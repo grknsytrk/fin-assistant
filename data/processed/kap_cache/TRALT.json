@@ -1,0 +1,42 @@
+{
+  "ok": true,
+  "cache_hit": false,
+  "cache_stale": false,
+  "company": "TRALT",
+  "company_title": "TÜRK ALTIN İŞLETMELERİ A.Ş.",
+  "stock_code": "TRALT",
+  "member_oid": "4028e4a2422d9a6e0142bd91d3687a69",
+  "source_url": "https://www.kap.org.tr/tr/sirket-bilgileri/ozet/1500-turk-altin-isletmeleri-a-s",
+  "fetched_at": "2026-02-19T21:36:19.961333+00:00",
+  "quarters": [
+    {
+      "year": 2025,
+      "period": 3,
+      "quarter": "2025Q3",
+      "disclosure_index": 1515783,
+      "publish_date": "2025.11.11 18:10:55",
+      "title": "Finansal Rapor",
+      "stock_code": "TRALT",
+      "pdf_url": "https://www.kap.org.tr/tr/api/BildirimPdf/1515783",
+      "unit_raw": "1.000 TL",
+      "currency": "TL",
+      "metrics": {
+        "net_kar": 2763673000.0,
+        "satis_gelirleri": 5588681000.0,
+        "brut_kar": 2631399000.0,
+        "favok": 2530344000.0,
+        "esas_faaliyet_kari": 1830825000.0,
+        "amortisman_itfa_gideri": 699519000.0,
+        "faaliyet_nakit_akisi": 8660679000.0,
+        "capex": -4504628000.0,
+        "donen_varliklar": 2800000.0,
+        "duran_varliklar": 17137178000.0,
+        "toplam_varliklar": 46229007000.0,
+        "finansal_borclar": null,
+        "net_borc": null,
+        "ozkaynaklar": 41646436000.0,
+        "serbest_nakit_akisi": 4156051000.0
+      }
+    }
+  ]
+}

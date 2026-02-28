@@ -1,0 +1,93 @@
+{
+  "ok": true,
+  "cache_hit": false,
+  "cache_stale": false,
+  "company": "MAVI",
+  "company_title": "MAVİ GİYİM SANAYİ VE TİCARET A.Ş.",
+  "stock_code": "MAVI",
+  "member_oid": "4028e4a141733b5101417ea9aae11fec",
+  "source_url": "https://www.kap.org.tr/tr/sirket-bilgileri/ozet/3843-mavi-giyim-sanayi-ve-ticaret-a-s",
+  "fetched_at": "2026-02-19T20:15:36.023522+00:00",
+  "quarters": [
+    {
+      "year": 2025,
+      "period": 3,
+      "quarter": "2025Q3",
+      "disclosure_index": 1525691,
+      "publish_date": "2025.12.10 18:11:12",
+      "title": "Finansal Rapor",
+      "stock_code": "MAVI",
+      "pdf_url": "https://www.kap.org.tr/tr/api/BildirimPdf/1525691",
+      "unit_raw": "1.000 TL",
+      "currency": "TL",
+      "metrics": {
+        "net_kar": 968837000.0,
+        "satis_gelirleri": 12156234000.0,
+        "brut_kar": 6318166000.0,
+        "faaliyet_nakit_akisi": 5389779000.0,
+        "capex": -1830563000.0,
+        "serbest_nakit_akisi": 3559216000.0
+      }
+    },
+    {
+      "year": 2025,
+      "period": 2,
+      "quarter": "2025Q2",
+      "disclosure_index": 1490659,
+      "publish_date": "2025.09.17 18:12:33",
+      "title": "Finansal Rapor",
+      "stock_code": "MAVI",
+      "pdf_url": "https://www.kap.org.tr/tr/api/BildirimPdf/1490659",
+      "unit_raw": "1.000 TL",
+      "currency": "TL",
+      "metrics": {
+        "net_kar": 166230000.0,
+        "satis_gelirleri": 9563543000.0,
+        "brut_kar": 4816855000.0,
+        "faaliyet_nakit_akisi": 3267733000.0,
+        "capex": -1214560000.0,
+        "serbest_nakit_akisi": 2053173000.0
+      }
+    },
+    {
+      "year": 2025,
+      "period": 1,
+      "quarter": "2025Q1",
+      "disclosure_index": 1447001,
+      "publish_date": "2025.06.10 18:17:21",
+      "title": "Finansal Rapor",
+      "stock_code": "MAVI",
+      "pdf_url": "https://www.kap.org.tr/tr/api/BildirimPdf/1447001",
+      "unit_raw": "1.000 TL",
+      "currency": "TL",
+      "metrics": {
+        "net_kar": 809877000.0,
+        "satis_gelirleri": 9776729000.0,
+        "brut_kar": 5102866000.0,
+        "faaliyet_nakit_akisi": 1880704000.0,
+        "capex": -428224000.0,
+        "serbest_nakit_akisi": 1452480000.0
+      }
+    },
+    {
+      "year": 2024,
+      "period": 4,
+      "quarter": "2024Q4",
+      "disclosure_index": 1408001,
+      "publish_date": "2025.03.18 18:26:35",
+      "title": "Finansal Rapor",
+      "stock_code": "MAVI",
+      "pdf_url": "https://www.kap.org.tr/tr/api/BildirimPdf/1408001",
+      "unit_raw": "1.000 TL",
+      "currency": "TL",
+      "metrics": {
+        "net_kar": 2674599000.0,
+        "satis_gelirleri": 38519107000.0,
+        "brut_kar": 19370894000.0,
+        "faaliyet_nakit_akisi": 7412879000.0,
+        "capex": -1429745000.0,
+        "serbest_nakit_akisi": 5983134000.0
+      }
+    }
+  ]
+}

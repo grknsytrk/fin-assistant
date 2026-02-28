@@ -1,0 +1,1272 @@
+{
+  "generated_at": "2026-02-15T18:40:31.382745+00:00",
+  "dataset": "D:\\Projeler\\rag-fin\\eval\\gold_questions.jsonl",
+  "multi_company_dataset": "D:\\Projeler\\rag-fin\\eval\\gold_questions_multicompany.jsonl",
+  "num_questions": 42,
+  "top_k": 5,
+  "top_k_initial_v2": 15,
+  "top_k_initial_v3": 20,
+  "top_k_initial_v5_vector": 20,
+  "top_k_initial_v5_bm25": 20,
+  "top_k_candidates_v6": 15,
+  "alpha_v2": 0.35,
+  "alpha_v3": 0.35,
+  "beta_v5": 0.6,
+  "retrievers": {
+    "v1": {
+      "hit@1": 0.1667,
+      "hit@3": 0.3333,
+      "hit@5": 0.4286,
+      "MRR@5": 0.2647,
+      "quarter_accuracy@1": 0.6667
+    },
+    "v2": {
+      "hit@1": 0.119,
+      "hit@3": 0.1667,
+      "hit@5": 0.2619,
+      "MRR@5": 0.1667,
+      "quarter_accuracy@1": 0.7619
+    },
+    "v3": {
+      "hit@1": 0.2143,
+      "hit@3": 0.2857,
+      "hit@5": 0.5,
+      "MRR@5": 0.2972,
+      "quarter_accuracy@1": 1.0
+    },
+    "v4_bm25": {
+      "hit@1": 0.3095,
+      "hit@3": 0.5238,
+      "hit@5": 0.6429,
+      "MRR@5": 0.4349,
+      "quarter_accuracy@1": 1.0
+    },
+    "v5_hybrid": {
+      "hit@1": 0.0952,
+      "hit@3": 0.2857,
+      "hit@5": 0.4762,
+      "MRR@5": 0.225,
+      "quarter_accuracy@1": 1.0
+    },
+    "v6_cross": {
+      "hit@1": 0.2381,
+      "hit@3": 0.5952,
+      "hit@5": 0.6905,
+      "MRR@5": 0.4091,
+      "quarter_accuracy@1": 1.0
+    }
+  },
+  "multi_company_extraction": {
+    "dataset": "D:\\Projeler\\rag-fin\\eval\\gold_questions_multicompany.jsonl",
+    "num_questions": 45,
+    "by_company": {
+      "BIM": {
+        "extraction_accuracy_before": 1.0,
+        "extraction_accuracy_after": 1.0,
+        "extraction_accuracy_delta": 0.0,
+        "coverage_rate_before": 1.0,
+        "coverage_rate": 1.0,
+        "coverage_rate_after": 1.0,
+        "invalid_rate": 0.0,
+        "verified_pass_rate": 0.2,
+        "count": 15,
+        "metrics": {
+          "net_kar": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 1.0,
+            "verified_warn_rate": 0.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "favok": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "satis_gelirleri": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "magaza_sayisi": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "net_kar_marji": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 1
+          },
+          "favok_marji": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 1
+          },
+          "brut_kar_marji": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 1
+          }
+        }
+      },
+      "MIGROS": {
+        "extraction_accuracy_before": 0.7333,
+        "extraction_accuracy_after": 0.8,
+        "extraction_accuracy_delta": 0.0667,
+        "coverage_rate_before": 0.7333,
+        "coverage_rate": 0.8,
+        "coverage_rate_after": 0.8,
+        "invalid_rate": 0.1333,
+        "verified_pass_rate": 0.0,
+        "count": 15,
+        "metrics": {
+          "net_kar": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "favok": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "satis_gelirleri": {
+            "coverage_rate_before": 0.3333,
+            "coverage_rate": 0.3333,
+            "coverage_rate_after": 0.3333,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.6667,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "magaza_sayisi": {
+            "coverage_rate_before": 0.6667,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.3333,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "net_kar_marji": {
+            "coverage_rate_before": 0.0,
+            "coverage_rate": 0.0,
+            "coverage_rate_after": 0.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 0.0,
+            "verified_fail_rate": 0.0,
+            "count": 1
+          },
+          "favok_marji": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 1
+          },
+          "brut_kar_marji": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 1
+          }
+        }
+      },
+      "SOK": {
+        "extraction_accuracy_before": 0.8,
+        "extraction_accuracy_after": 0.8667,
+        "extraction_accuracy_delta": 0.0667,
+        "coverage_rate_before": 0.8,
+        "coverage_rate": 0.8667,
+        "coverage_rate_after": 0.8667,
+        "invalid_rate": 0.0,
+        "verified_pass_rate": 0.0,
+        "count": 15,
+        "metrics": {
+          "net_kar": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "favok": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "satis_gelirleri": {
+            "coverage_rate_before": 0.6667,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.3333,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "magaza_sayisi": {
+            "coverage_rate_before": 0.6667,
+            "coverage_rate": 0.6667,
+            "coverage_rate_after": 0.6667,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 3
+          },
+          "net_kar_marji": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 1
+          },
+          "favok_marji": {
+            "coverage_rate_before": 1.0,
+            "coverage_rate": 1.0,
+            "coverage_rate_after": 1.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 1.0,
+            "verified_fail_rate": 0.0,
+            "count": 1
+          },
+          "brut_kar_marji": {
+            "coverage_rate_before": 0.0,
+            "coverage_rate": 0.0,
+            "coverage_rate_after": 0.0,
+            "coverage_delta": 0.0,
+            "invalid_rate": 0.0,
+            "verified_pass_rate": 0.0,
+            "verified_warn_rate": 0.0,
+            "verified_fail_rate": 0.0,
+            "count": 1
+          }
+        }
+      }
+    },
+    "by_metric": {
+      "net_kar": {
+        "coverage_rate_before": 1.0,
+        "coverage_rate": 1.0,
+        "coverage_rate_after": 1.0,
+        "coverage_delta": 0.0,
+        "invalid_rate": 0.0,
+        "verified_pass_rate": 0.3333,
+        "verified_warn_rate": 0.6667,
+        "verified_fail_rate": 0.0,
+        "count": 9
+      },
+      "favok": {
+        "coverage_rate_before": 1.0,
+        "coverage_rate": 1.0,
+        "coverage_rate_after": 1.0,
+        "coverage_delta": 0.0,
+        "invalid_rate": 0.0,
+        "verified_pass_rate": 0.0,
+        "verified_warn_rate": 1.0,
+        "verified_fail_rate": 0.0,
+        "count": 9
+      },
+      "satis_gelirleri": {
+        "coverage_rate_before": 0.6667,
+        "coverage_rate": 0.7778,
+        "coverage_rate_after": 0.7778,
+        "coverage_delta": 0.1111,
+        "invalid_rate": 0.2222,
+        "verified_pass_rate": 0.0,
+        "verified_warn_rate": 1.0,
+        "verified_fail_rate": 0.0,
+        "count": 9
+      },
+      "magaza_sayisi": {
+        "coverage_rate_before": 0.7778,
+        "coverage_rate": 0.8889,
+        "coverage_rate_after": 0.8889,
+        "coverage_delta": 0.1111,
+        "invalid_rate": 0.0,
+        "verified_pass_rate": 0.0,
+        "verified_warn_rate": 1.0,
+        "verified_fail_rate": 0.0,
+        "count": 9
+      },
+      "net_kar_marji": {
+        "coverage_rate_before": 0.6667,
+        "coverage_rate": 0.6667,
+        "coverage_rate_after": 0.6667,
+        "coverage_delta": 0.0,
+        "invalid_rate": 0.0,
+        "verified_pass_rate": 0.0,
+        "verified_warn_rate": 1.0,
+        "verified_fail_rate": 0.0,
+        "count": 3
+      },
+      "favok_marji": {
+        "coverage_rate_before": 1.0,
+        "coverage_rate": 1.0,
+        "coverage_rate_after": 1.0,
+        "coverage_delta": 0.0,
+        "invalid_rate": 0.0,
+        "verified_pass_rate": 0.0,
+        "verified_warn_rate": 1.0,
+        "verified_fail_rate": 0.0,
+        "count": 3
+      },
+      "brut_kar_marji": {
+        "coverage_rate_before": 0.6667,
+        "coverage_rate": 0.6667,
+        "coverage_rate_after": 0.6667,
+        "coverage_delta": 0.0,
+        "invalid_rate": 0.0,
+        "verified_pass_rate": 0.0,
+        "verified_warn_rate": 1.0,
+        "verified_fail_rate": 0.0,
+        "count": 3
+      }
+    },
+    "details": [
+      {
+        "id": "mc001",
+        "company": "BIM",
+        "metric": "net_kar",
+        "quarter": "Q1",
+        "question": "BIM 2025 birinci ceyrek net kar kac?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "PASS",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "2025 1. Çeyrek Faaliyet Raporu",
+          "page": 9,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc002",
+        "company": "BIM",
+        "metric": "net_kar",
+        "quarter": "Q2",
+        "question": "BIM 2025 ikinci ceyrek net kar ne kadar?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "PASS",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "2025 2. Çeyrek Faaliyet Raporu",
+          "page": 10,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc003",
+        "company": "BIM",
+        "metric": "net_kar",
+        "quarter": "Q3",
+        "question": "BIM 2025 ucuncu ceyrek net kar tutari nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "PASS",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "2025 3. Çeyrek Faaliyet Raporu",
+          "page": 9,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc004",
+        "company": "BIM",
+        "metric": "favok",
+        "quarter": "Q1",
+        "question": "BIM Q1 2025 FAVOK degeri kac TL?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.7454545454545454,
+        "selected_source": {
+          "doc_id": "2025 1. Çeyrek Faaliyet Raporu",
+          "page": 9,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc005",
+        "company": "BIM",
+        "metric": "favok",
+        "quarter": "Q2",
+        "question": "BIM Q2 2025 FAVOK tutari nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.7454545454545454,
+        "selected_source": {
+          "doc_id": "2025 2. Çeyrek Faaliyet Raporu",
+          "page": 10,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc006",
+        "company": "BIM",
+        "metric": "favok",
+        "quarter": "Q3",
+        "question": "BIM Q3 2025 FAVOK ne kadar?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.7454545454545454,
+        "selected_source": {
+          "doc_id": "2025 3. Çeyrek Faaliyet Raporu",
+          "page": 9,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc007",
+        "company": "BIM",
+        "metric": "satis_gelirleri",
+        "quarter": "Q1",
+        "question": "BIM 2025 Q1 satis gelirleri kac?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "2025 1. Çeyrek Faaliyet Raporu",
+          "page": 9,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc008",
+        "company": "BIM",
+        "metric": "satis_gelirleri",
+        "quarter": "Q2",
+        "question": "BIM 2025 Q2 ciro ne kadar?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "2025 2. Çeyrek Faaliyet Raporu",
+          "page": 10,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc009",
+        "company": "BIM",
+        "metric": "satis_gelirleri",
+        "quarter": "Q3",
+        "question": "BIM 2025 Q3 hasilat tutari nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "2025 3. Çeyrek Faaliyet Raporu",
+          "page": 9,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc010",
+        "company": "BIM",
+        "metric": "magaza_sayisi",
+        "quarter": "Q1",
+        "question": "BIM 2025 birinci ceyrek toplam magaza sayisi kac?",
+        "query_type": "kpi",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 1.0,
+        "selected_source": {
+          "doc_id": "2025 1. Çeyrek Faaliyet Raporu",
+          "page": 3,
+          "section_title": "Mağaza Sayıları Özet Tablo"
+        }
+      },
+      {
+        "id": "mc011",
+        "company": "BIM",
+        "metric": "magaza_sayisi",
+        "quarter": "Q2",
+        "question": "BIM 2025 ikinci ceyrek magaza adedi ne kadar?",
+        "query_type": "kpi",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.9,
+        "selected_source": {
+          "doc_id": "2025 2. Çeyrek Faaliyet Raporu",
+          "page": 4,
+          "section_title": "BÖLÜM 1 - BİM BİRLEŞİK MAĞAZALAR A.Ş. HAKKINDA"
+        }
+      },
+      {
+        "id": "mc012",
+        "company": "BIM",
+        "metric": "magaza_sayisi",
+        "quarter": "Q3",
+        "question": "BIM 2025 ucuncu ceyrek sube sayisi kac?",
+        "query_type": "kpi",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.9,
+        "selected_source": {
+          "doc_id": "2025 3. Çeyrek Faaliyet Raporu",
+          "page": 3,
+          "section_title": "BÖLÜM 1 - BİM BİRLEŞİK MAĞAZALAR A.Ş. HAKKINDA"
+        }
+      },
+      {
+        "id": "mc013",
+        "company": "BIM",
+        "metric": "net_kar_marji",
+        "quarter": "Q1",
+        "question": "BIM 2025 Q1 net kar marji yuzde kac?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.9,
+        "selected_source": {
+          "doc_id": "2025 1. Çeyrek Faaliyet Raporu",
+          "page": 9,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc014",
+        "company": "BIM",
+        "metric": "favok_marji",
+        "quarter": "Q2",
+        "question": "BIM 2025 Q2 FAVOK marji nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.9,
+        "selected_source": {
+          "doc_id": "2025 2. Çeyrek Faaliyet Raporu",
+          "page": 10,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc015",
+        "company": "BIM",
+        "metric": "brut_kar_marji",
+        "quarter": "Q3",
+        "question": "BIM 2025 Q3 brut kar marji kac?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.9,
+        "selected_source": {
+          "doc_id": "2025 3. Çeyrek Faaliyet Raporu",
+          "page": 9,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc016",
+        "company": "MIGROS",
+        "metric": "net_kar",
+        "quarter": "Q1",
+        "question": "MIGROS 2025 birinci ceyrek net kar kac?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.8,
+        "selected_source": {
+          "doc_id": "migros-sunum-1c-2025-v2-638824115026409185",
+          "page": 28,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc017",
+        "company": "MIGROS",
+        "metric": "net_kar",
+        "quarter": "Q2",
+        "question": "MIGROS 2025 ikinci ceyrek net kar ne kadar?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.8,
+        "selected_source": {
+          "doc_id": "migros-sunum-2c-2025-638906935108265007",
+          "page": 25,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc018",
+        "company": "MIGROS",
+        "metric": "net_kar",
+        "quarter": "Q3",
+        "question": "MIGROS 2025 ucuncu ceyrek net kar tutari nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.95,
+        "selected_source": {
+          "doc_id": "3c-2025-migros-yatirimci-sunumu-639017506183534315",
+          "page": 36,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc019",
+        "company": "MIGROS",
+        "metric": "favok",
+        "quarter": "Q1",
+        "question": "MIGROS Q1 2025 FAVOK degeri kac TL?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.95,
+        "selected_source": {
+          "doc_id": "migros-sunum-1c-2025-v2-638824115026409185",
+          "page": 13,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc020",
+        "company": "MIGROS",
+        "metric": "favok",
+        "quarter": "Q2",
+        "question": "MIGROS Q2 2025 FAVOK tutari nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.65,
+        "selected_source": {
+          "doc_id": "migros-sunum-2c-2025-638906935108265007",
+          "page": 14,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc021",
+        "company": "MIGROS",
+        "metric": "favok",
+        "quarter": "Q3",
+        "question": "MIGROS Q3 2025 FAVOK ne kadar?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.6909090909090909,
+        "selected_source": {
+          "doc_id": "3c-2025-migros-yatirimci-sunumu-639017506183534315",
+          "page": 13,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc022",
+        "company": "MIGROS",
+        "metric": "satis_gelirleri",
+        "quarter": "Q1",
+        "question": "MIGROS 2025 Q1 satis gelirleri kac?",
+        "query_type": "numeric",
+        "found_before": false,
+        "found_after": false,
+        "found": false,
+        "invalid": true,
+        "verify_status": null,
+        "selected_confidence": null,
+        "selected_source": {
+          "doc_id": null,
+          "page": null,
+          "section_title": null
+        }
+      },
+      {
+        "id": "mc023",
+        "company": "MIGROS",
+        "metric": "satis_gelirleri",
+        "quarter": "Q2",
+        "question": "MIGROS 2025 Q2 ciro ne kadar?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.875,
+        "selected_source": {
+          "doc_id": "migros-sunum-2c-2025-638906935108265007",
+          "page": 23,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc024",
+        "company": "MIGROS",
+        "metric": "satis_gelirleri",
+        "quarter": "Q3",
+        "question": "MIGROS 2025 Q3 hasilat tutari nedir?",
+        "query_type": "numeric",
+        "found_before": false,
+        "found_after": false,
+        "found": false,
+        "invalid": true,
+        "verify_status": null,
+        "selected_confidence": null,
+        "selected_source": {
+          "doc_id": null,
+          "page": null,
+          "section_title": null
+        }
+      },
+      {
+        "id": "mc025",
+        "company": "MIGROS",
+        "metric": "magaza_sayisi",
+        "quarter": "Q1",
+        "question": "MIGROS 2025 birinci ceyrek toplam magaza sayisi kac?",
+        "query_type": "kpi",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 1.0,
+        "selected_source": {
+          "doc_id": "migros-sunum-1c-2025-v2-638824115026409185",
+          "page": 20,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc026",
+        "company": "MIGROS",
+        "metric": "magaza_sayisi",
+        "quarter": "Q2",
+        "question": "MIGROS 2025 ikinci ceyrek magaza adedi ne kadar?",
+        "query_type": "kpi",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.775,
+        "selected_source": {
+          "doc_id": "migros-sunum-2c-2025-638906935108265007",
+          "page": 6,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc027",
+        "company": "MIGROS",
+        "metric": "magaza_sayisi",
+        "quarter": "Q3",
+        "question": "MIGROS 2025 ucuncu ceyrek sube sayisi kac?",
+        "query_type": "kpi",
+        "found_before": false,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.775,
+        "selected_source": {
+          "doc_id": "3c-2025-migros-yatirimci-sunumu-639017506183534315",
+          "page": 31,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc028",
+        "company": "MIGROS",
+        "metric": "net_kar_marji",
+        "quarter": "Q1",
+        "question": "MIGROS 2025 Q1 net kar marji yuzde kac?",
+        "query_type": "numeric",
+        "found_before": false,
+        "found_after": false,
+        "found": false,
+        "invalid": false,
+        "verify_status": null,
+        "selected_confidence": null,
+        "selected_source": {
+          "doc_id": null,
+          "page": null,
+          "section_title": null
+        }
+      },
+      {
+        "id": "mc029",
+        "company": "MIGROS",
+        "metric": "favok_marji",
+        "quarter": "Q2",
+        "question": "MIGROS 2025 Q2 FAVOK marji nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "migros-sunum-2c-2025-638906935108265007",
+          "page": 4,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc030",
+        "company": "MIGROS",
+        "metric": "brut_kar_marji",
+        "quarter": "Q3",
+        "question": "MIGROS 2025 Q3 brut kar marji kac?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "3c-2025-migros-yatirimci-sunumu-639017506183534315",
+          "page": 10,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc031",
+        "company": "SOK",
+        "metric": "net_kar",
+        "quarter": "Q1",
+        "question": "SOK 2025 birinci ceyrek net kar kac?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.8,
+        "selected_source": {
+          "doc_id": "SOK_1C2025-Sunum",
+          "page": 30,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc032",
+        "company": "SOK",
+        "metric": "net_kar",
+        "quarter": "Q2",
+        "question": "SOK 2025 ikinci ceyrek net kar ne kadar?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.8,
+        "selected_source": {
+          "doc_id": "SOK_2Q2025_TR-Webcast_v2",
+          "page": 29,
+          "section_title": "Özet Konsolide Nakit Akış Tablosu*"
+        }
+      },
+      {
+        "id": "mc033",
+        "company": "SOK",
+        "metric": "net_kar",
+        "quarter": "Q3",
+        "question": "SOK 2025 ucuncu ceyrek net kar tutari nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.825,
+        "selected_source": {
+          "doc_id": "SOK_3Q2025_Investor-Presentation-TR_v2",
+          "page": 25,
+          "section_title": "Özet Konsolide Gelir Tablosu (TMS 29 etkisi dahil)"
+        }
+      },
+      {
+        "id": "mc034",
+        "company": "SOK",
+        "metric": "favok",
+        "quarter": "Q1",
+        "question": "SOK Q1 2025 FAVOK degeri kac TL?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.55,
+        "selected_source": {
+          "doc_id": "SOK_1C2025-Sunum",
+          "page": 27,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc035",
+        "company": "SOK",
+        "metric": "favok",
+        "quarter": "Q2",
+        "question": "SOK Q2 2025 FAVOK tutari nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.8,
+        "selected_source": {
+          "doc_id": "SOK_2Q2025_TR-Webcast_v2",
+          "page": 11,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc036",
+        "company": "SOK",
+        "metric": "favok",
+        "quarter": "Q3",
+        "question": "SOK Q3 2025 FAVOK ne kadar?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "SOK_3Q2025_Investor-Presentation-TR_v2",
+          "page": 10,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc037",
+        "company": "SOK",
+        "metric": "satis_gelirleri",
+        "quarter": "Q1",
+        "question": "SOK 2025 Q1 satis gelirleri kac?",
+        "query_type": "numeric",
+        "found_before": false,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "SOK_1C2025-Sunum",
+          "page": 27,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc038",
+        "company": "SOK",
+        "metric": "satis_gelirleri",
+        "quarter": "Q2",
+        "question": "SOK 2025 Q2 ciro ne kadar?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "SOK_2Q2025_TR-Webcast_v2",
+          "page": 4,
+          "section_title": "Yatırımlar"
+        }
+      },
+      {
+        "id": "mc039",
+        "company": "SOK",
+        "metric": "satis_gelirleri",
+        "quarter": "Q3",
+        "question": "SOK 2025 Q3 hasilat tutari nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 1.0,
+        "selected_source": {
+          "doc_id": "SOK_3Q2025_Investor-Presentation-TR_v2",
+          "page": 6,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc040",
+        "company": "SOK",
+        "metric": "magaza_sayisi",
+        "quarter": "Q1",
+        "question": "SOK 2025 birinci ceyrek toplam magaza sayisi kac?",
+        "query_type": "kpi",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.75,
+        "selected_source": {
+          "doc_id": "SOK_1C2025-Sunum",
+          "page": 4,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc041",
+        "company": "SOK",
+        "metric": "magaza_sayisi",
+        "quarter": "Q2",
+        "question": "SOK 2025 ikinci ceyrek magaza adedi ne kadar?",
+        "query_type": "kpi",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.65,
+        "selected_source": {
+          "doc_id": "SOK_2Q2025_TR-Webcast_v2",
+          "page": 4,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc042",
+        "company": "SOK",
+        "metric": "magaza_sayisi",
+        "quarter": "Q3",
+        "question": "SOK 2025 ucuncu ceyrek sube sayisi kac?",
+        "query_type": "kpi",
+        "found_before": false,
+        "found_after": false,
+        "found": false,
+        "invalid": false,
+        "verify_status": null,
+        "selected_confidence": null,
+        "selected_source": {
+          "doc_id": null,
+          "page": null,
+          "section_title": null
+        }
+      },
+      {
+        "id": "mc043",
+        "company": "SOK",
+        "metric": "net_kar_marji",
+        "quarter": "Q1",
+        "question": "SOK 2025 Q1 net kar marji yuzde kac?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.9,
+        "selected_source": {
+          "doc_id": "SOK_1C2025-Sunum",
+          "page": 27,
+          "section_title": "(no heading)"
+        }
+      },
+      {
+        "id": "mc044",
+        "company": "SOK",
+        "metric": "favok_marji",
+        "quarter": "Q2",
+        "question": "SOK 2025 Q2 FAVOK marji nedir?",
+        "query_type": "numeric",
+        "found_before": true,
+        "found_after": true,
+        "found": true,
+        "invalid": false,
+        "verify_status": "WARN",
+        "selected_confidence": 0.9,
+        "selected_source": {
+          "doc_id": "SOK_2Q2025_TR-Webcast_v2",
+          "page": 26,
+          "section_title": "Özet Konsolide Gelir Tablosu*"
+        }
+      },
+      {
+        "id": "mc045",
+        "company": "SOK",
+        "metric": "brut_kar_marji",
+        "quarter": "Q3",
+        "question": "SOK 2025 Q3 brut kar marji kac?",
+        "query_type": "numeric",
+        "found_before": false,
+        "found_after": false,
+        "found": false,
+        "invalid": false,
+        "verify_status": null,
+        "selected_confidence": null,
+        "selected_source": {
+          "doc_id": null,
+          "page": null,
+          "section_title": null
+        }
+      }
+    ]
+  },
+  "detailed_output": "D:\\Projeler\\rag-fin\\data\\processed\\eval_metrics_detailed.jsonl"
+}

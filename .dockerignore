@@ -1,0 +1,11 @@
+.venv
+.venv39
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.git
+.gitignore
+data/processed/chroma

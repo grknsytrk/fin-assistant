@@ -1,0 +1,22 @@
+paths:
+  raw_dir: raw
+  processed_dir: processed
+  pages_file: processed/pages.jsonl
+  chunks_v1_file: processed/chunks.jsonl
+  chunks_v2_file: processed/chunks_v2.jsonl
+  ui_log_file: processed/ui_logs.jsonl
+chroma:
+  dir: processed/chroma
+  collection_v1: ragfin_demo_v1
+  collection_v2: ragfin_demo_v2
+evaluation:
+  gold_file: D:\Projeler\rag-fin\data\demo_bundle\gold_questions_demo.jsonl
+  gold_multicompany_file: D:\Projeler\rag-fin\data\demo_bundle\gold_questions_demo_multicompany.jsonl
+  detailed_output: processed/eval_metrics_detailed.jsonl
+  summary_output: processed/eval_metrics_summary.json
+  week6_summary_output: processed/eval_metrics_week6.json
+  error_output: processed/error_analysis.jsonl
+  latency_output: processed/latency_benchmark.json
+  latency_sample_size: 6
+extraction:
+  metrics_dictionary_file: D:\Projeler\rag-fin\data\dictionaries\metrics_tr.yaml

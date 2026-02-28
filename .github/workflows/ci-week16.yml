@@ -1,0 +1,54 @@
+name: ci-week16
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Compileall
+        run: |
+          python -m compileall src app ragfin
+
+      - name: Pytest
+        run: |
+          python -m pytest -q
+
+      - name: Prepare deterministic demo workspace
+        run: |
+          python -m ragfin.demo --prepare-only
+
+      - name: Smoke metrics_report on demo dataset
+        env:
+          RAGFIN_CONFIG: data/demo/config.demo.yaml
+        run: |
+          python -m src.cli metrics_report \
+            --gold-file data/demo_bundle/gold_questions_demo.jsonl \
+            --multi-company-gold-file data/demo_bundle/gold_questions_demo_multicompany.jsonl \
+            --detailed-output data/demo/processed/eval_metrics_detailed.jsonl \
+            --summary-output data/demo/processed/eval_metrics_summary.json \
+            --week6-summary-output data/demo/processed/eval_metrics_week6.json \
+            --top-k 3 \
+            --top-k-initial-v2 8 \
+            --top-k-initial-v3 12 \
+            --top-k-initial-v5-vector 12 \
+            --top-k-initial-v5-bm25 12 \
+            --top-k-candidates-v6 8
+          python scripts/check_demo_metrics_smoke.py data/demo/processed/eval_metrics_summary.json

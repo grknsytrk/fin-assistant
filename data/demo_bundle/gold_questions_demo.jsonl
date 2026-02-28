@@ -1,0 +1,6 @@
+{"id":"d001","question":"BIM 2025 ucuncu ceyrek net kar kac TL?","expected":[{"doc_contains":"BIM_2025Q3_DEMO","quarter":"Q3","page":7,"section_contains":"FINANSAL"}],"type":"numeric"}
+{"id":"d002","question":"MIGROS 2025 ikinci ceyrek ciro ne kadar?","expected":[{"doc_contains":"MIGROS_2025Q2_DEMO","quarter":"Q2","page":9,"section_contains":"FINANSAL"}],"type":"numeric"}
+{"id":"d003","question":"SOK 2025 birinci ceyrek net donem zarari kac?","expected":[{"doc_contains":"SOK_2025Q1_DEMO","quarter":"Q1","page":11,"section_contains":"FINANSAL"}],"type":"numeric"}
+{"id":"d004","question":"BIM Q2 2025 FAVOK marji yuzde kac?","expected":[{"doc_contains":"BIM_2025Q2_DEMO","quarter":"Q2","page":6,"section_contains":"FINANSAL"}],"type":"numeric"}
+{"id":"d005","question":"MIGROS Q1 2025 magaza sayisi kac?","expected":[{"doc_contains":"MIGROS_2025Q1_DEMO","quarter":"Q1","page":8,"section_contains":"FINANSAL"}],"type":"kpi"}
+{"id":"d006","question":"SOK Q3 2025 satis gelirleri ne kadar?","expected":[{"doc_contains":"SOK_2025Q3_DEMO","quarter":"Q3","page":13,"section_contains":"FINANSAL"}],"type":"numeric"}

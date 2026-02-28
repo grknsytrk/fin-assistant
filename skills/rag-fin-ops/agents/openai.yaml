@@ -1,0 +1,4 @@
+interface:
+  display_name: "RAG-Fin Ops"
+  short_description: "Run and troubleshoot RAG-Fin workflows"
+  default_prompt: "Use $rag-fin-ops to run the right RAG-Fin command workflow."

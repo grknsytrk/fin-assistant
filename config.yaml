@@ -1,0 +1,120 @@
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  pages_file: data/processed/pages.jsonl
+  chunks_v1_file: data/processed/chunks.jsonl
+  chunks_v2_file: data/processed/chunks_v2.jsonl
+  ui_log_file: data/processed/ui_logs.jsonl
+
+chroma:
+  dir: data/processed/chroma
+  collection_v1: bimas_faaliyet_2025
+  collection_v2: bimas_faaliyet_2025_v2
+
+chunking:
+  v1:
+    chunk_size: 900
+    overlap: 150
+  v2:
+    chunk_size: 900
+    overlap: 150
+
+retrieval:
+  top_k_final: 5
+  v2_top_k_initial: 15
+  v3_top_k_initial: 20
+  v5_top_k_vector: 20
+  v5_top_k_bm25: 20
+  v6_cross_top_n: 15
+  alpha_v2: 0.35
+  alpha_v3: 0.35
+  beta_v5: 0.60
+
+models:
+  embedding: intfloat/multilingual-e5-small
+  cross_encoder: cross-encoder/ms-marco-MiniLM-L-6-v2
+
+evaluation:
+  gold_file: eval/gold_questions.jsonl
+  gold_multicompany_file: eval/gold_questions_multicompany.jsonl
+  detailed_output: data/processed/eval_metrics_detailed.jsonl
+  summary_output: data/processed/eval_metrics_summary.json
+  week6_summary_output: data/processed/eval_metrics_week6.json
+  error_output: data/processed/error_analysis.jsonl
+  latency_output: data/processed/latency_benchmark.json
+  latency_sample_size: 20
+
+extraction:
+  metrics_dictionary_file: data/dictionaries/metrics_tr.yaml
+  top_candidates: 5
+  low_confidence_threshold: 0.55
+  trend_deviation_threshold_pct: 300.0
+  ratio_self_verify_pp_threshold: 10.0
+  expected_ranges:
+    net_kar:
+      min: -80000000000
+      max: 120000000000
+    brut_kar:
+      min: -120000000000
+      max: 500000000000
+    satis_gelirleri:
+      min: 1000000000
+      max: 2000000000000
+    favok:
+      min: -120000000000
+      max: 300000000000
+    faaliyet_nakit_akisi:
+      min: -400000000000
+      max: 400000000000
+    capex:
+      min: -250000000000
+      max: 250000000000
+    serbest_nakit_akisi:
+      min: -400000000000
+      max: 400000000000
+    magaza_sayisi:
+      min: 100
+      max: 100000
+    net_kar_marji:
+      min: -80
+      max: 80
+    favok_marji:
+      min: -80
+      max: 80
+    brut_kar_marji:
+      min: -20
+      max: 90
+
+kap:
+  enabled: true
+  timeout_seconds: 10.0
+  cache_ttl_hours: 24.0
+  user_agent: ragfin-kap-fetcher/1.0 (+local-first)
+
+llm_commentary:
+  enabled: false
+  provider: openrouter
+  model: arcee-ai/trinity-large-preview:free
+  max_tokens: null
+  timeout_s: 8.0
+  temperature: 0.2
+  reasoning_enabled: true
+
+llm_assistant:
+  enabled: false
+  provider: openrouter
+  model: arcee-ai/trinity-large-preview:free
+  max_tokens: null
+  timeout_s: 8.0
+  temperature: 0.2
+  reasoning_enabled: true
+
+health:
+  net_margin_green_min: 3.0
+  net_margin_yellow_min: 1.5
+  favok_margin_green_min: 5.0
+  favok_margin_yellow_min: 3.0
+  revenue_growth_green_min: 3.0
+  revenue_growth_yellow_min: 0.0
+  store_growth_green_min: 1.0
+  store_growth_yellow_min: 0.0

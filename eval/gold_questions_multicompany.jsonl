@@ -1,0 +1,45 @@
+{"id":"mc001","company":"BIM","question":"BIM 2025 birinci ceyrek net kar kac?","metric":"net_kar","quarter":"Q1","type":"numeric"}
+{"id":"mc002","company":"BIM","question":"BIM 2025 ikinci ceyrek net kar ne kadar?","metric":"net_kar","quarter":"Q2","type":"numeric"}
+{"id":"mc003","company":"BIM","question":"BIM 2025 ucuncu ceyrek net kar tutari nedir?","metric":"net_kar","quarter":"Q3","type":"numeric"}
+{"id":"mc004","company":"BIM","question":"BIM Q1 2025 FAVOK degeri kac TL?","metric":"favok","quarter":"Q1","type":"numeric"}
+{"id":"mc005","company":"BIM","question":"BIM Q2 2025 FAVOK tutari nedir?","metric":"favok","quarter":"Q2","type":"numeric"}
+{"id":"mc006","company":"BIM","question":"BIM Q3 2025 FAVOK ne kadar?","metric":"favok","quarter":"Q3","type":"numeric"}
+{"id":"mc007","company":"BIM","question":"BIM 2025 Q1 satis gelirleri kac?","metric":"satis_gelirleri","quarter":"Q1","type":"numeric"}
+{"id":"mc008","company":"BIM","question":"BIM 2025 Q2 ciro ne kadar?","metric":"satis_gelirleri","quarter":"Q2","type":"numeric"}
+{"id":"mc009","company":"BIM","question":"BIM 2025 Q3 hasilat tutari nedir?","metric":"satis_gelirleri","quarter":"Q3","type":"numeric"}
+{"id":"mc010","company":"BIM","question":"BIM 2025 birinci ceyrek toplam magaza sayisi kac?","metric":"magaza_sayisi","quarter":"Q1","type":"kpi"}
+{"id":"mc011","company":"BIM","question":"BIM 2025 ikinci ceyrek magaza adedi ne kadar?","metric":"magaza_sayisi","quarter":"Q2","type":"kpi"}
+{"id":"mc012","company":"BIM","question":"BIM 2025 ucuncu ceyrek sube sayisi kac?","metric":"magaza_sayisi","quarter":"Q3","type":"kpi"}
+{"id":"mc013","company":"BIM","question":"BIM 2025 Q1 net kar marji yuzde kac?","metric":"net_kar_marji","quarter":"Q1","type":"ratio"}
+{"id":"mc014","company":"BIM","question":"BIM 2025 Q2 FAVOK marji nedir?","metric":"favok_marji","quarter":"Q2","type":"ratio"}
+{"id":"mc015","company":"BIM","question":"BIM 2025 Q3 brut kar marji kac?","metric":"brut_kar_marji","quarter":"Q3","type":"ratio"}
+{"id":"mc016","company":"MIGROS","question":"MIGROS 2025 birinci ceyrek net kar kac?","metric":"net_kar","quarter":"Q1","type":"numeric"}
+{"id":"mc017","company":"MIGROS","question":"MIGROS 2025 ikinci ceyrek net kar ne kadar?","metric":"net_kar","quarter":"Q2","type":"numeric"}
+{"id":"mc018","company":"MIGROS","question":"MIGROS 2025 ucuncu ceyrek net kar tutari nedir?","metric":"net_kar","quarter":"Q3","type":"numeric"}
+{"id":"mc019","company":"MIGROS","question":"MIGROS Q1 2025 FAVOK degeri kac TL?","metric":"favok","quarter":"Q1","type":"numeric"}
+{"id":"mc020","company":"MIGROS","question":"MIGROS Q2 2025 FAVOK tutari nedir?","metric":"favok","quarter":"Q2","type":"numeric"}
+{"id":"mc021","company":"MIGROS","question":"MIGROS Q3 2025 FAVOK ne kadar?","metric":"favok","quarter":"Q3","type":"numeric"}
+{"id":"mc022","company":"MIGROS","question":"MIGROS 2025 Q1 satis gelirleri kac?","metric":"satis_gelirleri","quarter":"Q1","type":"numeric"}
+{"id":"mc023","company":"MIGROS","question":"MIGROS 2025 Q2 ciro ne kadar?","metric":"satis_gelirleri","quarter":"Q2","type":"numeric"}
+{"id":"mc024","company":"MIGROS","question":"MIGROS 2025 Q3 hasilat tutari nedir?","metric":"satis_gelirleri","quarter":"Q3","type":"numeric"}
+{"id":"mc025","company":"MIGROS","question":"MIGROS 2025 birinci ceyrek toplam magaza sayisi kac?","metric":"magaza_sayisi","quarter":"Q1","type":"kpi"}
+{"id":"mc026","company":"MIGROS","question":"MIGROS 2025 ikinci ceyrek magaza adedi ne kadar?","metric":"magaza_sayisi","quarter":"Q2","type":"kpi"}
+{"id":"mc027","company":"MIGROS","question":"MIGROS 2025 ucuncu ceyrek sube sayisi kac?","metric":"magaza_sayisi","quarter":"Q3","type":"kpi"}
+{"id":"mc028","company":"MIGROS","question":"MIGROS 2025 Q1 net kar marji yuzde kac?","metric":"net_kar_marji","quarter":"Q1","type":"ratio"}
+{"id":"mc029","company":"MIGROS","question":"MIGROS 2025 Q2 FAVOK marji nedir?","metric":"favok_marji","quarter":"Q2","type":"ratio"}
+{"id":"mc030","company":"MIGROS","question":"MIGROS 2025 Q3 brut kar marji kac?","metric":"brut_kar_marji","quarter":"Q3","type":"ratio"}
+{"id":"mc031","company":"SOK","question":"SOK 2025 birinci ceyrek net kar kac?","metric":"net_kar","quarter":"Q1","type":"numeric"}
+{"id":"mc032","company":"SOK","question":"SOK 2025 ikinci ceyrek net kar ne kadar?","metric":"net_kar","quarter":"Q2","type":"numeric"}
+{"id":"mc033","company":"SOK","question":"SOK 2025 ucuncu ceyrek net kar tutari nedir?","metric":"net_kar","quarter":"Q3","type":"numeric"}
+{"id":"mc034","company":"SOK","question":"SOK Q1 2025 FAVOK degeri kac TL?","metric":"favok","quarter":"Q1","type":"numeric"}
+{"id":"mc035","company":"SOK","question":"SOK Q2 2025 FAVOK tutari nedir?","metric":"favok","quarter":"Q2","type":"numeric"}
+{"id":"mc036","company":"SOK","question":"SOK Q3 2025 FAVOK ne kadar?","metric":"favok","quarter":"Q3","type":"numeric"}
+{"id":"mc037","company":"SOK","question":"SOK 2025 Q1 satis gelirleri kac?","metric":"satis_gelirleri","quarter":"Q1","type":"numeric"}
+{"id":"mc038","company":"SOK","question":"SOK 2025 Q2 ciro ne kadar?","metric":"satis_gelirleri","quarter":"Q2","type":"numeric"}
+{"id":"mc039","company":"SOK","question":"SOK 2025 Q3 hasilat tutari nedir?","metric":"satis_gelirleri","quarter":"Q3","type":"numeric"}
+{"id":"mc040","company":"SOK","question":"SOK 2025 birinci ceyrek toplam magaza sayisi kac?","metric":"magaza_sayisi","quarter":"Q1","type":"kpi"}
+{"id":"mc041","company":"SOK","question":"SOK 2025 ikinci ceyrek magaza adedi ne kadar?","metric":"magaza_sayisi","quarter":"Q2","type":"kpi"}
+{"id":"mc042","company":"SOK","question":"SOK 2025 ucuncu ceyrek sube sayisi kac?","metric":"magaza_sayisi","quarter":"Q3","type":"kpi"}
+{"id":"mc043","company":"SOK","question":"SOK 2025 Q1 net kar marji yuzde kac?","metric":"net_kar_marji","quarter":"Q1","type":"ratio"}
+{"id":"mc044","company":"SOK","question":"SOK 2025 Q2 FAVOK marji nedir?","metric":"favok_marji","quarter":"Q2","type":"ratio"}
+{"id":"mc045","company":"SOK","question":"SOK 2025 Q3 brut kar marji kac?","metric":"brut_kar_marji","quarter":"Q3","type":"ratio"}

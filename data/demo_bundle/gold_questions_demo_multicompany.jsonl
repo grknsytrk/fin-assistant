@@ -1,0 +1,18 @@
+{"id":"dm001","company":"BIM","question":"BIM 2025 birinci ceyrek net kar kac?","metric":"net_kar","quarter":"Q1","type":"numeric"}
+{"id":"dm002","company":"BIM","question":"BIM 2025 ikinci ceyrek satis gelirleri ne kadar?","metric":"satis_gelirleri","quarter":"Q2","type":"numeric"}
+{"id":"dm003","company":"BIM","question":"BIM 2025 ucuncu ceyrek FAVOK kac?","metric":"favok","quarter":"Q3","type":"numeric"}
+{"id":"dm004","company":"BIM","question":"BIM 2025 ucuncu ceyrek magaza sayisi kac?","metric":"magaza_sayisi","quarter":"Q3","type":"kpi"}
+{"id":"dm005","company":"BIM","question":"BIM Q1 2025 net kar marji yuzde kac?","metric":"net_kar_marji","quarter":"Q1","type":"numeric"}
+{"id":"dm006","company":"BIM","question":"BIM Q2 2025 FAVOK marji kac?","metric":"favok_marji","quarter":"Q2","type":"numeric"}
+{"id":"dm007","company":"MIGROS","question":"MIGROS 2025 birinci ceyrek net kar kac?","metric":"net_kar","quarter":"Q1","type":"numeric"}
+{"id":"dm008","company":"MIGROS","question":"MIGROS 2025 ikinci ceyrek ciro ne kadar?","metric":"satis_gelirleri","quarter":"Q2","type":"numeric"}
+{"id":"dm009","company":"MIGROS","question":"MIGROS 2025 ucuncu ceyrek FAVOK kac?","metric":"favok","quarter":"Q3","type":"numeric"}
+{"id":"dm010","company":"MIGROS","question":"MIGROS 2025 ucuncu ceyrek magaza sayisi kac?","metric":"magaza_sayisi","quarter":"Q3","type":"kpi"}
+{"id":"dm011","company":"MIGROS","question":"MIGROS Q1 2025 net kar marji yuzde kac?","metric":"net_kar_marji","quarter":"Q1","type":"numeric"}
+{"id":"dm012","company":"MIGROS","question":"MIGROS Q2 2025 FAVOK marji kac?","metric":"favok_marji","quarter":"Q2","type":"numeric"}
+{"id":"dm013","company":"SOK","question":"SOK 2025 birinci ceyrek net donem zarari kac?","metric":"net_kar","quarter":"Q1","type":"numeric"}
+{"id":"dm014","company":"SOK","question":"SOK 2025 ikinci ceyrek satis gelirleri ne kadar?","metric":"satis_gelirleri","quarter":"Q2","type":"numeric"}
+{"id":"dm015","company":"SOK","question":"SOK 2025 ucuncu ceyrek FAVOK kac?","metric":"favok","quarter":"Q3","type":"numeric"}
+{"id":"dm016","company":"SOK","question":"SOK 2025 ucuncu ceyrek magaza sayisi kac?","metric":"magaza_sayisi","quarter":"Q3","type":"kpi"}
+{"id":"dm017","company":"SOK","question":"SOK Q1 2025 net kar marji yuzde kac?","metric":"net_kar_marji","quarter":"Q1","type":"numeric"}
+{"id":"dm018","company":"SOK","question":"SOK Q3 2025 FAVOK marji kac?","metric":"favok_marji","quarter":"Q3","type":"numeric"}

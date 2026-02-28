@@ -1,0 +1,29 @@
+{
+  "gold_file": "D:\\Projeler\\rag-fin\\eval\\gold_questions.jsonl",
+  "output_file": "D:\\Projeler\\rag-fin\\data\\processed\\latency_benchmark.json",
+  "sample_size": 20,
+  "rows": [
+    {
+      "retriever": "v3",
+      "avg_ms": 34.31,
+      "p95_ms": 37.81,
+      "hit@1": 0.8,
+      "n": 20
+    },
+    {
+      "retriever": "v5",
+      "avg_ms": 31.12,
+      "p95_ms": 37.03,
+      "hit@1": 0.55,
+      "n": 20
+    },
+    {
+      "retriever": "v6",
+      "avg_ms": 1197.38,
+      "p95_ms": 1178.22,
+      "hit@1": 0.55,
+      "n": 20
+    }
+  ],
+  "table": "retriever    | avg_ms       | p95_ms       | hit@1     \n-------------------------------------------------------\nv3           | 34.31        | 37.81        | 0.8000    \nv5           | 31.12        | 37.03        | 0.5500    \nv6           | 1197.38      | 1178.22      | 0.5500    "
+}

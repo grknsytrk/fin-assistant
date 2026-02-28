@@ -1,0 +1,113 @@
+{
+  "ok": true,
+  "cache_hit": false,
+  "cache_stale": false,
+  "company": "EKGYO",
+  "company_title": "EMLAK KONUT GAYRİMENKUL YATIRIM ORTAKLIĞI A.Ş.",
+  "stock_code": "EKGYO",
+  "member_oid": "4028e4a2422d9a780142513cda5b232e",
+  "source_url": "https://www.kap.org.tr/tr/sirket-bilgileri/ozet/1531-emlak-konut-gayrimenkul-yatirim-ortakligi-a-s",
+  "fetched_at": "2026-02-19T21:15:48.454277+00:00",
+  "quarters": [
+    {
+      "year": 2025,
+      "period": 3,
+      "quarter": "2025Q3",
+      "disclosure_index": 1513512,
+      "publish_date": "2025.11.07 20:01:48",
+      "title": "Finansal Rapor",
+      "stock_code": "EKGYO",
+      "pdf_url": "https://www.kap.org.tr/tr/api/BildirimPdf/1513512",
+      "unit_raw": "1.000 TL",
+      "currency": "TL",
+      "metrics": {
+        "net_kar": 194218000.0,
+        "satis_gelirleri": 14211296000.0,
+        "brut_kar": 4373198000.0,
+        "faaliyet_nakit_akisi": -45235902000.0,
+        "capex": -913565000.0,
+        "serbest_nakit_akisi": -46149467000.0
+      }
+    },
+    {
+      "year": 2025,
+      "period": 3,
+      "quarter": "2025Q3",
+      "disclosure_index": 1513511,
+      "publish_date": "2025.11.07 20:01:29",
+      "title": "Finansal Rapor",
+      "stock_code": "EKGYO",
+      "pdf_url": "https://www.kap.org.tr/tr/api/BildirimPdf/1513511",
+      "unit_raw": "1.000 TL",
+      "currency": "TL",
+      "metrics": {
+        "net_kar": 193962000.0,
+        "satis_gelirleri": 8991903000.0,
+        "brut_kar": 3066780000.0,
+        "faaliyet_nakit_akisi": -48077572000.0,
+        "capex": -587741000.0,
+        "serbest_nakit_akisi": -48665313000.0
+      }
+    },
+    {
+      "year": 2025,
+      "period": 2,
+      "quarter": "2025Q2",
+      "disclosure_index": 1480229,
+      "publish_date": "2025.08.18 20:10:53",
+      "title": "Finansal Rapor",
+      "stock_code": "EKGYO",
+      "pdf_url": "https://www.kap.org.tr/tr/api/BildirimPdf/1480229",
+      "unit_raw": "1.000 TL",
+      "currency": "TL",
+      "metrics": {
+        "net_kar": 5985501000.0,
+        "satis_gelirleri": 23742734000.0,
+        "brut_kar": 8808993000.0,
+        "faaliyet_nakit_akisi": -7997912000.0,
+        "capex": -716982000.0,
+        "serbest_nakit_akisi": -8714894000.0
+      }
+    },
+    {
+      "year": 2025,
+      "period": 2,
+      "quarter": "2025Q2",
+      "disclosure_index": 1480228,
+      "publish_date": "2025.08.18 20:10:34",
+      "title": "Finansal Rapor",
+      "stock_code": "EKGYO",
+      "pdf_url": "https://www.kap.org.tr/tr/api/BildirimPdf/1480228",
+      "unit_raw": "1.000 TL",
+      "currency": "TL",
+      "metrics": {
+        "net_kar": 5279532000.0,
+        "satis_gelirleri": 23760897000.0,
+        "brut_kar": 7870260000.0,
+        "faaliyet_nakit_akisi": -8901291000.0,
+        "capex": -421086000.0,
+        "serbest_nakit_akisi": -9322377000.0
+      }
+    },
+    {
+      "year": 2025,
+      "period": 1,
+      "quarter": "2025Q1",
+      "disclosure_index": 1437005,
+      "publish_date": "2025.05.09 22:44:35",
+      "title": "Finansal Rapor",
+      "stock_code": "EKGYO",
+      "pdf_url": "https://www.kap.org.tr/tr/api/BildirimPdf/1437005",
+      "unit_raw": "1.000 TL",
+      "currency": "TL",
+      "metrics": {
+        "net_kar": 3253287000.0,
+        "satis_gelirleri": 22779241000.0,
+        "brut_kar": 5961099000.0,
+        "faaliyet_nakit_akisi": -3807992000.0,
+        "capex": -586578000.0,
+        "serbest_nakit_akisi": -4394570000.0
+      }
+    }
+  ]
+}
