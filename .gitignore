@@ -53,3 +53,7 @@ index_v2_out.txt
 data/processed/chroma/
 *.sqlite3
 *.db
+
+# Local planning / notes (keep local)
+agents_plan/
+WORK_SUMMARY.md
