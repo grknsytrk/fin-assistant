@@ -289,6 +289,18 @@ python -m ragfin.ui
 
 Opens a multi-page financial assistant UI at `http://127.0.0.1:8501`. Pages include dashboard overview, single-question Q&A, trend analysis, and ratio/comparison views.
 
+### Run the React UI (Beta)
+
+We are migrating to a React + TypeScript frontend. To run the new UI:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The modern web app will start at `http://localhost:5173`. It connects to the FastAPI backend running on port 8000. Use `.env` file to configure `VITE_API_BASE_URL`.
+
 ### Run the FastAPI service
 
 ```bash
