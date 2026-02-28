@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import time
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pandas import isna
 from pydantic import BaseModel, Field
@@ -40,6 +42,25 @@ from src.retrieve import RetrievedChunk, Retriever, RetrieverV2, RetrieverV3, Re
 CONFIG = load_config(Path("config.yaml"))
 app = FastAPI(title="RAG-Fin API", version="0.10.0")
 FEEDBACK_FILE = CONFIG.paths.processed_dir / "feedback.jsonl"
+
+
+def _cors_allow_origins() -> List[str]:
+    raw = os.getenv("RAGFIN_CORS_ALLOW_ORIGINS", "").strip()
+    if raw:
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    return [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allow_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class IndexRequest(BaseModel):
