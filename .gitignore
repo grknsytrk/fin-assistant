@@ -73,3 +73,12 @@ temp*.txt
 kap_home.html
 kap_market_tracker.js
 kap_page_chunk.js
+
+# KAP scraped artefacts (root level)
+_kap_*.js
+_kap_*.html
+_kap_*.json
+
+# Temporary sample/debug files
+tavhl_sample.txt
+*.sample.txt
