@@ -15,6 +15,14 @@ from src import kap_vyk_client
 def _reset_flow_state() -> None:
     api_module._FLOW_CACHE.clear()
     api_module._WATCH_CACHE.clear()
+    api_module._STOCKS_CACHE.clear()
+    api_module._MARKET_PRICE_CACHE.clear()
+    api_module._STOCK_RETURN_BASE_CACHE.clear()
+    api_module._MARKET_INDICES_CACHE.clear()
+    api_module._MARKET_INDEX_DETAIL_CACHE.clear()
+    api_module._MARKET_INDEX_QUOTE_CACHE.clear()
+    api_module._MARKET_INDEX_INTRADAY_CACHE.clear()
+    api_module._MARKET_INDEX_RETURN_CACHE.clear()
     kap_vyk_client.reset_caches_for_tests()
 
 
@@ -251,6 +259,362 @@ def test_market_flow_category_filter_applies_to_vyk_feed(monkeypatch: pytest.Mon
     payload = response.json()
     cats = {row["category"] for row in payload["items"]}
     assert cats == {"ozel_durum"}
+
+
+def test_fetch_market_price_map_parses_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+    html = """
+    <table><tbody id="tableBody">
+      <tr data-symbol="A1CAP">
+        <th scope="row">A1CAP</th>
+        <td>A1 CAPITAL</td>
+        <td class="price" data-val="14.18">14.18</td>
+        <td class="change" data-val="-0.21">-0.21</td>
+        <td class="percent" data-val="-1.46">-1.46 %</td>
+        <td>108.750.000,50</td>
+        <td class="previousClose" data-val="14.39">14.39</td>
+      </tr>
+    </tbody></table>
+    """
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return html.encode("utf-8")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse())
+
+    payload = api_module._fetch_market_price_map(["A1CAP"])
+
+    assert payload["A1CAP"]["price"] == 14.18
+    assert payload["A1CAP"]["change_pct"] == -1.46
+    assert payload["A1CAP"]["volume"] == 108750000.50
+
+
+def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    price_calls: List[tuple[str, ...]] = []
+
+    monkeypatch.setattr("app.kap_service.get_bist100_companies", lambda: ["A1CAP", "AEFES"])
+    monkeypatch.setattr("app.kap_service.get_bist30_companies", lambda: ["AEFES"])
+    monkeypatch.setattr(
+        api_module,
+        "_company_breakdown_from_chunks",
+        lambda _path: [
+            {"company": "A1CAP", "chunks": 3, "quarter_count": 2, "quarters": ["2025Q4"]},
+        ],
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_load_cached_kap_market_metadata",
+        lambda _cache_dir, symbol: {"latest_quarter": "2026Q1", "has_kap_cache": symbol == "A1CAP"},
+    )
+
+    def fake_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        price_calls.append(tuple(symbols))
+        return {
+            "A1CAP": {
+                "price": 14.18,
+                "currency": "TRY",
+                "change": -0.21,
+                "change_pct": -1.46,
+                "volume": 108750000.0,
+                "as_of": "2026-04-24T12:00:00+00:00",
+            },
+            "AEFES": {
+                "price": 19.0,
+                "currency": "TRY",
+                "change": 0.2,
+                "change_pct": 1.06,
+                "volume": None,
+                "as_of": "2026-04-24T12:00:00+00:00",
+            },
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_market_price_map", fake_prices)
+
+    def fake_return_bases(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        result: Dict[str, Dict[str, Any]] = {}
+        for symbol in symbols:
+            if symbol == "A1CAP":
+                result[symbol] = {
+                    "base_1w": 14.0,
+                    "base_1m": 13.0,
+                    "base_3m": 12.0,
+                    "base_6m": 10.0,
+                    "base_ytd": 11.0,
+                    "base_1y": 7.0,
+                }
+            elif symbol == "XU100":
+                result[symbol] = {
+                    "base_1w": 100.0,
+                    "base_1m": 95.0,
+                    "base_3m": 90.0,
+                    "base_6m": 80.0,
+                    "base_ytd": 85.0,
+                    "base_1y": 70.0,
+                    "latest_close": 110.0,
+                    "as_of": "2026-04-24T12:00:00+00:00",
+                }
+            elif symbol == "XU030":
+                result[symbol] = {
+                    "base_1w": 200.0,
+                    "base_1m": 190.0,
+                    "base_3m": 180.0,
+                    "base_6m": 160.0,
+                    "base_ytd": 170.0,
+                    "base_1y": 140.0,
+                    "latest_close": 220.0,
+                    "as_of": "2026-04-24T12:00:00+00:00",
+                }
+        return result
+
+    monkeypatch.setattr(api_module, "_fetch_stock_return_bases_bulk", fake_return_bases)
+
+    client = TestClient(app)
+    first = client.get("/market/stocks?index=XU100")
+    second = client.get("/market/stocks?index=XU100")
+    third = client.get("/market/stocks?index=XU030")
+    fourth = client.get("/market/stocks?index=XU030")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 200
+    assert fourth.status_code == 200
+    assert price_calls == [("A1CAP", "AEFES"), ("AEFES",)]
+
+    first_payload = first.json()
+    assert first_payload["index"] == "XU100"
+    assert first_payload["benchmarks"]["XU100"]["return_1w_pct"] == 10.0
+    assert first_payload["benchmarks"]["XU030"]["return_1w_pct"] == 10.0
+
+    rows = first_payload["rows"]
+    a1cap = rows[0]
+    assert a1cap["company"] == "A1CAP"
+    assert a1cap["volume"] == 108750000.0
+    assert a1cap["return_1w_pct"] == 1.29
+    assert a1cap["return_1y_pct"] == 102.57
+    assert rows[1]["return_1w_pct"] is None
+    assert third.json()["index"] == "XU030"
+    assert [row["company"] for row in third.json()["rows"]] == ["AEFES"]
+
+
+def test_market_stocks_rejects_unknown_index() -> None:
+    client = TestClient(app)
+    response = client.get("/market/stocks?index=XU050")
+
+    assert response.status_code == 400
+    assert "Desteklenmeyen endeks" in response.json()["detail"]
+
+
+def test_market_indices_list_returns_xu100_and_xu030(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_quote(index_code: str) -> Dict[str, Any]:
+        return {
+            "symbol": index_code,
+            "label": "BIST 100" if index_code == "XU100" else "BIST 30",
+            "yahoo_symbol": f"{index_code}.IS",
+            "price": 110.0 if index_code == "XU100" else 220.0,
+            "prev_close": 100.0 if index_code == "XU100" else 200.0,
+            "change": 10.0 if index_code == "XU100" else 20.0,
+            "change_pct": 10.0,
+            "high": 112.0,
+            "low": 99.0,
+            "volume": 123000000.0,
+            "currency": "TRY",
+            "market_state": "REGULAR",
+            "as_of": "2026-04-24T12:00:00+00:00",
+            "error": None,
+        }
+
+    def fake_bases(index_code: str) -> Dict[str, Any]:
+        latest = 110.0 if index_code == "XU100" else 220.0
+        return {
+            "base_1w": latest - 10.0,
+            "base_1m": latest - 20.0,
+            "base_3m": latest - 30.0,
+            "base_6m": latest - 40.0,
+            "base_ytd": latest - 50.0,
+            "base_1y": latest - 60.0,
+            "base_5y": latest - 70.0,
+            "latest_close": latest,
+            "as_of": "2026-04-24T12:00:00+00:00",
+            "yahoo_symbol": f"{index_code}.IS",
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_index_quote", fake_quote)
+    monkeypatch.setattr(api_module, "_fetch_index_return_bases", fake_bases)
+
+    client = TestClient(app)
+    response = client.get("/market/indices")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [row["symbol"] for row in payload["rows"]] == ["XU100", "XU030"]
+    assert payload["rows"][0]["label"] == "BIST 100"
+    assert payload["rows"][0]["return_1w_pct"] == 10.0
+    assert payload["rows"][0]["volume"] == 123000000.0
+
+
+def test_market_index_detail_returns_line_points_and_weighted_constituents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_index_quote",
+        lambda _index_code: {
+            "symbol": "XU100",
+            "label": "BIST 100",
+            "yahoo_symbol": "XU100.IS",
+            "price": 1000.0,
+            "prev_close": 990.0,
+            "change": 10.0,
+            "change_pct": 1.01,
+            "high": 1010.0,
+            "low": 980.0,
+            "volume": 1000000.0,
+            "currency": "TRY",
+            "market_state": "REGULAR",
+            "as_of": "2026-04-24T12:00:00+00:00",
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_index_return_bases",
+        lambda _index_code: {
+            "base_1w": 900.0,
+            "base_1m": 850.0,
+            "base_3m": 800.0,
+            "base_6m": 750.0,
+            "base_ytd": 700.0,
+            "base_1y": 650.0,
+            "base_5y": 500.0,
+            "latest_close": 1000.0,
+            "as_of": "2026-04-24T12:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_index_intraday_payload",
+        lambda _index_code: {
+            "line_points": [
+                {"time": "2026-04-24T09:00:00+00:00", "close": 990.0},
+                {"time": "2026-04-24T10:00:00+00:00", "close": 1000.0},
+            ],
+            "high": 1005.0,
+            "low": 985.0,
+            "prev_close": 990.0,
+            "yahoo_symbol": "XU100.IS",
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_market_stocks_payload",
+        lambda **_kwargs: {
+            "rows": [
+                {
+                    "company": "AAA",
+                    "price": 10.0,
+                    "price_currency": "TRY",
+                    "change_pct": 2.0,
+                    "volume": 100.0,
+                },
+                {
+                    "company": "BBB",
+                    "price": 30.0,
+                    "price_currency": "TRY",
+                    "change_pct": -1.0,
+                    "volume": 200.0,
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_index_weight_inputs_for_symbol",
+        lambda symbol: {
+            "shares_outstanding": 100.0,
+            "fdpo": 0.5,
+            "weight_coefficient": 1.0,
+        },
+    )
+
+    client = TestClient(app)
+    response = client.get("/market/indices/XU100")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "XU100"
+    assert payload["line_points"][1]["close"] == 1000.0
+    assert payload["return_5y_pct"] == 100.0
+    assert payload["weight_status"] == "available"
+    rows = {row["symbol"]: row for row in payload["constituents"]}
+    assert rows["AAA"]["weight_pct"] == 25.0
+    assert rows["AAA"]["point_effect"] == 5.0
+    assert rows["BBB"]["weight_pct"] == 75.0
+    assert rows["BBB"]["point_effect"] == -7.5
+
+
+def test_market_index_detail_leaves_weights_empty_when_inputs_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_index_quote",
+        lambda _index_code: {
+            "symbol": "XU030",
+            "label": "BIST 30",
+            "yahoo_symbol": "XU030.IS",
+            "price": 2000.0,
+            "prev_close": 1980.0,
+            "change": 20.0,
+            "change_pct": 1.01,
+            "high": None,
+            "low": None,
+            "volume": None,
+            "currency": "TRY",
+            "market_state": "REGULAR",
+            "as_of": "2026-04-24T12:00:00+00:00",
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(api_module, "_fetch_index_return_bases", lambda _index_code: {})
+    monkeypatch.setattr(api_module, "_index_intraday_payload", lambda _index_code: {"line_points": []})
+    monkeypatch.setattr(
+        api_module,
+        "_market_stocks_payload",
+        lambda **_kwargs: {
+            "rows": [
+                {"company": "AAA", "price": 10.0, "price_currency": "TRY", "change_pct": 2.0, "volume": 100.0},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_index_weight_inputs_for_symbol",
+        lambda _symbol: {"shares_outstanding": 100.0, "fdpo": None, "weight_coefficient": None},
+    )
+
+    client = TestClient(app)
+    response = client.get("/market/indices/XU030")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["weight_status"] == "unavailable"
+    assert payload["constituents"][0]["weight_pct"] is None
+    assert payload["constituents"][0]["point_effect"] is None
+    assert "Ağırlık" in payload["weight_note"]
+
+
+def test_market_index_detail_rejects_unknown_index() -> None:
+    client = TestClient(app)
+    response = client.get("/market/indices/XU050")
+
+    assert response.status_code == 400
+    assert "Desteklenmeyen endeks" in response.json()["detail"]
 
 
 def _watch_quote(

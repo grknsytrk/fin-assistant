@@ -563,8 +563,12 @@
     letter-spacing: 0.02em;
 }
 
-.stocks-cell-right {
+.stocks-table th.stocks-cell-right,
+.stocks-table td.stocks-cell-right,
+.indices-table th.stocks-cell-right,
+.indices-table td.stocks-cell-right {
     text-align: right;
+    justify-content: flex-end;
 }
 
 .stocks-price-cell,
@@ -737,7 +741,6 @@
 
 .indices-stat-row,
 .indices-return-strip,
-.indices-chart-actions,
 .indices-impact-summary {
     display: flex;
     align-items: center;
@@ -787,21 +790,6 @@
 
 .indices-chart-panel {
     margin-bottom: 1rem;
-}
-
-.indices-chart-actions {
-    gap: 0.45rem;
-    margin-bottom: 0.75rem;
-}
-
-.indices-chart-actions button {
-    min-height: 34px;
-    padding: 0 0.75rem;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 78%, transparent);
-    border-radius: 7px;
-    background: color-mix(in srgb, var(--surface-color) 72%, var(--bg-color));
-    color: var(--text-primary);
-    font-weight: 700;
 }
 
 .indices-line-chart,

@@ -32,6 +32,8 @@ type StockSortKey =
     | 'return_6m_pct'
     | 'return_ytd_pct'
     | 'return_1y_pct';
+type IndexSortKey = keyof MarketIndexListRow;
+
 type StockReturnKey = Extract<
     StockSortKey,
     'return_1w_pct' | 'return_1m_pct' | 'return_3m_pct' | 'return_6m_pct' | 'return_ytd_pct' | 'return_1y_pct'
@@ -46,7 +48,7 @@ const STOCK_COLUMNS: Array<{ key: StockSortKey; label: string; sublabel?: string
     { key: 'return_1m_pct', label: 'Getiri %', sublabel: 'Son 1 ay', align: 'right' },
     { key: 'return_3m_pct', label: 'Getiri %', sublabel: 'Son 3 ay', align: 'right' },
     { key: 'return_6m_pct', label: 'Getiri %', sublabel: 'Son 6 ay', align: 'right' },
-    { key: 'return_ytd_pct', label: 'Getiri %', sublabel: 'Yılbaşından bugüne', align: 'right' },
+    { key: 'return_ytd_pct', label: 'Getiri %', sublabel: 'YTA', align: 'right' },
     { key: 'return_1y_pct', label: 'Getiri %', sublabel: 'Son 1 yıl', align: 'right' },
 ];
 const STOCK_INDEX_OPTIONS: MarketStockIndex[] = ['XU100', 'XU030'];
@@ -72,14 +74,14 @@ const INDEX_COLUMNS: Array<{ key: keyof MarketIndexListRow; label: string; align
     { key: 'return_1m_pct', label: '1 Ay %', align: 'right' },
     { key: 'return_3m_pct', label: '3 Ay %', align: 'right' },
     { key: 'return_6m_pct', label: '6 Ay %', align: 'right' },
-    { key: 'return_ytd_pct', label: 'Yılbaşından bugüne %', align: 'right' },
+    { key: 'return_ytd_pct', label: 'YTA %', align: 'right' },
     { key: 'return_1y_pct', label: '1 Yıl %', align: 'right' },
 ];
 const DETAIL_RETURN_KEYS: Array<{ key: keyof MarketIndexListRow; label: string }> = [
     { key: 'change_pct', label: 'Gün içi' },
     { key: 'return_1w_pct', label: '1 Hafta' },
     { key: 'return_1m_pct', label: '1 Ay' },
-    { key: 'return_ytd_pct', label: 'Yılbaşından bugüne' },
+    { key: 'return_ytd_pct', label: 'YTA' },
     { key: 'return_6m_pct', label: '6 Ay' },
     { key: 'return_1y_pct', label: '1 Yıl' },
     { key: 'return_5y_pct', label: '5 Yıl' },
@@ -347,7 +349,7 @@ function FlashStockRow({
     );
 }
 
-function IndexCandleChart({ points, prevClose }: { points: MarketIndexDetailResponse['line_points'], prevClose: number | null }) {
+function IndexLineChart({ points, prevClose }: { points: MarketIndexDetailResponse['line_points'], prevClose: number | null }) {
     const width = 1120;
     const height = 400;
     const padding = { top: 30, right: 65, bottom: 40, left: 16 };
@@ -357,12 +359,7 @@ function IndexCandleChart({ points, prevClose }: { points: MarketIndexDetailResp
         return <div className="indices-chart-empty">Grafik verisi bekleniyor.</div>;
     }
 
-    const values = validPoints.flatMap(point => [
-        point.high ?? point.close,
-        point.low ?? point.close,
-        point.open ?? point.close,
-        point.close
-    ]);
+    const values = validPoints.map((point) => point.close);
     if (prevClose != null) values.push(prevClose);
     
     // Add small visual padding around min/max values
@@ -380,9 +377,6 @@ function IndexCandleChart({ points, prevClose }: { points: MarketIndexDetailResp
         padding.left + (validPoints.length === 1 ? 0 : (index / (validPoints.length - 1)) * plotWidth);
     const yFor = (value: number) => padding.top + ((maxValue - value) / span) * plotHeight;
 
-    const candleWidth = Math.max(1.5, (plotWidth / validPoints.length) * 0.65);
-
-    const first = validPoints[0].close;
     const last = validPoints[validPoints.length - 1].close;
 
     // Y ekseni çizgileri (5 adet)
@@ -393,15 +387,30 @@ function IndexCandleChart({ points, prevClose }: { points: MarketIndexDetailResp
     const timeTickCount = 8;
     const timeTicks = Array.from({ length: timeTickCount }).map((_, i) => Math.floor((validPoints.length - 1) * (i / (timeTickCount - 1))));
 
+    // Çizgi ve Gradient Rengi (Referans resmindeki gibi soldan sağa Mavi -> Mor geçişi)
+    const strokeLeft = '#3b82f6';  // Parlak mavi
+    const strokeRight = '#c084fc'; // Parlak mor
+
+    const pathData = validPoints
+        .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xFor(index)} ${yFor(point.close)}`)
+        .join(' ');
+        
+    const areaData = `${pathData} L ${xFor(validPoints.length - 1)} ${height - padding.bottom} L ${padding.left} ${height - padding.bottom} Z`;
+
     return (
-        <div style={{ backgroundColor: '#0f1214', borderRadius: '4px', border: '1px solid #1e2327', position: 'relative' }}>
-        <svg className="indices-line-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Endeks mum grafiği" style={{ display: 'block', width: '100%', height: 'auto', borderBottom: 'none' }}>
+        <div style={{ backgroundColor: '#0f1214', borderRadius: '8px', border: '1px solid #1e2327', position: 'relative', overflow: 'hidden' }}>
+        <svg className="indices-line-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Endeks çizgi grafiği" style={{ display: 'block', width: '100%', height: 'auto', borderBottom: 'none' }}>
             <defs>
-                <pattern id="grid" width="4" height="4" patternUnits="userSpaceOnUse">
-                    <rect width="4" height="4" fill="none" />
-                </pattern>
+                <linearGradient id="lineGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor={strokeLeft} />
+                    <stop offset="100%" stopColor={strokeRight} />
+                </linearGradient>
+                <linearGradient id="areaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                    <stop offset="0%" stopColor={strokeRight} stopOpacity="0.25" />
+                    <stop offset="100%" stopColor={strokeLeft} stopOpacity="0.0" />
+                </linearGradient>
             </defs>
-            {/* Arkaplan */}
+            {/* Koyu Arkaplan (Uygulamanın karanlık temasına uygun) */}
             <rect x="0" y="0" width={width} height={height} fill="#0d1113" rx="4" />
             
             {/* Yatay Grid ve Değerler */}
@@ -428,7 +437,7 @@ function IndexCandleChart({ points, prevClose }: { points: MarketIndexDetailResp
                     x2={width - padding.right}
                     y1={yFor(prevClose)}
                     y2={yFor(prevClose)}
-                    stroke="rgba(180, 180, 180, 0.4)"
+                    stroke="rgba(180, 180, 180, 0.3)"
                     strokeWidth="1"
                     strokeDasharray="4 4"
                 />
@@ -451,48 +460,24 @@ function IndexCandleChart({ points, prevClose }: { points: MarketIndexDetailResp
                             stroke="rgba(255,255,255,0.03)"
                             strokeWidth="1"
                         />
-                        <text x={x} y={height - 15} fill="rgba(255,255,255,0.6)" fontSize="11" fontFamily="monospace" textAnchor="middle">
+                        <text x={x} y={height - 15} fill="rgba(255,255,255,0.5)" fontSize="11" fontFamily="monospace" textAnchor="middle">
                             {label}
                         </text>
                     </g>
                 );
             })}
 
-            {/* Mumlar */}
-            {validPoints.map((point, i) => {
-                const open = point.open ?? point.close;
-                const close = point.close;
-                const high = point.high ?? Math.max(open, close);
-                const low = point.low ?? Math.min(open, close);
-                const isUp = close >= open;
-                const color = isUp ? '#00b86a' : '#ff4d4f';  /* TradingView yeşili/kırmızısı */
-                const x = xFor(i);
-                return (
-                    <g key={i}>
-                        <line
-                            x1={x}
-                            x2={x}
-                            y1={yFor(high)}
-                            y2={yFor(low)}
-                            stroke={color}
-                            strokeWidth="1.2"
-                        />
-                        <rect
-                            x={x - candleWidth / 2}
-                            y={yFor(Math.max(open, close))}
-                            width={Math.max(1, candleWidth)}
-                            height={Math.max(1, Math.abs(yFor(open) - yFor(close)))}
-                            fill={color}
-                            rx="0.5"
-                        />
-                    </g>
-                );
-            })}
+            {/* Alan ve Çizgi (Ağ/Line) (Açılış, yüksek, düşük kullanılmıyor, SADECE CLOSE) */}
+            <path d={areaData} fill="url(#areaGrad)" />
+            <path d={pathData} fill="none" stroke="url(#lineGrad)" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+            
+            {/* Uç Noktası (Kapanış) Dot */}
+            <circle cx={xFor(validPoints.length - 1)} cy={yFor(last)} r="4" fill={strokeRight} />
 
             {/* Anlık Fiyat İşareti */}
             <g transform={`translate(${width - padding.right}, ${yFor(last)})`}>
-                <rect x="0" y="-10" width="65" height="20" fill={last >= first ? '#00b86a' : '#ff4d4f'} rx="2" />
-                <path d="M 0 0 L 6 -6 L 6 6 Z" fill={last >= first ? '#00b86a' : '#ff4d4f'} transform="translate(-5, 0)" />
+                <rect x="0" y="-10" width="65" height="20" fill={strokeRight} rx="2" />
+                <path d="M 0 0 L 6 -6 L 6 6 Z" fill={strokeRight} transform="translate(-5, 0)" />
                 <text x="32" y="3" fill="#ffffff" fontSize="11" fontFamily="monospace" textAnchor="middle" fontWeight="bold">
                     {formatIndexPrice(last)}
                 </text>
@@ -523,6 +508,10 @@ export default function MarketsView() {
     const [returnMode, setReturnMode] = useState<StockReturnMode>('absolute');
     const [stockSort, setStockSort] = useState<{ key: StockSortKey; direction: SortDirection }>({
         key: 'company',
+        direction: 'asc',
+    });
+    const [indexSort, setIndexSort] = useState<{ key: IndexSortKey; direction: SortDirection }>({
+        key: 'symbol',
         direction: 'asc',
     });
     const stocksInFlightRef = useRef(false);
@@ -685,6 +674,30 @@ export default function MarketsView() {
         [indices?.rows, normalizedSearch],
     );
 
+    const sortedIndices = useMemo(() => {
+        const arr = [...filteredIndices];
+        arr.sort((a, b) => {
+            const av = a[indexSort.key];
+            const bv = b[indexSort.key];
+            const aMissing = av == null || av === '';
+            const bMissing = bv == null || bv === '';
+
+            if (aMissing && bMissing) return String(a.symbol).localeCompare(String(b.symbol), 'tr');
+            if (aMissing) return 1;
+            if (bMissing) return -1;
+
+            let result = 0;
+            if (typeof av === 'string' || typeof bv === 'string') {
+                result = String(av).localeCompare(String(bv), 'tr');
+            } else {
+                result = Number(av) - Number(bv);
+            }
+            if (result === 0) result = String(a.symbol).localeCompare(String(b.symbol), 'tr');
+            return indexSort.direction === 'asc' ? result : -result;
+        });
+        return arr;
+    }, [filteredIndices, indexSort]);
+
     const sortedStocks = useMemo(() => {
         const arr = [...filteredStocks];
         arr.sort((a, b) => {
@@ -738,6 +751,15 @@ export default function MarketsView() {
                 return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
             }
             return { key, direction: key === 'company' ? 'asc' : 'desc' };
+        });
+    };
+
+    const handleIndexSort = (key: IndexSortKey) => {
+        setIndexSort((prev) => {
+            if (prev.key === key) {
+                return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+            }
+            return { key, direction: key === 'symbol' ? 'asc' : 'desc' };
         });
     };
 
@@ -1117,13 +1139,31 @@ export default function MarketsView() {
                                                             key={column.key}
                                                             className={column.align === 'right' ? 'stocks-cell-right' : undefined}
                                                         >
-                                                            {column.label}
+                                                            <button
+                                                                type="button"
+                                                                className="stocks-sort-button"
+                                                                onClick={() => handleIndexSort(column.key)}
+                                                                aria-sort={
+                                                                    indexSort.key === column.key
+                                                                        ? indexSort.direction === 'asc'
+                                                                            ? 'ascending'
+                                                                            : 'descending'
+                                                                        : 'none'
+                                                                }
+                                                            >
+                                                                <span>{column.label}</span>
+                                                                {indexSort.key === column.key && (
+                                                                    <span className="stocks-sort-indicator">
+                                                                        {indexSort.direction === 'asc' ? '↑' : '↓'}
+                                                                    </span>
+                                                                )}
+                                                            </button>
                                                         </th>
                                                     ))}
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                                {filteredIndices.map((row, index) => (
+                                                {sortedIndices.map((row, index) => (
                                                     <tr
                                                         key={row.symbol}
                                                         onClick={() => setSelectedIndex(row.symbol)}
@@ -1231,13 +1271,7 @@ export default function MarketsView() {
                             </div>
 
                             <section className="indices-chart-panel">
-                                <div className="indices-chart-actions">
-                                    <button type="button">Karşılaştırma</button>
-                                    <button type="button">+ {selectedIndex === 'XU100' ? 'XU030' : 'XU100'}</button>
-                                    <button type="button">+ USDTRY</button>
-                                    <button type="button">+ EURTRY</button>
-                                </div>
-                                <IndexCandleChart points={indexDetail.line_points} prevClose={indexDetail.prev_close} />
+                                <IndexLineChart points={indexDetail.line_points} prevClose={indexDetail.prev_close} />
                             </section>
 
                             <section className="indices-impact-panel">
