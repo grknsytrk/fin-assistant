@@ -1,0 +1,539 @@
+.mn-sidebar {
+    width: 260px;
+    background-color: #0d0f11;
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 140;
+    overflow-y: auto;
+    color: #e2e8f0;
+    font-family: inherit;
+    padding-bottom: 20px;
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+    transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    flex-shrink: 0;
+}
+
+/* Hide scrollbar */
+.mn-sidebar::-webkit-scrollbar {
+    display: none;
+}
+
+/* Collapsed state — icon only */
+.mn-collapsed {
+    width: 60px;
+}
+
+.mn-collapsed .mn-menu-group {
+    padding: 0 0.35rem;
+}
+
+.mn-collapsed .mn-menu-item {
+    justify-content: center;
+    padding: 0.7rem 0;
+}
+
+.mn-collapsed .mn-item-main {
+    justify-content: center;
+}
+
+.mn-collapsed .mn-header {
+    justify-content: center;
+    padding: 0.95rem 0.5rem 0.85rem;
+}
+
+.mn-collapsed .mn-logo {
+    justify-content: center;
+    width: 40px;
+    height: 36px;
+}
+
+.mn-collapsed .mn-sidebar-toggle {
+    display: none;
+}
+
+/* Show toggle button positioned when collapsed */
+.mn-collapsed .mn-logo {
+    cursor: pointer;
+}
+
+
+.mn-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 1.25rem 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.mn-logo {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    position: relative;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: default;
+    border-radius: 8px;
+    line-height: 1;
+    transition: background-color 0.16s ease;
+}
+
+.mn-collapsed .mn-logo:hover,
+.mn-collapsed .mn-logo:focus-visible {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.mn-collapsed .mn-logo::after {
+    content: 'Fin-Rag';
+    position: fixed;
+    top: 14px;
+    left: 54px;
+    display: flex;
+    align-items: center;
+    height: 32px;
+    padding: 0 0.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    background: #12141a;
+    color: #fff;
+    font-size: 0.9rem;
+    font-weight: 700;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-4px);
+    transition: opacity 0.16s ease, transform 0.16s ease;
+    z-index: 170;
+}
+
+.mn-collapsed .mn-logo:hover::after,
+.mn-collapsed .mn-logo:focus-visible::after {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.mn-logo-icon {
+    width: 24px;
+    height: 24px;
+    background-color: #3b82f6;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    font-weight: 800;
+    font-size: 14px;
+    font-family: Arial, sans-serif;
+}
+
+.mn-logo-text {
+    font-weight: 700;
+    font-size: 1.15rem;
+    letter-spacing: -0.5px;
+    color: #fff;
+}
+
+.mn-sidebar-toggle {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    padding: 0;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    background: transparent;
+    color: #a0aec0;
+    line-height: 0;
+    transition: background 0.2s;
+    flex-shrink: 0;
+}
+
+.mn-sidebar-toggle:hover {
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+}
+
+.mn-sidebar-toggle svg {
+    width: 16px;
+    height: 16px;
+    stroke: currentColor;
+    flex-shrink: 0;
+}
+
+.mn-sidebar-search {
+    padding: 0 0.75rem 0.85rem;
+}
+
+.mn-sidebar-search .global-search {
+    width: 100%;
+    min-width: 0;
+}
+
+.mn-sidebar-search .global-search-shell {
+    height: 42px;
+    background: #080a0d;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+.mn-sidebar-search .global-search-action {
+    background: #12141a;
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+.mn-menu-group {
+    display: flex;
+    flex-direction: column;
+    padding: 0 0.5rem;
+}
+
+.mn-divider {
+    height: 1px;
+    background-color: rgba(255, 255, 255, 0.06);
+    margin: 0.75rem 1rem;
+}
+
+.mn-menu-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.6rem 0.75rem;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    text-decoration: none;
+    color: #a0aec0;
+    text-align: left;
+    transition: all 0.2s;
+}
+
+.mn-menu-item:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+    color: #fff;
+}
+
+.mn-menu-item.active {
+    color: #fff;
+}
+
+.mn-item-main {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+}
+
+.mn-icon {
+    color: #a0aec0;
+    transition: color 0.2s;
+}
+
+.mn-menu-item:hover .mn-icon,
+.mn-menu-item.active .mn-icon {
+    color: #fff;
+}
+
+.mn-text {
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+
+.mn-text-blue {
+    color: #3b82f6;
+    font-size: 0.95rem;
+    font-weight: 500;
+    margin-left: 0.35rem;
+}
+
+.mn-chevron, .mn-external-icon {
+    color: #4b5563;
+}
+
+.mn-badge {
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 2px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 0 0.3rem;
+    color: white;
+    text-transform: uppercase;
+}
+
+.blue-bg { background-color: #0ea5e9; }
+.purple-bg { background-color: #312e81; color: #818cf8; font-weight: 800; border-radius: 4px; text-transform: lowercase;}
+
+.mn-spacer {
+    flex-grow: 1;
+}
+
+.mn-auth-actions {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.mn-btn-login {
+    background-color: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    padding: 0.6rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.mn-btn-login:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+.mn-btn-signup {
+    background-color: #fff;
+    color: #0f172a;
+    border: none;
+    border-radius: 6px;
+    padding: 0.6rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.mn-btn-signup:hover {
+    background-color: #f1f5f9;
+}
+
+/* Search Modal Styles */
+.mn-search-modal-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    z-index: 99999;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 10vh;
+}
+
+.mn-search-modal {
+    width: 100%;
+    max-width: 600px;
+    background: #1e1e1e;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+}
+
+.mn-search-header {
+    display: flex;
+    align-items: center;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    gap: 1rem;
+}
+
+.mn-search-icon {
+    color: #94a3b8;
+}
+
+.mn-search-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #fff;
+    font-size: 1.1rem;
+}
+
+.mn-search-input::placeholder {
+    color: #64748b;
+}
+
+.mn-search-body {
+    padding: 1rem 0;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.mn-search-label {
+    padding: 0 1.5rem 0.5rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #e2e8f0;
+}
+
+.mn-search-results {
+    display: flex;
+    flex-direction: column;
+}
+
+.mn-search-result-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.5rem;
+    background: transparent;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    transition: background 0.2s;
+    text-align: left;
+}
+
+.mn-search-result-item:hover {
+    background: rgba(255,255,255,0.05);
+}
+
+.mn-sr-left {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.mn-sr-badge {
+    background: #fff;
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    color: #000;
+}
+
+.mn-sr-badge .symbol {
+    font-weight: 800;
+    font-size: 0.8rem;
+}
+
+.mn-sr-badge .market {
+    font-size: 0.5rem;
+    color: #666;
+    font-weight: 600;
+}
+
+.mn-sr-name {
+    font-size: 0.95rem;
+    color: #cbd5e1;
+}
+
+.mn-sr-change {
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.mn-sr-change.up {
+    color: #10b981;
+}
+
+.mn-sr-change.down {
+    color: #ef4444;
+}
+
+/* Clear button */
+.mn-search-clear {
+    background: none;
+    border: none;
+    color: #64748b;
+    cursor: pointer;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: color 0.2s;
+}
+.mn-search-clear:hover {
+    color: #fff;
+}
+
+/* History item badge icon */
+.mn-sr-badge-icon {
+    width: 36px;
+    height: 36px;
+    background: rgba(255,255,255,0.08);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #64748b;
+    flex-shrink: 0;
+}
+
+/* Ticker label in history row */
+.mn-sr-ticker {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #e2e8f0;
+}
+
+/* Remove button on history rows */
+.mn-sr-remove {
+    background: none;
+    border: none;
+    color: #4b5563;
+    cursor: pointer;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+    border-radius: 4px;
+    opacity: 0;
+    transition: opacity 0.2s, color 0.2s;
+}
+.mn-search-result-item:hover .mn-sr-remove {
+    opacity: 1;
+}
+.mn-sr-remove:hover {
+    color: #ef4444;
+}
+
+/* Suggestion result name */
+.mn-sr-name {
+    font-size: 0.95rem;
+    color: #cbd5e1;
+    font-weight: 500;
+}
+
+/* Empty state */
+.mn-search-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2.5rem 1rem;
+    gap: 0.75rem;
+    color: #4b5563;
+    text-align: center;
+}
+.mn-search-empty-state p {
+    font-size: 0.9rem;
+    color: #475569;
+    margin: 0;
+}

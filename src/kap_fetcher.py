@@ -19,7 +19,7 @@ MEMBER_FILTER_ENDPOINT = "member/filter"
 LIST_COMPANY_EXCEL_MEMBERS_ENDPOINT = "financialTable/listCompanyExcelMembers"
 ATTACHMENT_DETAIL_ENDPOINT = "notification/attachment-detail"
 PDF_ENDPOINT = "BildirimPdf"
-KAP_CACHE_SCHEMA_VERSION = 4
+KAP_CACHE_SCHEMA_VERSION = 11
 
 # Query aliases to improve company resolution against KAP ticker/search behavior.
 COMPANY_QUERY_ALIASES: Dict[str, List[str]] = {
@@ -169,6 +169,30 @@ def _is_favok_label(label_norm: str) -> bool:
     return has_finance_tax and has_depr and has_profit and has_before
 
 
+def _is_cash_equivalent_label(label_norm: str) -> bool:
+    ln = str(label_norm or "")
+    if not ln:
+        return False
+    if ln in {"nakit ve nakit benzerleri", "nakit ve nakit benzeri varliklar"}:
+        return True
+    if "nakit ve nakit benzer" not in ln:
+        return False
+    if any(
+        token in ln
+        for token in (
+            "net artis",
+            "net azalis",
+            "donem basi",
+            "donem sonu",
+            "cevrim fark",
+            "etkisi",
+            "diger ",
+        )
+    ):
+        return False
+    return True
+
+
 def _cache_file_for_company(processed_dir: Path, company: str) -> Path:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(company or "").strip().upper()) or "UNKNOWN"
     return processed_dir / "kap_cache" / f"{slug}.json"
@@ -189,6 +213,9 @@ def _write_cache(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def _is_cache_fresh(payload: Dict[str, Any], ttl_hours: float) -> bool:
+    # ttl_hours <= 0: her zaman canlı KAP'a git (dosya önbelleği yalnızca yedek / yazma için).
+    if float(ttl_hours) <= 0:
+        return False
     fetched_at_raw = str(payload.get("fetched_at", "")).strip()
     if not fetched_at_raw:
         return False
@@ -393,7 +420,18 @@ def _extract_rows_from_disclosure_body(body_html: str, body_index: int, unit_mul
     return rows
 
 
-def _col_preference(period: int, income_statement: bool, prefer_income_statement_ytd: bool = False) -> Tuple[int, ...]:
+def _col_preference(
+    period: int,
+    income_statement: bool,
+    prefer_income_statement_ytd: bool = False,
+    comparison_mode: str = "current",
+) -> Tuple[int, ...]:
+    if comparison_mode == "comparative":
+        if income_statement and int(period) > 1:
+            return (5, 7, 4, 6) if prefer_income_statement_ytd else (7, 5, 6, 4)
+        if income_statement:
+            return (5, 7, 4, 6) if prefer_income_statement_ytd else (7, 5, 6, 4)
+        return (5, 7, 4, 6)
     if income_statement and int(period) > 1:
         # Income statement rows usually expose: 4=YTD current, 5=YTD prev, 6=quarter current, 7=quarter prev.
         return (4, 6, 5, 7) if prefer_income_statement_ytd else (6, 4, 7, 5)
@@ -407,6 +445,7 @@ def _score_metric_candidate(
     row: Dict[str, Any],
     period: int,
     prefer_income_statement_ytd: bool = False,
+    comparison_mode: str = "current",
 ) -> int:
     score = 0
     label_norm = str(row.get("label_norm", ""))
@@ -424,6 +463,10 @@ def _score_metric_candidate(
         "net_faaliyet_kari",
         "esas_faaliyet_kari",
         "amortisman_itfa_gideri",
+        "prim_uretimi",
+        "alinan_net_primler",
+        "teknik_gelirler",
+        "teknik_denge",
     } and body_index == 1:
         score += 30
     if metric_key in {"faaliyet_nakit_akisi", "capex"} and body_index == 2:
@@ -440,6 +483,13 @@ def _score_metric_candidate(
         "finansal_borclar",
         "net_borc",
         "ozkaynaklar",
+        "nakit_ve_nakit_benzerleri",
+        "finansal_varliklar_sigortacilik",
+        "esas_faaliyetlerden_alacaklar",
+        "teknik_karsiliklar",
+        "esas_faaliyetlerden_borclar",
+        "odenmis_sermaye",
+        "cikarilmis_sermaye",
     } and body_index == 0:
         score += 30
 
@@ -458,29 +508,51 @@ def _score_metric_candidate(
             "amortisman_itfa_gideri",
         },
         prefer_income_statement_ytd=prefer_income_statement_ytd,
+        comparison_mode=comparison_mode,
     )
     if col_order in preferred_cols:
         score += max(1, 20 - preferred_cols.index(col_order) * 6)
 
     if metric_key == "net_kar":
+        # Prefer attributable/explicit net-period profit rows over generic period-profit
+        # lines, which may point to pre-attribution or continuing-operations subtotals.
         if "ana ortaklik paylari" in label_norm:
-            score += 120
+            if label_norm == "ana ortaklik paylari" and body_index == 1:
+                score += 135
+            elif "donem kari" in label_norm or "net donem kari" in label_norm:
+                score += 125
+            else:
+                score -= 120
+        if label_norm == "net donem kari veya zarari":
+            score += 140
         elif "net donem kari veya zarari" in label_norm:
             score += 110
-        elif "donem kari (zarari)" in label_norm:
-            score += 45
+        elif "net donem kari" in label_norm:
+            score += 90
+        elif label_norm == "donem kari (zarari)":
+            score += 35
+        elif "donem kari (zarari)" in label_norm and "surdurulen faaliyetler" not in label_norm:
+            score += 20
+        if "kapsamli gelir" in label_norm:
+            score -= 100
 
         # Consolidated statements often include multiple profit layers.
         # We prefer headline net/parent-profit rows over "continued operations".
         if "surdurulen faaliyetler donem kari" in label_norm:
-            score -= 30
+            score -= 60
         if "kontrol gucu olmayan paylar" in label_norm:
             score -= 80
     elif metric_key == "satis_gelirleri":
+        if label_norm == "toplam hasilat" or label_norm == "toplam satis gelirleri":
+            score += 140
+        elif "toplam hasilat" in label_norm or "toplam satis gelirleri" in label_norm:
+            score += 115
         if "hasilat" in label_norm:
             score += 35
         if "satis gelirleri" in label_norm:
             score += 25
+        if "finans sektoru faaliyetleri hasilati" in label_norm:
+            score -= 40
     elif metric_key == "brut_kar":
         if "brut kar" in label_norm and "ticari faaliyetlerden" not in label_norm:
             score += 35
@@ -519,6 +591,24 @@ def _score_metric_candidate(
             score += 45
         elif "amortisman" in label_norm:
             score += 20
+    elif metric_key == "prim_uretimi":
+        if "brut yazilan primler" in label_norm:
+            score += 110
+        elif "yazilan primler" in label_norm and "reasuror payi dusulmus" in label_norm:
+            score -= 30
+    elif metric_key == "alinan_net_primler":
+        if "yazilan primler" in label_norm and "reasuror payi dusulmus" in label_norm:
+            score += 105
+    elif metric_key == "teknik_gelirler":
+        if "hayat disi teknik gelir" in label_norm:
+            score += 110
+        elif "teknik gelir" in label_norm and "diger teknik gelirler" not in label_norm:
+            score += 40
+    elif metric_key == "teknik_denge":
+        if "teknik bolum dengesi - hayat disi" in label_norm:
+            score += 110
+        elif "genel teknik bolum dengesi" in label_norm:
+            score += 95
     elif metric_key == "faaliyet_nakit_akisi":
         if "isletme faaliyetlerinden nakit akislari" in label_norm:
             score += 35
@@ -568,6 +658,29 @@ def _score_metric_candidate(
             score += 80
         elif "beklenen kredi zarar karsiliklari" in label_norm:
             score += 70
+    elif metric_key == "nakit_ve_nakit_benzerleri":
+        if _is_cash_equivalent_label(label_norm):
+            score += 110
+        if "diger nakit ve nakit benzeri varliklar" in label_norm:
+            score -= 80
+    elif metric_key == "finansal_varliklar_sigortacilik":
+        if "finansal varliklar ile riski sigortalilara ait finansal yatirimlar" in label_norm:
+            score += 110
+    elif metric_key == "esas_faaliyetlerden_alacaklar":
+        if label_norm == "esas faaliyetlerden alacaklar":
+            score += 110
+        elif "esas faaliyetlerden alacaklar" in label_norm:
+            score += 55
+    elif metric_key == "teknik_karsiliklar":
+        if "sigortacilik teknik karsiliklari" in label_norm:
+            score += 110
+        elif "teknik karsilik" in label_norm and "diger teknik karsiliklar" not in label_norm:
+            score += 50
+    elif metric_key == "esas_faaliyetlerden_borclar":
+        if label_norm == "esas faaliyetlerden borclar":
+            score += 110
+        elif "esas faaliyetlerden borclar" in label_norm:
+            score += 55
     elif metric_key == "kisa_vadeli_yukumlulukler":
         if "toplam kisa vadeli yukumlulukler" in label_norm:
             score += 80
@@ -586,14 +699,34 @@ def _score_metric_candidate(
     elif metric_key == "ozkaynaklar":
         if "ana ortakliga ait ozkaynaklar" in label_norm:
             score += 95
+        elif "ozsermaye toplami" in label_norm:
+            score += 100
         elif "ana ortakliga ait" in label_norm and "ozkaynaklar" in label_norm:
             score += 85
         elif "toplam ozkaynaklar" in label_norm:
             score += 45
         elif "ozkaynaklar" in label_norm:
             score += 30
+        elif "ozsermaye" in label_norm:
+            score += 30
         if "kontrol gucu olmayan paylar" in label_norm:
             score -= 40
+        if "toplam yukumlulukler ve ozsermaye" in label_norm:
+            score -= 90
+    elif metric_key == "odenmis_sermaye":
+        if label_norm == "odenmis sermaye":
+            score += 120
+        elif "odenmis sermaye" in label_norm:
+            score += 80
+        if "sermaye duzeltme farklari" in label_norm:
+            score -= 120
+    elif metric_key == "cikarilmis_sermaye":
+        if label_norm == "cikarilmis sermaye":
+            score += 120
+        elif "cikarilmis sermaye" in label_norm:
+            score += 80
+        if "sermaye duzeltme farklari" in label_norm:
+            score -= 120
 
     if label_norm.startswith("toplam") or "ara toplam" in label_norm:
         if metric_key in {"donen_varliklar", "duran_varliklar", "toplam_varliklar", "ozkaynaklar"}:
@@ -608,12 +741,30 @@ def _pick_metric_value(
     rows: List[Dict[str, Any]],
     period: int,
     prefer_income_statement_ytd: bool = False,
+    comparison_mode: str = "current",
 ) -> Optional[float]:
     filtered: List[Dict[str, Any]] = []
+
+    if metric_key == "net_kar":
+        explicit_net_rows = [
+            row
+            for row in rows
+            if "net donem kari veya zarari" in str(row.get("label_norm", ""))
+        ]
+        if explicit_net_rows:
+            filtered = explicit_net_rows
+
     for row in rows:
         label_norm = str(row.get("label_norm", ""))
         if metric_key == "net_kar":
+            if filtered:
+                continue
             if "kontrol gucu olmayan paylar" in label_norm:
+                continue
+            is_bare_parent_share = "ana ortaklik paylari" in label_norm and (
+                "donem kari" not in label_norm and "net donem kari" not in label_norm
+            )
+            if is_bare_parent_share and int(row.get("body_index", -1)) != 1:
                 continue
             if (
                 "ana ortaklik paylari" in label_norm
@@ -649,11 +800,40 @@ def _pick_metric_value(
         elif metric_key == "amortisman_itfa_gideri":
             if "amortisman ve itfa gideri" in label_norm or "amortisman" in label_norm:
                 filtered.append(row)
+        elif metric_key == "prim_uretimi":
+            if "brut yazilan primler" in label_norm:
+                filtered.append(row)
+        elif metric_key == "alinan_net_primler":
+            if "yazilan primler" in label_norm and "reasuror payi dusulmus" in label_norm:
+                filtered.append(row)
+        elif metric_key == "teknik_gelirler":
+            if "hayat disi teknik gelir" in label_norm:
+                filtered.append(row)
+        elif metric_key == "teknik_denge":
+            if "teknik bolum dengesi - hayat disi" in label_norm or "genel teknik bolum dengesi" in label_norm:
+                filtered.append(row)
         elif metric_key == "faaliyet_nakit_akisi":
             if "isletme faaliyetlerinden nakit akis" in label_norm or "faaliyetlerden elde edilen nakit akis" in label_norm:
                 filtered.append(row)
         elif metric_key == "capex":
             if "nakit cikis" in label_norm and "duran varlik" in label_norm and "alim" in label_norm:
+                filtered.append(row)
+        elif metric_key == "nakit_ve_nakit_benzerleri":
+            if _is_cash_equivalent_label(label_norm):
+                filtered.append(row)
+        elif metric_key == "finansal_varliklar_sigortacilik":
+            if "finansal varliklar ile riski sigortalilara ait finansal yatirimlar" in label_norm:
+                filtered.append(row)
+        elif metric_key == "esas_faaliyetlerden_alacaklar":
+            if label_norm == "esas faaliyetlerden alacaklar" or "esas faaliyetlerden alacaklar" in label_norm:
+                filtered.append(row)
+        elif metric_key == "teknik_karsiliklar":
+            if "sigortacilik teknik karsiliklari" in label_norm:
+                filtered.append(row)
+            elif "teknik karsilik" in label_norm and "diger teknik karsiliklar" not in label_norm:
+                filtered.append(row)
+        elif metric_key == "esas_faaliyetlerden_borclar":
+            if label_norm == "esas faaliyetlerden borclar" or "esas faaliyetlerden borclar" in label_norm:
                 filtered.append(row)
         elif metric_key == "donen_varliklar":
             if "toplam donen varliklar" in label_norm or label_norm == "donen varliklar":
@@ -690,9 +870,19 @@ def _pick_metric_value(
         elif metric_key == "ozkaynaklar":
             if "ana ortakliga ait ozkaynaklar" in label_norm:
                 filtered.append(row)
+            elif "ozsermaye toplami" in label_norm:
+                filtered.append(row)
             elif "toplam ozkaynaklar" in label_norm:
                 filtered.append(row)
             elif "ozkaynaklar" in label_norm:
+                filtered.append(row)
+            elif "ozsermaye" in label_norm and "toplam yukumlulukler ve ozsermaye" not in label_norm:
+                filtered.append(row)
+        elif metric_key == "odenmis_sermaye":
+            if label_norm == "odenmis sermaye" or "odenmis sermaye" in label_norm:
+                filtered.append(row)
+        elif metric_key == "cikarilmis_sermaye":
+            if label_norm == "cikarilmis sermaye" or "cikarilmis sermaye" in label_norm:
                 filtered.append(row)
 
     if not filtered:
@@ -706,6 +896,7 @@ def _pick_metric_value(
                 item,
                 period,
                 prefer_income_statement_ytd=prefer_income_statement_ytd,
+                comparison_mode=comparison_mode,
             ),
             abs(float(item.get("value", 0.0))),
         ),
@@ -721,8 +912,13 @@ def _pick_best_row(
     includes: Tuple[str, ...],
     excludes: Tuple[str, ...] = (),
     body_index: Optional[int] = None,
+    comparison_mode: str = "current",
 ) -> Optional[Dict[str, Any]]:
-    preferred_cols = _col_preference(period=period, income_statement=False)
+    preferred_cols = _col_preference(
+        period=period,
+        income_statement=False,
+        comparison_mode=comparison_mode,
+    )
     candidates: List[Tuple[int, float, Dict[str, Any]]] = []
     for row in rows:
         if body_index is not None and int(row.get("body_index", -1)) != int(body_index):
@@ -742,7 +938,11 @@ def _pick_best_row(
     return candidates[0][2]
 
 
-def _derive_finansal_borclar(rows: List[Dict[str, Any]], period: int) -> Optional[float]:
+def _derive_finansal_borclar(
+    rows: List[Dict[str, Any]],
+    period: int,
+    comparison_mode: str = "current",
+) -> Optional[float]:
     def _bucket(*, includes: Tuple[str, ...], excludes: Tuple[str, ...] = ()) -> Optional[float]:
         non_related_excludes = excludes + ("iliskili taraf",)
         row = _pick_best_row(
@@ -751,6 +951,7 @@ def _derive_finansal_borclar(rows: List[Dict[str, Any]], period: int) -> Optiona
             includes=includes,
             excludes=non_related_excludes,
             body_index=0,
+            comparison_mode=comparison_mode,
         )
         if row is None:
             row = _pick_best_row(
@@ -759,6 +960,7 @@ def _derive_finansal_borclar(rows: List[Dict[str, Any]], period: int) -> Optiona
                 includes=includes,
                 excludes=excludes,
                 body_index=0,
+                comparison_mode=comparison_mode,
             )
         if row is None:
             return None
@@ -787,21 +989,162 @@ def _derive_finansal_borclar(rows: List[Dict[str, Any]], period: int) -> Optiona
     return None
 
 
-def _derive_net_borc(rows: List[Dict[str, Any]], period: int, finansal_borclar: Optional[float]) -> Optional[float]:
-    direct_row = _pick_best_row(rows=rows, period=period, includes=("net borc",), body_index=0)
+def _derive_net_borc(
+    rows: List[Dict[str, Any]],
+    period: int,
+    finansal_borclar: Optional[float],
+    comparison_mode: str = "current",
+) -> Optional[float]:
+    direct_row = _pick_best_row(
+        rows=rows,
+        period=period,
+        includes=("net borc",),
+        body_index=0,
+        comparison_mode=comparison_mode,
+    )
     if direct_row is not None:
         return float(direct_row.get("value", 0.0))
     if finansal_borclar is None:
         return None
 
-    nakit_row = _pick_best_row(rows=rows, period=period, includes=("nakit ve nakit benzer",), body_index=0)
-    yatirim_row = _pick_best_row(rows=rows, period=period, includes=("finansal yatirim",), body_index=0)
+    nakit_row = _pick_best_row(
+        rows=rows,
+        period=period,
+        includes=("nakit ve nakit benzer",),
+        body_index=0,
+        comparison_mode=comparison_mode,
+    )
     nakit = float(nakit_row.get("value", 0.0)) if nakit_row else 0.0
-    finansal_yatirim = float(yatirim_row.get("value", 0.0)) if yatirim_row else 0.0
 
-    if nakit == 0.0 and finansal_yatirim == 0.0:
+    cash_like_finansal_yatirim = _pick_cash_like_financial_investment(
+        rows=rows,
+        period=period,
+        comparison_mode=comparison_mode,
+    )
+
+    if nakit == 0.0 and cash_like_finansal_yatirim is None:
         return None
-    return float(finansal_borclar) - nakit - finansal_yatirim
+    return float(finansal_borclar) - nakit - float(cash_like_finansal_yatirim or 0.0)
+
+
+def _pick_cash_like_financial_investment(
+    *,
+    rows: List[Dict[str, Any]],
+    period: int,
+    comparison_mode: str = "current",
+) -> Optional[float]:
+    preferred_cols = _col_preference(
+        period=period,
+        income_statement=False,
+        comparison_mode=comparison_mode,
+    )
+    primary_col = preferred_cols[0] if preferred_cols else 4
+    generic_rows: List[Dict[str, Any]] = []
+    explicit_rows: List[Dict[str, Any]] = []
+
+    for row in rows:
+        if int(row.get("body_index", -1)) != 0:
+            continue
+        col_order = int(row.get("col_order", -1))
+        if col_order != primary_col:
+            continue
+        label_norm = str(row.get("label_norm", ""))
+        if not label_norm:
+            continue
+        if any(
+            token in label_norm
+            for token in (
+                "vadeli mevduat",
+                "para piyasasi fon",
+                "likit",
+                "nakit benzeri",
+                "gercege uygun deger farki kar/zarara yansitilan finansal varliklar",
+            )
+        ):
+            explicit_rows.append(row)
+            continue
+        if label_norm == "finansal yatirimlar":
+            generic_rows.append(row)
+
+    if explicit_rows:
+        best_explicit = max(explicit_rows, key=lambda item: abs(float(item.get("value", 0.0))))
+        return float(best_explicit.get("value", 0.0))
+
+    # Some issuers expose separate current/non-current investment totals with the same
+    # label. In that case the larger current bucket is usually the liquid bucket used
+    # in market net debt views. A single generic row is too ambiguous, so we leave it out.
+    if len(generic_rows) >= 2:
+        best_generic = max(generic_rows, key=lambda item: abs(float(item.get("value", 0.0))))
+        return float(best_generic.get("value", 0.0))
+
+    return None
+
+
+def _pick_income_row_value(
+    *,
+    rows: List[Dict[str, Any]],
+    period: int,
+    comparison_mode: str,
+    includes: Tuple[str, ...],
+    excludes: Tuple[str, ...] = (),
+) -> Optional[float]:
+    row = _pick_best_row(
+        rows=rows,
+        period=period,
+        includes=includes,
+        excludes=excludes,
+        body_index=1,
+        comparison_mode=comparison_mode,
+    )
+    if row is None:
+        return None
+    return float(row.get("value", 0.0))
+
+
+def _derive_favok(
+    *,
+    rows: List[Dict[str, Any]],
+    period: int,
+    comparison_mode: str,
+    explicit_favok: Optional[float],
+    esas_faaliyet_kari: Optional[float],
+    amortisman_itfa_gideri: Optional[float],
+) -> Optional[float]:
+    if explicit_favok is not None:
+        return explicit_favok
+    if esas_faaliyet_kari is None or amortisman_itfa_gideri is None:
+        return None
+
+    other_income = _pick_income_row_value(
+        rows=rows,
+        period=period,
+        comparison_mode=comparison_mode,
+        includes=("esas faaliyetlerden diger gelir",),
+    ) or 0.0
+    other_expense = _pick_income_row_value(
+        rows=rows,
+        period=period,
+        comparison_mode=comparison_mode,
+        includes=("esas faaliyetlerden diger gider",),
+    ) or 0.0
+    equity_share = _pick_income_row_value(
+        rows=rows,
+        period=period,
+        comparison_mode=comparison_mode,
+        includes=("ozkaynak yontemiyle degerlenen", "kar"),
+        excludes=("diger kapsamli", "dagitilmamis"),
+    ) or 0.0
+
+    try:
+        return (
+            float(esas_faaliyet_kari)
+            - float(other_income)
+            - float(other_expense)
+            - float(equity_share)
+            + float(amortisman_itfa_gideri)
+        )
+    except Exception:
+        return None
 
 
 def _extract_disclosure_metrics(
@@ -809,6 +1152,7 @@ def _extract_disclosure_metrics(
     period: int,
     *,
     prefer_income_statement_ytd: bool = False,
+    comparison_mode: str = "current",
 ) -> Tuple[Dict[str, Optional[float]], Dict[str, Any]]:
     disclosure_body = detail_payload.get("disclosureBody", [])
     if not isinstance(disclosure_body, list):
@@ -838,95 +1182,151 @@ def _extract_disclosure_metrics(
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
         ),
         "satis_gelirleri": _pick_metric_value(
             "satis_gelirleri",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
         ),
         "brut_kar": _pick_metric_value(
             "brut_kar",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
         ),
         "favok": _pick_metric_value(
             "favok",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
         ),
         "faiz_gelirleri": _pick_metric_value(
             "faiz_gelirleri",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
         ),
         "faiz_giderleri": _pick_metric_value(
             "faiz_giderleri",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
         ),
         "net_ucret_komisyon_gelirleri": _pick_metric_value(
             "net_ucret_komisyon_gelirleri",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
         ),
         "net_faaliyet_kari": _pick_metric_value(
             "net_faaliyet_kari",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
         ),
         "esas_faaliyet_kari": _pick_metric_value(
             "esas_faaliyet_kari",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
         ),
         "amortisman_itfa_gideri": _pick_metric_value(
             "amortisman_itfa_gideri",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
         ),
-        "faaliyet_nakit_akisi": _pick_metric_value("faaliyet_nakit_akisi", all_rows, period=period),
-        "capex": _pick_metric_value("capex", all_rows, period=period),
-        "donen_varliklar": _pick_metric_value("donen_varliklar", all_rows, period=period),
-        "duran_varliklar": _pick_metric_value("duran_varliklar", all_rows, period=period),
-        "toplam_varliklar": _pick_metric_value("toplam_varliklar", all_rows, period=period),
-        "kisa_vadeli_yukumlulukler": _pick_metric_value("kisa_vadeli_yukumlulukler", all_rows, period=period),
-        "finansal_varliklar_net": _pick_metric_value("finansal_varliklar_net", all_rows, period=period),
-        "krediler": _pick_metric_value("krediler", all_rows, period=period),
-        "mevduatlar": _pick_metric_value("mevduatlar", all_rows, period=period),
-        "beklenen_zarar_karsiliklari": _pick_metric_value("beklenen_zarar_karsiliklari", all_rows, period=period),
-        "finansal_borclar": _pick_metric_value("finansal_borclar", all_rows, period=period),
-        "net_borc": _pick_metric_value("net_borc", all_rows, period=period),
-        "ozkaynaklar": _pick_metric_value("ozkaynaklar", all_rows, period=period),
+        "prim_uretimi": _pick_metric_value(
+            "prim_uretimi",
+            all_rows,
+            period=period,
+            prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
+        ),
+        "alinan_net_primler": _pick_metric_value(
+            "alinan_net_primler",
+            all_rows,
+            period=period,
+            prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
+        ),
+        "teknik_gelirler": _pick_metric_value(
+            "teknik_gelirler",
+            all_rows,
+            period=period,
+            prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
+        ),
+        "teknik_denge": _pick_metric_value(
+            "teknik_denge",
+            all_rows,
+            period=period,
+            prefer_income_statement_ytd=prefer_income_statement_ytd,
+            comparison_mode=comparison_mode,
+        ),
+        "faaliyet_nakit_akisi": _pick_metric_value("faaliyet_nakit_akisi", all_rows, period=period, comparison_mode=comparison_mode),
+        "capex": _pick_metric_value("capex", all_rows, period=period, comparison_mode=comparison_mode),
+        "nakit_ve_nakit_benzerleri": _pick_metric_value("nakit_ve_nakit_benzerleri", all_rows, period=period, comparison_mode=comparison_mode),
+        "finansal_varliklar_sigortacilik": _pick_metric_value("finansal_varliklar_sigortacilik", all_rows, period=period, comparison_mode=comparison_mode),
+        "esas_faaliyetlerden_alacaklar": _pick_metric_value("esas_faaliyetlerden_alacaklar", all_rows, period=period, comparison_mode=comparison_mode),
+        "teknik_karsiliklar": _pick_metric_value("teknik_karsiliklar", all_rows, period=period, comparison_mode=comparison_mode),
+        "esas_faaliyetlerden_borclar": _pick_metric_value("esas_faaliyetlerden_borclar", all_rows, period=period, comparison_mode=comparison_mode),
+        "donen_varliklar": _pick_metric_value("donen_varliklar", all_rows, period=period, comparison_mode=comparison_mode),
+        "duran_varliklar": _pick_metric_value("duran_varliklar", all_rows, period=period, comparison_mode=comparison_mode),
+        "toplam_varliklar": _pick_metric_value("toplam_varliklar", all_rows, period=period, comparison_mode=comparison_mode),
+        "kisa_vadeli_yukumlulukler": _pick_metric_value("kisa_vadeli_yukumlulukler", all_rows, period=period, comparison_mode=comparison_mode),
+        "finansal_varliklar_net": _pick_metric_value("finansal_varliklar_net", all_rows, period=period, comparison_mode=comparison_mode),
+        "krediler": _pick_metric_value("krediler", all_rows, period=period, comparison_mode=comparison_mode),
+        "mevduatlar": _pick_metric_value("mevduatlar", all_rows, period=period, comparison_mode=comparison_mode),
+        "beklenen_zarar_karsiliklari": _pick_metric_value("beklenen_zarar_karsiliklari", all_rows, period=period, comparison_mode=comparison_mode),
+        "finansal_borclar": _pick_metric_value("finansal_borclar", all_rows, period=period, comparison_mode=comparison_mode),
+        "net_borc": _pick_metric_value("net_borc", all_rows, period=period, comparison_mode=comparison_mode),
+        "ozkaynaklar": _pick_metric_value("ozkaynaklar", all_rows, period=period, comparison_mode=comparison_mode),
+        "odenmis_sermaye": _pick_metric_value("odenmis_sermaye", all_rows, period=period, comparison_mode=comparison_mode),
+        "cikarilmis_sermaye": _pick_metric_value("cikarilmis_sermaye", all_rows, period=period, comparison_mode=comparison_mode),
     }
     if metrics["finansal_borclar"] is None:
-        metrics["finansal_borclar"] = _derive_finansal_borclar(all_rows, period=period)
+        metrics["finansal_borclar"] = _derive_finansal_borclar(
+            all_rows,
+            period=period,
+            comparison_mode=comparison_mode,
+        )
     if metrics["net_borc"] is None:
         metrics["net_borc"] = _derive_net_borc(
             all_rows,
             period=period,
             finansal_borclar=metrics.get("finansal_borclar"),
+            comparison_mode=comparison_mode,
         )
-    if metrics["favok"] is None:
-        esas = metrics.get("esas_faaliyet_kari")
-        amortisman = metrics.get("amortisman_itfa_gideri")
-        if esas is not None and amortisman is not None:
-            try:
-                metrics["favok"] = float(esas) + float(amortisman)
-            except Exception:
-                metrics["favok"] = None
+    metrics["favok"] = _derive_favok(
+        rows=all_rows,
+        period=period,
+        comparison_mode=comparison_mode,
+        explicit_favok=metrics.get("favok"),
+        esas_faaliyet_kari=metrics.get("esas_faaliyet_kari"),
+        amortisman_itfa_gideri=metrics.get("amortisman_itfa_gideri"),
+    )
     if metrics["faaliyet_nakit_akisi"] is not None and metrics["capex"] is not None:
         metrics["serbest_nakit_akisi"] = float(metrics["faaliyet_nakit_akisi"]) + float(metrics["capex"])
     else:
         metrics["serbest_nakit_akisi"] = None
+    cash_like = metrics.get("nakit_ve_nakit_benzerleri")
+    insurance_assets = metrics.get("finansal_varliklar_sigortacilik")
+    if cash_like is not None and insurance_assets is not None:
+        metrics["nakit_benzeri_finansal_varliklar"] = float(cash_like) + float(insurance_assets)
+    else:
+        metrics["nakit_benzeri_finansal_varliklar"] = cash_like if cash_like is not None else insurance_assets
     return metrics, unit_info
 
 
@@ -960,14 +1360,26 @@ def fetch_kap_company_snapshot(
             "quarters": [],
         }
 
+    requested_max_quarters = max(1, int(max_quarters))
+
     cache_path = _cache_file_for_company(processed_dir, company_norm)
     cached = _read_cache(cache_path)
     cache_version = int(cached.get("schema_version", 0)) if isinstance(cached, dict) else 0
+    cached_quarters = list((cached or {}).get("quarters") or []) if isinstance(cached, dict) else []
+    cached_period_count = len(
+        {
+            (int(item.get("year", 0)), int(item.get("period", 0)))
+            for item in cached_quarters
+            if isinstance(item, dict)
+        }
+    )
+    cache_has_requested_depth = cached_period_count >= requested_max_quarters
     if (
         cached
         and not force_refresh
         and cache_version == KAP_CACHE_SCHEMA_VERSION
         and _is_cache_fresh(cached, cfg.cache_ttl_hours)
+        and cache_has_requested_depth
     ):
         cached["cache_hit"] = True
         cached["cache_stale"] = False
@@ -983,11 +1395,15 @@ def fetch_kap_company_snapshot(
             raise RuntimeError("KAP finansal bildirim listesi bos dondu.")
 
         quarter_rows: List[Dict[str, Any]] = []
+        seen_periods: set[Tuple[int, int]] = set()
         for item in disclosures:
-            if len(quarter_rows) >= max(1, int(max_quarters)):
+            if len(quarter_rows) >= requested_max_quarters:
                 break
             period = int(item["period"])
             year = int(item["year"])
+            period_key = (year, period)
+            if period_key in seen_periods:
+                continue
             disclosure_index = int(item["disclosure_index"])
             detail = _fetch_attachment_detail(disclosure_index, cfg)
             if not detail:
@@ -1002,11 +1418,25 @@ def fetch_kap_company_snapshot(
                 detail,
                 period=period,
                 prefer_income_statement_ytd=False,
+                comparison_mode="current",
             )
             metrics_ytd, _ = _extract_disclosure_metrics(
                 detail,
                 period=period,
                 prefer_income_statement_ytd=True,
+                comparison_mode="current",
+            )
+            metrics_comparative, _ = _extract_disclosure_metrics(
+                detail,
+                period=period,
+                prefer_income_statement_ytd=False,
+                comparison_mode="comparative",
+            )
+            metrics_ytd_comparative, _ = _extract_disclosure_metrics(
+                detail,
+                period=period,
+                prefer_income_statement_ytd=True,
+                comparison_mode="comparative",
             )
             quarter_rows.append(
                 {
@@ -1023,8 +1453,12 @@ def fetch_kap_company_snapshot(
                     "metrics": metrics,
                     "metrics_quarterly": metrics,
                     "metrics_ytd": metrics_ytd,
+                    "metrics_comparative": metrics_comparative,
+                    "metrics_quarterly_comparative": metrics_comparative,
+                    "metrics_ytd_comparative": metrics_ytd_comparative,
                 }
             )
+            seen_periods.add(period_key)
 
         if not quarter_rows:
             raise RuntimeError("KAP bildirim detayi alindi ancak ceyrek verisi parse edilemedi.")

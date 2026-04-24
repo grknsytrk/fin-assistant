@@ -71,3 +71,12 @@ export default defineConfig([
   },
 ])
 ```
+
+## Market Watch Strip
+
+Markets sayfasının üst kısmındaki borsa izleme bandı tek endpoint ile beslenir:
+
+- Endpoint: `/market/watch`
+- Kapsam: `sections.indices` (XU100, XU030), `sections.fx` (USD/TRY, EUR/TRY), `sections.commodities` (Brent, Altın, Gümüş, Doğal Gaz)
+- Yenileme: istemci tarafında 60 saniye polling
+- Gecikme notu: sağlayıcı verisi yaklaşık 15 dakika gecikmeli olabilir (`delay_note`)

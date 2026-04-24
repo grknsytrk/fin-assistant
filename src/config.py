@@ -96,8 +96,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "kap": {
         "enabled": True,
         "timeout_seconds": 10.0,
-        "cache_ttl_hours": 24.0,
+        "cache_ttl_hours": 0.0,
         "user_agent": "ragfin-kap-fetcher/1.0 (+local-first)",
+        "api_key": "",
+        "api_secret": "",
+        "vyk_base_url": "https://apigwdev.mkk.com.tr/api/vyk",
+        "vyk_auth_mode": "auto",
+        "vyk_token_url": "",
     },
     "llm_commentary": {
         "enabled": False,
@@ -210,6 +215,11 @@ class KapConfig:
     timeout_seconds: float
     cache_ttl_hours: float
     user_agent: str
+    api_key: str
+    api_secret: str
+    vyk_base_url: str
+    vyk_auth_mode: str
+    vyk_token_url: str
 
 
 @dataclass(frozen=True)
@@ -474,7 +484,7 @@ def _build_config(raw: Dict[str, Any], path: Path) -> AppConfig:
         "kap.timeout_seconds",
         kap.get("timeout_seconds", kap_defaults["timeout_seconds"]),
     )
-    kap_cache_ttl_hours = _require_positive_float(
+    kap_cache_ttl_hours = _require_non_negative_float(
         "kap.cache_ttl_hours",
         kap.get("cache_ttl_hours", kap_defaults["cache_ttl_hours"]),
     )
@@ -484,7 +494,7 @@ def _build_config(raw: Dict[str, Any], path: Path) -> AppConfig:
     if kap_timeout_seconds > 120.0:
         raise ValueError("kap.timeout_seconds 1..120 araliginda olmali")
     if kap_cache_ttl_hours > 24 * 30:
-        raise ValueError("kap.cache_ttl_hours makul aralikta olmali (<= 720)")
+        raise ValueError("kap.cache_ttl_hours makul aralikta olmali (<= 720; 0=canli KAP)")
 
     env_kap_enabled = os.getenv("RAGFIN_KAP_ENABLED", "").strip()
     if env_kap_enabled:
@@ -494,19 +504,51 @@ def _build_config(raw: Dict[str, Any], path: Path) -> AppConfig:
         kap_timeout_seconds = _require_positive_float("RAGFIN_KAP_TIMEOUT_SECONDS", env_kap_timeout)
     env_kap_ttl = os.getenv("RAGFIN_KAP_CACHE_TTL_HOURS", "").strip()
     if env_kap_ttl:
-        kap_cache_ttl_hours = _require_positive_float("RAGFIN_KAP_CACHE_TTL_HOURS", env_kap_ttl)
+        kap_cache_ttl_hours = _require_non_negative_float("RAGFIN_KAP_CACHE_TTL_HOURS", env_kap_ttl)
     kap_user_agent = os.getenv("RAGFIN_KAP_USER_AGENT", "").strip() or kap_user_agent
 
     if kap_timeout_seconds > 120.0:
         raise ValueError("RAGFIN_KAP_TIMEOUT_SECONDS 1..120 araliginda olmali")
     if kap_cache_ttl_hours > 24 * 30:
-        raise ValueError("RAGFIN_KAP_CACHE_TTL_HOURS makul aralikta olmali (<= 720)")
+        raise ValueError("RAGFIN_KAP_CACHE_TTL_HOURS makul aralikta olmali (<= 720; 0=canli KAP)")
+
+    # VYK (Veri Yayin Kanali) resmi REST endpoint'i kimlik bilgileri.
+    # En az api_key + vyk_base_url dolu olmali; api_secret sadece Basic akista gerekir.
+    kap_api_key = str(kap.get("api_key", kap_defaults.get("api_key", ""))).strip()
+    kap_api_secret = str(kap.get("api_secret", kap_defaults.get("api_secret", ""))).strip()
+    kap_vyk_base_url = str(
+        kap.get("vyk_base_url", kap_defaults.get("vyk_base_url", ""))
+    ).strip()
+    kap_vyk_auth_mode = str(
+        kap.get("vyk_auth_mode", kap_defaults.get("vyk_auth_mode", "auto"))
+    ).strip().lower() or "auto"
+    kap_vyk_token_url = str(
+        kap.get("vyk_token_url", kap_defaults.get("vyk_token_url", ""))
+    ).strip()
+    kap_api_key = os.getenv("RAGFIN_KAP_API_KEY", "").strip() or kap_api_key
+    kap_api_secret = os.getenv("RAGFIN_KAP_API_SECRET", "").strip() or kap_api_secret
+    kap_vyk_base_url = os.getenv("RAGFIN_KAP_VYK_BASE_URL", "").strip() or kap_vyk_base_url
+    kap_vyk_auth_mode = (
+        os.getenv("RAGFIN_KAP_VYK_AUTH_MODE", "").strip().lower() or kap_vyk_auth_mode
+    )
+    kap_vyk_token_url = os.getenv("RAGFIN_KAP_VYK_TOKEN_URL", "").strip() or kap_vyk_token_url
+    if kap_vyk_base_url:
+        kap_vyk_base_url = kap_vyk_base_url.rstrip("/")
+    if kap_vyk_token_url:
+        kap_vyk_token_url = kap_vyk_token_url.rstrip("/")
+    if kap_vyk_auth_mode not in {"auto", "basic", "token"}:
+        raise ValueError("RAGFIN_KAP_VYK_AUTH_MODE auto/basic/token olmali")
 
     kap_cfg = KapConfig(
         enabled=kap_enabled,
         timeout_seconds=kap_timeout_seconds,
         cache_ttl_hours=kap_cache_ttl_hours,
         user_agent=kap_user_agent,
+        api_key=kap_api_key,
+        api_secret=kap_api_secret,
+        vyk_base_url=kap_vyk_base_url,
+        vyk_auth_mode=kap_vyk_auth_mode,
+        vyk_token_url=kap_vyk_token_url,
     )
 
     llm_defaults = DEFAULT_CONFIG.get("llm_assistant", DEFAULT_CONFIG["llm_commentary"])

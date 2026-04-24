@@ -5314,6 +5314,98 @@ def _render_settings_page() -> None:
             st.success(f"coverage_audit tamamlandı: {report.get('output_file')}")
 
 
+def _render_kap_flow_page() -> None:
+    st.subheader("KAP Canlı Bildirim Akışı")
+    st.caption("Son yayınlanan KAP bildirimleri (otomatik olarak yenilenir). API üzerinden güncel veriler çekilmektedir.")
+
+    kap_cfg = getattr(CONFIG, "kap", None)
+    if not kap_cfg or not kap_cfg.enabled:
+        st.warning("KAP yapılandırması etkin değil.")
+        return
+
+    from src.kap_vyk_client import get_last_disclosure_index, list_disclosures_batch
+    import datetime
+    
+    # Optional filtering controls 
+    col1, col2 = st.columns([1, 3])
+    max_disclosures = col1.number_input("Gösterilecek Bildirim Sayısı", min_value=10, max_value=200, value=30, step=10)
+    
+    fragment_func = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+
+    def _fetch_and_render_flow():
+        try:
+            with st.spinner("Son KAP bildirimleri çekiliyor (apigwdev)..."):
+                last_idx = get_last_disclosure_index(kap_cfg)
+        except Exception as e:
+            st.error(f"Son bildirim ID si alınırken hata oluştu: {e}")
+            return
+            
+        if not last_idx:
+            st.warning("Yeni KAP bildirimi bulunamadı (API'den index dönmedi).")
+            return
+            
+        try:
+            # list_disclosures_batch fetches up to 50 at a time starting from start_index.
+            # E.g. start_index = last_idx - 30 means fetching from 1230987 up to last_idx.
+            # If we want `max_disclosures`, we should just fetch `start_index = last_idx - max_disclosures + 1` 
+            # Note: disclosure index might have gaps, so it might return fewer than requested mathematically, 
+            # but list_disclosures_batch returns "from index" forward.
+            
+            all_disclosures = []
+            current_start = max(1, last_idx - max_disclosures + 1)
+            
+            # Since VYK list_disclosures limits to 50, fetch in loop if needed
+            while current_start <= last_idx and len(all_disclosures) < max_disclosures:
+                batch = list_disclosures_batch(kap_cfg, start_index=current_start)
+                if not batch:
+                    break
+                all_disclosures.extend(batch)
+                # Next request should be from the max index returned + 1
+                max_in_batch = max([int(b.get("disclosureIndex")) for b in batch if b.get("disclosureIndex")])
+                current_start = max_in_batch + 1
+                
+        except Exception as e:
+            st.error(f"Bildirimler alınırken hata oluştu: {e}")
+            return
+
+        if not all_disclosures:
+            st.info("Gösterilecek son bildirim bulunamadı.")
+            return
+
+        # Deduplicate and sort descending by ID
+        unique_disclosures = {d.get("disclosureIndex"): d for d in all_disclosures}
+        sorted_disclosures = sorted(unique_disclosures.values(), key=lambda x: int(x.get("disclosureIndex", 0)), reverse=True)[:max_disclosures]
+
+        st.caption(f"**Son Güncelleme:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (Index: {last_idx})")
+        
+        for k in sorted_disclosures:
+            with st.container(border=True):
+                title = k.get("title", "Bilinmeyen Şirket/Kurum")
+                disc_class = k.get("disclosureClass", "-")
+                disc_type = k.get("disclosureType", "-")
+                idx = k.get("disclosureIndex", "")
+                
+                # KAP Website standard link for details
+                link = f"https://www.kap.org.tr/tr/Bildirim/{idx}"
+                
+                cols = st.columns([4, 1])
+                cols[0].markdown(f"**[{title}]({link})**")
+                cols[0].markdown(f"`Sınıf: {disc_class}` | `Tip: {disc_type}`")
+                cols[1].caption(f"ID: {idx}")
+                
+        st.button("Akışı Yenile (Manuel)")
+
+    if fragment_func:
+        # Wrap _fetch_and_render_flow inside the fragment
+        # 15s refresh interval is appropriate for live feed
+        @fragment_func(run_every="15s")
+        def auto_refreshed_feed():
+            _fetch_and_render_flow()
+            
+        auto_refreshed_feed()
+    else:
+        _fetch_and_render_flow()
+
 def main() -> None:
     _ensure_paths()
     st.set_page_config(page_title="Bilanço Asistanı", layout="wide")
@@ -5330,6 +5422,7 @@ def main() -> None:
     pages = ["Overview", "Companies", "Reports", "Ask"]
     if getattr(CONFIG, "kap", None) is not None and bool(getattr(CONFIG.kap, "enabled", False)):
         pages.append("KAP")
+        pages.append("KAP Akışı")
     pages.append("Settings")
     if st.session_state.get("nav_page") not in pages:
         st.session_state["nav_page"] = "Overview"
@@ -5344,6 +5437,7 @@ def main() -> None:
             "Reports": "Raporlar",
             "Ask": "Soru Sor",
             "KAP": "KAP Finansallari",
+            "KAP Akışı": "KAP Canlı Akış",
             "Settings": "Ayarlar",
         }[x],
         key="sidebar_page",
@@ -5363,6 +5457,8 @@ def main() -> None:
         _render_ask_page()
     elif page == "KAP":
         _render_kap_financials_page()
+    elif page == "KAP Akışı":
+        _render_kap_flow_page()
     else:
         _render_settings_page()
 

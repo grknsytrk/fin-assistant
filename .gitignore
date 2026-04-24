@@ -57,3 +57,19 @@ data/processed/chroma/
 # Local planning / notes (keep local)
 agents_plan/
 WORK_SUMMARY.md
+
+# Temporary Chrome Profiles and Logs
+.tmp-chrome-debug/
+.tmp-chrome-net/
+.tmp-chrome-net2/
+
+# KAP Cache and PDF files
+data/processed/kap_cache/
+data/processed/*.pdf
+debug-kap-netlog.json
+temp*.txt
+
+# Standalone script/HTML tests
+kap_home.html
+kap_market_tracker.js
+kap_page_chunk.js

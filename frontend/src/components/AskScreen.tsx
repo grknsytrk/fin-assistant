@@ -1,17 +1,46 @@
-import React, { useState } from 'react';
-import type { AskRequest, AskResponse } from '../api/types';
+import { useState } from 'react';
+import type { AskRequest, AskResponse, ComparisonRow, EvidenceChunk } from '../api/types';
 import { apiClient } from '../api/client';
 
 interface AskScreenProps {
-    settings: {
+    settings?: {
         retriever: AskRequest['retriever'];
         mode: AskRequest['mode'];
     };
+    initialCompany?: string;
+    disableCompanySelect?: boolean;
 }
 
-export function AskScreen({ settings }: AskScreenProps) {
+function formatComparisonValue(row: ComparisonRow): string {
+    if (typeof row.value !== 'number' || Number.isNaN(row.value)) {
+        return '-';
+    }
+
+    const looksLikeRatio = String(row.target || '').toLowerCase().includes('margin');
+    return looksLikeRatio
+        ? `${row.value.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`
+        : row.value.toLocaleString('tr-TR', { maximumFractionDigits: 2 });
+}
+
+function formatConfidence(confidence: number | null): string {
+    if (typeof confidence !== 'number' || Number.isNaN(confidence)) {
+        return 'M/A';
+    }
+    return `${(confidence * 100).toFixed(1)}%`;
+}
+
+function formatEvidencePeriod(chunk: EvidenceChunk): string {
+    const parts = [chunk.year, chunk.quarter].filter((part) => part !== null && part !== undefined && String(part).trim() !== '');
+    return parts.length > 0 ? parts.join(' ') : 'Dönem bilgisi yok';
+}
+
+export function AskScreen({ 
+    settings, 
+    initialCompany = '', 
+    disableCompanySelect = false 
+}: AskScreenProps) {
     const [question, setQuestion] = useState('');
-    const [company, setCompany] = useState('');
+    const [company, setCompany] = useState(initialCompany);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [result, setResult] = useState<AskResponse | null>(null);
@@ -25,8 +54,8 @@ export function AskScreen({ settings }: AskScreenProps) {
         try {
             const payload: AskRequest = {
                 question,
-                retriever: settings.retriever,
-                mode: settings.mode,
+                retriever: settings?.retriever || 'v5',
+                mode: settings?.mode || 'single',
             };
             if (company.trim()) {
                 payload.company = company.trim();
@@ -45,16 +74,18 @@ export function AskScreen({ settings }: AskScreenProps) {
         <div className="ask-box card-glass">
             <h2>Soru Sor</h2>
             <form onSubmit={handleSubmit} className="ask-form">
-                <div className="form-group">
-                    <label>Şirket Kodu (Opsiyonel)</label>
-                    <input
-                        type="text"
-                        placeholder="Örn: THYAO"
-                        value={company}
-                        onChange={(e) => setCompany(e.target.value)}
-                        className="input-field"
-                    />
-                </div>
+                {!disableCompanySelect && (
+                    <div className="form-group">
+                        <label>Şirket Kodu (Opsiyonel)</label>
+                        <input
+                            type="text"
+                            placeholder="Örn: THYAO"
+                            value={company}
+                            onChange={(e) => setCompany(e.target.value)}
+                            className="input-field"
+                        />
+                    </div>
+                )}
                 <div className="form-group">
                     <label>Sorunuz</label>
                     <textarea
@@ -77,25 +108,71 @@ export function AskScreen({ settings }: AskScreenProps) {
                 <div className="result-container fade-in">
                     <div className="answer-section">
                         <h3>Cevap</h3>
-                        {result.answer.bullets.length > 0 ? (
-                            <ul className="bullets-list">
-                                {result.answer.bullets.map((bullet, idx) => (
-                                    <li key={idx}>{bullet}</li>
-                                ))}
-                            </ul>
+
+                        {result.answer.bullets.filter((bullet) => bullet.trim()).length > 0 ? (
+                            <div className="answer-structured">
+                                <ul className="bullets-list">
+                                    {result.answer.bullets
+                                        .filter((bullet) => bullet.trim())
+                                        .map((bullet, idx) => (
+                                            <li key={idx}>{bullet}</li>
+                                        ))}
+                                </ul>
+                            </div>
                         ) : (
-                            <p>Bulunamadı.</p>
+                            <p className="answer-empty">
+                                {result.answer.found ? 'Yanıt üretilemedi.' : 'Dokümanda bulunamadı.'}
+                            </p>
                         )}
 
                         <div className="meta-info">
                             <span className={`badge ${result.answer.verify_status.toLowerCase()}`}>
-                                Güven: {(result.answer.confidence * 100).toFixed(1)}% | {result.answer.verify_status}
+                                Guven: {(result.answer.confidence * 100).toFixed(1)}% | {result.answer.verify_status}
                             </span>
                             <span className="debug-badge">
                                 Latans: {result.debug.latency_ms}ms | Metod: {result.debug.retriever}
                             </span>
                         </div>
                     </div>
+
+                    {result.comparison && result.comparison.rows.length > 0 && (
+                        <div className="trend-section mt-4">
+                            <h3>Şirket Karşılaştırması</h3>
+                            <p className="answer-main-text">
+                                Hedef metrik: <strong>{result.comparison.target}</strong>
+                                {result.comparison.best_company && (
+                                    <>
+                                        {' '}| Öne çıkan şirket: <strong>{result.comparison.best_company}</strong>
+                                    </>
+                                )}
+                            </p>
+                            <div className="table-responsive">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>Şirket</th>
+                                            <th>Çeyrek</th>
+                                            <th>Değer</th>
+                                            <th>Güven</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {result.comparison.rows.map((row, idx) => {
+                                            const isBest = row.company === result.comparison?.best_company;
+                                            return (
+                                                <tr key={`${row.company}-${row.quarter || idx}`}>
+                                                    <td>{isBest ? <strong>{row.company}</strong> : row.company}</td>
+                                                    <td>{row.quarter || '-'}</td>
+                                                    <td>{formatComparisonValue(row)}</td>
+                                                    <td>{formatConfidence(row.confidence)}</td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
 
                     {result.trend && result.trend.rows.length > 0 && (
                         <div className="trend-section mt-4">
@@ -128,13 +205,13 @@ export function AskScreen({ settings }: AskScreenProps) {
                                 {result.evidence.map((chunk, idx) => (
                                     <div key={idx} className="evidence-card">
                                         <div className="evidence-header">
-                                            <strong>{chunk.company}</strong> - {chunk.year} {chunk.quarter} (Sayfa: {chunk.page})
+                                            <strong>{chunk.company || chunk.doc_id}</strong> - {formatEvidencePeriod(chunk)} (Sayfa: {chunk.page})
                                         </div>
                                         <div className="evidence-body">
                                             {chunk.excerpt}
                                         </div>
                                         <div className="evidence-footer">
-                                            Güven: {chunk.confidence ? (chunk.confidence * 100).toFixed(1) : 'M/A'}%
+                                            Güven: {formatConfidence(chunk.confidence)} | Bölüm: {chunk.section_title || '-'}
                                         </div>
                                     </div>
                                 ))}
@@ -146,3 +223,5 @@ export function AskScreen({ settings }: AskScreenProps) {
         </div>
     );
 }
+
+export default AskScreen;

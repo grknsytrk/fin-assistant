@@ -1,0 +1,146 @@
+.section-charts {
+    display: flex;
+    flex-direction: column;
+}
+
+.section-charts-embedded {
+    gap: 0;
+}
+
+.kap-charts-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+}
+
+.kap-charts-grid-3 {
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.kap-charts-grid-lines {
+    margin-top: 1.5rem;
+}
+
+.kap-chart-card {
+    background: var(--surface-color);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--border-radius);
+    padding: 1.5rem;
+    position: relative;
+}
+
+.kap-chart-card h4 {
+    margin: 0 0 1rem;
+    font-size: 0.95rem;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.kap-chart-svg {
+    width: 100%;
+    height: auto;
+    overflow: visible;
+}
+
+.kap-grid-line {
+    stroke: var(--surface-border);
+    stroke-width: 1;
+    stroke-dasharray: 4 4;
+    opacity: 0.5;
+}
+
+.kap-grid-line-v {
+    opacity: 0.15;
+}
+
+.kap-axis-line {
+    stroke: var(--surface-border);
+    stroke-width: 2;
+}
+
+.kap-bar-positive {
+    fill: var(--success-color);
+    transition: all 0.2s;
+    opacity: 0.85;
+}
+
+.kap-bar-negative {
+    fill: var(--danger-color);
+    transition: all 0.2s;
+    opacity: 0.85;
+}
+
+.kap-bar-highlighted {
+    opacity: 1 !important;
+}
+
+.kap-bar-faded {
+    opacity: 0.3 !important;
+}
+
+.kap-x-label {
+    fill: var(--text-secondary);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    pointer-events: none;
+}
+
+.kap-line-path {
+    fill: none;
+    stroke: var(--accent-color);
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.kap-line-point {
+    fill: var(--surface-color);
+    stroke: var(--accent-color);
+    stroke-width: 2;
+    transition: all 0.2s;
+    cursor: pointer;
+}
+
+.kap-point-highlighted {
+    fill: var(--accent-color);
+    r: 6;
+}
+
+.kap-point-faded {
+    opacity: 0.3;
+}
+
+.kap-chart-tooltip {
+    position: absolute;
+    background: var(--surface-color);
+    border: 1px solid var(--surface-border);
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--border-radius);
+    pointer-events: none;
+    transform: translate(-50%, -120%);
+    box-shadow: var(--shadow-md);
+    z-index: 10;
+    min-width: 120px;
+    text-align: center;
+}
+
+.kap-chart-tooltip-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.25rem;
+    font-weight: 500;
+}
+
+.kap-chart-tooltip-value {
+    font-size: 0.95rem;
+    color: var(--text-primary);
+    font-weight: 700;
+    font-family: var(--font-mono);
+}
+
+@media (max-width: 900px) {
+    .kap-charts-grid,
+    .kap-charts-grid-3 {
+        grid-template-columns: 1fr;
+    }
+}

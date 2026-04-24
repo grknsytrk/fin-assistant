@@ -1,0 +1,71 @@
+.kap-multiples-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.kap-multiple-group {
+    position: relative;
+    background: var(--surface-color);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--border-radius);
+    padding: 1.25rem;
+    box-shadow: var(--shadow-sm);
+    animation: fadeIn 0.4s ease-out forwards;
+    opacity: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* Subtle top border gradient for premium terminal feel */
+.kap-multiple-group::before {
+    content: '';
+    position: absolute;
+    top: -1px;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--surface-border), color-mix(in srgb, var(--accent-color) 50%, var(--surface-border)), var(--surface-border));
+    border-radius: var(--border-radius) var(--border-radius) 0 0;
+}
+
+.kap-multiple-group-title {
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+}
+
+.kap-multiple-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+}
+
+.kap-multiple-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.kap-multiple-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.kap-multiple-value {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
+    line-height: 1.1;
+}
+
+.kap-multiple-value.negative-ratio {
+    color: var(--danger-color);
+}

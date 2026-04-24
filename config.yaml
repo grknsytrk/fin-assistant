@@ -88,7 +88,8 @@ extraction:
 kap:
   enabled: true
   timeout_seconds: 10.0
-  cache_ttl_hours: 24.0
+  # 0 = her zaman canlı KAP (www.kap.org.tr); başarılı yanıt yine kap_cache dosyasına yazılır.
+  cache_ttl_hours: 0.0
   user_agent: ragfin-kap-fetcher/1.0 (+local-first)
 
 llm_commentary:

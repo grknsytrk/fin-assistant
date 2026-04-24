@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 import unicodedata
@@ -1576,6 +1576,7 @@ def extract_metric_with_candidates(
                 all_candidates.append(
                     {
                         "company": str(getattr(chunk, "company", "BIM")),
+                        "year": getattr(chunk, "year", None),
                         "quarter": quarter,
                         "metric": metric,
                         "value": scaled_value,
@@ -1701,6 +1702,7 @@ def extract_metric_with_candidates(
                 all_candidates.append(
                     {
                         "company": str(getattr(chunk, "company", "BIM")),
+                        "year": getattr(chunk, "year", None),
                         "quarter": quarter,
                         "metric": metric,
                         "value": scaled_value,

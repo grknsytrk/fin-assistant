@@ -245,7 +245,7 @@ Key sections in `config.yaml`:
 | `retrieval` | Top-k values and alpha/beta blending weights per retriever |
 | `models` | Embedding model (`intfloat/multilingual-e5-small`) and cross-encoder model |
 | `extraction` | Metric dictionary, confidence thresholds, expected value ranges |
-| `kap` | KAP fetcher toggle, timeout, cache TTL, user-agent |
+| `kap` | KAP fetcher toggle, timeout, cache TTL, user-agent, VYK auth settings |
 | `llm_assistant` | LLM commentary toggle, provider, model, timeout, temperature |
 | `health` | Dashboard health indicator thresholds (margin, growth) |
 
@@ -266,8 +266,13 @@ A `.env` file in the working directory or repository root is loaded automaticall
 | `RAGFIN_LLM_ASSISTANT_REASONING_ENABLED` | No | `true` | Enable reasoning mode flag | `true` |
 | `RAGFIN_KAP_ENABLED` | No | `true` | Enable KAP fetcher integration | `false` |
 | `RAGFIN_KAP_TIMEOUT_SECONDS` | No | `10` | HTTP timeout for KAP requests | `12` |
-| `RAGFIN_KAP_CACHE_TTL_HOURS` | No | `24` | Cache TTL for KAP responses | `24` |
+| `RAGFIN_KAP_CACHE_TTL_HOURS` | No | `0` | KAP snapshot file cache TTL hours; `0` = always fetch live KAP | `24` |
 | `RAGFIN_KAP_USER_AGENT` | No | `ragfin-kap-fetcher/1.0 (+local-first)` | User-Agent header for KAP requests | `ragfin-kap-fetcher/1.0 (+my-org)` |
+| `RAGFIN_KAP_API_KEY` | Only for VYK REST feed | *(empty)* | API key used by VYK endpoints and `generateToken` | `29223dec-32bc-49fb-919f-51405d110ab2` |
+| `RAGFIN_KAP_API_SECRET` | No | *(empty)* | Optional Basic auth secret for legacy/fallback flows | `my-secret` |
+| `RAGFIN_KAP_VYK_BASE_URL` | Only for VYK REST feed | `https://apigwdev.mkk.com.tr/api/vyk` | Base URL for VYK data methods (`disclosures`, `disclosureDetail`, etc.) | `https://apigw.mkk.com.tr/api/vyk` |
+| `RAGFIN_KAP_VYK_AUTH_MODE` | No | `auto` | Auth mode: `auto`, `basic`, or `token` | `token` |
+| `RAGFIN_KAP_VYK_TOKEN_URL` | No | `https://<gateway>/auth/generateToken?apiKey=<RAGFIN_KAP_API_KEY>` | Override token endpoint if gateway differs | `https://apigw.mkk.com.tr/auth/generateToken?apiKey=...` |
 
 `RAGFIN_LLM_COMMENTARY_*` aliases are also accepted by the config loader.
 

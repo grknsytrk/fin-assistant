@@ -1,0 +1,129 @@
+.stock-header-band {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    width: 100%;
+    padding: 0.9rem 1.4rem;
+    background: var(--surface-color);
+    border-bottom: 1px solid var(--surface-border);
+}
+
+.sh-left {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    min-width: 0;
+}
+
+.sh-titles {
+    display: flex;
+    flex-direction: column;
+    gap: 0.18rem;
+    min-width: 0;
+}
+
+.sh-symbol-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+}
+
+.sh-symbol-row h1 {
+    margin: 0;
+    font-size: 1.95rem;
+    line-height: 1;
+    font-weight: 800;
+    color: var(--text-primary);
+    letter-spacing: -0.03em;
+}
+
+.sh-star-btn {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid var(--surface-border);
+    background: transparent;
+    color: var(--text-secondary);
+}
+
+.sh-star-btn:hover {
+    color: var(--warn-color);
+    border-color: var(--warn-color);
+    background: rgba(245, 158, 11, 0.1);
+}
+
+.sh-company-name {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sh-right {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.2rem;
+    flex-shrink: 0;
+}
+
+.sh-price-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 0.3rem;
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
+}
+
+.sh-price-currency {
+    color: var(--text-secondary);
+    font-size: 1.55rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+}
+
+.sh-price-value {
+    color: var(--text-primary);
+    font-size: 2.35rem;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: -0.04em;
+}
+
+.sh-price-change {
+    margin-left: 0.3rem;
+    font-size: 1.08rem;
+    font-weight: 700;
+}
+
+.sh-price-change.price-up {
+    color: var(--success-color);
+}
+
+.sh-price-change.price-down {
+    color: var(--danger-color);
+}
+
+.sh-time-row {
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
+}
+
+@media (max-width: 900px) {
+    .stock-header-band {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .sh-right {
+        align-items: flex-start;
+    }
+}

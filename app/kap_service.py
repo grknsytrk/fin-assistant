@@ -1,0 +1,540 @@
+"""KAP service layer — decouples KAP logic from Streamlit and FastAPI."""
+from __future__ import annotations
+
+import re
+import urllib.request
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from src.config import KapConfig
+from src.kap_fetcher import fetch_kap_company_snapshot
+
+# Static BIST100 universe snapshot used by the market terminal.
+# Source basis: current XU100 constituent pages cross-checked against the
+# Q1 2026 Borsa Istanbul index change announcement.
+BIST100_SYMBOLS: List[str] = [
+    "AEFES", "AGHOL", "AKBNK", "AKSA", "AKSEN", "ALARK", "ALTNY", "ANSGR",
+    "ARCLK", "ASELS", "ASTOR", "BALSU", "BIMAS", "BRSAN", "BRYAT", "BSOKE",
+    "BTCIM", "CANTE", "CCOLA", "CIMSA", "CWENE", "DAPGM", "DOAS", "DOHOL",
+    "DSTKF", "ECILC", "EFOR", "EGEEN", "EKGYO", "ENERY", "ENJSA", "ENKAI",
+    "EREGL", "EUPWR", "FENER", "FROTO", "GARAN", "GENIL", "GESAN", "GLRMK",
+    "GRSEL", "GRTHO", "GSRAY", "GUBRF", "HALKB", "HEKTS", "ISCTR", "ISMEN",
+    "IZENR", "KCAER", "KCHOL", "KLRHO", "KONTR", "KRDMD", "KTLEV", "KUYAS",
+    "MAGEN", "MAVI", "MGROS", "MIATK", "MPARK", "OBAMS", "ODAS", "OTKAR",
+    "OYAKC", "PASEU", "PATEK", "PETKM", "PGSUS", "QUAGR", "RALYH", "REEDR",
+    "SAHOL", "SASA", "SISE", "SKBNK", "SOKM", "TABGD", "TAVHL", "TCELL",
+    "THYAO", "TKFEN", "TOASO", "TRALT", "TRENJ", "TRMET", "TSKB", "TSPOR",
+    "TTKOM", "TTRAK", "TUKAS", "TUPRS", "TUREX", "TURSG", "ULKER", "VAKBN",
+    "VESTL", "YEOTK", "YKBNK", "ZOREN",
+]
+
+# BIST30 (XU030) constituent snapshot. Ordered by most recent BIST30 membership
+# list provided by the product owner.
+BIST30_SYMBOLS: List[str] = [
+    "TRALT", "AKBNK", "GARAN", "EKGYO", "PGSUS", "SAHOL", "YKBNK", "VAKBN",
+    "ISCTR", "AEFES", "TTKOM", "ENKAI", "DSTKF", "THYAO", "EREGL", "KCHOL",
+    "KRDMD", "FROTO", "SISE", "GUBRF", "TCELL", "TAVHL", "SASA", "BIMAS",
+    "ASTOR", "TOASO", "MGROS", "ASELS", "PETKM", "TUPRS",
+]
+
+
+def get_bist30_companies() -> List[str]:
+    return list(BIST30_SYMBOLS)
+
+
+# Search candidates are kept as a separate concept from the market universe so
+# header search can evolve independently without changing the terminal screen.
+KAP_COMPANY_CANDIDATES: List[str] = list(BIST100_SYMBOLS)
+
+# Prefer exchange symbols in dropdown and normalize common aliases from dataset names.
+KAP_SYMBOL_ALIASES: Dict[str, str] = {
+    "BIM": "BIMAS",
+    "BIMAS": "BIMAS",
+    "MIGROS": "MGROS",
+    "MGROS": "MGROS",
+    "SOK": "SOKM",
+    "SOKM": "SOKM",
+    "TAV": "TAVHL",
+    "TAVHL": "TAVHL",
+}
+
+
+def normalize_kap_symbol(symbol: str) -> str:
+    raw = str(symbol or "").strip().upper()
+    if not raw:
+        return ""
+    return KAP_SYMBOL_ALIASES.get(raw, raw)
+
+
+def get_bist100_companies() -> List[str]:
+    return list(BIST100_SYMBOLS)
+
+
+def get_kap_companies(indexed_companies: Optional[List[str]] = None) -> List[str]:
+    """Return deduplicated, sorted company list (candidates + indexed)."""
+    merged: List[str] = []
+    seen: set[str] = set()
+
+    def _append(symbol: str) -> None:
+        normalized = normalize_kap_symbol(symbol)
+        if not normalized:
+            return
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        merged.append(normalized)
+
+    for candidate in KAP_COMPANY_CANDIDATES:
+        _append(candidate)
+
+    if indexed_companies:
+        for c in indexed_companies:
+            _append(c)
+
+    return sorted(merged)
+
+
+def get_kap_snapshot(
+    *,
+    company: str,
+    cfg: KapConfig,
+    processed_dir: Path,
+    force_refresh: bool = False,
+    max_quarters: int = 10,
+) -> Dict[str, Any]:
+    """Fetch a raw snapshot via kap_fetcher with correct keyword args."""
+    normalized_company = normalize_kap_symbol(company)
+    return fetch_kap_company_snapshot(
+        company=normalized_company,
+        cfg=cfg,
+        processed_dir=processed_dir,
+        force_refresh=force_refresh,
+        max_quarters=max_quarters,
+    )
+
+
+# Display labels for frontend normalization
+_METRIC_LABELS: Dict[str, str] = {
+    "net_kar": "Net Kâr",
+    "satis_gelirleri": "Hasılat",
+    "brut_kar": "Brüt Kâr",
+    "favok": "FAVÖK",
+    "faiz_gelirleri": "Faiz Gelirleri",
+    "faiz_giderleri": "Faiz Giderleri",
+    "net_faaliyet_kari": "Net Faaliyet Kârı",
+    "esas_faaliyet_kari": "Esas Faaliyet Kârı",
+    "prim_uretimi": "Prim Üretimi",
+    "alinan_net_primler": "Alınan Net Primler",
+    "teknik_gelirler": "Teknik Gelirler",
+    "teknik_denge": "Teknik Denge",
+    "ozkaynaklar": "Özkaynaklar",
+    "nakit_ve_nakit_benzerleri": "Nakit ve Nakit Benzerleri",
+    "finansal_varliklar_sigortacilik": "Finansal Varlıklar (Sigortacılık)",
+    "nakit_benzeri_finansal_varliklar": "Nakit Benzeri Finansal Varlıklar",
+    "esas_faaliyetlerden_alacaklar": "Esas Faaliyetlerden Alacaklar",
+    "teknik_karsiliklar": "Teknik Karşılıklar",
+    "esas_faaliyetlerden_borclar": "Esas Faaliyetlerden Borçlar",
+    "donen_varliklar": "Dönen Varlıklar",
+    "kisa_vadeli_yukumlulukler": "Kısa Vadeli Yükümlülükler",
+    "toplam_varliklar": "Toplam Varlıklar",
+    "finansal_borclar": "Finansal Borçlar",
+    "net_borc": "Net Borç",
+    "faaliyet_nakit_akisi": "Faaliyet Nakit Akışı",
+    "serbest_nakit_akisi": "Serbest Nakit Akışı",
+    "odenmis_sermaye": "Ödenmiş Sermaye",
+    "cikarilmis_sermaye": "Çıkarılmış Sermaye",
+}
+
+_SUMMARY_KEYS = [
+    "net_kar", "satis_gelirleri", "brut_kar", "favok",
+    "ozkaynaklar", "toplam_varliklar", "net_borc",
+]
+
+
+_FLOW_RESTATEMENT_KEYS = (
+    "satis_gelirleri",
+    "brut_kar",
+    "favok",
+    "net_kar",
+    "faaliyet_nakit_akisi",
+    "serbest_nakit_akisi",
+    "faiz_gelirleri",
+    "faiz_giderleri",
+    "net_ucret_komisyon_gelirleri",
+    "net_faaliyet_kari",
+    "esas_faaliyet_kari",
+    "prim_uretimi",
+    "alinan_net_primler",
+    "teknik_gelirler",
+    "teknik_denge",
+)
+
+_POINT_IN_TIME_RESTATEMENT_KEYS = (
+    "donen_varliklar",
+    "duran_varliklar",
+    "toplam_varliklar",
+    "kisa_vadeli_yukumlulukler",
+    "finansal_borclar",
+    "net_borc",
+    "ozkaynaklar",
+    "krediler",
+    "mevduatlar",
+    "finansal_varliklar_net",
+    "beklenen_zarar_karsiliklari",
+    "esas_faaliyetlerden_alacaklar",
+    "teknik_karsiliklar",
+    "esas_faaliyetlerden_borclar",
+    "nakit_ve_nakit_benzerleri",
+    "finansal_varliklar_sigortacilik",
+    "nakit_benzeri_finansal_varliklar",
+)
+
+_ANALYSIS_NOTE = (
+    "Önceki dönem tutarları, son KAP raporlarıyla karşılaştırılabilir kalması için "
+    "güncel analitik baza taşınabilir. İlk açıklandığı hali payload içindeki "
+    "`*_original` alanlarında korunur."
+)
+
+_TCMB_CONSUMER_PRICES_URL = (
+    "https://www.tcmb.gov.tr/wps/wcm/connect/EN/TCMB%2BEN/Main%2BMenu/"
+    "Statistics/Inflation%2BData/Consumer%2BPrices"
+)
+_TCMB_MONTHLY_ROW_PATTERN = re.compile(
+    r"<tr>\s*<td[^>]*>(\d{2})-(\d{4})</td>\s*<td[^>]*>[^<]+</td>\s*<td[^>]*>([^<]+)</td>\s*</tr>",
+    flags=re.IGNORECASE,
+)
+
+
+def _period_key(row: Dict[str, Any]) -> tuple[int, int]:
+    return (int(row.get("year") or 0), int(row.get("period") or 0))
+
+
+def _period_to_month(period: int) -> int:
+    normalized_period = int(period or 0)
+    if 1 <= normalized_period <= 4:
+        return normalized_period * 3
+    return normalized_period
+
+
+def _safe_number(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed:
+        return None
+    return parsed
+
+
+def _metric_from_raw(row: Dict[str, Any], bucket: str, metric_key: str) -> Optional[float]:
+    source = row.get(bucket) or {}
+    if not isinstance(source, dict):
+        return None
+    return _safe_number(source.get(metric_key))
+
+
+def _candidate_factor(restated_value: Optional[float], original_value: Optional[float]) -> Optional[float]:
+    if restated_value is None or original_value in (None, 0):
+        return None
+    try:
+        factor = float(restated_value) / float(original_value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if factor <= 0:
+        return None
+    if factor < 0.5 or factor > 3.0:
+        return None
+    return factor
+
+
+def _median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _derive_same_year_factor(newer: Dict[str, Any], older: Dict[str, Any]) -> Optional[float]:
+    candidates: List[float] = []
+    for metric_key in _FLOW_RESTATEMENT_KEYS:
+        newer_ytd = _metric_from_raw(newer, "metrics_ytd", metric_key)
+        newer_quarter = _metric_from_raw(newer, "metrics_quarterly", metric_key)
+        older_ytd = _metric_from_raw(older, "metrics_ytd", metric_key)
+        if newer_ytd is None or newer_quarter is None or older_ytd in (None, 0):
+            continue
+        restated_older_ytd = newer_ytd - newer_quarter
+        factor = _candidate_factor(restated_older_ytd, older_ytd)
+        if factor is not None:
+            candidates.append(factor)
+    return _median(candidates)
+
+
+@lru_cache(maxsize=1)
+def _load_monthly_inflation_rates() -> Dict[tuple[int, int], float]:
+    request = urllib.request.Request(
+        _TCMB_CONSUMER_PRICES_URL,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        payload = response.read().decode("utf-8", errors="ignore")
+
+    rates: Dict[tuple[int, int], float] = {}
+    for month_raw, year_raw, pct_raw in _TCMB_MONTHLY_ROW_PATTERN.findall(payload):
+        try:
+            month = int(month_raw)
+            year = int(year_raw)
+            pct = float(str(pct_raw).replace(",", ".").strip())
+        except ValueError:
+            continue
+        rates[(year, month)] = pct / 100.0
+    return rates
+
+
+def _next_month(year: int, month: int) -> tuple[int, int]:
+    if month >= 12:
+        return year + 1, 1
+    return year, month + 1
+
+
+def _derive_same_year_inflation_factor(newer: Dict[str, Any], older: Dict[str, Any]) -> Optional[float]:
+    newer_year = int(newer.get("year") or 0)
+    older_year = int(older.get("year") or 0)
+    newer_month = _period_to_month(int(newer.get("period") or 0))
+    older_month = _period_to_month(int(older.get("period") or 0))
+
+    if newer_year != older_year or newer_month <= 0 or older_month <= 0 or newer_month <= older_month:
+        return None
+
+    try:
+        monthly_rates = _load_monthly_inflation_rates()
+    except Exception:
+        return None
+
+    factor = 1.0
+    year, month = _next_month(older_year, older_month)
+    while (year, month) <= (newer_year, newer_month):
+        rate = monthly_rates.get((year, month))
+        if rate is None:
+            return None
+        factor *= 1.0 + rate
+        year, month = _next_month(year, month)
+    return factor
+
+
+def _derive_comparative_factor(newer: Dict[str, Any], older: Dict[str, Any]) -> Optional[float]:
+    candidates: List[float] = []
+    for metric_key in _POINT_IN_TIME_RESTATEMENT_KEYS:
+        restated_value = _metric_from_raw(newer, "metrics_comparative", metric_key)
+        original_value = _metric_from_raw(older, "metrics", metric_key)
+        factor = _candidate_factor(restated_value, original_value)
+        if factor is not None:
+            candidates.append(factor)
+    return _median(candidates)
+
+
+def _derive_adjacent_factor(newer: Dict[str, Any], older: Dict[str, Any]) -> tuple[float, str]:
+    same_year = int(newer.get("year") or 0) == int(older.get("year") or 0)
+    if same_year:
+        same_year_factor = _derive_same_year_factor(newer, older)
+        if same_year_factor is not None:
+            return same_year_factor, "same_year_ytd"
+        inflation_factor = _derive_same_year_inflation_factor(newer, older)
+        if inflation_factor is not None:
+            return inflation_factor, "same_year_inflation"
+        return 1.0, "reported_filing"
+
+    comparative_factor = _derive_comparative_factor(newer, older)
+    if comparative_factor is not None:
+        return comparative_factor, "comparative_override"
+
+    return 1.0, "reported_filing"
+
+
+def _scale_metric_set(source: Dict[str, Any], factor: float) -> Dict[str, Optional[float]]:
+    scaled: Dict[str, Optional[float]] = {}
+    for key, value in source.items():
+        numeric = _safe_number(value)
+        scaled[key] = None if numeric is None else numeric * factor
+    return scaled
+
+
+def _merge_metric_override(
+    target: Dict[str, Optional[float]],
+    override: Optional[Dict[str, Any]],
+) -> Dict[str, Optional[float]]:
+    if not override:
+        return target
+    merged = dict(target)
+    for key, value in override.items():
+        numeric = _safe_number(value)
+        if numeric is not None:
+            merged[key] = numeric
+    return merged
+
+
+def _build_analysis_state(
+    quarters: List[Dict[str, Any]],
+) -> tuple[Dict[tuple[int, int], float], Dict[tuple[int, int], str], Dict[tuple[int, int], Dict[str, Dict[str, Any]]]]:
+    ordered = sorted(quarters, key=_period_key)
+    if not ordered:
+        return {}, {}, {}
+
+    multiplier_map: Dict[tuple[int, int], float] = {}
+    source_map: Dict[tuple[int, int], str] = {}
+    latest_key = _period_key(ordered[-1])
+    multiplier_map[latest_key] = 1.0
+    source_map[latest_key] = "current_period"
+
+    for idx in range(len(ordered) - 2, -1, -1):
+        older = ordered[idx]
+        newer = ordered[idx + 1]
+        older_key = _period_key(older)
+        newer_key = _period_key(newer)
+        factor, source = _derive_adjacent_factor(newer, older)
+        multiplier_map[older_key] = multiplier_map.get(newer_key, 1.0) * factor
+        source_map[older_key] = source
+
+    overrides: Dict[tuple[int, int], Dict[str, Dict[str, Any]]] = {}
+    latest = ordered[-1]
+    latest_year = int(latest.get("year") or 0)
+    latest_period = int(latest.get("period") or 0)
+
+    prev_year_same_period_key = (latest_year - 1, latest_period)
+    if any(_period_key(row) == prev_year_same_period_key for row in ordered):
+        overrides.setdefault(prev_year_same_period_key, {})
+        overrides[prev_year_same_period_key]["metrics_ytd"] = dict(latest.get("metrics_ytd_comparative") or {})
+        overrides[prev_year_same_period_key]["metrics_quarterly"] = dict(latest.get("metrics_quarterly_comparative") or {})
+
+    prev_year_end_key = (latest_year - 1, 4)
+    if any(_period_key(row) == prev_year_end_key for row in ordered):
+        overrides.setdefault(prev_year_end_key, {})
+        overrides[prev_year_end_key]["metrics"] = dict(latest.get("metrics_comparative") or {})
+
+    return multiplier_map, source_map, overrides
+
+
+def normalize_snapshot_for_frontend(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten raw snapshot into a frontend-friendly shape."""
+    result: Dict[str, Any] = {
+        "ok": raw.get("ok", False),
+        "company": raw.get("company", ""),
+        "company_title": raw.get("company_title", ""),
+        "stock_code": raw.get("stock_code", ""),
+        "fetched_at": raw.get("fetched_at", ""),
+        "cache_hit": raw.get("cache_hit", False),
+        "error": raw.get("error"),
+        "analysis_basis": "latest_comparable",
+        "analysis_note": _ANALYSIS_NOTE,
+    }
+
+    quarters = raw.get("quarters") or []
+    multiplier_map, source_map, override_map = _build_analysis_state(quarters)
+    normalized_quarters = []
+    for q in quarters:
+        quarter_key = _period_key(q)
+        factor = multiplier_map.get(quarter_key, 1.0)
+        currency = str(q.get("currency", "TL"))
+        raw_metrics = q.get("metrics") or {}
+        raw_metrics_quarterly = q.get("metrics_quarterly") or raw_metrics
+        raw_metrics_ytd = q.get("metrics_ytd") or raw_metrics
+        raw_metrics_comparative = q.get("metrics_comparative") or {}
+        raw_metrics_quarterly_comparative = q.get("metrics_quarterly_comparative") or raw_metrics_comparative
+        raw_metrics_ytd_comparative = q.get("metrics_ytd_comparative") or raw_metrics_comparative
+
+        analysis_metrics = _scale_metric_set(raw_metrics, factor)
+        analysis_metrics_quarterly = _scale_metric_set(raw_metrics_quarterly, factor)
+        analysis_metrics_ytd = _scale_metric_set(raw_metrics_ytd, factor)
+
+        quarter_overrides = override_map.get(quarter_key, {})
+        analysis_metrics = _merge_metric_override(analysis_metrics, quarter_overrides.get("metrics"))
+        analysis_metrics_quarterly = _merge_metric_override(
+            analysis_metrics_quarterly,
+            quarter_overrides.get("metrics_quarterly"),
+        )
+        analysis_metrics_ytd = _merge_metric_override(
+            analysis_metrics_ytd,
+            quarter_overrides.get("metrics_ytd"),
+        )
+
+        metric_keys = sorted(
+            set(_METRIC_LABELS.keys())
+            | set(raw_metrics.keys())
+            | set(raw_metrics_quarterly.keys())
+            | set(raw_metrics_ytd.keys())
+            | set(raw_metrics_comparative.keys())
+            | set(raw_metrics_quarterly_comparative.keys())
+            | set(raw_metrics_ytd_comparative.keys())
+        )
+
+        def _normalize_metric_set(source: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+            normalized: Dict[str, Dict[str, Any]] = {}
+            for key in metric_keys:
+                label = _METRIC_LABELS.get(key, key.replace("_", " ").title())
+                value = source.get(key)
+                normalized[key] = {
+                    "label": label,
+                    "value": value,
+                    "display": _fmt_number(value, currency),
+                }
+            return normalized
+
+        nq: Dict[str, Any] = {
+            "quarter": q.get("quarter", ""),
+            "year": q.get("year"),
+            "period": q.get("period"),
+            "currency": currency,
+            "publish_date": q.get("publish_date", ""),
+            "metrics": _normalize_metric_set(analysis_metrics),
+            "metrics_quarterly": _normalize_metric_set(analysis_metrics_quarterly),
+            "metrics_ytd": _normalize_metric_set(analysis_metrics_ytd),
+            "metrics_original": _normalize_metric_set(raw_metrics),
+            "metrics_quarterly_original": _normalize_metric_set(raw_metrics_quarterly),
+            "metrics_ytd_original": _normalize_metric_set(raw_metrics_ytd),
+            "metrics_comparative": _normalize_metric_set(raw_metrics_comparative),
+            "metrics_quarterly_comparative": _normalize_metric_set(raw_metrics_quarterly_comparative),
+            "metrics_ytd_comparative": _normalize_metric_set(raw_metrics_ytd_comparative),
+            "analysis_multiplier": factor,
+            "analysis_factor_source": source_map.get(quarter_key, "reported_filing"),
+        }
+        normalized_quarters.append(nq)
+
+    result["quarters"] = normalized_quarters
+
+    # Summary = latest quarter's key metrics
+    if normalized_quarters:
+        latest = normalized_quarters[0]
+        summary: Dict[str, Any] = {}
+        for key in _SUMMARY_KEYS:
+            m = latest["metrics"].get(key, {})
+            summary[key] = {
+                "label": m.get("label", key),
+                "value": m.get("value"),
+                "display": m.get("display", "-"),
+            }
+        result["summary"] = summary
+        result["latest_quarter"] = latest["quarter"]
+    else:
+        result["summary"] = {}
+        result["latest_quarter"] = None
+
+    return result
+
+
+def _fmt_number(val: Optional[float], currency: str = "TL") -> str:
+    if val is None:
+        return "-"
+    abs_val = abs(val)
+    sign = "-" if val < 0 else ""
+    if abs_val >= 1_000_000_000:
+        formatted = f"{sign}{abs_val / 1_000_000_000:,.2f} Milyar"
+    elif abs_val >= 1_000_000:
+        formatted = f"{sign}{abs_val / 1_000_000:,.2f} Milyon"
+    elif abs_val >= 1_000:
+        formatted = f"{sign}{abs_val / 1_000:,.1f} Bin"
+    else:
+        formatted = f"{sign}{abs_val:,.0f}"
+    return f"{formatted} {currency}"

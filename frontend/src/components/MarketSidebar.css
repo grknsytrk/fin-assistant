@@ -1,0 +1,547 @@
+.ms-toggle,
+.market-page > .ms-toggle {
+    position: fixed;
+    top: 120px;
+    right: 0;
+    z-index: 165;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 8px;
+    background: var(--surface-color);
+    color: var(--text-primary);
+    border: 1px solid var(--surface-border);
+    border-right: none;
+    border-top-left-radius: var(--border-radius);
+    border-bottom-left-radius: var(--border-radius);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background-color 0.16s ease, color 0.16s ease;
+}
+
+.ms-toggle:hover {
+    background: color-mix(in srgb, var(--surface-color) 70%, var(--bg-color));
+    color: var(--accent-color);
+}
+
+.ms-toggle.is-open {
+    right: 380px;
+}
+
+.ms-backdrop,
+.market-page > .ms-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    z-index: 150;
+}
+
+@media (min-width: 1100px) {
+    .ms-backdrop {
+        display: none;
+    }
+}
+
+.ms-panel,
+.market-page > .ms-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    height: 100vh;
+    width: 380px;
+    max-width: 92vw;
+    background: var(--surface-color);
+    border-left: 1px solid var(--surface-border);
+    display: flex;
+    flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+    z-index: 160;
+    overflow: hidden;
+}
+
+.ms-panel.is-open {
+    transform: translateX(0);
+}
+
+.ms-panel-modes {
+    flex-shrink: 0;
+    display: flex;
+    gap: 0.35rem;
+    padding: 0.65rem 0.95rem 0.55rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 88%, transparent);
+}
+
+.ms-mode-tab {
+    flex: 1;
+    padding: 0.42rem 0.65rem;
+    border: 1px solid var(--surface-border);
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: var(--border-radius);
+    font-family: var(--font-heading);
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.ms-mode-tab:hover {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--surface-border) 60%, var(--text-secondary));
+}
+
+.ms-mode-tab.active {
+    background: color-mix(in srgb, var(--text-primary) 92%, var(--bg-color));
+    color: var(--bg-color);
+    border-color: color-mix(in srgb, var(--text-primary) 92%, var(--bg-color));
+}
+
+.ms-section {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 0.85rem 0.95rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 88%, transparent);
+}
+
+.ms-panel-single {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    border-bottom: none;
+}
+
+.ms-panel-single.ms-markets .ms-list {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.ms-panel-single.ms-flow .ms-flow-list {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.ms-tabs {
+    display: flex;
+    gap: 0.3rem;
+    margin-bottom: 0.65rem;
+    flex-wrap: wrap;
+}
+
+.ms-tab {
+    padding: 0.35rem 0.6rem;
+    border: 1px solid var(--surface-border);
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: var(--border-radius);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.ms-tab:hover {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--surface-border) 60%, var(--text-secondary));
+}
+
+.ms-tab.active {
+    background: color-mix(in srgb, var(--text-primary) 92%, var(--bg-color));
+    color: var(--bg-color);
+    border-color: color-mix(in srgb, var(--text-primary) 92%, var(--bg-color));
+}
+
+.ms-table-head {
+    display: grid;
+    grid-template-columns: 1fr 90px 76px;
+    gap: 0.5rem;
+    padding: 0.3rem 0.1rem 0.4rem;
+    font-size: 0.66rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 75%, transparent);
+}
+
+.ms-th-right {
+    text-align: right;
+}
+
+.ms-list,
+.ms-flow-list {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--surface-border) 70%, var(--text-secondary)) transparent;
+}
+
+.ms-list::-webkit-scrollbar,
+.ms-flow-list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.ms-list::-webkit-scrollbar-track,
+.ms-flow-list::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.ms-list::-webkit-scrollbar-thumb,
+.ms-flow-list::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--surface-border) 60%, var(--text-secondary));
+    border-radius: 999px;
+}
+
+.ms-list::-webkit-scrollbar-thumb:hover,
+.ms-flow-list::-webkit-scrollbar-thumb:hover {
+    background: var(--text-secondary);
+}
+
+.ms-list {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.ms-row,
+.ms-row-static {
+    display: grid;
+    grid-template-columns: 1fr 90px 76px;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.48rem 0.1rem;
+    border: none;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    color: var(--text-primary);
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 50%, transparent);
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    transition: background-color 0.12s ease;
+}
+
+.ms-row-static {
+    cursor: default;
+}
+
+.ms-row:hover {
+    background: color-mix(in srgb, var(--surface-color) 60%, var(--bg-color));
+}
+
+.ms-sym {
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: 0.02em;
+}
+
+.ms-price {
+    text-align: right;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.ms-change {
+    text-align: right;
+    font-weight: 600;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    padding: 2px 6px;
+    border-radius: var(--border-radius);
+}
+
+.ms-change-up {
+    color: var(--success-color);
+    background: color-mix(in srgb, var(--success-color) 12%, transparent);
+}
+
+.ms-change-down {
+    color: var(--danger-color);
+    background: color-mix(in srgb, var(--danger-color) 12%, transparent);
+}
+
+.ms-change-flat {
+    color: var(--text-secondary);
+}
+
+.ms-empty {
+    padding: 0.8rem 0.2rem;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+
+.ms-empty-error {
+    color: var(--danger-color);
+}
+
+.ms-flow-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+}
+
+.ms-flow-head h3 {
+    margin: 0;
+    font-size: 0.92rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+.ms-flow-kicker {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+}
+
+.ms-flow-refresh {
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 80%, transparent);
+    color: var(--text-secondary);
+    padding: 0.18rem 0.55rem;
+    border-radius: var(--border-radius);
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.ms-flow-refresh:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--surface-border) 55%, var(--text-secondary));
+}
+
+.ms-flow-refresh:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.ms-flow-warning {
+    margin: 0 0 0.5rem;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--warn-color) 45%, transparent);
+    border-left-width: 2px;
+    background: color-mix(in srgb, var(--warn-color) 10%, transparent);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    line-height: 1.45;
+    letter-spacing: 0.01em;
+    border-radius: var(--border-radius);
+}
+
+.ms-flow-list {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.ms-flow-filters {
+    display: flex;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+    padding: 0.1rem 0 0.5rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 60%, transparent);
+    margin-bottom: 0.3rem;
+}
+
+.ms-flow-filter {
+    padding: 0.25rem 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 85%, transparent);
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: var(--border-radius);
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.ms-flow-filter:hover {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--surface-border) 60%, var(--text-secondary));
+}
+
+.ms-flow-filter.active {
+    background: color-mix(in srgb, var(--text-primary) 92%, var(--bg-color));
+    color: var(--bg-color);
+    border-color: color-mix(in srgb, var(--text-primary) 92%, var(--bg-color));
+}
+
+.ms-flow-size {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.25rem 0 0.55rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 60%, transparent);
+    margin-bottom: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.ms-flow-size-label {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    margin-right: 0.25rem;
+}
+
+.ms-flow-size-btn {
+    padding: 0.2rem 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 85%, transparent);
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: var(--border-radius);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.ms-flow-size-btn:hover:not(:disabled):not(.active) {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--surface-border) 55%, var(--text-secondary));
+}
+
+.ms-flow-size-btn.active {
+    background: color-mix(in srgb, var(--text-primary) 92%, var(--bg-color));
+    color: var(--bg-color);
+    border-color: color-mix(in srgb, var(--text-primary) 92%, var(--bg-color));
+}
+
+.ms-flow-size-btn:disabled {
+    opacity: 0.65;
+    cursor: default;
+}
+
+.ms-flow-group + .ms-flow-group {
+    margin-top: 0.35rem;
+}
+
+.ms-flow-group-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.5rem 0.1rem 0.35rem;
+    position: sticky;
+    top: 0;
+    background: var(--surface-color);
+    z-index: 1;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 65%, transparent);
+}
+
+.ms-flow-group-label {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.ms-flow-group-count {
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    color: var(--text-secondary);
+    padding: 1px 6px;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 75%, transparent);
+    border-radius: var(--border-radius);
+}
+
+.ms-delay-note {
+    padding: 0.55rem 0.3rem 0.2rem;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.ms-flow-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.22rem;
+    padding: 0.55rem 0.1rem;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 50%, transparent);
+    text-align: left;
+    cursor: pointer;
+    color: var(--text-primary);
+    transition: background-color 0.12s ease;
+}
+
+.ms-flow-item:hover {
+    background: color-mix(in srgb, var(--surface-color) 60%, var(--bg-color));
+}
+
+.ms-flow-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+}
+
+.ms-flow-source {
+    color: var(--text-secondary);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.ms-flow-symbol {
+    color: var(--accent-color);
+    font-weight: 600;
+}
+
+.ms-flow-dot {
+    opacity: 0.6;
+}
+
+.ms-flow-time {
+    margin-left: auto;
+    color: var(--text-secondary);
+}
+
+.ms-flow-title {
+    font-size: 0.85rem;
+    line-height: 1.35;
+    color: var(--text-primary);
+}
+
+@media (max-width: 640px) {
+    .ms-panel {
+        width: 100vw;
+        max-width: 100vw;
+    }
+    .ms-toggle.is-open {
+        right: calc(100vw - 44px);
+    }
+}
+
+@keyframes ms-flash-green { 
+    0% { background-color: color-mix(in srgb, var(--success-color) 40%, transparent); border-radius: 4px; } 
+    100% { background-color: transparent; border-radius: 4px; } 
+}
+@keyframes ms-flash-red { 
+    0% { background-color: color-mix(in srgb, var(--danger-color) 40%, transparent); border-radius: 4px; } 
+    100% { background-color: transparent; border-radius: 4px;} 
+}
+.ms-flash-up { animation: ms-flash-green 1s ease-out; }
+.ms-flash-down { animation: ms-flash-red 1s ease-out; }

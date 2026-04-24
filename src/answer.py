@@ -156,6 +156,63 @@ class RulesBasedAnswerAdapter(AnswerAdapter):
             return False
         return True
 
+    @classmethod
+    def _find_best_answer_line(cls, question: str, chunks: Sequence["RetrievedChunk"]) -> Optional[str]:
+        """Find the line in the most relevant chunk that best matches the question keywords and contains a number."""
+        q_keywords = cls._question_keywords(question)
+        if not q_keywords:
+            return None
+
+        best_line: Optional[str] = None
+        best_score = -1
+
+        for chunk in chunks:
+            lines = [line.strip() for line in chunk.text.splitlines() if line.strip()]
+            for line in lines:
+                line_tokens = set(cls._tokenize(line))
+                # Count how many question keywords appear in this line
+                overlap = sum(1 for kw in q_keywords if kw in line_tokens)
+                if overlap == 0:
+                    continue
+                # Line must contain at least one number
+                numbers = NUMBER_PATTERN.findall(line)
+                if not numbers:
+                    continue
+                # Prefer lines with more keyword overlap
+                score = overlap * 10 + len(numbers)
+                if score > best_score:
+                    best_score = score
+                    best_line = line
+
+        return best_line
+
+    @classmethod
+    def _extract_direct_answer(cls, question: str, chunks: Sequence["RetrievedChunk"]) -> Optional[str]:
+        """Try to extract a direct 'Label: Value' answer from the best matching line."""
+        best_line = cls._find_best_answer_line(question, chunks)
+        if not best_line:
+            return None
+
+        # Try to find the most relevant number on the line
+        numbers = NUMBER_PATTERN.findall(best_line)
+        if not numbers:
+            return None
+
+        # Build a clean label from the question
+        q_keywords = cls._question_keywords(question)
+        label_parts = []
+        for word in question.split():
+            normalized = cls._normalize_text(word)
+            tokens = TOKEN_PATTERN.findall(normalized)
+            if tokens and tokens[0] not in QUESTION_STOPWORDS and len(tokens[0]) >= 2:
+                label_parts.append(word)
+        label = " ".join(label_parts).strip().title() if label_parts else question.strip().title()
+
+        # Pick the most significant number (longest, most likely to be a real value)
+        best_number = max(numbers, key=lambda n: len(n.replace(".", "").replace(",", "")))
+
+        return f"{label}: {best_number}"
+
     def generate(self, question: str, chunks: Sequence["RetrievedChunk"]) -> str:
         searched_pages = []
         seen_pages = set()
@@ -175,16 +232,16 @@ class RulesBasedAnswerAdapter(AnswerAdapter):
             ]
             return "\n".join(lines)
 
+        direct_answer = self._extract_direct_answer(question, chunks)
         numeric_candidates = self._extract_numbers(chunks)
-        summary_lines = [
-            f"- Soru: {question}",
-            "- Yanıt: İlgili içerik aşağıdaki kanıtlarda bulundu.",
-            (
-                f"- Sayısal adaylar: {', '.join(numeric_candidates)}"
-                if numeric_candidates
-                else "- Sayısal adaylar: Belirgin değer ayıklanamadı."
-            ),
-        ]
+
+        summary_lines = []
+        if direct_answer:
+            summary_lines.append(f"- {direct_answer}")
+        else:
+            summary_lines.append("- Yanıt: İlgili içerik aşağıdaki kanıtlarda bulundu.")
+        if numeric_candidates:
+            summary_lines.append(f"- Sayısal adaylar: {', '.join(numeric_candidates)}")
 
         evidence_lines = ["", "Evidence"]
         for chunk in chunks:
