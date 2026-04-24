@@ -212,7 +212,14 @@ def _run_multicompany_extraction_eval(
         }
 
     rows = load_gold_questions(gold_file)
-    retriever_v3 = RetrieverV3()
+    from src.config import load_config
+    cfg = load_config()
+    chroma_path = cfg.paths.processed_dir / cfg.chroma.dir.name
+    
+    retriever_v3 = RetrieverV3(
+        chroma_path=chroma_path,
+        collection_name=cfg.chroma.collection_v2
+    )
     by_company_metric: Dict[str, Dict[str, Dict[str, int]]] = {}
     detailed_rows: List[Dict[str, object]] = []
 
@@ -422,12 +429,35 @@ def run_metrics_report(
     summary_output.parent.mkdir(parents=True, exist_ok=True)
     week6_summary_output.parent.mkdir(parents=True, exist_ok=True)
 
-    retriever_v1 = Retriever()
-    retriever_v2 = RetrieverV2()
-    retriever_v3 = RetrieverV3()
-    retriever_v4_bm25 = RetrieverBM25()
-    retriever_v5 = RetrieverV5Hybrid()
-    retriever_v6 = RetrieverV6Cross()
+    from src.config import load_config
+    cfg = load_config()
+    chroma_path = cfg.paths.processed_dir / cfg.chroma.dir.name
+
+    retriever_v1 = Retriever(
+        chroma_path=chroma_path,
+        collection_name=cfg.chroma.collection_v1
+    )
+    retriever_v2 = RetrieverV2(
+        chroma_path=chroma_path,
+        collection_name=cfg.chroma.collection_v2
+    )
+    retriever_v3 = RetrieverV3(
+        chroma_path=chroma_path,
+        collection_name=cfg.chroma.collection_v2
+    )
+    retriever_v4_bm25 = RetrieverBM25(
+        chunks_file=cfg.paths.chunks_v2_file
+    )
+    retriever_v5 = RetrieverV5Hybrid(
+        chroma_path=chroma_path,
+        collection_name=cfg.chroma.collection_v2,
+        chunks_file=cfg.paths.chunks_v2_file
+    )
+    retriever_v6 = RetrieverV6Cross(
+        chroma_path=chroma_path,
+        collection_name=cfg.chroma.collection_v2,
+        chunks_file=cfg.paths.chunks_v2_file
+    )
 
     aggregates = {name: _empty_aggregate() for name in RETRIEVER_ORDER}
 

@@ -16,11 +16,11 @@ QUARTER_PATTERN_TR = re.compile(
     re.IGNORECASE,
 )
 QUARTER_PATTERN_CQ_FIRST = re.compile(
-    r"(?P<quarter>[1-4])\s*[cq]\s*[-_ ]?\s*(?P<year>20\d{2})",
+    r"(?:(?P<quarter>[1-4])\s*[cq]|[cq]\s*(?P<quarter_alt>[1-4]))\s*[-_ ]?\s*(?P<year>20\d{2})",
     re.IGNORECASE,
 )
 QUARTER_PATTERN_CQ_LAST = re.compile(
-    r"(?P<year>20\d{2})\s*[-_ ]?\s*(?P<quarter>[1-4])\s*[cq]",
+    r"(?P<year>20\d{2})\s*[-_ ]?\s*(?:(?P<quarter>[1-4])\s*[cq]|[cq]\s*(?P<quarter_alt>[1-4]))",
     re.IGNORECASE,
 )
 YEAR_PATTERN = re.compile(r"(20\d{2})")
@@ -124,7 +124,7 @@ def parse_quarter_from_name(name: str) -> str:
             break
     if match:
         year = match.group("year")
-        quarter = match.group("quarter")
+        quarter = match.group("quarter") or match.group("quarter_alt")
         return f"{year}Q{quarter}"
     return "UNKNOWN"
 

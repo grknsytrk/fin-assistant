@@ -112,15 +112,35 @@
 .mw-grid {
     display: grid;
     gap: 0.62rem;
+    margin-bottom: 1.2rem;
 }
 
-.mw-grid-main {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+.mw-section-title {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin: 0.8rem 0 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    opacity: 0.8;
 }
 
-.mw-grid-commodities {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    margin-top: 0.62rem;
+.mw-section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--surface-border) 40%, transparent), transparent);
+}
+
+.mw-grid-indices,
+.mw-grid-fx,
+.mw-grid-commodities,
+.mw-grid-watchlist {
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
 }
 
 .mw-card {

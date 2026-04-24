@@ -3,8 +3,10 @@ import { apiClient } from '../api/client';
 import type { MarketWatchItem, MarketWatchResponse } from '../api/types';
 import './MarketWatchStrip.css';
 
-const PRIMARY_SYMBOLS = ['XU100', 'XU030', 'USD/TRY', 'EUR/TRY'] as const;
+const INDEX_SYMBOLS = ['XU100', 'XU030', 'VIX', 'S&P 500', 'NASDAQ', 'DOW'] as const;
+const FX_SYMBOLS = ['USD/TRY', 'EUR/TRY'] as const;
 const COMMODITY_SYMBOLS = ['BRENT', 'ALTIN', 'GUMUS', 'DOGALGAZ'] as const;
+const WATCHLIST_SYMBOLS = ['BIMAS', 'MGROS', 'SOKM'] as const;
 const DEFAULT_DELAY_NOTE = 'Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).';
 
 const FALLBACK_LABELS: Record<string, string> = {
@@ -16,6 +18,13 @@ const FALLBACK_LABELS: Record<string, string> = {
     ALTIN: 'Altın (Ons)',
     GUMUS: 'Gümüş (Ons)',
     DOGALGAZ: 'Doğal Gaz',
+    VIX: 'Korku Endeksi (VIX)',
+    'S&P 500': 'S&P 500',
+    NASDAQ: 'NASDAQ Composite',
+    DOW: 'Dow Jones Industrial',
+    BIMAS: 'BİM Birleşik Mağazalar',
+    MGROS: 'Migros Ticaret',
+    SOKM: 'Şok Marketler',
 };
 
 function normalizeSymbol(raw: string): string {
@@ -143,7 +152,7 @@ export default function MarketWatchStrip() {
         void loadWatch();
         const timer = window.setInterval(() => {
             void loadWatch();
-        }, 60000);
+        }, 3000);
         return () => {
             window.clearInterval(timer);
         };
@@ -167,13 +176,20 @@ export default function MarketWatchStrip() {
         return map;
     }, [payload]);
 
-    const primaryItems = useMemo(
-        () => PRIMARY_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
+    const indexItems = useMemo(
+        () => INDEX_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
         [lookup],
     );
-
+    const fxItems = useMemo(
+        () => FX_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
+        [lookup],
+    );
     const commodityItems = useMemo(
         () => COMMODITY_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
+        [lookup],
+    );
+    const watchlistItems = useMemo(
+        () => WATCHLIST_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
         [lookup],
     );
 
@@ -185,7 +201,7 @@ export default function MarketWatchStrip() {
             <div className="mw-strip-header">
                 <div className="mw-copy">
                     <h2>Borsa İzleme Bandı</h2>
-                    <p>XU100, XU030, döviz ve emtia özetleri 60 saniyede bir otomatik güncellenir.</p>
+                    <p>XU100, XU030, döviz ve emtia özetleri 3 saniyede bir otomatik güncellenir.</p>
                 </div>
                 <div className="mw-meta">
                     <span className="mw-updated">Son güncelleme: {formatClock(payload?.as_of)}</span>
@@ -224,13 +240,10 @@ export default function MarketWatchStrip() {
 
             {payload && (
                 <>
-                    <div className="mw-grid mw-grid-main">
-                        {primaryItems.map((item) => (
-                            <FlashMarketCard
-                                key={item.symbol}
-                                item={item}
-                                className="mw-card-main"
-                            >
+                    <div className="mw-section-title">Endeksler</div>
+                    <div className="mw-grid mw-grid-indices">
+                        {indexItems.map((item) => (
+                            <FlashMarketCard key={item.symbol} item={item}>
                                 <div className="mw-card-head">
                                     <span className="mw-symbol">{item.symbol}</span>
                                     <span className="mw-label">{item.label}</span>
@@ -244,12 +257,10 @@ export default function MarketWatchStrip() {
                         ))}
                     </div>
 
-                    <div className="mw-grid mw-grid-commodities">
-                        {commodityItems.map((item) => (
-                            <FlashMarketCard
-                                key={item.symbol}
-                                item={item}
-                            >
+                    <div className="mw-section-title">Döviz</div>
+                    <div className="mw-grid mw-grid-fx">
+                        {fxItems.map((item) => (
+                            <FlashMarketCard key={item.symbol} item={item}>
                                 <div className="mw-card-head">
                                     <span className="mw-symbol">{item.symbol}</span>
                                     <span className="mw-label">{item.label}</span>
@@ -258,6 +269,41 @@ export default function MarketWatchStrip() {
                                 <div className={`mw-card-change ${changeClass(item.change_pct)}`}>
                                     {formatPct(item.change_pct)}
                                 </div>
+                                <div className="mw-card-meta">{itemMetaLabel(item)}</div>
+                            </FlashMarketCard>
+                        ))}
+                    </div>
+
+                    <div className="mw-section-title">Emtia</div>
+                    <div className="mw-grid mw-grid-commodities">
+                        {commodityItems.map((item) => (
+                            <FlashMarketCard key={item.symbol} item={item}>
+                                <div className="mw-card-head">
+                                    <span className="mw-symbol">{item.symbol}</span>
+                                    <span className="mw-label">{item.label}</span>
+                                </div>
+                                <div className="mw-card-price">{formatPrice(item)}</div>
+                                <div className={`mw-card-change ${changeClass(item.change_pct)}`}>
+                                    {formatPct(item.change_pct)}
+                                </div>
+                                <div className="mw-card-meta">{itemMetaLabel(item)}</div>
+                            </FlashMarketCard>
+                        ))}
+                    </div>
+
+                    <div className="mw-section-title">İzleme Listesi (Demo Şirketleri)</div>
+                    <div className="mw-grid mw-grid-watchlist">
+                        {watchlistItems.map((item) => (
+                            <FlashMarketCard key={item.symbol} item={item}>
+                                <div className="mw-card-head">
+                                    <span className="mw-symbol">{item.symbol}</span>
+                                    <span className="mw-label">{item.label}</span>
+                                </div>
+                                <div className="mw-card-price">{formatPrice(item)}</div>
+                                <div className={`mw-card-change ${changeClass(item.change_pct)}`}>
+                                    {formatPct(item.change_pct)}
+                                </div>
+                                <div className="mw-card-meta">{itemMetaLabel(item)}</div>
                             </FlashMarketCard>
                         ))}
                     </div>

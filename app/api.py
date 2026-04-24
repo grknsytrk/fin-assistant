@@ -3152,7 +3152,7 @@ def market_xu030() -> Dict[str, Any]:
 
 # ── Commodities (Yahoo-backed, provider-delayed) ──────────
 _COMMODITY_CACHE: Dict[str, Any] = {}
-_COMMODITY_CACHE_TTL = 90  # 90 seconds
+_COMMODITY_CACHE_TTL = 3  # 3 seconds
 
 # Display symbol -> (Yahoo ticker, Turkish label, override currency)
 _COMMODITY_MAP: List[tuple[str, str, str, Optional[str]]] = [
@@ -3164,6 +3164,13 @@ _COMMODITY_MAP: List[tuple[str, str, str, Optional[str]]] = [
     ("BAKIR", "HG=F", "Bakır", "USD"),
     ("PLATIN", "PL=F", "Platin", "USD"),
     ("PALADYUM", "PA=F", "Paladyum", "USD"),
+    ("KAHVE", "KC=F", "Kahve", "USD"),
+    ("SEKER", "SB=F", "Şeker", "USD"),
+    ("BUGDAY", "ZW=F", "Buğday", "USD"),
+    ("MISIR", "ZC=F", "Mısır", "USD"),
+    ("PAMUK", "CT=F", "Pamuk", "USD"),
+    ("KAKAO", "CC=F", "Kakao", "USD"),
+    ("SOYA", "ZS=F", "Soya Fasulyesi", "USD"),
 ]
 
 
@@ -3772,9 +3779,32 @@ def market_fx() -> Dict[str, Any]:
     return _market_fx_payload()
 
 
+_SIDEBAR_INDEX_CANDIDATES = [
+    ("S&P 500", "S&P 500", ["^GSPC"]),
+    ("NASDAQ", "NASDAQ Composite", ["^IXIC"]),
+    ("DOW", "Dow Jones Industrial", ["^DJI"]),
+    ("DAX", "DAX Index", ["^GDAXI"]),
+    ("VIX", "Korku Endeksi", ["^VIX"]),
+]
+
+def _market_indices_payload() -> Dict[str, Any]:
+    items = [
+        _watch_index_item(symbol=symbol, label=label, yahoo_candidates=candidates)
+        for symbol, label, candidates in _SIDEBAR_INDEX_CANDIDATES
+    ]
+    return {
+        "items": items,
+        "as_of": datetime.now(timezone.utc).isoformat()
+    }
+
+@app.get("/market/indices")
+def market_indices() -> Dict[str, Any]:
+    return _market_indices_payload()
+
+
 # ── Market watch strip (single endpoint for Markets page) ────────────────
 _WATCH_CACHE: Dict[str, Any] = {}
-_WATCH_CACHE_TTL = 60
+_WATCH_CACHE_TTL = 3
 _WATCH_DELAY_NOTE = "Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk)."
 
 _WATCH_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [

@@ -9,7 +9,7 @@ import type {
 } from '../api/types';
 import './MarketSidebar.css';
 
-type TabId = 'XU100' | 'XU030' | 'DOVIZ' | 'EMTIA';
+type TabId = 'XU100' | 'XU030' | 'ENDEKSLER' | 'DOVIZ' | 'EMTIA';
 
 type PanelMode = 'markets' | 'flow';
 
@@ -21,6 +21,7 @@ const PANEL_MODES: { id: PanelMode; label: string }[] = [
 const TABS: { id: TabId; label: string }[] = [
     { id: 'XU100', label: 'XU100' },
     { id: 'XU030', label: 'XU030' },
+    { id: 'ENDEKSLER', label: 'Endeksler' },
     { id: 'DOVIZ', label: 'Döviz' },
     { id: 'EMTIA', label: 'Emtia' },
 ];
@@ -201,10 +202,15 @@ export default function MarketSidebar({
     const [fxError, setFxError] = useState<string | null>(null);
     const [fxDelayNote, setFxDelayNote] = useState<string>('');
 
+    const [indicesData, setIndicesData] = useState<any[] | null>(null);
+    const [indicesLoading, setIndicesLoading] = useState(false);
+    const [indicesError, setIndicesError] = useState<string | null>(null);
+
     const flowInFlight = useRef(false);
     const xu030InFlight = useRef(false);
     const commoditiesInFlight = useRef(false);
     const fxInFlight = useRef(false);
+    const indicesInFlight = useRef(false);
 
     const loadFlow = useCallback((options?: { refresh?: boolean; size?: number }) => {
         if (flowInFlight.current) return;
@@ -306,25 +312,48 @@ export default function MarketSidebar({
             });
     }, [fx]);
 
+    const loadIndices = useCallback((force = false) => {
+        if (indicesInFlight.current) return;
+        if (!force && indicesData) return;
+        indicesInFlight.current = true;
+        setIndicesLoading(true);
+        setIndicesError(null);
+        apiClient
+            .marketIndices()
+            .then((res) => {
+                setIndicesData(res.items || []);
+            })
+            .catch((err: any) => {
+                setIndicesError(err?.message || 'Endeks verisi alınamadı.');
+            })
+            .finally(() => {
+                indicesInFlight.current = false;
+                setIndicesLoading(false);
+            });
+    }, [indicesData]);
+
     useEffect(() => {
         if (!open) return;
         loadFlow();
         const xu030Timer = window.setTimeout(() => loadXu030(), 150);
-        const fxTimer = window.setTimeout(() => loadFx(), 400);
+        const indicesTimer = window.setTimeout(() => loadIndices(), 300);
+        const fxTimer = window.setTimeout(() => loadFx(), 450);
         const commoditiesTimer = window.setTimeout(() => loadCommodities(), 700);
         return () => {
             window.clearTimeout(xu030Timer);
+            window.clearTimeout(indicesTimer);
             window.clearTimeout(fxTimer);
             window.clearTimeout(commoditiesTimer);
         };
-    }, [open, loadFlow, loadXu030, loadFx, loadCommodities]);
+    }, [open, loadFlow, loadXu030, loadIndices, loadFx, loadCommodities]);
 
     useEffect(() => {
         if (!open) return;
         if (tab === 'XU030') loadXu030();
+        else if (tab === 'ENDEKSLER') loadIndices();
         else if (tab === 'DOVIZ') loadFx();
         else if (tab === 'EMTIA') loadCommodities();
-    }, [open, tab, loadXu030, loadFx, loadCommodities]);
+    }, [open, tab, loadXu030, loadIndices, loadFx, loadCommodities]);
 
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
@@ -348,10 +377,11 @@ export default function MarketSidebar({
         if (!open || panelMode !== 'markets') return;
         const intervalId = window.setInterval(() => {
             if (tab === 'XU030') loadXu030(true);
+            else if (tab === 'ENDEKSLER') loadIndices(true);
             else if (tab === 'DOVIZ') loadFx(true);
             else if (tab === 'EMTIA') loadCommodities(true);
             // XU100 parent'tan (MarketsView) zaten setInterval üzerinden yenilenip geliyor.
-        }, 10000);
+        }, 3000);
         return () => window.clearInterval(intervalId);
     }, [open, panelMode, tab, loadXu030, loadFx, loadCommodities]);
 
@@ -508,6 +538,33 @@ export default function MarketSidebar({
                                     >
                                         <span className="ms-sym">{row.company}</span>
                                         <span className="ms-price">{formatPrice(row.price, row.price_currency)}</span>
+                                        <span className={`ms-change ${changeClass(row.change_pct)}`}>
+                                            {formatPct(row.change_pct)}
+                                        </span>
+                                    </FlashRow>
+                                ))
+                            )
+                        )}
+                        
+                        {tab === 'ENDEKSLER' && (
+                            indicesLoading && !indicesData ? (
+                                <div className="ms-empty">Yükleniyor…</div>
+                            ) : indicesError ? (
+                                <div className="ms-empty ms-empty-error">{indicesError}</div>
+                            ) : !indicesData || indicesData.length === 0 ? (
+                                <div className="ms-empty">Veri bulunamadı.</div>
+                            ) : (
+                                indicesData.map((row) => (
+                                    <FlashRow
+                                        key={row.symbol}
+                                        price={row.price}
+                                        className="ms-row-static"
+                                        title={row.label}
+                                    >
+                                        <span className="ms-sym">{row.symbol}</span>
+                                        <span className="ms-price">
+                                            {formatPrice(row.price, row.currency, pickDecimals(row.price))}
+                                        </span>
                                         <span className={`ms-change ${changeClass(row.change_pct)}`}>
                                             {formatPct(row.change_pct)}
                                         </span>
