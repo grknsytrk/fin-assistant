@@ -78,33 +78,34 @@ def _flow_item(
 def _stub_flow_sources(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    vyk: Optional[List[Dict[str, Any]]] = None,
+    public: Optional[List[Dict[str, Any]]] = None,
     local: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, List[int]]:
     """Replace both upstream flow sources with deterministic stubs."""
-    calls: Dict[str, List[int]] = {"vyk": [0], "local": [0]}
+    calls: Dict[str, List[int]] = {"public": [0], "local": [0]}
 
-    def fake_vyk(*args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
-        calls["vyk"][0] += 1
-        return list(vyk or [])
+    def fake_public(*args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+        calls["public"][0] += 1
+        return list(public or [])
 
     def fake_local() -> List[Dict[str, Any]]:
         calls["local"][0] += 1
         return list(local or [])
 
-    monkeypatch.setattr(api_module, "_fetch_kap_vyk_feed", fake_vyk)
+    monkeypatch.setattr(api_module, "_fetch_kap_public_disclosures", fake_public)
     monkeypatch.setattr(api_module, "_local_flow_items_from_cache", fake_local)
     return calls
 
 
-def test_market_flow_prefers_vyk_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_market_flow_prefers_public_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _stub_flow_sources(
         monkeypatch,
-        vyk=[
+        public=[
             _flow_item(
                 idx="1230901",
                 category="finansal_rapor",
                 published_at="2026-04-19T11:00:00",
+                id_prefix="public",
             ),
             _flow_item(
                 idx="1230900",
@@ -112,6 +113,7 @@ def test_market_flow_prefers_vyk_when_available(monkeypatch: pytest.MonkeyPatch)
                 published_at="2026-04-19T10:00:00",
                 source="Özel Durum",
                 symbol="ASELS",
+                id_prefix="public",
             ),
         ],
         local=[
@@ -129,23 +131,22 @@ def test_market_flow_prefers_vyk_when_available(monkeypatch: pytest.MonkeyPatch)
     assert response.status_code == 200
     payload = response.json()
 
-    assert payload["source"] == "kap_vyk"
+    assert payload["source"] == "kap_public_website"
     assert payload["degraded_mode"] is False
     assert payload["multi_category"] is True
     assert payload.get("warning") in (None, "")
 
     ids = [row["id"] for row in payload["items"]]
-    assert ids == ["vyk-1230901", "vyk-1230900"]
+    assert ids == ["public-1230901", "public-1230900"]
 
-    # VYK cevap verdiginde yerel cache'e hic dokunulmamali; akis kalabalaklasmasin.
-    assert calls["vyk"][0] == 1
+    assert calls["public"][0] == 1
     assert calls["local"][0] == 0
 
 
-def test_market_flow_falls_back_to_local_when_vyk_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_market_flow_falls_back_to_local_when_public_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _stub_flow_sources(
         monkeypatch,
-        vyk=[],
+        public=[],
         local=[
             _flow_item(
                 idx="42",
@@ -165,7 +166,7 @@ def test_market_flow_falls_back_to_local_when_vyk_empty(monkeypatch: pytest.Monk
     assert payload["degraded_mode"] is True
     assert payload["multi_category"] is False
     assert payload["warning"]
-    assert calls["vyk"][0] == 1
+    assert calls["public"][0] == 1
     assert calls["local"][0] == 1
     assert [row["id"] for row in payload["items"]] == ["local-42"]
 
@@ -173,7 +174,7 @@ def test_market_flow_falls_back_to_local_when_vyk_empty(monkeypatch: pytest.Monk
 def test_market_flow_reuses_cache_on_repeat_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _stub_flow_sources(
         monkeypatch,
-        vyk=[
+        public=[
             _flow_item(
                 idx="1",
                 category="finansal_rapor",
@@ -189,17 +190,17 @@ def test_market_flow_reuses_cache_on_repeat_requests(monkeypatch: pytest.MonkeyP
 
     # Flow cache 180 sn, degraded_mode=False oldugu icin ikinci ve ucuncu
     # istekler upstream'e hic ulasmamali.
-    assert calls["vyk"][0] == 1
+    assert calls["public"][0] == 1
 
 
 def test_market_flow_scales_detail_budget_with_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     # Kullanici UI'dan daha fazla kayit istedikçe backend VYK'ye gonderdigi
     # detay butcesini de buyutmeli; bu sayede 'kayit sayisi' secicisi gercekten
     # feed'i genisletiyor.
-    seen_budgets: List[int] = []
+    seen_limits: List[int] = []
 
-    def fake_vyk(**kwargs: Any) -> List[Dict[str, Any]]:
-        seen_budgets.append(int(kwargs.get("detail_budget") or 0))
+    def fake_public(**kwargs: Any) -> List[Dict[str, Any]]:
+        seen_limits.append(int(kwargs.get("max_items") or 0))
         return [
             _flow_item(
                 idx=str(i),
@@ -209,25 +210,23 @@ def test_market_flow_scales_detail_budget_with_limit(monkeypatch: pytest.MonkeyP
             for i in range(1, 6)
         ]
 
-    monkeypatch.setattr(api_module, "_fetch_kap_vyk_feed", fake_vyk)
+    monkeypatch.setattr(api_module, "_fetch_kap_public_disclosures", fake_public)
     monkeypatch.setattr(api_module, "_local_flow_items_from_cache", lambda: [])
 
     client = TestClient(app)
     client.get("/market/flow", params={"limit": 25})
     client.get("/market/flow", params={"limit": 500})
 
-    assert seen_budgets, "VYK feed cagrilmadi"
-    # 25 ve 500 ayri cache kovalarina dustugu icin iki ayri upstream cagri olmali
-    # ve ikinci cagrinin butcesi ilkinden buyuk olmali.
-    assert len(seen_budgets) == 2
-    assert seen_budgets[0] < seen_budgets[1]
-    assert seen_budgets[1] >= 500
+    assert seen_limits, "Public feed cagrilmadi"
+    assert len(seen_limits) == 2
+    assert seen_limits[0] < seen_limits[1]
+    assert seen_limits[1] >= 500
 
 
 def test_market_flow_refresh_bypasses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _stub_flow_sources(
         monkeypatch,
-        vyk=[
+        public=[
             _flow_item(
                 idx="1",
                 category="finansal_rapor",
@@ -240,13 +239,13 @@ def test_market_flow_refresh_bypasses_cache(monkeypatch: pytest.MonkeyPatch) -> 
     client.get("/market/flow", params={"limit": 5})
     client.get("/market/flow", params={"limit": 5, "refresh": "true"})
 
-    assert calls["vyk"][0] == 2
+    assert calls["public"][0] == 2
 
 
-def test_market_flow_category_filter_applies_to_vyk_feed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_market_flow_category_filter_applies_to_public_feed(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_flow_sources(
         monkeypatch,
-        vyk=[
+        public=[
             _flow_item(idx="1", category="ozel_durum", published_at="2026-04-19T12:00:00"),
             _flow_item(idx="2", category="finansal_rapor", published_at="2026-04-19T13:00:00"),
             _flow_item(idx="3", category="genel_kurul", published_at="2026-04-19T14:00:00"),
