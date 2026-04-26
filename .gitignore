@@ -82,3 +82,6 @@ _kap_*.json
 # Temporary sample/debug files
 tavhl_sample.txt
 *.sample.txt
+
+# Codex temporary browser profiles
+.tmp-codex*/

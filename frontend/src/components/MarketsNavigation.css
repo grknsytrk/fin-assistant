@@ -148,7 +148,7 @@
     height: 28px;
     min-width: 28px;
     padding: 0;
-    border: 1px solid rgba(255,255,255,0.12);
+    border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 6px;
     display: flex;
     align-items: center;
@@ -162,7 +162,7 @@
 }
 
 .mn-sidebar-toggle:hover {
-    background: rgba(255,255,255,0.08);
+    background: rgba(255, 255, 255, 0.08);
     color: #fff;
 }
 
@@ -257,7 +257,8 @@
     margin-left: 0.35rem;
 }
 
-.mn-chevron, .mn-external-icon {
+.mn-chevron,
+.mn-external-icon {
     color: #4b5563;
 }
 
@@ -274,8 +275,17 @@
     text-transform: uppercase;
 }
 
-.blue-bg { background-color: #0ea5e9; }
-.purple-bg { background-color: #312e81; color: #818cf8; font-weight: 800; border-radius: 4px; text-transform: lowercase;}
+.blue-bg {
+    background-color: #0ea5e9;
+}
+
+.purple-bg {
+    background-color: #312e81;
+    color: #818cf8;
+    font-weight: 800;
+    border-radius: 4px;
+    text-transform: lowercase;
+}
 
 .mn-spacer {
     flex-grow: 1;
@@ -340,7 +350,7 @@
     width: 100%;
     max-width: 600px;
     background: #1e1e1e;
-    border: 1px solid rgba(255,255,255,0.1);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 12px;
     box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
     overflow: hidden;
@@ -353,7 +363,7 @@
     display: flex;
     align-items: center;
     padding: 1rem 1.5rem;
-    border-bottom: 1px solid rgba(255,255,255,0.05);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     gap: 1rem;
 }
 
@@ -406,7 +416,7 @@
 }
 
 .mn-search-result-item:hover {
-    background: rgba(255,255,255,0.05);
+    background: rgba(255, 255, 255, 0.05);
 }
 
 .mn-sr-left {
@@ -470,6 +480,7 @@
     border-radius: 4px;
     transition: color 0.2s;
 }
+
 .mn-search-clear:hover {
     color: #fff;
 }
@@ -478,7 +489,7 @@
 .mn-sr-badge-icon {
     width: 36px;
     height: 36px;
-    background: rgba(255,255,255,0.08);
+    background: rgba(255, 255, 255, 0.08);
     border-radius: 8px;
     display: flex;
     align-items: center;
@@ -507,9 +518,11 @@
     opacity: 0;
     transition: opacity 0.2s, color 0.2s;
 }
+
 .mn-search-result-item:hover .mn-sr-remove {
     opacity: 1;
 }
+
 .mn-sr-remove:hover {
     color: #ef4444;
 }
@@ -532,6 +545,7 @@
     color: #4b5563;
     text-align: center;
 }
+
 .mn-search-empty-state p {
     font-size: 0.9rem;
     color: #475569;

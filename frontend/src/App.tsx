@@ -81,46 +81,49 @@ function App() {
   };
 
   const isMarketsView = !ticker && page === 'markets';
+  const isLandingPage = !ticker && page !== 'markets';
 
   return (
     <div className="app-layout">
-      <header className="app-header">
-        <div className="header-content">
-          <div className="header-brand" onClick={handleBackToMarket} style={{ cursor: 'pointer' }}>
-            <div className="logo-area">
-              {/* Removed RAG-Fin Terminal text as requested */}
+      {!isLandingPage && !isMarketsView && (
+        <header className="app-header">
+          <div className="header-content">
+            <div className="header-brand" onClick={handleBackToMarket} style={{ cursor: 'pointer' }}>
+              <div className="logo-area">
+                {/* Removed RAG-Fin Terminal text as requested */}
+              </div>
+            </div>
+
+            <div className="header-actions">
+              <button
+                className="nav-tab"
+                onClick={handleGoToMarkets}
+                style={{
+                    marginRight: '0.5rem',
+                    padding: '0.4rem 1.2rem',
+                    background: 'color-mix(in srgb, var(--surface-color) 80%, var(--bg-color))',
+                    border: '1px solid var(--surface-border)',
+                    borderRadius: '99px',
+                    cursor: 'pointer'
+                }}
+              >
+                Piyasalar
+              </button>
+              {!isMarketsView && (
+                <GlobalTickerSearch currentTicker={ticker} onSelectTicker={handleSelectTicker} />
+              )}
+
+              <button
+                className="theme-toggle-btn"
+                onClick={toggleTheme}
+                title={theme === 'light' ? 'Dark Mode' : 'Light Mode'}
+              >
+                {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
+              </button>
             </div>
           </div>
-          
-          <div className="header-actions">
-            <button 
-              className="nav-tab" 
-              onClick={handleGoToMarkets}
-              style={{ 
-                  marginRight: '0.5rem', 
-                  padding: '0.4rem 1.2rem', 
-                  background: 'color-mix(in srgb, var(--surface-color) 80%, var(--bg-color))',
-                  border: '1px solid var(--surface-border)', 
-                  borderRadius: '99px',
-                  cursor: 'pointer'
-              }}
-            >
-              Piyasalar
-            </button>
-            {!isMarketsView && (
-              <GlobalTickerSearch currentTicker={ticker} onSelectTicker={handleSelectTicker} />
-            )}
-            
-            <button
-              className="theme-toggle-btn"
-              onClick={toggleTheme}
-              title={theme === 'light' ? 'Dark Mode' : 'Light Mode'}
-            >
-              {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
-            </button>
-          </div>
-        </div>
-      </header>
+        </header>
+      )}
 
       <main className="app-main-full">
         {ticker ? (

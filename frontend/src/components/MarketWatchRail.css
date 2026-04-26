@@ -1,0 +1,476 @@
+.mwr-shell {
+    --mwr-dock-width: 54px;
+    --mwr-panel-width: clamp(320px, 28vw, 390px);
+    position: relative;
+    width: calc(var(--mwr-panel-width) + var(--mwr-dock-width));
+    flex: 0 0 calc(var(--mwr-panel-width) + var(--mwr-dock-width));
+    height: 100%;
+    min-height: 0;
+    overflow: visible;
+}
+
+.mwr-shell.mwr-shell-collapsed {
+    width: var(--mwr-dock-width);
+    flex-basis: var(--mwr-dock-width);
+}
+
+.mwr-panel {
+    position: absolute;
+    right: var(--mwr-dock-width);
+    top: 0;
+    bottom: 0;
+    width: var(--mwr-panel-width);
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid color-mix(in srgb, var(--surface-border) 86%, transparent);
+    background: #151514;
+    box-shadow: -10px 0 24px rgba(0, 0, 0, 0.18);
+    overflow: hidden;
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+    transition: transform 0.24s ease, opacity 0.2s ease;
+}
+
+.mwr-panel.is-collapsed {
+    transform: translateX(104%);
+    opacity: 0;
+    pointer-events: none;
+}
+
+.mwr-head {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1rem 1rem 0.85rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+}
+
+.mwr-panel-title {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.mwr-tabs {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.mwr-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.mwr-tab {
+    min-height: 34px;
+    padding: 0 0.58rem;
+    border: 0;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-border) 44%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-weight: 800;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.mwr-tab:hover,
+.mwr-tab.is-active {
+    background: var(--text-primary);
+    color: var(--bg-color);
+}
+
+.mwr-table-head,
+.mwr-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(74px, auto) minmax(72px, auto);
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.mwr-table-head {
+    padding: 0.7rem 1.15rem 0.45rem;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 800;
+}
+
+.mwr-table-head span:nth-child(2),
+.mwr-table-head span:nth-child(3) {
+    text-align: right;
+}
+
+.mwr-list {
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--surface-border) 74%, var(--text-secondary)) transparent;
+}
+
+.mwr-list::-webkit-scrollbar {
+    width: 8px;
+}
+
+.mwr-list::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+    background: transparent;
+}
+
+.mwr-list::-webkit-scrollbar-track {
+    background: #111312;
+}
+
+.mwr-list::-webkit-scrollbar-thumb {
+    min-height: 48px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--surface-border) 74%, var(--text-secondary));
+    background-clip: padding-box;
+}
+
+.mwr-list::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--text-secondary) 62%, var(--surface-border));
+    background-clip: padding-box;
+}
+
+.mwr-row {
+    width: 100%;
+    min-height: 46px;
+    padding: 0 1.15rem;
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 48%, transparent);
+    background: transparent;
+    color: var(--text-primary);
+    text-align: left;
+}
+
+.mwr-row-clickable {
+    cursor: pointer;
+}
+
+.mwr-row-clickable:hover {
+    background: color-mix(in srgb, var(--surface-border) 28%, transparent);
+}
+
+.mwr-row-muted {
+    opacity: 0.62;
+}
+
+.mwr-symbol-cell {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.62rem;
+}
+
+.mwr-logo {
+    flex: 0 0 auto;
+}
+
+.mwr-symbol-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.06rem;
+}
+
+.mwr-symbol-copy strong {
+    color: var(--text-primary);
+    font-size: 0.82rem;
+    font-weight: 800;
+    line-height: 1.15;
+}
+
+.mwr-symbol-copy small {
+    max-width: 142px;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 0.64rem;
+    font-weight: 700;
+    line-height: 1.15;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mwr-price {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    font-weight: 800;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.mwr-change {
+    justify-self: end;
+    min-width: 68px;
+    padding: 0.28rem 0.42rem;
+    border-radius: 5px;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 900;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.mwr-change-up {
+    color: var(--success-color);
+    background: color-mix(in srgb, var(--success-color) 12%, transparent);
+}
+
+.mwr-change-down {
+    color: var(--danger-color);
+    background: color-mix(in srgb, var(--danger-color) 13%, transparent);
+}
+
+.mwr-change-flat {
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--surface-border) 42%, transparent);
+}
+
+.mwr-state {
+    margin: 0.85rem 1rem;
+    padding: 0.8rem;
+    border: 1px dashed color-mix(in srgb, var(--surface-border) 76%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+
+.mwr-error,
+.mwr-error-text {
+    color: var(--danger-color);
+}
+
+.mwr-sync {
+    padding: 0.55rem 1rem 0.75rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    text-align: right;
+}
+
+/* Skeleton Loading */
+@keyframes mwr-shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.mwr-skeleton-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(74px, auto) minmax(72px, auto);
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.85rem 1.15rem;
+}
+
+.mwr-skeleton-pulse {
+    background: linear-gradient(90deg, #1c1c1b 25%, #2a2a29 50%, #1c1c1b 75%);
+    background-size: 200% 100%;
+    animation: mwr-shimmer 1.6s infinite linear;
+    border-radius: 4px;
+}
+
+.mwr-skeleton-symbol-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.mwr-skeleton-logo {
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+}
+
+.mwr-skeleton-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.mwr-skeleton-title { width: 36px; height: 10px; }
+.mwr-skeleton-desc { width: 54px; height: 7px; opacity: 0.6; }
+.mwr-skeleton-price { width: 48px; height: 10px; justify-self: end; }
+.mwr-skeleton-change { width: 42px; height: 10px; justify-self: end; }
+
+.mwr-empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    text-align: center;
+    color: #fff;
+}
+
+.mwr-empty-icon {
+    margin-bottom: 1.5rem;
+    color: #2a2a29;
+}
+
+.mwr-empty-state h3 {
+    margin: 0 0 0.75rem;
+    font-size: 1.1rem;
+    font-weight: 700;
+    line-height: 1.3;
+}
+
+.mwr-empty-state p {
+    margin: 0 0 2rem;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    max-width: 240px;
+}
+
+.mwr-empty-action {
+    min-height: 44px;
+    padding: 0 1.5rem;
+    border: 0;
+    border-radius: 8px;
+    background: #f1f3f5;
+    color: #1a1b1e;
+    font-size: 0.92rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.16s ease;
+}
+
+.mwr-empty-action:hover {
+    background: #fff;
+}
+
+.mwr-dock {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 46;
+    width: var(--mwr-dock-width);
+    padding: 0.75rem 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    border-left: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
+    background: #0d0d0c;
+    box-shadow: none;
+}
+
+.mwr-dock-button {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.18s ease;
+}
+
+.mwr-dock-button svg {
+    width: 16px;
+    height: 16px;
+    stroke: currentColor;
+    stroke-width: 2.2;
+}
+
+.mwr-dock-button:hover:not(:disabled) {
+    opacity: 1;
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--text-secondary) 52%, var(--surface-border));
+    background: color-mix(in srgb, var(--surface-border) 54%, transparent);
+    transform: translateX(-1px);
+}
+
+.mwr-dock-button:disabled {
+    cursor: default;
+    opacity: 0.52;
+}
+
+.mwr-dock-button-primary {
+    border-color: color-mix(in srgb, var(--accent-color) 40%, var(--surface-border));
+}
+
+.mwr-dock-button.is-active {
+    color: var(--text-primary);
+    border: 1px solid #fff;
+    background: transparent;
+}
+
+.mwr-dock-divider {
+    width: 100%;
+    height: 1px;
+    margin: 0.15rem 0 0.08rem;
+    background: color-mix(in srgb, var(--surface-border) 70%, transparent);
+}
+
+@media (max-width: 1180px) {
+    .mwr-shell {
+        --mwr-panel-width: min(390px, calc(100vw - 56px));
+    }
+
+    .mwr-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 40;
+        width: var(--mwr-panel-width);
+        flex-basis: auto;
+        height: 100vh;
+        border-left: 1px solid color-mix(in srgb, var(--surface-border) 86%, transparent);
+    }
+}
+
+@media (max-width: 520px) {
+    .mwr-shell {
+        --mwr-panel-width: calc(100vw - 34px);
+    }
+
+    .mwr-panel {
+        width: var(--mwr-panel-width);
+    }
+
+    .mwr-table-head,
+    .mwr-row {
+        grid-template-columns: minmax(0, 1fr) minmax(66px, auto) minmax(64px, auto);
+        gap: 0.45rem;
+    }
+
+    .mwr-table-head,
+    .mwr-row {
+        padding-left: 0.8rem;
+        padding-right: 0.8rem;
+    }
+
+    .mwr-symbol-copy small {
+        display: none;
+    }
+
+    .mwr-dock {
+        top: 5.1rem;
+        right: 4px;
+        width: 40px;
+        padding: 0.34rem 0.28rem;
+    }
+
+    .mwr-dock-button {
+        width: 31px;
+        height: 31px;
+    }
+}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Star } from 'lucide-react';
 import { apiClient } from '../../api/client';
+import SymbolLogo from '../SymbolLogo';
 import './PriceTicker.css';
 
 type PriceData = {
@@ -87,6 +88,13 @@ export function PriceTicker({
             <div className="sh-left">
                 <div className="sh-titles">
                     <div className="sh-symbol-row">
+                        <SymbolLogo
+                            symbol={symbol}
+                            name={companyName || symbol}
+                            kind="stock"
+                            size="md"
+                            className="sh-symbol-logo"
+                        />
                         <h1>{symbol.toUpperCase()}</h1>
                         <button type="button" className="sh-star-btn" aria-label={`${symbol} favori`}>
                             <Star size={15} />

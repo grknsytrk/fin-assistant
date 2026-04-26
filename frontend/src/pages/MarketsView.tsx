@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import type { PointerEvent as ReactPointerEvent } from 'react';
+import { CalendarDays, GripHorizontal, Plus, Search, X } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type {
     MarketIndexCode,
@@ -6,26 +9,35 @@ import type {
     MarketIndexDetailResponse,
     MarketIndexListRow,
     MarketIndicesResponse,
+    MarketIndexLinePoint,
+    MarketStockCardChartRange,
+    MarketStockCardItem,
+    MarketStockCardsResponse,
     MarketReturnBenchmark,
     MarketStockIndex,
     MarketStockRow,
     MarketStocksResponse,
     MarketUniverseResponse,
-    MarketUniverseRow,
 } from '../api/types';
+import MarketWatchRail from '../components/MarketWatchRail';
 import MarketSidebar from '../components/MarketSidebar';
 import MarketWatchStrip from '../components/MarketWatchStrip';
 import MarketsNavigation from '../components/MarketsNavigation';
+import SymbolLogo from '../components/SymbolLogo';
 import './MarketsView.css';
 
 type MarketSection = 'markets' | 'stocks' | 'indices';
 type SortDirection = 'asc' | 'desc';
 type StockReturnMode = 'absolute' | 'relative_xu100' | 'relative_xu030';
+type IndexConstituentDataSortKey = 'symbol' | 'price' | 'change_pct' | 'volume' | 'weight_pct' | 'point_effect';
+type IndexConstituentSortKey = IndexConstituentDataSortKey | 'impact_pct' | 'impact_abs';
+type StockCardDropPlacement = 'before' | 'after';
 type StockSortKey =
     | 'company'
     | 'price'
     | 'change_pct'
     | 'volume'
+    | 'market_cap'
     | 'return_1w_pct'
     | 'return_1m_pct'
     | 'return_3m_pct'
@@ -44,6 +56,7 @@ const STOCK_COLUMNS: Array<{ key: StockSortKey; label: string; sublabel?: string
     { key: 'price', label: 'Fiyat', align: 'right' },
     { key: 'change_pct', label: 'Gün %', align: 'right' },
     { key: 'volume', label: 'Hacim', align: 'right' },
+    { key: 'market_cap', label: 'Piyasa Değeri', align: 'right' },
     { key: 'return_1w_pct', label: 'Getiri %', sublabel: 'Son 1 hafta', align: 'right' },
     { key: 'return_1m_pct', label: 'Getiri %', sublabel: 'Son 1 ay', align: 'right' },
     { key: 'return_3m_pct', label: 'Getiri %', sublabel: 'Son 3 ay', align: 'right' },
@@ -65,6 +78,14 @@ const RETURN_KEYS: StockReturnKey[] = [
     'return_ytd_pct',
     'return_1y_pct',
 ];
+const STOCK_CARD_STORAGE_KEY = 'ragfin_market_stock_cards';
+const MAX_STOCK_CARDS = 12;
+const STOCK_CARD_CHART_RANGES: Array<{ id: MarketStockCardChartRange; label: string; title: string }> = [
+    { id: '1d', label: 'G', title: 'Gün içi' },
+    { id: '1w', label: '1H', title: '1 Hafta' },
+    { id: '1m', label: '1A', title: '1 Ay' },
+    { id: '1y', label: '1Y', title: '1 Yıl' },
+];
 const INDEX_COLUMNS: Array<{ key: keyof MarketIndexListRow; label: string; align?: 'left' | 'right' }> = [
     { key: 'symbol', label: 'Endeks', align: 'left' },
     { key: 'price', label: 'Son Fiyat', align: 'right' },
@@ -77,6 +98,15 @@ const INDEX_COLUMNS: Array<{ key: keyof MarketIndexListRow; label: string; align
     { key: 'return_ytd_pct', label: 'YTA %', align: 'right' },
     { key: 'return_1y_pct', label: '1 Yıl %', align: 'right' },
 ];
+const INDEX_CONSTITUENT_COLUMNS: Array<{ key: Exclude<IndexConstituentSortKey, 'impact_abs'>; label: string; align?: 'left' | 'right' }> = [
+    { key: 'symbol', label: 'Şirket', align: 'left' },
+    { key: 'price', label: 'Son Fiyat', align: 'right' },
+    { key: 'change_pct', label: '%', align: 'right' },
+    { key: 'volume', label: 'Hacim', align: 'right' },
+    { key: 'weight_pct', label: 'Endeks Ağırlığı', align: 'right' },
+    { key: 'point_effect', label: 'Puan Etkisi', align: 'right' },
+    { key: 'impact_pct', label: 'Etki %', align: 'right' },
+];
 const DETAIL_RETURN_KEYS: Array<{ key: keyof MarketIndexListRow; label: string }> = [
     { key: 'change_pct', label: 'Gün içi' },
     { key: 'return_1w_pct', label: '1 Hafta' },
@@ -86,32 +116,6 @@ const DETAIL_RETURN_KEYS: Array<{ key: keyof MarketIndexListRow; label: string }
     { key: 'return_1y_pct', label: '1 Yıl' },
     { key: 'return_5y_pct', label: '5 Yıl' },
 ];
-
-function getStatusMeta(row: MarketUniverseRow): { label: string; className: string; hint: string } {
-    if (row.has_rag) {
-        return {
-            label: 'Analiz Hazır',
-            className: 'cc-status-rag',
-            hint: 'Detay ekranı ve soru-cevap bölümü kullanılabilir.',
-        };
-    }
-    return {
-        label: 'Finansal Görünüm',
-        className: 'cc-status-kap',
-        hint: 'Detay ekranı açılır, soru-cevap kapsamı daha sonra genişler.',
-    };
-}
-
-function formatPrice(row: MarketUniverseRow): string {
-    if (row.price == null) {
-        return '-';
-    }
-    const currencyPrefix = row.price_currency && row.price_currency !== 'TRY' ? `${row.price_currency} ` : '₺';
-    return `${currencyPrefix}${row.price.toLocaleString('tr-TR', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-    })}`;
-}
 
 function formatStockPrice(row: MarketStockRow): string {
     if (row.price == null) return '-';
@@ -134,17 +138,6 @@ function formatMaybeCurrency(value: number | null, currency?: string | null): st
     if (value == null) return '-';
     const prefix = currency && currency !== 'TRY' ? `${currency} ` : '₺';
     return `${prefix}${value.toLocaleString('tr-TR', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-    })}`;
-}
-
-function formatChangePct(changePct: number | null): string {
-    if (changePct == null) {
-        return 'Veri bekleniyor';
-    }
-    const sign = changePct > 0 ? '+' : '';
-    return `% ${sign}${changePct.toLocaleString('tr-TR', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     })}`;
@@ -177,6 +170,95 @@ function formatVolume(value: number | null): string {
     return value.toLocaleString('tr-TR', { maximumFractionDigits: 0 });
 }
 
+function formatMarketCap(value: number | null): string {
+    if (value == null) return '-';
+    return `₺${formatVolume(value)}`;
+}
+
+function formatCardCurrency(value: number | null | undefined, currency?: string | null): string {
+    if (value == null) return '-';
+    const prefix = currency && currency !== 'TRY' ? `${currency} ` : '₺';
+    return `${prefix}${value.toLocaleString('tr-TR', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}`;
+}
+
+function formatCardPct(value: number | null | undefined): string {
+    if (value == null) return '% -';
+    const sign = value > 0 ? '+' : '';
+    return `% ${sign}${value.toLocaleString('tr-TR', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}`;
+}
+
+function formatCardRatio(value: number | null | undefined): string {
+    if (value == null || !Number.isFinite(value)) return '-';
+    return value.toLocaleString('tr-TR', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    });
+}
+
+function formatCardPositiveRatio(value: number | null | undefined): string {
+    if (value == null || !Number.isFinite(value) || value <= 0) return '-';
+    return formatCardRatio(value);
+}
+
+function hasStockCardCoreData(item: MarketStockCardItem | null | undefined): boolean {
+    if (!item) return false;
+    const hasPrice = Number.isFinite(item.price) && (item.price ?? 0) > 0;
+    const hasHigh = Number.isFinite(item.high);
+    const hasLow = Number.isFinite(item.low);
+    const hasPreviousClose = Number.isFinite(item.previous_close);
+    const hasChart = (item.line_points ?? []).some((point) => Number.isFinite(point.close));
+    return hasPrice && hasHigh && hasLow && hasPreviousClose && hasChart;
+}
+
+function formatCardFullNumber(value: number | null | undefined): string {
+    if (value == null || !Number.isFinite(value)) return '-';
+    return value.toLocaleString('tr-TR', { maximumFractionDigits: 0 });
+}
+
+function formatCardFullCurrency(value: number | null | undefined, currency?: string | null): string {
+    if (value == null || !Number.isFinite(value)) return '-';
+    const prefix = currency && currency !== 'TRY' ? `${currency} ` : '₺';
+    return `${prefix}${formatCardFullNumber(value)}`;
+}
+
+function formatStockCardChartDate(iso: string | null | undefined, range: MarketStockCardChartRange): string {
+    if (!iso) return '-';
+    const dt = new Date(iso);
+    if (Number.isNaN(dt.getTime())) return '-';
+    const withTime = range === '1d' || range === '1w';
+    return new Intl.DateTimeFormat('tr-TR', {
+        timeZone: 'Europe/Istanbul',
+        day: '2-digit',
+        month: 'short',
+        year: '2-digit',
+        ...(withTime ? { hour: '2-digit', minute: '2-digit' } : {}),
+    }).format(dt);
+}
+
+function formatStockCardAxisDate(iso: string | null | undefined, range: MarketStockCardChartRange): string {
+    if (!iso) return '';
+    const dt = new Date(iso);
+    if (Number.isNaN(dt.getTime())) return '';
+    if (range === '1d') {
+        return new Intl.DateTimeFormat('tr-TR', {
+            timeZone: 'Europe/Istanbul',
+            hour: '2-digit',
+            minute: '2-digit',
+        }).format(dt);
+    }
+    return new Intl.DateTimeFormat('tr-TR', {
+        timeZone: 'Europe/Istanbul',
+        day: '2-digit',
+        month: 'short',
+    }).format(dt);
+}
+
 function formatUpdateTime(iso: string | null | undefined): string {
     if (!iso) return '--:--';
     const dt = new Date(iso);
@@ -198,11 +280,47 @@ function formatDateTime(iso: string | null | undefined): string {
     });
 }
 
-function getPriceChangeClass(changePct: number | null): string {
-    if (changePct == null || changePct === 0) {
-        return 'cc-change-flat';
+function formatTerminalDate(date: Date): string {
+    const dayMonth = date.toLocaleDateString('tr-TR', {
+        day: 'numeric',
+        month: 'long',
+    });
+    const weekday = date.toLocaleDateString('tr-TR', { weekday: 'long' });
+    return `${dayMonth}, ${weekday.charAt(0).toUpperCase()}${weekday.slice(1)}`;
+}
+
+function formatTerminalClock(date: Date): string {
+    return date.toLocaleTimeString('tr-TR', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+    });
+}
+
+function normalizeStockCardSymbol(raw: string): string {
+    return raw.trim().toUpperCase().replace(/\.IS$/, '');
+}
+
+function readStoredStockCards(): string[] {
+    if (typeof window === 'undefined') return [];
+    try {
+        const raw = window.localStorage.getItem(STOCK_CARD_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        if (!Array.isArray(parsed)) return [];
+        const seen = new Set<string>();
+        const symbols: string[] = [];
+        for (const item of parsed) {
+            if (typeof item !== 'string') continue;
+            const symbol = normalizeStockCardSymbol(item);
+            if (!/^[A-Z0-9]{2,12}$/.test(symbol) || seen.has(symbol)) continue;
+            symbols.push(symbol);
+            seen.add(symbol);
+            if (symbols.length >= MAX_STOCK_CARDS) break;
+        }
+        return symbols;
+    } catch {
+        return [];
     }
-    return changePct > 0 ? 'cc-change-up' : 'cc-change-down';
 }
 
 function getTableChangeClass(value: number | null): string {
@@ -244,6 +362,34 @@ function formatPointEffect(value: number | null): string {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     })}`;
+}
+
+function formatPointEffectShort(value: number | null): string {
+    const formatted = formatPointEffect(value);
+    return formatted === '-' ? formatted : `${formatted}p`;
+}
+
+function getImpactPct(row: MarketIndexConstituent, indexLevel: number | null): number | null {
+    if (row.point_effect == null || indexLevel == null || indexLevel <= 0) return null;
+    return (row.point_effect / indexLevel) * 100;
+}
+
+function formatImpactPct(value: number | null): string {
+    if (value == null || !Number.isFinite(value)) return '-';
+    const sign = value > 0 ? '+' : '';
+    return `${sign}${value.toLocaleString('tr-TR', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}%`;
+}
+
+function formatHeatmapChangePct(value: number | null): string {
+    if (value == null || !Number.isFinite(value)) return '-';
+    const sign = value > 0 ? '+' : '';
+    return `${sign}${value.toLocaleString('tr-TR', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}%`;
 }
 
 function isReturnKey(key: StockSortKey): key is StockReturnKey {
@@ -289,37 +435,20 @@ function stockSortValue(
     return row[key];
 }
 
-function getLatestQuarterText(row: MarketUniverseRow): string {
-    return row.latest_quarter || 'Detay ekranında yüklenecek';
-}
-
-function getFinancialReadinessText(row: MarketUniverseRow): string {
-    return row.has_kap_cache ? 'Hazır' : 'İlk açılışta yüklenir';
-}
-
-function FlashCompanyCard({
-    row,
-    children,
-    onClick,
-}: React.PropsWithChildren<{ row: MarketUniverseRow; onClick: () => void }>) {
-    const prevPriceRef = useRef(row.price);
-    const [flashClass, setFlashClass] = useState('');
-
-    useEffect(() => {
-        if (row.price != null && prevPriceRef.current != null && row.price !== prevPriceRef.current) {
-            setFlashClass(row.price > prevPriceRef.current ? 'cc-flash-up' : 'cc-flash-down');
-            const timer = window.setTimeout(() => setFlashClass(''), 1100);
-            prevPriceRef.current = row.price;
-            return () => window.clearTimeout(timer);
-        }
-        prevPriceRef.current = row.price;
-    }, [row.price]);
-
-    return (
-        <div className={`company-card ${flashClass}`} onClick={onClick}>
-            {children}
-        </div>
-    );
+function constituentSortValue(
+    row: MarketIndexConstituent,
+    key: IndexConstituentSortKey,
+    indexLevel: number | null,
+): string | number | null {
+    if (key === 'symbol') return row.symbol;
+    if (key === 'impact_abs') return row.point_effect == null ? null : Math.abs(row.point_effect);
+    if (key === 'impact_pct') return getImpactPct(row, indexLevel);
+    if (key === 'price') return row.price;
+    if (key === 'change_pct') return row.change_pct;
+    if (key === 'volume') return row.volume;
+    if (key === 'weight_pct') return row.weight_pct;
+    if (key === 'point_effect') return row.point_effect;
+    return null;
 }
 
 function FlashStockRow({
@@ -349,7 +478,15 @@ function FlashStockRow({
     );
 }
 
-function IndexLineChart({ points, prevClose }: { points: MarketIndexDetailResponse['line_points'], prevClose: number | null }) {
+function IndexLineChart({
+    points,
+    prevClose,
+    changePct,
+}: {
+    points: MarketIndexDetailResponse['line_points'];
+    prevClose: number | null;
+    changePct: number | null;
+}) {
     const width = 1120;
     const height = 400;
     const padding = { top: 30, right: 65, bottom: 40, left: 16 };
@@ -387,9 +524,7 @@ function IndexLineChart({ points, prevClose }: { points: MarketIndexDetailRespon
     const timeTickCount = 8;
     const timeTicks = Array.from({ length: timeTickCount }).map((_, i) => Math.floor((validPoints.length - 1) * (i / (timeTickCount - 1))));
 
-    // Çizgi ve Gradient Rengi (Referans resmindeki gibi soldan sağa Mavi -> Mor geçişi)
-    const strokeLeft = '#3b82f6';  // Parlak mavi
-    const strokeRight = '#c084fc'; // Parlak mor
+    const chartColor = changePct != null && changePct < 0 ? '#ff4d5e' : '#22c55e';
 
     const pathData = validPoints
         .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xFor(index)} ${yFor(point.close)}`)
@@ -401,13 +536,9 @@ function IndexLineChart({ points, prevClose }: { points: MarketIndexDetailRespon
         <div style={{ backgroundColor: '#0f1214', borderRadius: '8px', border: '1px solid #1e2327', position: 'relative', overflow: 'hidden' }}>
         <svg className="indices-line-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Endeks çizgi grafiği" style={{ display: 'block', width: '100%', height: 'auto', borderBottom: 'none' }}>
             <defs>
-                <linearGradient id="lineGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                    <stop offset="0%" stopColor={strokeLeft} />
-                    <stop offset="100%" stopColor={strokeRight} />
-                </linearGradient>
                 <linearGradient id="areaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-                    <stop offset="0%" stopColor={strokeRight} stopOpacity="0.25" />
-                    <stop offset="100%" stopColor={strokeLeft} stopOpacity="0.0" />
+                    <stop offset="0%" stopColor={chartColor} stopOpacity="0.24" />
+                    <stop offset="100%" stopColor={chartColor} stopOpacity="0" />
                 </linearGradient>
             </defs>
             {/* Koyu Arkaplan (Uygulamanın karanlık temasına uygun) */}
@@ -469,15 +600,15 @@ function IndexLineChart({ points, prevClose }: { points: MarketIndexDetailRespon
 
             {/* Alan ve Çizgi (Ağ/Line) (Açılış, yüksek, düşük kullanılmıyor, SADECE CLOSE) */}
             <path d={areaData} fill="url(#areaGrad)" />
-            <path d={pathData} fill="none" stroke="url(#lineGrad)" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+            <path d={pathData} fill="none" stroke={chartColor} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
             
             {/* Uç Noktası (Kapanış) Dot */}
-            <circle cx={xFor(validPoints.length - 1)} cy={yFor(last)} r="4" fill={strokeRight} />
+            <circle cx={xFor(validPoints.length - 1)} cy={yFor(last)} r="4" fill={chartColor} />
 
             {/* Anlık Fiyat İşareti */}
             <g transform={`translate(${width - padding.right}, ${yFor(last)})`}>
-                <rect x="0" y="-10" width="65" height="20" fill={strokeRight} rx="2" />
-                <path d="M 0 0 L 6 -6 L 6 6 Z" fill={strokeRight} transform="translate(-5, 0)" />
+                <rect x="0" y="-10" width="65" height="20" fill={chartColor} rx="2" />
+                <path d="M 0 0 L 6 -6 L 6 6 Z" fill={chartColor} transform="translate(-5, 0)" />
                 <text x="32" y="3" fill="#ffffff" fontSize="11" fontFamily="monospace" textAnchor="middle" fontWeight="bold">
                     {formatIndexPrice(last)}
                 </text>
@@ -485,6 +616,975 @@ function IndexLineChart({ points, prevClose }: { points: MarketIndexDetailRespon
         </svg>
         </div>
     );
+}
+
+function StockCardMiniChart({
+    symbol,
+    points,
+    previousClose,
+    changePct,
+    currency,
+    selectedRange,
+    pendingRange,
+    rangeLoading,
+    rangeError,
+    onRangeSelect,
+    isLoading = false,
+}: {
+    symbol: string;
+    points: MarketIndexLinePoint[] | undefined;
+    previousClose?: number | null;
+    changePct: number | null;
+    currency: string | null;
+    selectedRange: MarketStockCardChartRange;
+    pendingRange: MarketStockCardChartRange | null;
+    rangeLoading: Partial<Record<MarketStockCardChartRange, boolean>>;
+    rangeError: Partial<Record<MarketStockCardChartRange, string | null>>;
+    onRangeSelect: (range: MarketStockCardChartRange) => void;
+    isLoading?: boolean;
+}) {
+    const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+    const width = 360;
+    const height = 150;
+    const padding = { top: 8, right: 2, bottom: 18, left: 2 };
+    const validPoints = (points ?? []).filter((point) => Number.isFinite(point.close));
+    const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+    const rangeControls = (
+        <div className="stock-card-chart-ranges" onClick={(event) => event.stopPropagation()}>
+            {STOCK_CARD_CHART_RANGES.map((range) => {
+                const isActive = selectedRange === range.id;
+                const isPending = pendingRange === range.id || Boolean(rangeLoading[range.id]);
+                const error = rangeError[range.id];
+                return (
+                    <button
+                        key={range.id}
+                        type="button"
+                        className={[
+                            'stock-card-chart-range',
+                            isActive ? 'is-active' : '',
+                            isPending ? 'is-loading' : '',
+                            error ? 'has-error' : '',
+                        ]
+                            .filter(Boolean)
+                            .join(' ')}
+                        title={error ? `${range.title}: ${error}` : range.title}
+                        aria-pressed={isActive}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            onRangeSelect(range.id);
+                        }}
+                    >
+                        {range.label}
+                    </button>
+                );
+            })}
+        </div>
+    );
+    const skeletonTop = 6;
+    const skeletonBottom = height - 4;
+    const skeletonSpan = Math.max(1, skeletonBottom - skeletonTop);
+    const skeletonPointCount = 44;
+    let skeletonSeed = `${symbol}:${selectedRange}`
+        .split('')
+        .reduce((acc, char) => ((acc * 31 + char.charCodeAt(0)) >>> 0), 7);
+    const seededRandom = () => {
+        skeletonSeed = (1664525 * skeletonSeed + 1013904223) >>> 0;
+        return skeletonSeed / 0xffffffff;
+    };
+    const trend = (seededRandom() - 0.5) * 0.2;
+    let level = 0.56 + (seededRandom() - 0.5) * 0.16;
+    const skeletonPoints: Array<[number, number]> = Array.from({ length: skeletonPointCount }, (_, index) => {
+        if (index > 0) {
+            const burst = index % 7 === 0 ? (seededRandom() - 0.5) * 0.22 : 0;
+            const drift = trend / skeletonPointCount + (seededRandom() - 0.5) * 0.16 + burst;
+            level = clamp(level + drift, 0.08, 0.92);
+        }
+        const x = (index / Math.max(1, skeletonPointCount - 1)) * width;
+        const y = skeletonTop + level * skeletonSpan;
+        return [x, y];
+    });
+    const skeletonLinePath = skeletonPoints
+        .map(([x, y], index) => `${index === 0 ? 'M' : 'L'} ${x} ${y}`)
+        .join(' ');
+    const skeletonAreaPath = `${skeletonLinePath} L ${width} ${height - 2} L 0 ${height - 2} Z`;
+    const skeletonIdBase = `stock-card-skeleton-${symbol.replace(/[^a-zA-Z0-9]/g, '') || 'sym'}-${selectedRange}`;
+    const skeletonAreaGradientId = `${skeletonIdBase}-area`;
+
+    if (isLoading) {
+        return (
+            <div className="stock-card-chart-shell">
+                {rangeControls}
+                <div className="stock-card-inline-chart-skeleton" aria-hidden="true">
+                    <div className="stock-card-inline-chart-track stock-card-inline-skeleton-pulse">
+                        <svg
+                            className="stock-card-inline-chart-svg"
+                            viewBox={`0 0 ${width} ${height}`}
+                            preserveAspectRatio="none"
+                        >
+                            <defs>
+                                <linearGradient id={skeletonAreaGradientId} x1="0%" y1="0%" x2="0%" y2="100%">
+                                    <stop offset="0%" stopColor="rgba(148,163,184,0.22)" />
+                                    <stop offset="100%" stopColor="rgba(148,163,184,0)" />
+                                </linearGradient>
+                            </defs>
+                            <line className="stock-card-inline-chart-gridline" x1={0} x2={width} y1={height * 0.56} y2={height * 0.56} />
+                            <path className="stock-card-inline-chart-area" d={skeletonAreaPath} fill={`url(#${skeletonAreaGradientId})`} />
+                            <path
+                                className="stock-card-inline-chart-line"
+                                d={skeletonLinePath}
+                                pathLength={100}
+                            />
+                        </svg>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    if (validPoints.length < 2) {
+        return (
+            <div className="stock-card-chart-shell">
+                {rangeControls}
+                <div className="stock-card-chart-empty">Veri yok</div>
+            </div>
+        );
+    }
+
+    const values = validPoints.map((point) => point.close);
+    let minValue = Math.min(...values);
+    let maxValue = Math.max(...values);
+    const spanRaw = Math.max(0.01, maxValue - minValue);
+    minValue -= spanRaw * 0.08;
+    maxValue += spanRaw * 0.08;
+    const span = Math.max(0.01, maxValue - minValue);
+    const plotWidth = width - padding.left - padding.right;
+    const plotHeight = height - padding.top - padding.bottom;
+    const xFor = (index: number) =>
+        padding.left + (validPoints.length === 1 ? 0 : (index / (validPoints.length - 1)) * plotWidth);
+    const yFor = (value: number) => padding.top + ((maxValue - value) / span) * plotHeight;
+    const pathData = validPoints
+        .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xFor(index)} ${yFor(point.close)}`)
+        .join(' ');
+    const areaData = `${pathData} L ${xFor(validPoints.length - 1)} ${height - 2} L ${padding.left} ${height - 2} Z`;
+    const color = changePct == null || changePct >= 0 ? '#22c55e' : '#ff4d5e';
+    const gradientId = `stock-card-area-${symbol.replace(/[^a-zA-Z0-9]/g, '')}-${selectedRange}`;
+    const baselineValue =
+        selectedRange === '1d' && Number.isFinite(previousClose)
+            ? Number(previousClose)
+            : validPoints.length >= 2
+                ? validPoints[validPoints.length - 2].close
+                : validPoints[0].close;
+    const baselineY = clamp(yFor(baselineValue), padding.top, height - padding.bottom);
+    const timeTickIndexes = Array.from(
+        new Set([0, Math.floor((validPoints.length - 1) / 2), validPoints.length - 1]),
+    );
+    const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0) return;
+        const x = ((event.clientX - rect.left) / rect.width) * width;
+        const rawIndex = Math.round(((x - padding.left) / plotWidth) * (validPoints.length - 1));
+        setHoverIndex(clamp(rawIndex, 0, validPoints.length - 1));
+    };
+    const activeHoverIndex = hoverIndex == null ? null : clamp(hoverIndex, 0, validPoints.length - 1);
+    const hoverPoint = activeHoverIndex == null ? null : validPoints[activeHoverIndex];
+    const hoverX = activeHoverIndex == null ? null : xFor(activeHoverIndex);
+    const hoverY = hoverPoint ? yFor(hoverPoint.close) : null;
+    const tooltipWidth = 132;
+    const tooltipHeight = 58;
+    const tooltipX = hoverX == null ? 0 : clamp(hoverX + 12, 8, width - tooltipWidth - 8);
+    const tooltipY = hoverY == null ? 0 : clamp(hoverY - tooltipHeight / 2, padding.top, height - tooltipHeight - 8);
+
+    return (
+        <div className="stock-card-chart-shell">
+            {rangeControls}
+            <svg
+                className="stock-card-mini-chart"
+                viewBox={`0 0 ${width} ${height}`}
+                preserveAspectRatio="none"
+                role="img"
+                aria-label={`${symbol} ${selectedRange} çizgi grafiği`}
+                onPointerMove={handlePointerMove}
+                onPointerLeave={() => setHoverIndex(null)}
+            >
+                <defs>
+                    <linearGradient id={gradientId} x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" stopColor={color} stopOpacity="0.22" />
+                        <stop offset="100%" stopColor={color} stopOpacity="0" />
+                    </linearGradient>
+                </defs>
+                <line
+                    x1={0}
+                    x2={width}
+                    y1={baselineY}
+                    y2={baselineY}
+                    stroke="rgba(255,255,255,0.16)"
+                    strokeDasharray="3 4"
+                />
+                {timeTickIndexes.map((index) => {
+                    const x = xFor(index);
+                    return (
+                        <text
+                            key={index}
+                            x={x}
+                            y={height - 6}
+                            fill="rgba(255,255,255,0.24)"
+                            fontSize="10"
+                            fontFamily="monospace"
+                            textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
+                        >
+                            {formatStockCardAxisDate(validPoints[index].time, selectedRange)}
+                        </text>
+                    );
+                })}
+                <path d={areaData} fill={`url(#${gradientId})`} />
+                <path d={pathData} fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+                {hoverPoint && hoverX != null && hoverY != null && (
+                    <g className="stock-card-chart-hover">
+                        <line
+                            x1={hoverX}
+                            x2={hoverX}
+                            y1={padding.top}
+                            y2={height - padding.bottom}
+                            stroke="rgba(255,255,255,0.42)"
+                            strokeDasharray="4 4"
+                        />
+                        <line
+                            x1={padding.left}
+                            x2={width - padding.right}
+                            y1={hoverY}
+                            y2={hoverY}
+                            stroke="rgba(255,255,255,0.24)"
+                            strokeDasharray="5 5"
+                        />
+                        <circle cx={hoverX} cy={hoverY} r="3.5" fill={color} stroke="#0a0c0f" strokeWidth="1.5" />
+                        <g transform={`translate(${tooltipX}, ${tooltipY})`}>
+                            <rect width={tooltipWidth} height={tooltipHeight} rx="4" fill="#07090b" stroke="rgba(59,130,246,0.2)" />
+                            <text x="10" y="19" fill="#d8dee9" fontSize="12" fontFamily="monospace">
+                                {formatStockCardChartDate(hoverPoint.time, selectedRange)}
+                            </text>
+                            <text x="10" y="42" fill="#f8fafc" fontSize="12" fontFamily="monospace" fontWeight="700">
+                                {symbol}
+                            </text>
+                            <text x={tooltipWidth - 10} y="42" fill="#f8fafc" fontSize="12" fontFamily="monospace" fontWeight="700" textAnchor="end">
+                                {formatCardCurrency(hoverPoint.close, currency)}
+                            </text>
+                        </g>
+                    </g>
+                )}
+            </svg>
+        </div>
+    );
+}
+
+function emptyStockCardItem(symbol: string): MarketStockCardItem {
+    return {
+        symbol,
+        company: symbol,
+        yahoo_symbol: null,
+        price: null,
+        currency: 'TRY',
+        change: null,
+        change_pct: null,
+        volume: null,
+        volume_lot: null,
+        volume_tl: null,
+        market_cap: null,
+        high: null,
+        low: null,
+        previous_close: null,
+        fk: null,
+        pd_dd: null,
+        fd_favok: null,
+        net_borc_favok: null,
+        return_1w_pct: null,
+        return_1m_pct: null,
+        return_3m_pct: null,
+        return_6m_pct: null,
+        return_ytd_pct: null,
+        return_1y_pct: null,
+        market_state: '',
+        as_of: null,
+        line_points: [],
+        error: 'data_unavailable',
+        logo_url: null,
+        logo_source: null,
+    };
+}
+
+const STOCK_CARD_PERFORMANCE_KEYS: Array<{
+    key: 'return_1w_pct' | 'return_1m_pct' | 'return_3m_pct' | 'return_6m_pct' | 'return_ytd_pct' | 'return_1y_pct';
+    label: string;
+}> = [
+    { key: 'return_1w_pct', label: '1H' },
+    { key: 'return_1m_pct', label: '1A' },
+    { key: 'return_3m_pct', label: '3A' },
+    { key: 'return_6m_pct', label: '6A' },
+    { key: 'return_ytd_pct', label: 'YTD' },
+    { key: 'return_1y_pct', label: '1Y' },
+];
+
+function MarketStockCard({
+    item,
+    onOpen,
+    onRemove,
+    onMoveStart,
+    onMoveOver,
+    onMoveEnd,
+    isLoading = false,
+    isDragging = false,
+}: {
+    item: MarketStockCardItem;
+    onOpen: () => void;
+    onRemove: () => void;
+    onMoveStart: () => void;
+    onMoveOver: (placement: StockCardDropPlacement) => void;
+    onMoveEnd: () => void;
+    isLoading?: boolean;
+    isDragging?: boolean;
+}) {
+    const [selectedRange, setSelectedRange] = useState<MarketStockCardChartRange>('1d');
+    const [pendingRange, setPendingRange] = useState<MarketStockCardChartRange | null>(null);
+    const [chartDataByRange, setChartDataByRange] = useState<Partial<Record<MarketStockCardChartRange, MarketIndexLinePoint[]>>>(
+        () => ({ '1d': item.line_points ?? [] }),
+    );
+    const [rangeLoading, setRangeLoading] = useState<Partial<Record<MarketStockCardChartRange, boolean>>>({});
+    const [rangeError, setRangeError] = useState<Partial<Record<MarketStockCardChartRange, string | null>>>({});
+    const chartAbortRef = useRef<AbortController | null>(null);
+    const chartRequestIdRef = useRef(0);
+
+    useEffect(() => {
+        setChartDataByRange((previous) => ({ ...previous, '1d': item.line_points ?? [] }));
+        setRangeError((previous) => ({ ...previous, '1d': null }));
+    }, [item.line_points]);
+
+    useEffect(() => {
+        return () => {
+            chartAbortRef.current?.abort();
+        };
+    }, []);
+
+    const [hoveredData, setHoveredData] = useState<{
+        base: number | null | undefined;
+        high: number | null | undefined;
+        low: number | null | undefined;
+        anchorX: number;
+    } | null>(null);
+    const [tooltipActive, setTooltipActive] = useState(false);
+
+    const performanceRef = useRef<HTMLDivElement>(null);
+    const [tooltipStyles, setTooltipStyles] = useState<React.CSSProperties>({});
+    const tooltipCloseTimerRef = useRef<number | null>(null);
+    const tooltipOpenFrameRef = useRef<number | null>(null);
+
+    useLayoutEffect(() => {
+        if (!isLoading && hoveredData && performanceRef.current) {
+            const performanceRect = performanceRef.current.getBoundingClientRect();
+            const cardElement = performanceRef.current.closest('.stock-card');
+            const cardRect = cardElement?.getBoundingClientRect() ?? performanceRect;
+            const halfTooltipWidth = cardRect.width / 2;
+            const viewportPadding = 12;
+            const minCenterX = viewportPadding + halfTooltipWidth;
+            const maxCenterX = window.innerWidth - viewportPadding - halfTooltipWidth;
+            const tooltipCenterX = Math.min(Math.max(hoveredData.anchorX, minCenterX), maxCenterX);
+            setTooltipStyles({
+                top: `${performanceRect.top - 8}px`,
+                left: `${tooltipCenterX}px`,
+                width: `${cardRect.width}px`,
+                maxWidth: `${cardRect.width}px`,
+            });
+        }
+    }, [hoveredData, isLoading]);
+
+    useEffect(() => {
+        return () => {
+            if (tooltipCloseTimerRef.current != null) {
+                window.clearTimeout(tooltipCloseTimerRef.current);
+            }
+            if (tooltipOpenFrameRef.current != null) {
+                window.cancelAnimationFrame(tooltipOpenFrameRef.current);
+            }
+        };
+    }, []);
+
+    useEffect(() => {
+        if (isLoading) {
+            if (tooltipCloseTimerRef.current != null) {
+                window.clearTimeout(tooltipCloseTimerRef.current);
+                tooltipCloseTimerRef.current = null;
+            }
+            if (tooltipOpenFrameRef.current != null) {
+                window.cancelAnimationFrame(tooltipOpenFrameRef.current);
+                tooltipOpenFrameRef.current = null;
+            }
+            setTooltipActive(false);
+            setHoveredData(null);
+        }
+    }, [isLoading]);
+
+    const openPerformanceTooltip = (
+        data: {
+            base: number | null | undefined;
+            high: number | null | undefined;
+            low: number | null | undefined;
+            anchorX: number;
+        },
+    ) => {
+        if (tooltipCloseTimerRef.current != null) {
+            window.clearTimeout(tooltipCloseTimerRef.current);
+            tooltipCloseTimerRef.current = null;
+        }
+        if (tooltipOpenFrameRef.current != null) {
+            window.cancelAnimationFrame(tooltipOpenFrameRef.current);
+            tooltipOpenFrameRef.current = null;
+        }
+        setTooltipActive(false);
+        setHoveredData(data);
+        tooltipOpenFrameRef.current = window.requestAnimationFrame(() => {
+            tooltipOpenFrameRef.current = window.requestAnimationFrame(() => {
+                setTooltipActive(true);
+                tooltipOpenFrameRef.current = null;
+            });
+        });
+    };
+
+    const closePerformanceTooltip = () => {
+        if (tooltipOpenFrameRef.current != null) {
+            window.cancelAnimationFrame(tooltipOpenFrameRef.current);
+            tooltipOpenFrameRef.current = null;
+        }
+        setTooltipActive(false);
+        if (tooltipCloseTimerRef.current != null) {
+            window.clearTimeout(tooltipCloseTimerRef.current);
+        }
+        tooltipCloseTimerRef.current = window.setTimeout(() => {
+            setHoveredData(null);
+            tooltipCloseTimerRef.current = null;
+        }, 180);
+    };
+
+    const handleRangeSelect = (nextRange: MarketStockCardChartRange) => {
+        if (isLoading) {
+            return;
+        }
+        if (nextRange === selectedRange || rangeLoading[nextRange]) {
+            return;
+        }
+
+        const cachedPoints = chartDataByRange[nextRange];
+        if (cachedPoints !== undefined && !rangeError[nextRange]) {
+            setSelectedRange(nextRange);
+            setPendingRange(null);
+            return;
+        }
+
+        chartAbortRef.current?.abort();
+        const controller = new AbortController();
+        chartAbortRef.current = controller;
+        const requestId = chartRequestIdRef.current + 1;
+        chartRequestIdRef.current = requestId;
+        setPendingRange(nextRange);
+        setRangeLoading((previous) => ({ ...previous, [nextRange]: true }));
+        setRangeError((previous) => ({ ...previous, [nextRange]: null }));
+
+        apiClient
+            .marketStockCardChart(item.symbol, nextRange, { signal: controller.signal })
+            .then((payload) => {
+                if (controller.signal.aborted || requestId !== chartRequestIdRef.current) {
+                    return;
+                }
+                const nextPoints = payload.line_points ?? [];
+                setChartDataByRange((previous) => ({ ...previous, [nextRange]: nextPoints }));
+                if (payload.error || nextPoints.length < 2) {
+                    setRangeError((previous) => ({
+                        ...previous,
+                        [nextRange]: payload.error || 'Veri yok',
+                    }));
+                    return;
+                }
+                setSelectedRange(nextRange);
+            })
+            .catch((error) => {
+                if ((error as Error)?.name === 'AbortError' || requestId !== chartRequestIdRef.current) {
+                    return;
+                }
+                setRangeError((previous) => ({
+                    ...previous,
+                    [nextRange]: (error as Error)?.message || 'Grafik verisi alınamadı',
+                }));
+            })
+            .finally(() => {
+                if (requestId !== chartRequestIdRef.current) {
+                    return;
+                }
+                setRangeLoading((previous) => ({ ...previous, [nextRange]: false }));
+                setPendingRange(null);
+                if (chartAbortRef.current === controller) {
+                    chartAbortRef.current = null;
+                }
+            });
+    };
+
+    const formatTooltipMetricValue = (value: number | null | undefined): string => {
+        if (value == null || !Number.isFinite(value)) return '-';
+        return value.toLocaleString('tr-TR', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
+    };
+
+    return (
+        <article
+            className={`stock-card${isDragging ? ' stock-card-dragging' : ''}`}
+            data-stock-card-symbol={item.symbol}
+            onClick={onOpen}
+            onDragEnter={(event) => {
+                event.preventDefault();
+            }}
+            onDragOver={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                event.dataTransfer.dropEffect = 'move';
+                const rect = event.currentTarget.getBoundingClientRect();
+                const placement: StockCardDropPlacement =
+                    event.clientX >= rect.left + rect.width / 2 ? 'after' : 'before';
+                onMoveOver(placement);
+            }}
+            onDrop={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onMoveEnd();
+            }}
+        >
+            <div
+                className="stock-card-controls"
+                onClick={(event) => event.stopPropagation()}
+            >
+                <button
+                    type="button"
+                    className="stock-card-control stock-card-drag-handle"
+                    draggable
+                    onDragStart={(event) => {
+                        event.stopPropagation();
+                        event.dataTransfer.effectAllowed = 'move';
+                        event.dataTransfer.setData('text/plain', item.symbol);
+                        const cardElement = event.currentTarget.closest('.stock-card') as HTMLElement | null;
+                        if (cardElement) {
+                            event.dataTransfer.setDragImage(cardElement, cardElement.offsetWidth / 2, 24);
+                        }
+                        onMoveStart();
+                    }}
+                    onDragEnd={(event) => {
+                        event.stopPropagation();
+                        onMoveEnd();
+                    }}
+                    aria-label={`${item.symbol} kartını taşı`}
+                    title="Kartı taşı"
+                >
+                    <GripHorizontal size={14} aria-hidden="true" />
+                </button>
+                <button
+                    type="button"
+                    className="stock-card-control stock-card-control-remove"
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onRemove();
+                    }}
+                    aria-label={`${item.symbol} kartını kaldır`}
+                    title="Kartı kaldır"
+                >
+                    <X size={13} aria-hidden="true" />
+                </button>
+            </div>
+            <div className="stock-card-head">
+                <div className="stock-card-identity">
+                    <SymbolLogo
+                        symbol={item.symbol}
+                        name={item.company}
+                        kind="stock"
+                        logoUrl={item.logo_url}
+                        size="md"
+                        className="stock-card-logo"
+                    />
+                    <div>
+                        <h3>{item.symbol}</h3>
+                        <span>{item.company}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div className="stock-card-price-row">
+                {isLoading ? (
+                    <>
+                        <span className="stock-card-inline-skeleton-price stock-card-inline-skeleton-pulse" aria-hidden="true" />
+                        <span className="stock-card-inline-skeleton-change stock-card-inline-skeleton-pulse" aria-hidden="true" />
+                    </>
+                ) : (
+                    <>
+                        <span className="stock-card-price">{formatCardCurrency(item.price, item.currency)}</span>
+                        <span className={`stock-card-change ${getTableChangeClass(item.change_pct)}`}>
+                            {formatCardPct(item.change_pct)}
+                        </span>
+                    </>
+                )}
+            </div>
+
+            <div className="stock-card-metrics">
+                <div>
+                    <span>Yüksek</span>
+                    <strong>
+                        {isLoading ? (
+                            <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
+                        ) : (
+                            formatCardCurrency(item.high, item.currency)
+                        )}
+                    </strong>
+                </div>
+                <div>
+                    <span>Düşük</span>
+                    <strong>
+                        {isLoading ? (
+                            <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
+                        ) : (
+                            formatCardCurrency(item.low, item.currency)
+                        )}
+                    </strong>
+                </div>
+                <div>
+                    <span>Önc.Kap.</span>
+                    <strong>
+                        {isLoading ? (
+                            <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
+                        ) : (
+                            formatCardCurrency(item.previous_close, item.currency)
+                        )}
+                    </strong>
+                </div>
+            </div>
+
+            <StockCardMiniChart
+                symbol={item.symbol}
+                points={chartDataByRange[selectedRange]}
+                previousClose={item.previous_close}
+                changePct={(() => {
+                    if (selectedRange === '1d') return item.change_pct;
+                    if (selectedRange === '1w') return item.return_1w_pct;
+                    if (selectedRange === '1m') return item.return_1m_pct;
+                    if (selectedRange === '1y') return item.return_1y_pct;
+                    return item.change_pct;
+                })()}
+                currency={item.currency}
+                selectedRange={selectedRange}
+                pendingRange={pendingRange}
+                rangeLoading={rangeLoading}
+                rangeError={rangeError}
+                onRangeSelect={handleRangeSelect}
+                isLoading={isLoading}
+            />
+
+            <div className="stock-card-detail-metrics">
+                <div>
+                    <span>F/K</span>
+                    <strong>
+                        {isLoading ? (
+                            <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
+                        ) : (
+                            formatCardPositiveRatio(item.fk)
+                        )}
+                    </strong>
+                </div>
+                <div>
+                    <span>FD/FAVÖK</span>
+                    <strong>
+                        {isLoading ? (
+                            <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
+                        ) : (
+                            formatCardPositiveRatio(item.fd_favok)
+                        )}
+                    </strong>
+                </div>
+                <div>
+                    <span>PD/DD</span>
+                    <strong>
+                        {isLoading ? (
+                            <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
+                        ) : (
+                            formatCardPositiveRatio(item.pd_dd)
+                        )}
+                    </strong>
+                </div>
+                <div>
+                    <span>Net Borç/FAVÖK</span>
+                    <strong>
+                        {isLoading ? (
+                            <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
+                        ) : (
+                            formatCardRatio(item.net_borc_favok)
+                        )}
+                    </strong>
+                </div>
+                <div>
+                    <span>Hacim Lot</span>
+                    <strong>
+                        {isLoading ? (
+                            <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
+                        ) : (
+                            formatCardFullNumber(item.volume_lot)
+                        )}
+                    </strong>
+                </div>
+                <div>
+                    <span>Hacim TL</span>
+                    <strong>
+                        {isLoading ? (
+                            <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
+                        ) : (
+                            formatCardFullCurrency(item.volume_tl, item.currency)
+                        )}
+                    </strong>
+                </div>
+                <div className="stock-card-detail-wide">
+                    <span>Piyasa Değeri</span>
+                    <strong>
+                        {isLoading ? (
+                            <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric-wide" aria-hidden="true" />
+                        ) : (
+                            formatCardFullCurrency(item.market_cap, item.currency)
+                        )}
+                    </strong>
+                </div>
+            </div>
+
+
+            <div className="stock-card-performance" ref={performanceRef}>
+                {!isLoading && hoveredData && createPortal(
+                    <div
+                        className={`stock-card-performance-tooltip${tooltipActive ? ' active' : ''}`}
+                        style={tooltipStyles}
+                    >
+                        <div className="tooltip-row">
+                            <div className="tooltip-metric">
+                                <span className="tooltip-metric-label">Önc.Kap.:</span>
+                                <strong className="tooltip-metric-value">{formatTooltipMetricValue(hoveredData.base)}</strong>
+                            </div>
+                            <div className="tooltip-metric">
+                                <span className="tooltip-metric-label">Düşük:</span>
+                                <strong className="tooltip-metric-value">{formatTooltipMetricValue(hoveredData.low)}</strong>
+                            </div>
+                            <div className="tooltip-metric">
+                                <span className="tooltip-metric-label">Yüksek:</span>
+                                <strong className="tooltip-metric-value">{formatTooltipMetricValue(hoveredData.high)}</strong>
+                            </div>
+                        </div>
+                    </div>,
+                    document.body
+                )}
+                {isLoading
+                    ? STOCK_CARD_PERFORMANCE_KEYS.map(({ key }) => (
+                          <span key={key} className="stock-card-performance-chip stock-card-performance-chip-skeleton" aria-hidden="true">
+                              <span className="stock-card-inline-skeleton-chip-line stock-card-inline-skeleton-pulse" />
+                          </span>
+                      ))
+                    : STOCK_CARD_PERFORMANCE_KEYS.map(({ key, label }) => {
+                          const value = item[key];
+                          const period = key.replace('return_', '').replace('_pct', '');
+                          const base = (item as any)[`base_${period}`];
+                          const high = (item as any)[`high_${period}`];
+                          const low = (item as any)[`low_${period}`];
+
+                          return (
+                              <span
+                                  key={key}
+                                  className={`stock-card-performance-chip ${getTableChangeClass(value)}`}
+                                  onMouseEnter={(event) => {
+                                      const chipRect = event.currentTarget.getBoundingClientRect();
+                                      openPerformanceTooltip({
+                                          base,
+                                          high,
+                                          low,
+                                          anchorX: chipRect.left + chipRect.width / 2,
+                                      });
+                                  }}
+                                  onMouseLeave={closePerformanceTooltip}
+                              >
+                                  <strong>{label}</strong>
+                                  {formatCardPct(value)}
+                              </span>
+                          );
+                      })}
+            </div>
+
+            <div className="stock-card-foot">
+                {isLoading ? (
+                    <span className="stock-card-inline-skeleton-time stock-card-inline-skeleton-pulse" aria-hidden="true" />
+                ) : (
+                    <span>Son güncelleme {formatUpdateTime(item.as_of)}</span>
+                )}
+            </div>
+        </article>
+    );
+}
+
+const TREEMAP_LAYOUT_WIDTH = 100;
+const TREEMAP_LAYOUT_HEIGHT = 62;
+
+type HeatmapTile = {
+    row: MarketIndexConstituent;
+    impactPct: number | null;
+    changePct: number | null;
+    pointEffect: number | null;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    areaPct: number;
+};
+
+type HeatmapLayoutItem = {
+    row: MarketIndexConstituent;
+    area: number;
+    impactPct: number | null;
+    changePct: number | null;
+};
+
+type HeatmapLayoutRect = {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+};
+
+function treemapValue(row: MarketIndexConstituent): number {
+    if (row.weight_pct != null && row.weight_pct > 0) return row.weight_pct;
+    const impact = Math.abs(row.point_effect ?? 0);
+    return impact > 0 ? impact : 0.01;
+}
+
+function worstTreemapAspect(row: HeatmapLayoutItem[], shortSide: number): number {
+    if (!row.length || shortSide <= 0) return Number.POSITIVE_INFINITY;
+    const areas = row.map((item) => item.area);
+    const sum = areas.reduce((total, area) => total + area, 0);
+    const min = Math.min(...areas);
+    const max = Math.max(...areas);
+    if (sum <= 0 || min <= 0) return Number.POSITIVE_INFINITY;
+    const sideSquared = shortSide * shortSide;
+    return Math.max((sideSquared * max) / (sum * sum), (sum * sum) / (sideSquared * min));
+}
+
+function heatmapTileFromRect(item: HeatmapLayoutItem, rect: HeatmapLayoutRect): HeatmapTile {
+    const width = Math.max(0, rect.width);
+    const height = Math.max(0, rect.height);
+    return {
+        row: item.row,
+        impactPct: item.impactPct,
+        changePct: item.changePct,
+        pointEffect: item.row.point_effect,
+        left: (rect.x / TREEMAP_LAYOUT_WIDTH) * 100,
+        top: (rect.y / TREEMAP_LAYOUT_HEIGHT) * 100,
+        width: (width / TREEMAP_LAYOUT_WIDTH) * 100,
+        height: (height / TREEMAP_LAYOUT_HEIGHT) * 100,
+        areaPct: (width * height) / (TREEMAP_LAYOUT_WIDTH * TREEMAP_LAYOUT_HEIGHT) * 100,
+    };
+}
+
+function layoutTreemapRow(
+    row: HeatmapLayoutItem[],
+    remaining: HeatmapLayoutRect,
+    tiles: HeatmapTile[],
+): void {
+    if (!row.length || remaining.width <= 0 || remaining.height <= 0) return;
+    const rowArea = row.reduce((total, item) => total + item.area, 0);
+    if (rowArea <= 0) return;
+
+    if (remaining.width >= remaining.height) {
+        const columnWidth = Math.min(remaining.width, rowArea / remaining.height);
+        let y = remaining.y;
+        row.forEach((item, index) => {
+            const height = index === row.length - 1 ? remaining.y + remaining.height - y : item.area / columnWidth;
+            tiles.push(heatmapTileFromRect(item, {
+                x: remaining.x,
+                y,
+                width: columnWidth,
+                height: Math.max(0, height),
+            }));
+            y += height;
+        });
+        remaining.x += columnWidth;
+        remaining.width = Math.max(0, remaining.width - columnWidth);
+        return;
+    }
+
+    const rowHeight = Math.min(remaining.height, rowArea / remaining.width);
+    let x = remaining.x;
+    row.forEach((item, index) => {
+        const width = index === row.length - 1 ? remaining.x + remaining.width - x : item.area / rowHeight;
+        tiles.push(heatmapTileFromRect(item, {
+            x,
+            y: remaining.y,
+            width: Math.max(0, width),
+            height: rowHeight,
+        }));
+        x += width;
+    });
+    remaining.y += rowHeight;
+    remaining.height = Math.max(0, remaining.height - rowHeight);
+}
+
+function buildHeatmapTiles(items: MarketIndexConstituent[], indexLevel: number | null): HeatmapTile[] {
+    const sorted = [...items].sort((a, b) => {
+        const result = treemapValue(b) - treemapValue(a);
+        return result === 0 ? a.symbol.localeCompare(b.symbol, 'tr') : result;
+    });
+    const totalValue = sorted.reduce((total, row) => total + treemapValue(row), 0);
+    if (totalValue <= 0) return [];
+
+    const totalArea = TREEMAP_LAYOUT_WIDTH * TREEMAP_LAYOUT_HEIGHT;
+    const layoutItems: HeatmapLayoutItem[] = sorted.map((row) => {
+        const value = treemapValue(row);
+        return {
+            row,
+            area: (value / totalValue) * totalArea,
+            impactPct: getImpactPct(row, indexLevel),
+            changePct: numericOrNull(row.change_pct),
+        };
+    });
+    const remaining: HeatmapLayoutRect = {
+        x: 0,
+        y: 0,
+        width: TREEMAP_LAYOUT_WIDTH,
+        height: TREEMAP_LAYOUT_HEIGHT,
+    };
+    const tiles: HeatmapTile[] = [];
+    let row: HeatmapLayoutItem[] = [];
+
+    layoutItems.forEach((item) => {
+        const nextRow = [...row, item];
+        const shortSide = Math.min(remaining.width, remaining.height);
+        if (!row.length || worstTreemapAspect(nextRow, shortSide) <= worstTreemapAspect(row, shortSide)) {
+            row = nextRow;
+            return;
+        }
+        layoutTreemapRow(row, remaining, tiles);
+        row = [item];
+    });
+    layoutTreemapRow(row, remaining, tiles);
+    return tiles;
+}
+
+function formatTreemapScalePct(value: number): string {
+    const rounded = Math.abs(value) >= 1 ? Math.round(value) : Number(value.toFixed(2));
+    if (rounded === 0) return '0%';
+    return `${rounded.toLocaleString('tr-TR', {
+        minimumFractionDigits: Math.abs(rounded) >= 1 ? 0 : 2,
+        maximumFractionDigits: Math.abs(rounded) >= 1 ? 0 : 2,
+    })}%`;
+}
+
+function getTreemapTileColor(changePct: number | null, scaledMove: number): string {
+    if (changePct == null || changePct === 0) return 'hsl(146 10% 28%)';
+    if (changePct > 0) {
+        return `hsl(123 92% ${23 + scaledMove * 24}%)`;
+    }
+    return `hsl(0 40% ${25 + scaledMove * 18}%)`;
 }
 
 export default function MarketsView() {
@@ -501,11 +1601,19 @@ export default function MarketsView() {
     const [indexDetailLoading, setIndexDetailLoading] = useState(false);
     const [indexDetailError, setIndexDetailError] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [stockCardSearchTerm, setStockCardSearchTerm] = useState('');
     const [navCollapsed, setNavCollapsed] = useState(false);
     const [activeSection, setActiveSection] = useState<MarketSection>('markets');
     const [selectedIndex, setSelectedIndex] = useState<MarketIndexCode | null>(null);
     const [stockIndex, setStockIndex] = useState<MarketStockIndex>('XU100');
     const [returnMode, setReturnMode] = useState<StockReturnMode>('absolute');
+    const [terminalNow, setTerminalNow] = useState(() => new Date());
+    const [stockCardSymbols, setStockCardSymbols] = useState<string[]>(readStoredStockCards);
+    const [stockCards, setStockCards] = useState<MarketStockCardsResponse | null>(null);
+    const [stockCardsLoading, setStockCardsLoading] = useState(false);
+    const [stockCardsError, setStockCardsError] = useState<string | null>(null);
+    const [stockCardPendingSymbols, setStockCardPendingSymbols] = useState<string[]>(() => [...readStoredStockCards()]);
+    const [stockCardPickerOpen, setStockCardPickerOpen] = useState(false);
     const [stockSort, setStockSort] = useState<{ key: StockSortKey; direction: SortDirection }>({
         key: 'company',
         direction: 'asc',
@@ -514,11 +1622,60 @@ export default function MarketsView() {
         key: 'symbol',
         direction: 'asc',
     });
+    const [indexConstituentSort, setIndexConstituentSort] = useState<{
+        key: IndexConstituentSortKey;
+        direction: SortDirection;
+    }>({
+        key: 'impact_abs',
+        direction: 'desc',
+    });
     const stocksInFlightRef = useRef(false);
     const indicesInFlightRef = useRef(false);
     const indexDetailInFlightRef = useRef(false);
+    const stockCardsInFlightRef = useRef(false);
+    const marketPageRef = useRef<HTMLDivElement | null>(null);
+    const pendingMarketScrollResetRef = useRef(true);
+    const marketScrollResetFrameRef = useRef<number | null>(null);
     const latestStockIndexRef = useRef<MarketStockIndex>(stockIndex);
     const latestSelectedIndexRef = useRef<MarketIndexCode | null>(selectedIndex);
+    const latestStockCardSymbolsRef = useRef(stockCardSymbols.join(','));
+    const previousStockCardSymbolsRef = useRef<string[]>(stockCardSymbols);
+    const draggingStockCardSymbolRef = useRef<string | null>(null);
+    const [draggingStockCardSymbol, setDraggingStockCardSymbol] = useState<string | null>(null);
+    const stockCardSymbolsKey = stockCardSymbols.join(',');
+
+    useEffect(() => {
+        if (activeSection === 'markets') {
+            pendingMarketScrollResetRef.current = true;
+        }
+    }, [activeSection]);
+
+    useLayoutEffect(() => {
+        if (activeSection !== 'markets' || loading || error || !market) return;
+        if (!pendingMarketScrollResetRef.current) return;
+        if (stockCardSymbols.length > 0 && !stockCards && !stockCardsError) return;
+
+        const resetScroll = () => {
+            marketPageRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+            window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+            document.documentElement.scrollTop = 0;
+            document.body.scrollTop = 0;
+        };
+
+        resetScroll();
+        marketScrollResetFrameRef.current = window.requestAnimationFrame(() => {
+            resetScroll();
+            marketScrollResetFrameRef.current = window.requestAnimationFrame(resetScroll);
+        });
+        pendingMarketScrollResetRef.current = false;
+
+        return () => {
+            if (marketScrollResetFrameRef.current != null) {
+                window.cancelAnimationFrame(marketScrollResetFrameRef.current);
+                marketScrollResetFrameRef.current = null;
+            }
+        };
+    }, [activeSection, loading, error, market, stockCardSymbols.length, stockCards, stockCardsError]);
 
     useEffect(() => {
         latestStockIndexRef.current = stockIndex;
@@ -527,6 +1684,42 @@ export default function MarketsView() {
     useEffect(() => {
         latestSelectedIndexRef.current = selectedIndex;
     }, [selectedIndex]);
+
+    useEffect(() => {
+        latestStockCardSymbolsRef.current = stockCardSymbolsKey;
+        try {
+            window.localStorage.setItem(STOCK_CARD_STORAGE_KEY, JSON.stringify(stockCardSymbols));
+        } catch {
+            // localStorage may be unavailable in private or restricted contexts.
+        }
+    }, [stockCardSymbols, stockCardSymbolsKey]);
+
+    useEffect(() => {
+        const previousSymbols = previousStockCardSymbolsRef.current;
+        const previousSet = new Set(previousSymbols);
+        const selectedSet = new Set(stockCardSymbols);
+        const addedSymbols = stockCardSymbols.filter((symbol) => !previousSet.has(symbol));
+
+        setStockCardPendingSymbols((previous) => {
+            if (stockCardSymbols.length === 0) return [];
+            const next = previous.filter((symbol) => selectedSet.has(symbol));
+            const existing = new Set(next);
+            for (const symbol of addedSymbols) {
+                if (!existing.has(symbol)) {
+                    next.push(symbol);
+                }
+            }
+            return next;
+        });
+
+        previousStockCardSymbolsRef.current = stockCardSymbols;
+    }, [stockCardSymbols, stockCardSymbolsKey]);
+
+    useEffect(() => {
+        if (activeSection !== 'markets') return;
+        const intervalId = window.setInterval(() => setTerminalNow(new Date()), 1000);
+        return () => window.clearInterval(intervalId);
+    }, [activeSection]);
 
     useEffect(() => { 
         loadStats(); 
@@ -547,6 +1740,22 @@ export default function MarketsView() {
         }, 3000);
         return () => window.clearInterval(intervalId);
     }, [activeSection, stockIndex]);
+
+    useEffect(() => {
+        if (activeSection !== 'markets') return;
+        if (stockCardSymbols.length === 0) {
+            setStockCards(null);
+            setStockCardsError(null);
+            setStockCardsLoading(false);
+            setStockCardPendingSymbols([]);
+            return;
+        }
+        loadStockCards(false, true, stockCardSymbols);
+        const intervalId = window.setInterval(() => {
+            loadStockCards(true, false, stockCardSymbols);
+        }, 30000);
+        return () => window.clearInterval(intervalId);
+    }, [activeSection, stockCardSymbols, stockCardSymbolsKey]);
 
     useEffect(() => {
         if (activeSection !== 'indices') return;
@@ -601,6 +1810,39 @@ export default function MarketsView() {
         }
     }
 
+    async function loadStockCards(
+        silent = false,
+        refresh = false,
+        requestedSymbols: string[] = stockCardSymbols,
+    ) {
+        if (requestedSymbols.length === 0) return;
+        const requestedKey = requestedSymbols.join(',');
+        stockCardsInFlightRef.current = true;
+        if (!silent) setStockCardsLoading(true);
+        if (!silent) setStockCardsError(null);
+        try {
+            const payload = await apiClient.marketStockCards({ symbols: requestedSymbols, refresh });
+            if (latestStockCardSymbolsRef.current !== requestedKey) return;
+            setStockCards(payload);
+            setStockCardsError(null);
+            const readySymbols = new Set(
+                (payload.items ?? [])
+                    .filter((item) => hasStockCardCoreData(item))
+                    .map((item) => item.symbol),
+            );
+            if (readySymbols.size > 0) {
+                setStockCardPendingSymbols((previous) => previous.filter((symbol) => !readySymbols.has(symbol)));
+            }
+        } catch (err: any) {
+            if (!silent || !stockCards) {
+                setStockCardsError(err.message || 'Hisse kartları yüklenemedi.');
+            }
+        } finally {
+            stockCardsInFlightRef.current = false;
+            if (!silent) setStockCardsLoading(false);
+        }
+    }
+
     async function loadIndices(silent = false, refresh = false) {
         if (indicesInFlightRef.current) return;
         indicesInFlightRef.current = true;
@@ -645,12 +1887,17 @@ export default function MarketsView() {
     }
 
     const normalizedSearch = searchTerm.trim().toLowerCase();
-    const filteredCompanies = useMemo(
+    const normalizedStockCardSearch = stockCardSearchTerm.trim().toLowerCase();
+    const stockCardCandidates = useMemo(
         () =>
-            (market?.rows || []).filter((row) =>
-                row.company.toLowerCase().includes(normalizedSearch),
-            ),
-        [market?.rows, normalizedSearch],
+            (market?.rows || [])
+                .filter((row) => !stockCardSymbols.includes(row.company))
+                .filter((row) => {
+                    if (!normalizedStockCardSearch) return true;
+                    return row.company.toLowerCase().includes(normalizedStockCardSearch);
+                })
+                .slice(0, 18),
+        [market?.rows, normalizedStockCardSearch, stockCardSymbols],
     );
 
     const filteredStocks = useMemo(
@@ -721,23 +1968,198 @@ export default function MarketsView() {
         return arr;
     }, [filteredStocks, stockSort, stocks?.benchmarks, returnMode]);
 
-    const coverageRows = market?.coverage_rows || [];
-    const maxCoverageQuarterCount = Math.max(1, ...coverageRows.map((row) => row.quarter_count));
+    const stockCardsBySymbol = useMemo(() => {
+        const map = new Map<string, MarketStockCardItem>();
+        for (const item of stockCards?.items || []) {
+            map.set(item.symbol, item);
+        }
+        return map;
+    }, [stockCards?.items]);
+    const stockCardPendingSet = useMemo(() => new Set(stockCardPendingSymbols), [stockCardPendingSymbols]);
+    const canAddStockCards = stockCardSymbols.length < MAX_STOCK_CARDS;
     const activeBenchmarkIndex = getBenchmarkIndex(returnMode);
     const activeReturnModeLabel = RETURN_MODE_OPTIONS.find((option) => option.id === returnMode)?.label || 'Mutlak';
-    const indexConstituents = indexDetail?.constituents || [];
-    const positiveConstituents = indexConstituents.filter((row) => (row.change_pct || 0) > 0).length;
-    const negativeConstituents = indexConstituents.filter((row) => (row.change_pct || 0) < 0).length;
+    const indexConstituents = useMemo(() => indexDetail?.constituents ?? [], [indexDetail?.constituents]);
+    const indexImpactLevel = numericOrNull(indexDetail?.price) ?? numericOrNull(indexDetail?.prev_close);
+    const positiveConstituents = indexConstituents.filter((row) => (row.point_effect || 0) > 0).length;
+    const negativeConstituents = indexConstituents.filter((row) => (row.point_effect || 0) < 0).length;
     const neutralConstituents = indexConstituents.length - positiveConstituents - negativeConstituents;
-    const weightedConstituents = indexConstituents.filter((row) => row.weight_pct != null && row.weight_pct > 0);
-    const pageTitle = activeSection === 'indices' ? 'Borsa İstanbul Endeksleri' : 'Piyasa Görünümü';
+    const sortedIndexConstituents = useMemo(() => {
+        const arr = [...indexConstituents];
+        arr.sort((a, b) => {
+            const av = constituentSortValue(a, indexConstituentSort.key, indexImpactLevel);
+            const bv = constituentSortValue(b, indexConstituentSort.key, indexImpactLevel);
+            const aMissing = av == null || av === '';
+            const bMissing = bv == null || bv === '';
+            if (aMissing && bMissing) return a.symbol.localeCompare(b.symbol, 'tr');
+            if (aMissing) return 1;
+            if (bMissing) return -1;
+
+            let result = 0;
+            if (typeof av === 'string' || typeof bv === 'string') {
+                result = String(av).localeCompare(String(bv), 'tr');
+            } else {
+                result = Number(av) - Number(bv);
+            }
+            if (result === 0) result = a.symbol.localeCompare(b.symbol, 'tr');
+            return indexConstituentSort.direction === 'asc' ? result : -result;
+        });
+        return arr;
+    }, [indexConstituents, indexConstituentSort, indexImpactLevel]);
+    const heatmapConstituents = useMemo(
+        () =>
+            indexConstituents
+                .filter((row) => row.weight_pct != null && row.weight_pct > 0)
+                .sort((a, b) => treemapValue(b) - treemapValue(a)),
+        [indexConstituents],
+    );
+    const maxHeatmapMovePct = Math.max(
+        0.01,
+        ...heatmapConstituents.map((row) => Math.abs(row.change_pct ?? 0)),
+    );
+    const heatmapTiles = useMemo(
+        () => buildHeatmapTiles(heatmapConstituents, indexImpactLevel),
+        [heatmapConstituents, indexImpactLevel],
+    );
+    const hasPointEffects = useMemo(
+        () => indexConstituents.some((row) => row.point_effect != null),
+        [indexConstituents],
+    );
+    const netPointEffect = useMemo<number | null>(
+        () => {
+            if (!hasPointEffects) return null;
+            return indexConstituents.reduce((total, row) => {
+                if (row.point_effect == null || !Number.isFinite(row.point_effect)) return total;
+                return total + row.point_effect;
+            }, 0);
+        },
+        [indexConstituents, hasPointEffects],
+    );
+    const netImpactPct = netPointEffect != null && indexImpactLevel && indexImpactLevel > 0 ? (netPointEffect / indexImpactLevel) * 100 : null;
+    const pageTitle =
+        activeSection === 'indices'
+            ? 'Borsa İstanbul Endeksleri'
+            : activeSection === 'stocks'
+              ? 'BIST Hisseleri'
+              : 'Piyasa Görünümü';
     const pageDescription =
         activeSection === 'indices'
             ? 'XU100 ve XU030 endekslerini, getirileri ve endeks içi şirket hareketlerini takip edin.'
+            : activeSection === 'stocks'
+              ? 'XU100 ve XU030 hisselerini getiri, hacim ve piyasa değeriyle karşılaştırın.'
             : 'Güncel fiyatlar, finansal görünüm ve analiz erişimi tek ekranda.';
 
     const onCompanyClick = (ticker: string) => {
         window.location.href = `/?ticker=${ticker}`;
+    };
+
+    const handleAddStockCard = (symbol: string) => {
+        const normalized = normalizeStockCardSymbol(symbol);
+        setStockCardSymbols((prev) => {
+            if (prev.includes(normalized) || prev.length >= MAX_STOCK_CARDS) return prev;
+            return [...prev, normalized];
+        });
+        setStockCardSearchTerm('');
+        setStockCardPickerOpen(false);
+    };
+
+    const handleStockCardMoveStart = (symbol: string) => {
+        draggingStockCardSymbolRef.current = symbol;
+        setDraggingStockCardSymbol(symbol);
+    };
+
+    const moveStockCard = (
+        sourceSymbol: string,
+        targetSymbol: string,
+        placement: StockCardDropPlacement,
+    ) => {
+        if (sourceSymbol === targetSymbol) return;
+
+        setStockCardSymbols((prev) => {
+            if (!prev.includes(sourceSymbol) || !prev.includes(targetSymbol)) return prev;
+            const next = prev.filter((symbol) => symbol !== sourceSymbol);
+            const targetIndex = next.indexOf(targetSymbol);
+            if (targetIndex < 0) return prev;
+            next.splice(targetIndex + (placement === 'after' ? 1 : 0), 0, sourceSymbol);
+            const didChange = next.some((symbol, index) => symbol !== prev[index]);
+            return didChange ? next : prev;
+        });
+    };
+
+    const handleStockCardMoveOver = (targetSymbol: string, placement: StockCardDropPlacement) => {
+        const sourceSymbol = draggingStockCardSymbolRef.current;
+        if (!sourceSymbol || sourceSymbol === targetSymbol) return;
+        moveStockCard(sourceSymbol, targetSymbol, placement);
+    };
+
+    const handleStockCardMoveToEnd = () => {
+        const sourceSymbol = draggingStockCardSymbolRef.current;
+        if (!sourceSymbol) return;
+        setStockCardSymbols((prev) => {
+            if (!prev.includes(sourceSymbol) || prev[prev.length - 1] === sourceSymbol) return prev;
+            const next = prev.filter((symbol) => symbol !== sourceSymbol);
+            next.push(sourceSymbol);
+            return next;
+        });
+    };
+
+    const handleStockCardGridDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+        const sourceSymbol = draggingStockCardSymbolRef.current;
+        if (!sourceSymbol) return;
+
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+
+        const cardElements = Array.from(
+            event.currentTarget.querySelectorAll<HTMLElement>('.stock-card:not(.stock-card-dragging)'),
+        );
+        let closestDrop: {
+            symbol: string;
+            placement: StockCardDropPlacement;
+            distance: number;
+        } | null = null;
+
+        for (const cardElement of cardElements) {
+            const targetSymbol = cardElement.dataset.stockCardSymbol;
+            if (!targetSymbol || targetSymbol === sourceSymbol) continue;
+
+            const rect = cardElement.getBoundingClientRect();
+            const outsideX = event.clientX < rect.left
+                ? rect.left - event.clientX
+                : event.clientX > rect.right
+                  ? event.clientX - rect.right
+                  : 0;
+            const outsideY = event.clientY < rect.top
+                ? rect.top - event.clientY
+                : event.clientY > rect.bottom
+                  ? event.clientY - rect.bottom
+                  : 0;
+            const placement: StockCardDropPlacement =
+                event.clientX >= rect.left + rect.width / 2 ? 'after' : 'before';
+            const distance = outsideY * 1000 + outsideX;
+
+            if (!closestDrop || distance < closestDrop.distance) {
+                closestDrop = { symbol: targetSymbol, placement, distance };
+            }
+        }
+
+        if (closestDrop) {
+            moveStockCard(sourceSymbol, closestDrop.symbol, closestDrop.placement);
+        } else {
+            handleStockCardMoveToEnd();
+        }
+    };
+
+    const handleStockCardMoveEnd = () => {
+        draggingStockCardSymbolRef.current = null;
+        setDraggingStockCardSymbol(null);
+    };
+
+    const handleRemoveStockCard = (symbol: string) => {
+        if (draggingStockCardSymbolRef.current === symbol) {
+            handleStockCardMoveEnd();
+        }
+        setStockCardSymbols((prev) => prev.filter((item) => item !== symbol));
     };
 
     const handleSectionChange = (section: MarketSection) => {
@@ -763,6 +2185,28 @@ export default function MarketsView() {
         });
     };
 
+    const handleIndexConstituentSort = (key: IndexConstituentSortKey) => {
+        setIndexConstituentSort((prev) => {
+            if (prev.key === key) {
+                return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+            }
+            return { key, direction: key === 'symbol' ? 'asc' : 'desc' };
+        });
+    };
+
+    const getTreemapTileScale = (row: MarketIndexConstituent): number => {
+        const movePct = Math.abs(row.change_pct ?? 0);
+        return Math.min(1, Math.sqrt(movePct / maxHeatmapMovePct));
+    };
+
+    const getHeatmapTileFontSize = (tile: HeatmapTile): string => {
+        if (tile.areaPct >= 16 && tile.width >= 22 && tile.height >= 22) return '2rem';
+        if (tile.areaPct >= 8) return '1.45rem';
+        if (tile.areaPct >= 3.5) return '1rem';
+        if (tile.areaPct >= 1.2) return '0.78rem';
+        return '0.64rem';
+    };
+
     const renderReturnCell = (row: MarketStockRow, key: StockReturnKey) => {
         const value = getReturnValue(row, key, stocks?.benchmarks, returnMode);
         return (
@@ -780,45 +2224,38 @@ export default function MarketsView() {
                 onCollapsedChange={setNavCollapsed}
                 onSectionChange={handleSectionChange}
             />
-            <div className="market-page">
-                {market && (
+            <div className={`markets-workspace${activeSection === 'markets' ? ' markets-workspace-with-rail' : ''}`}>
+                <div className="market-page" ref={marketPageRef}>
+                {market && activeSection !== 'markets' && (
                     <MarketSidebar rows={market.rows} onSelectTicker={onCompanyClick} />
                 )}
-            <header className="market-header">
-                <div className="market-title">
-                    <h1>{pageTitle}</h1>
-                    <p>{pageDescription}</p>
-                </div>
-                
-                {activeSection === 'markets' && market && (
-                    <div className="market-quick-stats">
-                        <div className="quick-stat">
-                            <span className="qs-label">BIST100</span>
-                            <span className="qs-value">{market.stats.bist100_count}</span>
-                        </div>
-                        <div className="quick-stat">
-                            <span className="qs-label">Analiz Hazır</span>
-                            <span className="qs-value">{market.stats.rag_ready_count}</span>
-                        </div>
-                        <div className="quick-stat">
-                            <span className="qs-label">Finansal Görünüm</span>
-                            <span className="qs-value">{market.stats.kap_only_count}</span>
-                        </div>
-                        <div className="quick-stat">
-                            <span className="qs-label">Rapor</span>
-                            <span className="qs-value">{market.stats.pdf_count}</span>
-                        </div>
-                        <div className="quick-stat">
-                            <span className="qs-label">Sayfa</span>
-                            <span className="qs-value">{market.stats.page_count}</span>
-                        </div>
+            {activeSection !== 'markets' && (
+                <header className="market-header">
+                    <div className="market-title">
+                        <h1>{pageTitle}</h1>
+                        <p>{pageDescription}</p>
                     </div>
-                )}
-            </header>
+                </header>
+            )}
 
             {activeSection === 'markets' && (
-                <div className="market-watch-slot">
-                    <MarketWatchStrip />
+                <div className="market-terminal-shell">
+                    <div className="market-overview-head">
+                        <div className="market-title">
+                            <h1>Piyasa Görünümü</h1>
+                            <p>Güncel fiyatlar, finansal görünüm ve seçtiğiniz hisse kartları tek ekranda.</p>
+                        </div>
+                    </div>
+                    <div className="market-session-bar">
+                        <div className="market-session-date">
+                            <CalendarDays size={18} aria-hidden="true" />
+                            <strong>Bugün</strong>
+                            <span>{formatTerminalDate(terminalNow)}</span>
+                            <time>{formatTerminalClock(terminalNow)}</time>
+                            <span className="market-session-dot" aria-label="Piyasa izleme aktif" />
+                        </div>
+                    </div>
+                    <MarketWatchStrip variant="compact" />
                 </div>
             )}
 
@@ -832,98 +2269,162 @@ export default function MarketsView() {
             )}
 
             {activeSection === 'markets' && !loading && !error && market && (
-                <div className="market-content">
+                <div className="market-content market-content-terminal">
                     <div className="market-main-column">
-                        <div className="panel company-search-panel">
-                            <div className="panel-header">
-                                <h2>Hisse Seçimi</h2>
-                                <div className="search-box">
-                                    <input 
-                                        type="text" 
-                                        placeholder="Hisse kodu ile ara..." 
-                                        value={searchTerm}
-                                        onChange={(e) => setSearchTerm(e.target.value)}
-                                        className="input-field"
-                                    />
+                        <section className="panel stock-cards-panel">
+                            <div className="stock-cards-toolbar">
+                                <div className="stock-cards-title-row">
+                                    <h2>Hisse Kartları</h2>
+                                    <span className="panel-kicker">
+                                        {stockCardSymbols.length}/{MAX_STOCK_CARDS} kart
+                                    </span>
+                                    <button
+                                        type="button"
+                                        className="stock-card-add-link"
+                                        onClick={() => setStockCardPickerOpen((open) => !open)}
+                                        disabled={!canAddStockCards}
+                                    >
+                                        <span>Ekle</span>
+                                        <Plus size={16} aria-hidden="true" />
+                                    </button>
                                 </div>
                             </div>
-                            
-                            <div className="company-grid">
-                                {filteredCompanies.length > 0 ? (
-                                    filteredCompanies.map((row) => {
-                                        const status = getStatusMeta(row);
-                                        return (
-                                            <FlashCompanyCard
-                                                key={row.company} 
-                                                row={row}
-                                                onClick={() => onCompanyClick(row.company)}
-                                            >
-                                                <div className="cc-header">
-                                                    <div className="cc-symbol-row">
-                                                        <h3>{row.company}</h3>
-                                                        <span className={`cc-status ${status.className}`}>{status.label}</span>
-                                                    </div>
-                                                    <div className="cc-price-row">
-                                                        <span className="cc-price">{formatPrice(row)}</span>
-                                                        <span className={`cc-change ${getPriceChangeClass(row.change_pct)}`}>
-                                                            {formatChangePct(row.change_pct)}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                                <div className="cc-body">
-                                                    <div className="cc-metric">
-                                                        <span className="cc-label">Son Rapor</span>
-                                                        <span className="cc-value">
-                                                            {getLatestQuarterText(row)}
-                                                        </span>
-                                                    </div>
-                                                    <div className="cc-metric">
-                                                        <span className="cc-label">Analiz Kapsamı</span>
-                                                        <span className={`cc-value ${row.has_rag ? '' : 'empty'}`}>
-                                                            {row.has_rag ? `${row.quarter_count} çeyrek` : 'Finansal görünüm'}
-                                                        </span>
-                                                    </div>
-                                                    <div className="cc-metric">
-                                                        <span className="cc-label">Finansal Veri</span>
-                                                        <span className={`cc-value ${row.has_kap_cache ? '' : 'empty'}`}>
-                                                            {getFinancialReadinessText(row)}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                                <div className="cc-foot">{status.hint}</div>
-                                            </FlashCompanyCard>
-                                        );
-                                    })
-                                ) : (
-                                    <div className="no-results">Aranan kritere uyan BIST100 hissesi bulunamadı.</div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div className="market-side-column">
-                        {coverageRows.length > 0 && (
-                            <div className="panel coverage-panel">
-                                <div className="panel-header">
-                                    <h3>Analiz Kapsamı</h3>
-                                    <span className="panel-kicker">Belge kapsamı en güçlü hisseler</span>
-                                </div>
-                                <div className="coverage-list">
-                                    {coverageRows.map((row) => (
-                                        <div key={row.company} className="coverage-item" onClick={() => onCompanyClick(row.company)}>
-                                            <span className="ci-company">{row.company}</span>
-                                            <div className="ci-bar-container">
-                                                <div
-                                                    className="ci-bar"
-                                                    style={{ width: `${Math.max(12, (row.quarter_count / maxCoverageQuarterCount) * 100)}%` }}
-                                                />
+
+                            {stockCardPickerOpen && (
+                                <div className="stock-card-picker">
+                                    <div className="stock-card-picker-search">
+                                        <Search size={16} aria-hidden="true" />
+                                        <input
+                                            type="text"
+                                            placeholder="Hisse ara..."
+                                            value={stockCardSearchTerm}
+                                            onChange={(event) => setStockCardSearchTerm(event.target.value)}
+                                            autoFocus
+                                        />
+                                        <button
+                                            type="button"
+                                            className="stock-card-picker-close"
+                                            onClick={() => {
+                                                setStockCardPickerOpen(false);
+                                                setStockCardSearchTerm('');
+                                            }}
+                                            aria-label="Hisse seçiciyi kapat"
+                                            title="Kapat"
+                                        >
+                                            <X size={16} aria-hidden="true" />
+                                        </button>
+                                    </div>
+                                    <div className="stock-card-picker-heading">Hisse Senetleri</div>
+                                    <div className="stock-card-picker-list">
+                                        {stockCardCandidates.length > 0 ? (
+                                            stockCardCandidates.map((row) => (
+                                                <button
+                                                    key={row.company}
+                                                    type="button"
+                                                    onClick={() => handleAddStockCard(row.company)}
+                                                >
+                                                    <SymbolLogo
+                                                        symbol={row.company}
+                                                        name={row.company}
+                                                        kind="stock"
+                                                        logoUrl={row.logo_url}
+                                                        size="sm"
+                                                        className="stock-card-picker-logo"
+                                                    />
+                                                    <span className="stock-card-picker-copy">
+                                                        <strong>{row.company}</strong>
+                                                    </span>
+                                                </button>
+                                            ))
+                                        ) : (
+                                            <div className="stock-card-picker-empty">
+                                                Eklenebilecek hisse bulunamadı.
                                             </div>
-                                            <span className="ci-value">{row.quarter_count} Çyrk</span>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {stockCardsError && (
+                                <div className="stock-card-error">
+                                    <span>{stockCardsError}</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => loadStockCards(false, true, stockCardSymbols)}
+                                    >
+                                        Tekrar dene
+                                    </button>
+                                </div>
+                            )}
+
+                            {stockCardSymbols.length === 0 ? (
+                                <div className="stock-card-empty-state">
+                                    <h3>Henüz hisse kartı yok</h3>
+                                    <p>Takip etmek istediğiniz hisseleri ekleyin; fiyat, gün içi grafik ve temel piyasa verileri burada görünsün.</p>
+                                    <button
+                                        type="button"
+                                        className="stock-card-empty-action"
+                                        onClick={() => setStockCardPickerOpen(true)}
+                                    >
+                                        <Plus size={16} aria-hidden="true" />
+                                        Hisse kartı ekle
+                                    </button>
+                                </div>
+                            ) : !stockCards && !stockCardsError ? (
+                                <div className="stock-card-skeleton-grid">
+                                    {stockCardSymbols.map((symbol) => (
+                                        <div key={symbol} className="stock-card-skeleton">
+                                            <div className="stock-card-skeleton-head">
+                                                <div className="stock-card-skeleton-logo stock-card-skeleton-pulse" />
+                                                <div className="stock-card-skeleton-id">
+                                                    <div className="stock-card-skeleton-symbol stock-card-skeleton-pulse" />
+                                                    <div className="stock-card-skeleton-company stock-card-skeleton-pulse" />
+                                                </div>
+                                            </div>
+                                            <div className="stock-card-skeleton-price-row">
+                                                <div className="stock-card-skeleton-price stock-card-skeleton-pulse" />
+                                                <div className="stock-card-skeleton-change stock-card-skeleton-pulse" />
+                                            </div>
+                                            <div className="stock-card-skeleton-metrics">
+                                                <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
+                                                <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
+                                                <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
+                                            </div>
+                                            <div className="stock-card-skeleton-chart stock-card-skeleton-pulse" />
                                         </div>
                                     ))}
                                 </div>
-                            </div>
-                        )}
+                            ) : (
+                                <div
+                                    className="stock-card-grid"
+                                    onDragOver={handleStockCardGridDragOver}
+                                    onDrop={(event) => {
+                                        event.preventDefault();
+                                        handleStockCardMoveEnd();
+                                    }}
+                                >
+                                    {stockCardSymbols.map((symbol) => {
+                                        const item = stockCardsBySymbol.get(symbol) || emptyStockCardItem(symbol);
+                                        const isCardLoading =
+                                            stockCardPendingSet.has(symbol)
+                                            || (stockCardsLoading && !stockCardsBySymbol.has(symbol));
+                                        return (
+                                            <MarketStockCard
+                                                key={symbol}
+                                                item={item}
+                                                onOpen={() => onCompanyClick(symbol)}
+                                                onRemove={() => handleRemoveStockCard(symbol)}
+                                                onMoveStart={() => handleStockCardMoveStart(symbol)}
+                                                onMoveOver={(placement) => handleStockCardMoveOver(symbol, placement)}
+                                                onMoveEnd={handleStockCardMoveEnd}
+                                                isLoading={isCardLoading}
+                                                isDragging={draggingStockCardSymbol === symbol}
+                                            />
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </section>
                     </div>
                 </div>
             )}
@@ -937,11 +2438,17 @@ export default function MarketsView() {
                                 <span className="panel-kicker">
                                     {stocks?.index || stockIndex} ·{' '}
                                     {sortedStocks.length || stocks?.rows.length || 0} hisse
-                                    {stocksLoading && stocks ? ' · güncelleniyor' : ''}
                                 </span>
                             </div>
                             <div className="stocks-panel-actions">
-                                <div className="stocks-segment" aria-label="Endeks seçimi">
+                                <div
+                                    className="stocks-segment"
+                                    aria-label="Endeks seçimi"
+                                    style={{
+                                        '--item-count': STOCK_INDEX_OPTIONS.length,
+                                        '--active-index': STOCK_INDEX_OPTIONS.indexOf(stockIndex)
+                                    } as React.CSSProperties}
+                                >
                                     {STOCK_INDEX_OPTIONS.map((option) => (
                                         <button
                                             key={option}
@@ -954,7 +2461,14 @@ export default function MarketsView() {
                                         </button>
                                     ))}
                                 </div>
-                                <div className="stocks-segment stocks-return-segment" aria-label="Getiri modu">
+                                <div
+                                    className="stocks-segment stocks-return-segment"
+                                    aria-label="Getiri modu"
+                                    style={{
+                                        '--item-count': RETURN_MODE_OPTIONS.length,
+                                        '--active-index': RETURN_MODE_OPTIONS.findIndex(o => o.id === returnMode)
+                                    } as React.CSSProperties}
+                                >
                                     {RETURN_MODE_OPTIONS.map((option) => (
                                         <button
                                             key={option.id}
@@ -1055,12 +2569,27 @@ export default function MarketsView() {
                                                         rank={index + 1}
                                                         onClick={() => onCompanyClick(row.company)}
                                                     >
-                                                        <td className="stocks-symbol-cell">{row.company}</td>
+                                                        <td className="stocks-symbol-cell">
+                                                            <span className="stocks-symbol-main">
+                                                                <SymbolLogo
+                                                                    symbol={row.company}
+                                                                    name={row.company}
+                                                                    kind="stock"
+                                                                    logoUrl={row.logo_url}
+                                                                    size="xs"
+                                                                    className="stocks-symbol-logo"
+                                                                />
+                                                                <span>{row.company}</span>
+                                                            </span>
+                                                        </td>
                                                         <td className="stocks-cell-right stocks-price-cell">{formatStockPrice(row)}</td>
                                                         <td className={`stocks-cell-right ${getTableChangeClass(row.change_pct)}`}>
                                                             {formatTablePct(row.change_pct)}
                                                         </td>
                                                         <td className="stocks-cell-right stocks-volume-cell">{formatVolume(row.volume)}</td>
+                                                        <td className="stocks-cell-right stocks-market-cap-cell">
+                                                            {formatMarketCap(row.market_cap)}
+                                                        </td>
                                                         {renderReturnCell(row, 'return_1w_pct')}
                                                         {renderReturnCell(row, 'return_1m_pct')}
                                                         {renderReturnCell(row, 'return_3m_pct')}
@@ -1087,7 +2616,6 @@ export default function MarketsView() {
                                 <h2>Endeksler</h2>
                                 <span className="panel-kicker">
                                     {filteredIndices.length || indices?.rows.length || 0} endeks
-                                    {indicesLoading && indices ? ' · güncelleniyor' : ''}
                                 </span>
                             </div>
                             <div className="stocks-panel-actions">
@@ -1186,7 +2714,16 @@ export default function MarketsView() {
                                                                 >
                                                                     {column.key === 'symbol' ? (
                                                                         <span className="indices-symbol-main">
-                                                                            <span>{row.symbol}</span>
+                                                                            <span className="indices-symbol-head">
+                                                                                <SymbolLogo
+                                                                                    symbol={row.symbol}
+                                                                                    name={row.label}
+                                                                                    kind="index"
+                                                                                    size="xs"
+                                                                                    className="indices-symbol-logo"
+                                                                                />
+                                                                                <span>{row.symbol}</span>
+                                                                            </span>
                                                                             <small>{row.label}</small>
                                                                         </span>
                                                                     ) : (
@@ -1236,7 +2773,13 @@ export default function MarketsView() {
                         <>
                             <section className="indices-hero">
                                 <div className="indices-hero-main">
-                                    <div className="indices-logo">{indexDetail.symbol.slice(-3)}</div>
+                                    <SymbolLogo
+                                        symbol={indexDetail.symbol}
+                                        name={indexDetail.label}
+                                        kind="index"
+                                        size="lg"
+                                        className="indices-logo"
+                                    />
                                     <div>
                                         <h2>{indexDetail.symbol}</h2>
                                         <p>{indexDetail.label}</p>
@@ -1271,7 +2814,11 @@ export default function MarketsView() {
                             </div>
 
                             <section className="indices-chart-panel">
-                                <IndexLineChart points={indexDetail.line_points} prevClose={indexDetail.prev_close} />
+                                <IndexLineChart
+                                    points={indexDetail.line_points}
+                                    prevClose={indexDetail.prev_close}
+                                    changePct={indexDetail.change_pct}
+                                />
                             </section>
 
                             <section className="indices-impact-panel">
@@ -1285,48 +2832,140 @@ export default function MarketsView() {
                                     {indexDetailError && <span className="stocks-soft-error">Son yenileme başarısız oldu.</span>}
                                 </div>
 
-                                {indexDetail.weight_status !== 'available' && (
+                                {indexDetail.weight_note && (
                                     <div className="indices-weight-note">{indexDetail.weight_note}</div>
                                 )}
 
                                 {indexDetail.weight_status === 'available' && (
-                                    <div className="indices-treemap">
-                                        {weightedConstituents.map((row) => (
-                                            <div
-                                                key={row.symbol}
-                                                className={`indices-tree-tile ${getTableChangeClass(row.change_pct)}`}
-                                                style={{ flexBasis: `${Math.max(7, Math.min(38, row.weight_pct || 0))}%` }}
-                                                title={`${row.symbol} · ${formatWeight(row.weight_pct)} · ${formatPointEffect(row.point_effect)} puan`}
-                                            >
-                                                <strong>{row.symbol}</strong>
-                                                <span>{formatPointEffect(row.point_effect)}</span>
+                                    <>
+                                        <div className="indices-treemap-scale" aria-hidden="true">
+                                            <div className="indices-treemap-scale-labels">
+                                                <span>{formatTreemapScalePct(-maxHeatmapMovePct)}</span>
+                                                <span>0%</span>
+                                                <span>{formatTreemapScalePct(maxHeatmapMovePct)}</span>
                                             </div>
-                                        ))}
-                                    </div>
+                                            <div className="indices-treemap-scale-bar" />
+                                        </div>
+                                        <div className="indices-treemap">
+                                            {heatmapTiles.map((tile) => {
+                                                const row = tile.row;
+                                                const impactPct = tile.impactPct;
+                                                const scaledMove = getTreemapTileScale(row);
+                                                const showChange = tile.areaPct >= 1.05 && tile.width >= 5 && tile.height >= 4.5;
+                                                const showSymbol = tile.areaPct >= 0.45 && tile.width >= 3.5 && tile.height >= 3;
+                                                const tileDetail = `${row.symbol} · Değişim ${formatHeatmapChangePct(tile.changePct)} · Ağırlık ${formatWeight(row.weight_pct)} · Endeks etkisi ${formatImpactPct(impactPct)} · ${formatPointEffectShort(tile.pointEffect)}`;
+                                                const tileDensityClass = tile.areaPct >= 14
+                                                    ? 'is-hero'
+                                                    : showChange
+                                                    ? 'is-full'
+                                                    : showSymbol
+                                                        ? 'is-label-only'
+                                                        : 'is-tiny';
+                                                return (
+                                                    <div
+                                                        key={row.symbol}
+                                                        className={`indices-tree-tile ${tileDensityClass} ${getTableChangeClass(tile.changePct)}`}
+                                                        style={{
+                                                            left: `${tile.left}%`,
+                                                            top: `${tile.top}%`,
+                                                            width: `${tile.width}%`,
+                                                            height: `${tile.height}%`,
+                                                            backgroundColor: getTreemapTileColor(tile.changePct, scaledMove),
+                                                            fontSize: getHeatmapTileFontSize(tile),
+                                                        }}
+                                                        title={tileDetail}
+                                                        aria-label={tileDetail}
+                                                    >
+                                                        {showSymbol && <strong>{row.symbol}</strong>}
+                                                        {showChange && (
+                                                            <span className="indices-tree-impact-pct">{formatHeatmapChangePct(tile.changePct)}</span>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </>
                                 )}
 
                                 <div className="indices-impact-summary">
-                                    <span className="stocks-up">{positiveConstituents} pozitif</span>
-                                    <span className="stocks-flat">{neutralConstituents} nötr</span>
-                                    <span className="stocks-down">{negativeConstituents} negatif</span>
+                                    <div className="indices-impact-counts">
+                                        <span className="indices-impact-count stocks-up">
+                                            <span className="indices-impact-dot" />
+                                            {positiveConstituents} pozitif
+                                        </span>
+                                        <span className="indices-impact-count stocks-flat">
+                                            <span className="indices-impact-dot" />
+                                            {neutralConstituents} nötr
+                                        </span>
+                                        <span className="indices-impact-count stocks-down">
+                                            <span className="indices-impact-dot" />
+                                            {negativeConstituents} negatif
+                                        </span>
+                                    </div>
+                                    <div className="indices-net-impact">
+                                        <span>{indexDetail.symbol} tahmini katkı:</span>
+                                        <strong className={getTableChangeClass(netPointEffect)}>
+                                            {formatPointEffectShort(netPointEffect)}
+                                        </strong>
+                                        <span>·</span>
+                                        <strong className={getTableChangeClass(netImpactPct)}>
+                                            {formatImpactPct(netImpactPct)}
+                                        </strong>
+                                    </div>
                                 </div>
 
                                 <div className="stocks-table-wrap indices-constituent-wrap">
                                     <table className="stocks-table indices-constituent-table">
                                         <thead>
                                             <tr>
-                                                <th>Şirket</th>
-                                                <th className="stocks-cell-right">Son Fiyat</th>
-                                                <th className="stocks-cell-right">%</th>
-                                                <th className="stocks-cell-right">Hacim</th>
-                                                <th className="stocks-cell-right">Endeks Ağırlığı</th>
-                                                <th className="stocks-cell-right">Puan Etkisi</th>
+                                                {INDEX_CONSTITUENT_COLUMNS.map((column) => {
+                                                    const isActive = indexConstituentSort.key === column.key;
+                                                    return (
+                                                        <th
+                                                            key={column.key}
+                                                            className={column.align === 'right' ? 'stocks-cell-right' : undefined}
+                                                            scope="col"
+                                                            aria-sort={
+                                                                isActive
+                                                                    ? indexConstituentSort.direction === 'asc'
+                                                                        ? 'ascending'
+                                                                        : 'descending'
+                                                                    : 'none'
+                                                            }
+                                                        >
+                                                            <button
+                                                                type="button"
+                                                                className="stocks-sort-button"
+                                                                onClick={() => handleIndexConstituentSort(column.key)}
+                                                            >
+                                                                <span>{column.label}</span>
+                                                                {isActive && (
+                                                                    <span className="stocks-sort-indicator">
+                                                                        {indexConstituentSort.direction === 'asc' ? '↑' : '↓'}
+                                                                    </span>
+                                                                )}
+                                                            </button>
+                                                        </th>
+                                                    );
+                                                })}
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {indexConstituents.map((row) => (
+                                            {sortedIndexConstituents.map((row) => (
                                                 <tr key={row.symbol} onClick={() => onCompanyClick(row.symbol)}>
-                                                    <td className="stocks-symbol-cell">{row.symbol}</td>
+                                                    <td className="stocks-symbol-cell">
+                                                        <span className="stocks-symbol-main">
+                                                            <SymbolLogo
+                                                                symbol={row.symbol}
+                                                                name={row.symbol}
+                                                                kind="stock"
+                                                                logoUrl={row.logo_url}
+                                                                size="xs"
+                                                                className="stocks-symbol-logo"
+                                                            />
+                                                            <span>{row.symbol}</span>
+                                                        </span>
+                                                    </td>
                                                     <td className="stocks-cell-right stocks-price-cell">{constituentPrice(row)}</td>
                                                     <td className={`stocks-cell-right ${getTableChangeClass(row.change_pct)}`}>
                                                         {formatTablePct(row.change_pct)}
@@ -1335,6 +2974,9 @@ export default function MarketsView() {
                                                     <td className="stocks-cell-right">{formatWeight(row.weight_pct)}</td>
                                                     <td className={`stocks-cell-right ${getTableChangeClass(row.point_effect)}`}>
                                                         {formatPointEffect(row.point_effect)}
+                                                    </td>
+                                                    <td className={`stocks-cell-right ${getTableChangeClass(getImpactPct(row, indexImpactLevel))}`}>
+                                                        {formatImpactPct(getImpactPct(row, indexImpactLevel))}
                                                     </td>
                                                 </tr>
                                             ))}
@@ -1346,6 +2988,10 @@ export default function MarketsView() {
                     )}
                 </div>
             )}
+                </div>
+                {activeSection === 'markets' && market && (
+                    <MarketWatchRail xu100Rows={market.rows} onSelectTicker={onCompanyClick} />
+                )}
             </div>
         </div>
     );

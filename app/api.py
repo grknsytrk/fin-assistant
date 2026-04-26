@@ -252,16 +252,82 @@ def _load_cached_kap_market_metadata(cache_dir: Path, symbol: str) -> Dict[str, 
     except Exception:
         return {}
 
+    company_title = str(payload.get("company_title") or "").strip()
+    company_code = str(payload.get("company") or payload.get("stock_code") or symbol).strip().upper()
+
     quarters_raw = payload.get("quarters")
     quarters = [
         str(row.get("quarter") or "").strip().upper()
         for row in (quarters_raw or [])
         if isinstance(row, dict) and str(row.get("quarter") or "").strip()
     ]
+    quarter_rows = [row for row in (quarters_raw or []) if isinstance(row, dict)]
+    latest_row = max(
+        quarter_rows,
+        key=lambda row: _quarter_label_sort_key(str(row.get("quarter") or "").strip().upper()),
+        default=None,
+    )
+    shares_outstanding = None
+    share_source = None
+    if latest_row:
+        for metric_key in ("odenmis_sermaye", "cikarilmis_sermaye"):
+            for field in ("metrics", "metrics_ytd"):
+                container = latest_row.get(field)
+                if not isinstance(container, dict):
+                    continue
+                metric = container.get(metric_key)
+                value = metric.get("value") if isinstance(metric, dict) else metric
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                    continue
+                shares_outstanding = float(value)
+                share_source = metric_key
+                break
+            if shares_outstanding is not None:
+                break
     return {
         "latest_quarter": _latest_quarter_label(quarters),
         "has_kap_cache": True,
+        "shares_outstanding": shares_outstanding,
+        "share_source": share_source,
+        "company_title": company_title or None,
+        "company": company_code or symbol,
     }
+
+
+def _positive_float(raw: Any) -> Optional[float]:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    if value <= 0:
+        return None
+    return value
+
+
+def _market_cap_from_quote_and_meta(
+    quote: Dict[str, Any],
+    cached_meta: Dict[str, Any],
+    basic_summary: Optional[Dict[str, Any]] = None,
+) -> Optional[float]:
+    price = quote.get("price")
+    shares = cached_meta.get("shares_outstanding")
+    price_value = _positive_float(price)
+    shares_value = _positive_float(shares)
+    if price_value is not None and shares_value is not None:
+        return price_value * shares_value
+
+    quote_market_cap = _positive_float(quote.get("market_cap"))
+    if quote_market_cap is not None:
+        return quote_market_cap
+
+    summary = basic_summary or {}
+    market_cap = _positive_float(summary.get("market_cap"))
+    if market_cap is not None:
+        return market_cap
+
+    summary_shares = _positive_float(summary.get("shares_outstanding"))
+    if price_value is not None and summary_shares is not None:
+        return price_value * summary_shares
+    return None
 
 
 _UNIVERSE_CACHE: Dict[str, Any] = {}
@@ -287,6 +353,7 @@ def _market_universe_payload() -> Dict[str, Any]:
     cache_dir = CONFIG.paths.processed_dir / "kap_cache"
     base_price_map = _fetch_market_price_map(symbols)
     price_map = _fill_prices_via_yahoo(symbols, base_price_map)
+    basic_summary_map = _fetch_isyatirim_basic_summary_map()
 
     rows: List[Dict[str, Any]] = []
     rag_ready_count = 0
@@ -324,6 +391,8 @@ def _market_universe_payload() -> Dict[str, Any]:
                 "change": quote.get("change"),
                 "change_pct": quote.get("change_pct"),
                 "price_as_of": quote.get("as_of"),
+                "market_cap": _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary_map.get(symbol)),
+                **_kap_logo_payload_for_symbol(symbol),
             }
         )
 
@@ -816,6 +885,20 @@ def market_universe() -> Dict[str, Any]:
 @app.get("/market/stocks")
 def market_stocks(index: str = Query("XU100"), refresh: bool = Query(False)) -> Dict[str, Any]:
     return _market_stocks_payload(index_name=index, force_refresh=refresh)
+
+
+@app.get("/market/stocks/cards")
+def market_stock_cards(symbols: str = Query(""), refresh: bool = Query(False)) -> Dict[str, Any]:
+    return _market_stock_cards_payload(symbols=symbols, force_refresh=refresh)
+
+
+@app.get("/market/stocks/cards/chart")
+def market_stock_card_chart(
+    symbol: str = Query(""),
+    range: str = Query("1d"),
+    refresh: bool = Query(False),
+) -> Dict[str, Any]:
+    return _market_stock_card_chart_payload(symbol=symbol, chart_range=range, force_refresh=refresh)
 
 
 @app.get("/market/indices")
@@ -1823,6 +1906,11 @@ def _fetch_kap_vyk_feed(
 # endpoint'ini kullanarak KAP'ın listeleme endpoint'i engellendiğinde dahi
 # canlı veri üretir.
 _KAP_MEMBER_OID_CACHE: Dict[str, str] = {}
+_KAP_MEMBER_OID_NEGATIVE_CACHE: Dict[str, float] = {}
+_KAP_MEMBER_OID_NEGATIVE_TTL = 1800  # 30 dk
+_KAP_MEMBER_OID_WARMED_FROM_CACHE = False
+_MARKET_KAP_LOGO_CACHE: Dict[str, Any] = {}
+_MARKET_KAP_LOGO_CACHE_TTL = 1800  # 30 dk
 _KAP_MEMBER_FEED_CACHE: Dict[str, Any] = {"items": [], "ts": 0.0}
 _KAP_MEMBER_FEED_TTL = 600  # 10 dk
 
@@ -1870,6 +1958,87 @@ def _fetch_kap_member_disclosures_for(symbol: str, year: int) -> List[Dict[str, 
     if not isinstance(payload, list):
         return []
     return [row for row in payload if isinstance(row, dict)]
+
+
+def _resolve_kap_member_oid(symbol: str) -> Optional[str]:
+    global _KAP_MEMBER_OID_WARMED_FROM_CACHE
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return None
+
+    if not _KAP_MEMBER_OID_WARMED_FROM_CACHE:
+        _KAP_MEMBER_OID_WARMED_FROM_CACHE = True
+        kap_cache_dir = CONFIG.paths.processed_dir / "kap_cache"
+        if kap_cache_dir.exists():
+            for cache_file in kap_cache_dir.glob("*.json"):
+                try:
+                    with cache_file.open("r", encoding="utf-8") as handle:
+                        payload = json.load(handle)
+                except Exception:
+                    continue
+                cache_symbol = str(payload.get("stock_code") or cache_file.stem).strip().upper()
+                cache_oid = str(payload.get("member_oid") or "").strip()
+                if cache_symbol and cache_oid and cache_symbol not in _KAP_MEMBER_OID_CACHE:
+                    _KAP_MEMBER_OID_CACHE[cache_symbol] = cache_oid
+
+    oid = _KAP_MEMBER_OID_CACHE.get(normalized)
+    if oid:
+        return oid
+
+    now = time.time()
+    negative_ts = _KAP_MEMBER_OID_NEGATIVE_CACHE.get(normalized, 0.0)
+    if negative_ts and now - negative_ts < _KAP_MEMBER_OID_NEGATIVE_TTL:
+        return None
+
+    import urllib.parse
+    import urllib.request
+
+    headers = {
+        "Accept": "application/json",
+        "Accept-Language": "tr",
+        "User-Agent": _KAP_DEFAULT_HEADERS["User-Agent"],
+    }
+    try:
+        encoded_symbol = urllib.parse.quote(normalized, safe="")
+        req = urllib.request.Request(
+            f"https://www.kap.org.tr/tr/api/member/filter/{encoded_symbol}",
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            rows = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                candidate = str(row.get("mkkMemberOid") or "").strip()
+                if candidate:
+                    _KAP_MEMBER_OID_CACHE[normalized] = candidate
+                    _KAP_MEMBER_OID_NEGATIVE_CACHE.pop(normalized, None)
+                    return candidate
+    except Exception:
+        pass
+
+    _KAP_MEMBER_OID_NEGATIVE_CACHE[normalized] = now
+    return None
+
+
+def _kap_logo_payload_for_symbol(symbol: str) -> Dict[str, Optional[str]]:
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return {"logo_url": None, "logo_source": None}
+
+    now = time.time()
+    cached = _MARKET_KAP_LOGO_CACHE.get(normalized)
+    if cached and now - cached.get("_ts", 0) < _MARKET_KAP_LOGO_CACHE_TTL:
+        return dict(cached.get("data") or {"logo_url": None, "logo_source": None})
+
+    oid = _resolve_kap_member_oid(normalized)
+    data = {
+        "logo_url": f"https://www.kap.org.tr/tr/api/member/logo/{oid}" if oid else None,
+        "logo_source": "kap" if oid else None,
+    }
+    _MARKET_KAP_LOGO_CACHE[normalized] = {"_ts": now, "data": data}
+    return dict(data)
 
 
 def _synth_quarter_publish_dt(year: int, period: int) -> Optional[datetime]:
@@ -2355,12 +2524,26 @@ _PRICE_CACHE: Dict[str, Any] = {}
 _PRICE_CACHE_TTL = 300  # 5 minutes
 _MARKET_PRICE_CACHE: Dict[str, Any] = {}
 _MARKET_PRICE_CACHE_TTL = 3  # seconds; used by the live stocks table
+_INFOYATIRIM_STOCK_PAGE_CACHE: Dict[str, Any] = {}
+_INFOYATIRIM_STOCK_PAGE_CACHE_TTL = 60
+_INFOYATIRIM_STOCK_PAGE_FALLBACK_LIMIT = 12
 _STOCKS_CACHE: Dict[str, Any] = {}
 _STOCKS_CACHE_TTL = 3
+_MARKET_STOCK_CARD_CHART_CACHE: Dict[str, Any] = {}
+_MARKET_STOCK_CARD_CHART_CACHE_TTL = 45
+_MARKET_STOCK_CARD_LIMIT = 12
+_MARKET_STOCK_CARD_CHART_RANGES: Dict[str, Dict[str, Any]] = {
+    "1d": {"interval": "5m", "range": "1d", "ttl": 30},
+    "1w": {"interval": "15m", "range": "5d", "ttl": 60},
+    "1m": {"interval": "1d", "range": "1mo", "ttl": 600},
+    "1y": {"interval": "1wk", "range": "1y", "ttl": 3600},
+}
 _STOCK_RETURN_BASE_CACHE: Dict[str, Any] = {}
 _STOCK_RETURN_BASE_CACHE_TTL = 900  # 15 minutes
 _ISYATIRIM_CACHE: Dict[str, Any] = {}
 _ISYATIRIM_CACHE_TTL = 900  # 15 minutes
+_ISYATIRIM_BASIC_SUMMARY_CACHE: Dict[str, Any] = {}
+_ISYATIRIM_BASIC_SUMMARY_CACHE_TTL = 60
 _MARKET_STOCK_INDEXES = {"XU100", "XU030"}
 _MARKET_INDICES_CACHE: Dict[str, Any] = {}
 _MARKET_INDEX_DETAIL_CACHE: Dict[str, Any] = {}
@@ -2399,6 +2582,10 @@ _INDEX_RETURN_BASE_FIELDS: List[tuple[str, str]] = _RETURN_BASE_FIELDS + [
 
 def _isyatirim_company_card_url(symbol: str) -> str:
     return f"https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/sirket-karti.aspx?hisse={symbol}"
+
+
+def _isyatirim_basic_summary_url() -> str:
+    return "https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/Temel-Degerler-Ve-Oranlar.aspx"
 
 
 def _parse_tr_decimal(raw: Any) -> Optional[float]:
@@ -2467,6 +2654,117 @@ def _quote_ts_to_iso(raw: Any) -> Optional[str]:
         return None
 
 
+def _infoyatirim_stock_page_url(symbol: str) -> str:
+    ticker = str(symbol or "").strip().lower()
+    return f"https://infoyatirim.com/borsa/{ticker}-hisse"
+
+
+def _infoyatirim_stock_page_text(html_text: str) -> str:
+    text = re.sub(r"<script\b[^>]*>.*?</script>", " ", str(html_text or ""), flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = html.unescape(re.sub(r"<[^>]+>", " ", text, flags=re.IGNORECASE))
+    text = " ".join(text.split())
+    return (
+        text.upper()
+        .replace("İ", "I")
+        .replace("Ş", "S")
+        .replace("Ğ", "G")
+        .replace("Ü", "U")
+        .replace("Ö", "O")
+        .replace("Ç", "C")
+    )
+
+
+def _extract_infoyatirim_stock_page_quote(symbol: str, html_text: str) -> Dict[str, Any]:
+    ticker = str(symbol or "").strip().upper()
+    if not ticker or not html_text:
+        return {}
+
+    text = _infoyatirim_stock_page_text(html_text)
+
+    def value_after(label: str) -> Optional[float]:
+        match = re.search(rf"{label}\s+([-+]?\d[\d\.,]*\s*(?:%|₺|TL)?)", text, flags=re.IGNORECASE)
+        return _parse_tr_decimal(match.group(1)) if match else None
+
+    price = value_after(r"SON ISLEM FIYATI")
+    change_pct = value_after(r"GUNLUK DEGISIM\s+%")
+    change = value_after(r"GUNLUK DEGISIM\s+\(TL\)")
+    volume = value_after(r"GUNLUK HACIM\s+\(TL\)")
+    if volume is None:
+        volume = value_after(r"TOPLAM ISLEM HACMI")
+    market_cap = value_after(r"PIYASA DEGERI")
+    fk = value_after(r"F/K")
+    pd_dd = value_after(r"PD/DD")
+    fd_favok = value_after(r"FD/FAVOK")
+
+    if price is None and change_pct is None and volume is None and market_cap is None and fk is None and pd_dd is None and fd_favok is None:
+        return {}
+
+    return {
+        "price": price,
+        "currency": "TRY",
+        "change": change,
+        "change_pct": change_pct,
+        "volume": volume,
+        "market_cap": market_cap,
+        "fk": fk,
+        "pd_dd": pd_dd,
+        "fd_favok": fd_favok,
+        "market_state": "",
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _fetch_infoyatirim_stock_page_quote(symbol: str) -> Dict[str, Any]:
+    import urllib.error
+    import urllib.request
+
+    ticker = str(symbol or "").strip().upper()
+    if not ticker:
+        return {}
+
+    now = time.time()
+    cached = _INFOYATIRIM_STOCK_PAGE_CACHE.get(ticker)
+    if cached and now - cached.get("_ts", 0) < _INFOYATIRIM_STOCK_PAGE_CACHE_TTL:
+        return dict(cached.get("data") or {})
+
+    request = urllib.request.Request(
+        _infoyatirim_stock_page_url(ticker),
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            html_text = response.read().decode("utf-8", errors="ignore")
+    except (urllib.error.URLError, Exception):
+        _INFOYATIRIM_STOCK_PAGE_CACHE[ticker] = {"_ts": now, "data": {}}
+        return {}
+
+    data = _extract_infoyatirim_stock_page_quote(ticker, html_text)
+    _INFOYATIRIM_STOCK_PAGE_CACHE[ticker] = {"_ts": now, "data": data}
+    return dict(data)
+
+
+def _market_price_row_needs_fallback(row: Optional[Dict[str, Any]]) -> bool:
+    if not row:
+        return True
+    return row.get("price") is None or row.get("change_pct") is None or row.get("volume") is None
+
+
+def _merge_market_price_fallback(base: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
+    if not fallback:
+        return base
+    merged = dict(base or {})
+    for key in ("price", "currency", "change", "change_pct", "volume", "market_cap", "market_state", "as_of"):
+        if key not in merged or merged.get(key) is None or (key in {"currency", "market_state"} and merged.get(key) == ""):
+            value = fallback.get(key)
+            if value is not None:
+                merged[key] = value
+    return merged
+
+
 def _fetch_market_price_map(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
     import urllib.error
     import urllib.request
@@ -2527,6 +2825,24 @@ def _fetch_market_price_map(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
     except Exception:
         return {}
 
+    missing_symbols = [
+        symbol
+        for symbol in normalized_symbols
+        if _market_price_row_needs_fallback(items.get(symbol))
+    ]
+    if items and missing_symbols:
+        fallback_symbols = missing_symbols[:_INFOYATIRIM_STOCK_PAGE_FALLBACK_LIMIT]
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=min(6, len(fallback_symbols))) as pool:
+                fallback_rows = list(pool.map(_fetch_infoyatirim_stock_page_quote, fallback_symbols))
+        except Exception:
+            fallback_rows = [_fetch_infoyatirim_stock_page_quote(symbol) for symbol in fallback_symbols]
+        for symbol, fallback in zip(fallback_symbols, fallback_rows):
+            if fallback:
+                items[symbol] = _merge_market_price_fallback(items.get(symbol, {}), fallback)
+
     _MARKET_PRICE_CACHE[cache_key] = {"_ts": now, "items": items}
     return items
 
@@ -2582,36 +2898,65 @@ def _fetch_stock_return_bases(symbol: str) -> Dict[str, Any]:
     try:
         result = data["chart"]["result"][0]
         timestamps = result.get("timestamp") or []
-        closes = ((result.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+        quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+        closes = quote.get("close") or []
+        highs = quote.get("high") or []
+        lows = quote.get("low") or []
     except (KeyError, IndexError, TypeError):
         return {}
 
-    points: List[tuple[datetime, float]] = []
-    for ts, close in zip(timestamps, closes):
+    series: List[Dict[str, Any]] = []
+    for ts, close, high, low in zip(timestamps, closes, highs, lows):
         if close is None or not isinstance(ts, (int, float)):
             continue
         try:
-            numeric_close = float(close)
+            dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+            series.append({
+                "dt": dt,
+                "close": float(close),
+                "high": float(high) if high is not None else float(close),
+                "low": float(low) if low is not None else float(close),
+            })
         except (TypeError, ValueError):
             continue
-        if numeric_close <= 0:
-            continue
-        points.append((datetime.fromtimestamp(float(ts), tz=timezone.utc), numeric_close))
 
-    if not points:
+    if not series:
         return {}
 
-    points.sort(key=lambda item: item[0])
-    latest_dt, latest_close = points[-1]
+    series.sort(key=lambda x: x["dt"])
+    latest = series[-1]
+    latest_dt = latest["dt"]
+    latest_close = latest["close"]
     year_start = datetime(latest_dt.year, 1, 1, tzinfo=timezone.utc)
 
+    def _get_base_price(target_dt: datetime) -> Optional[float]:
+        points_for_base = [(s["dt"], s["close"]) for s in series]
+        return _pick_series_value_at_or_before(points_for_base, target_dt)
+
+    def _get_range_stats(start_dt: datetime):
+        relevant = [s for s in series if s["dt"] >= start_dt]
+        if not relevant:
+            return None, None, None
+        
+        base_val = _get_base_price(start_dt)
+        high_val = max(s["high"] for s in relevant)
+        low_val = min(s["low"] for s in relevant)
+        return base_val, high_val, low_val
+
+    b1w, h1w, l1w = _get_range_stats(latest_dt - timedelta(days=7))
+    b1m, h1m, l1m = _get_range_stats(latest_dt - timedelta(days=30))
+    b3m, h3m, l3m = _get_range_stats(latest_dt - timedelta(days=91))
+    b6m, h6m, l6m = _get_range_stats(latest_dt - timedelta(days=182))
+    bytd, hytd, lytd = _get_range_stats(year_start)
+    b1y, h1y, l1y = _get_range_stats(latest_dt - timedelta(days=365))
+
     bases = {
-        "base_1w": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=7)),
-        "base_1m": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=30)),
-        "base_3m": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=91)),
-        "base_6m": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=182)),
-        "base_ytd": _pick_series_value_at_or_after(points, year_start),
-        "base_1y": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=365)),
+        "base_1w": b1w, "high_1w": h1w, "low_1w": l1w,
+        "base_1m": b1m, "high_1m": h1m, "low_1m": l1m,
+        "base_3m": b3m, "high_3m": h3m, "low_3m": l3m,
+        "base_6m": b6m, "high_6m": h6m, "low_6m": l6m,
+        "base_ytd": bytd, "high_ytd": hytd, "low_ytd": lytd,
+        "base_1y": b1y, "high_1y": h1y, "low_1y": l1y,
         "latest_close": latest_close,
         "as_of": latest_dt.isoformat(),
     }
@@ -2660,11 +3005,21 @@ def _return_pct(current_price: Any, base_price: Any) -> Optional[float]:
     return round(((price - base) / base) * 100, 2)
 
 
-def _returns_from_bases(current_price: Any, return_bases: Dict[str, Any]) -> Dict[str, Optional[float]]:
-    return {
-        response_field: _return_pct(current_price, return_bases.get(base_field))
-        for response_field, base_field in _RETURN_BASE_FIELDS
-    }
+def _returns_from_bases(current_price: Any, return_bases: Dict[str, Any]) -> Dict[str, Any]:
+    res = {}
+    for response_field, base_field in _RETURN_BASE_FIELDS:
+        base_val = return_bases.get(base_field)
+        res[response_field] = _return_pct(current_price, base_val)
+        
+        # Extract period (e.g. 1w from return_1w_pct)
+        period = response_field.replace("return_", "").replace("_pct", "")
+        res[f"base_{period}"] = base_val
+        res[f"high_{period}"] = return_bases.get(f"high_{period}")
+        res[f"low_{period}"] = return_bases.get(f"low_{period}")
+    return res
+
+
+
 
 
 def _market_stock_benchmarks() -> Dict[str, Dict[str, Any]]:
@@ -2698,6 +3053,7 @@ def _market_stock_row(
     cached_meta: Dict[str, Any],
     quote: Dict[str, Any],
     return_bases: Dict[str, Any],
+    basic_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     quarters = [
         str(item or "").strip().upper()
@@ -2721,6 +3077,8 @@ def _market_stock_row(
         "change_pct": quote.get("change_pct"),
         "price_as_of": quote.get("as_of"),
         "volume": quote.get("volume"),
+        "market_cap": _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary),
+        **_kap_logo_payload_for_symbol(symbol),
         **_returns_from_bases(current_for_returns, return_bases),
     }
 
@@ -2745,6 +3103,7 @@ def _market_stocks_payload(*, index_name: str = "XU100", force_refresh: bool = F
     cache_dir = CONFIG.paths.processed_dir / "kap_cache"
     price_map = _fetch_market_price_map(symbols)
     return_base_map = _fetch_stock_return_bases_bulk(symbols)
+    basic_summary_map = _fetch_isyatirim_basic_summary_map()
 
     rows = [
         _market_stock_row(
@@ -2753,6 +3112,7 @@ def _market_stocks_payload(*, index_name: str = "XU100", force_refresh: bool = F
             cached_meta=_load_cached_kap_market_metadata(cache_dir, symbol),
             quote=price_map.get(symbol, {}),
             return_bases=return_base_map.get(symbol, {}),
+            basic_summary=basic_summary_map.get(symbol),
         )
         for symbol in symbols
     ]
@@ -2765,6 +3125,353 @@ def _market_stocks_payload(*, index_name: str = "XU100", force_refresh: bool = F
     }
     _STOCKS_CACHE[cache_key] = {"_ts": now_ts, "data": data}
     return data
+
+
+def _normalize_market_stock_card_symbol(symbol: str) -> str:
+    raw = str(symbol or "").strip()
+    item = raw.upper()
+    if item.endswith(".IS"):
+        item = item[:-3]
+    if not item or not re.fullmatch(r"[A-Z0-9]{2,12}", item):
+        raise HTTPException(status_code=400, detail=f"Gecersiz hisse kodu: {raw or symbol}")
+    return item
+
+
+def _normalize_market_stock_card_symbols(symbols: str) -> List[str]:
+    raw_items = re.split(r"[,\s]+", str(symbols or "").strip())
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        if not raw.strip():
+            continue
+        item = _normalize_market_stock_card_symbol(raw)
+        if item in seen:
+            continue
+        normalized.append(item)
+        seen.add(item)
+
+    if len(normalized) > _MARKET_STOCK_CARD_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"En fazla {_MARKET_STOCK_CARD_LIMIT} hisse karti secilebilir.",
+        )
+    return normalized
+
+
+def _normalize_stock_card_chart_range(chart_range: str) -> str:
+    normalized = str(chart_range or "1d").strip().lower()
+    if normalized not in _MARKET_STOCK_CARD_CHART_RANGES:
+        allowed = ", ".join(sorted(_MARKET_STOCK_CARD_CHART_RANGES))
+        raise HTTPException(status_code=400, detail=f"Desteklenmeyen grafik araligi. Desteklenenler: {allowed}")
+    return normalized
+
+
+def _stock_card_chart_cache_key(symbol: str, chart_range: str) -> str:
+    return f"stock-card-chart:{symbol}:{chart_range}"
+
+
+def _point_datetime(raw: Any) -> Optional[datetime]:
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        try:
+            return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+        except Exception:
+            return None
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _numeric_chart_value(raw: Any) -> Optional[float]:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value:
+        return None
+    return value
+
+
+def _normalize_stock_card_line_points(raw_points: Any) -> List[Dict[str, Any]]:
+    deduped: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(raw_points, list):
+        return []
+
+    for point in raw_points:
+        if not isinstance(point, dict):
+            continue
+        point_dt = _point_datetime(point.get("time"))
+        close = _numeric_chart_value(point.get("close"))
+        if point_dt is None or close is None or close <= 0:
+            continue
+        time_key = point_dt.isoformat()
+        row: Dict[str, Any] = {"time": time_key, "close": close}
+        for key in ("open", "high", "low", "volume"):
+            value = _numeric_chart_value(point.get(key))
+            if value is not None:
+                row[key] = value
+        deduped[time_key] = row
+
+    return [deduped[key] for key in sorted(deduped)]
+
+
+def _fetch_stock_card_chart(symbol: str, chart_range: str, *, force_refresh: bool = False) -> Dict[str, Any]:
+    ticker = _normalize_market_stock_card_symbol(symbol)
+    normalized_range = _normalize_stock_card_chart_range(chart_range)
+    config = _MARKET_STOCK_CARD_CHART_RANGES[normalized_range]
+    cache_key = _stock_card_chart_cache_key(ticker, normalized_range)
+    now = time.time()
+    cached = _MARKET_STOCK_CARD_CHART_CACHE.get(cache_key)
+    if cached and not force_refresh and now - cached.get("_ts", 0) < config["ttl"]:
+        payload = dict(cached.get("data") or {})
+        payload["source"] = "yahoo_cache"
+        return payload
+
+    yahoo_symbol = f"{ticker}.IS"
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    chart = _fetch_yahoo_chart_raw(yahoo_symbol, interval=config["interval"], range_=config["range"])
+    points = _normalize_stock_card_line_points(chart.get("points") if chart.get("ok") else [])
+    payload = {
+        "symbol": ticker,
+        "range": normalized_range,
+        "yahoo_symbol": yahoo_symbol,
+        "line_points": points,
+        "source": "yahoo_live",
+        "as_of": fetched_at,
+        "error": None if chart.get("ok") and points else chart.get("error") or "chart_unavailable",
+        "meta": chart.get("meta") or {},
+    }
+    _MARKET_STOCK_CARD_CHART_CACHE[cache_key] = {"_ts": now, "data": payload}
+    return dict(payload)
+
+
+def _market_stock_card_chart_payload(*, symbol: str, chart_range: str, force_refresh: bool = False) -> Dict[str, Any]:
+    payload = _fetch_stock_card_chart(symbol, chart_range, force_refresh=force_refresh)
+    return {
+        "symbol": payload.get("symbol"),
+        "range": payload.get("range"),
+        "yahoo_symbol": payload.get("yahoo_symbol"),
+        "line_points": payload.get("line_points") or [],
+        "source": payload.get("source") or "yahoo_live",
+        "as_of": payload.get("as_of"),
+        "error": payload.get("error"),
+    }
+
+
+def _fetch_stock_card_intraday(symbol: str, *, force_refresh: bool = False) -> Dict[str, Any]:
+    chart_payload = _fetch_stock_card_chart(symbol, "1d", force_refresh=force_refresh)
+    ticker = chart_payload.get("symbol") or _normalize_market_stock_card_symbol(symbol)
+    yahoo_symbol = chart_payload.get("yahoo_symbol") or f"{ticker}.IS"
+    points = chart_payload.get("line_points") or []
+    if points:
+        highs = [
+            point.get("high")
+            for point in points
+            if isinstance(point.get("high"), (int, float))
+        ]
+        lows = [
+            point.get("low")
+            for point in points
+            if isinstance(point.get("low"), (int, float))
+        ]
+        meta_payload = chart_payload.get("meta") or {}
+        price = meta_payload.get("regularMarketPrice")
+        prev_close = meta_payload.get("chartPreviousClose") or meta_payload.get("previousClose")
+        change = None
+        change_pct = None
+        if price is not None and prev_close:
+            try:
+                change = round(float(price) - float(prev_close), 4)
+                change_pct = round((change / float(prev_close)) * 100, 2)
+            except (TypeError, ValueError, ZeroDivisionError):
+                change = None
+                change_pct = None
+
+        as_of = None
+        rmt = meta_payload.get("regularMarketTime")
+        if isinstance(rmt, (int, float)):
+            try:
+                as_of = datetime.fromtimestamp(float(rmt), tz=timezone.utc).isoformat()
+            except Exception:
+                as_of = None
+
+        payload = {
+            "line_points": points,
+            "price": price,
+            "prev_close": prev_close,
+            "change": change,
+            "change_pct": change_pct,
+            "high": meta_payload.get("regularMarketDayHigh") or (max(highs) if highs else None),
+            "low": meta_payload.get("regularMarketDayLow") or (min(lows) if lows else None),
+            "volume": meta_payload.get("regularMarketVolume"),
+            "volume_lot": meta_payload.get("regularMarketVolume"),
+            "currency": meta_payload.get("currency") or "TRY",
+            "market_state": meta_payload.get("marketState") or "",
+            "as_of": as_of or chart_payload.get("as_of"),
+            "yahoo_symbol": yahoo_symbol,
+            "error": None,
+        }
+        return dict(payload)
+
+    fallback = {
+        "line_points": [],
+        "price": None,
+        "prev_close": None,
+        "change": None,
+        "change_pct": None,
+        "high": None,
+        "low": None,
+        "volume": None,
+        "volume_lot": None,
+        "currency": "TRY",
+        "market_state": "",
+        "as_of": chart_payload.get("as_of"),
+        "yahoo_symbol": yahoo_symbol,
+        "error": chart_payload.get("error") or "chart_unavailable",
+    }
+    return dict(fallback)
+
+
+def _first_not_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _is_missing_market_ratio(value: Any) -> bool:
+    ratio = _parse_tr_decimal(value)
+    return ratio is None or abs(ratio) <= 1e-12
+
+
+def _resolve_market_card_multiples(symbol: str, multiples_payload: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    fk = _parse_tr_decimal(multiples_payload.get("fk")) if multiples_payload.get("ok") else None
+    pd_dd = _parse_tr_decimal(multiples_payload.get("pd_dd")) if multiples_payload.get("ok") else None
+    fd_favok = _parse_tr_decimal(multiples_payload.get("fd_favok")) if multiples_payload.get("ok") else None
+
+    need_fallback = (
+        _is_missing_market_ratio(fk)
+        or _is_missing_market_ratio(pd_dd)
+        or _is_missing_market_ratio(fd_favok)
+    )
+    if not need_fallback:
+        return {"fk": fk, "pd_dd": pd_dd, "fd_favok": fd_favok}
+
+    fallback = _fetch_infoyatirim_stock_page_quote(symbol)
+    if _is_missing_market_ratio(fk):
+        fallback_fk = _parse_tr_decimal(fallback.get("fk"))
+        if fallback_fk is not None and abs(fallback_fk) > 1e-12:
+            fk = fallback_fk
+    if _is_missing_market_ratio(pd_dd):
+        fallback_pd_dd = _parse_tr_decimal(fallback.get("pd_dd"))
+        if fallback_pd_dd is not None and abs(fallback_pd_dd) > 1e-12:
+            pd_dd = fallback_pd_dd
+    if _is_missing_market_ratio(fd_favok):
+        fallback_fd_favok = _parse_tr_decimal(fallback.get("fd_favok"))
+        if fallback_fd_favok is not None and abs(fallback_fd_favok) > 1e-12:
+            fd_favok = fallback_fd_favok
+
+    return {"fk": fk, "pd_dd": pd_dd, "fd_favok": fd_favok}
+
+
+def _stock_card_financial_ratios_from_cache(symbol: str) -> Dict[str, Optional[float]]:
+    cache_path = CONFIG.paths.processed_dir / "kap_cache" / f"{str(symbol or '').strip().upper()}.json"
+    try:
+        with cache_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return {"net_borc_favok": None}
+
+    quarters_raw = payload.get("quarters")
+    quarters = [q for q in quarters_raw if isinstance(q, dict)] if isinstance(quarters_raw, list) else []
+    if not quarters:
+        return {"net_borc_favok": None}
+
+    quarters_sorted = sorted(quarters, key=_quarter_sort_key)
+    latest = quarters_sorted[-1]
+    net_borc = _extract_quarter_metric(latest, "net_borc", priority=["metrics", "metrics_ytd"])
+    ttm_favok = _build_ttm_sum(quarters_sorted, "favok")
+    net_borc_favok = None
+    try:
+        if net_borc is not None and ttm_favok is not None and float(ttm_favok) != 0:
+            net_borc_favok = round(float(net_borc) / float(ttm_favok), 2)
+    except (TypeError, ValueError, ZeroDivisionError):
+        net_borc_favok = None
+    return {"net_borc_favok": net_borc_favok}
+
+
+def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) -> Dict[str, Any]:
+    normalized_symbols = _normalize_market_stock_card_symbols(symbols)
+    if not normalized_symbols:
+        return {
+            "items": [],
+            "source": "infoyatirim_yahoo_chart",
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+
+    cache_dir = CONFIG.paths.processed_dir / "kap_cache"
+    price_map = _fetch_market_price_map(normalized_symbols)
+    basic_summary_map = _fetch_isyatirim_basic_summary_map()
+    return_base_map = _fetch_stock_return_bases_bulk(normalized_symbols)
+
+    items: List[Dict[str, Any]] = []
+    for symbol in normalized_symbols:
+        quote = price_map.get(symbol, {})
+        intraday = _fetch_stock_card_intraday(symbol, force_refresh=force_refresh)
+        cached_meta = _load_cached_kap_market_metadata(cache_dir, symbol)
+        company_name = str(cached_meta.get("company_title") or "").strip() or symbol
+        basic_summary = basic_summary_map.get(symbol)
+        market_cap = _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary)
+        multiples = _fetch_isyatirim_multiples(symbol)
+        resolved_multiples = _resolve_market_card_multiples(symbol, multiples)
+        cache_ratios = _stock_card_financial_ratios_from_cache(symbol)
+        return_bases = return_base_map.get(symbol, {})
+
+        price = _first_not_none(quote.get("price"), intraday.get("price"))
+        currency = quote.get("currency") or intraday.get("currency") or "TRY"
+        volume_tl = quote.get("volume")
+        volume_lot = _first_not_none(intraday.get("volume_lot"), intraday.get("volume"))
+        current_for_returns = price if price is not None else return_bases.get("latest_close")
+        item = {
+            "symbol": symbol,
+            "company": company_name,
+            "yahoo_symbol": intraday.get("yahoo_symbol"),
+            "price": price,
+            "currency": currency,
+            "change": _first_not_none(quote.get("change"), intraday.get("change")),
+            "change_pct": _first_not_none(quote.get("change_pct"), intraday.get("change_pct")),
+            "volume": _first_not_none(volume_tl, volume_lot),
+            "volume_lot": volume_lot,
+            "volume_tl": volume_tl,
+            "market_cap": market_cap,
+            "high": intraday.get("high"),
+            "low": intraday.get("low"),
+            "previous_close": intraday.get("prev_close"),
+            "fk": resolved_multiples.get("fk"),
+            "pd_dd": resolved_multiples.get("pd_dd"),
+            "fd_favok": resolved_multiples.get("fd_favok"),
+            "net_borc_favok": cache_ratios.get("net_borc_favok"),
+            "market_state": quote.get("market_state") or intraday.get("market_state") or "",
+            "as_of": quote.get("as_of") or intraday.get("as_of"),
+            "line_points": intraday.get("line_points") or [],
+            "error": None if price is not None or intraday.get("line_points") else intraday.get("error"),
+            **_kap_logo_payload_for_symbol(symbol),
+            **_returns_from_bases(current_for_returns, return_bases),
+        }
+        items.append(item)
+
+    return {
+        "items": items,
+        "source": "infoyatirim_yahoo_chart",
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _strip_html_cell(raw: str) -> str:
@@ -2784,6 +3491,92 @@ def _norm_text(value: str) -> str:
         .replace("Ö", "O")
         .replace("Ç", "C")
     )
+
+
+def _extract_isyatirim_basic_summary_map(html_text: str) -> Dict[str, Dict[str, Any]]:
+    table_match = re.search(
+        r'<table[^>]+data-csvname="temelozet"[^>]*>(.*?)</table>',
+        html_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not table_match:
+        return {}
+
+    table_html = table_match.group(1)
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, flags=re.IGNORECASE | re.DOTALL)
+    if not rows:
+        return {}
+
+    header_indexes: Dict[str, int] = {}
+    items: Dict[str, Dict[str, Any]] = {}
+    for row_html in rows:
+        header_cells = [_strip_html_cell(cell) for cell in re.findall(r"<th[^>]*>(.*?)</th>", row_html, flags=re.IGNORECASE | re.DOTALL)]
+        if header_cells:
+            for idx, header in enumerate(header_cells):
+                norm = _norm_text(header)
+                if norm == "KOD":
+                    header_indexes["symbol"] = idx
+                elif "PIYASA DEGERI" in norm and "MN TL" in norm:
+                    header_indexes["market_cap_mn_try"] = idx
+                elif "HALKA ACIKLIK" in norm:
+                    header_indexes["free_float_pct"] = idx
+                elif norm.startswith("SERMAYE") and "MN TL" in norm:
+                    header_indexes["capital_mn_try"] = idx
+            continue
+
+        cells = [_strip_html_cell(cell) for cell in re.findall(r"<td[^>]*>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL)]
+        if not cells:
+            continue
+
+        symbol_idx = header_indexes.get("symbol", 0)
+        market_cap_idx = header_indexes.get("market_cap_mn_try", 4)
+        free_float_idx = header_indexes.get("free_float_pct", 6)
+        capital_idx = header_indexes.get("capital_mn_try", 7)
+        if symbol_idx >= len(cells):
+            continue
+        symbol = str(cells[symbol_idx] or "").strip().upper()
+        if not symbol:
+            continue
+
+        market_cap_mn_try = _parse_tr_decimal(cells[market_cap_idx]) if market_cap_idx < len(cells) else None
+        free_float_pct = _parse_tr_decimal(cells[free_float_idx]) if free_float_idx < len(cells) else None
+        capital_mn_try = _parse_tr_decimal(cells[capital_idx]) if capital_idx < len(cells) else None
+        items[symbol] = {
+            "market_cap": market_cap_mn_try * 1_000_000 if market_cap_mn_try is not None else None,
+            "fdpo": round(free_float_pct / 100.0, 6) if free_float_pct is not None and free_float_pct > 0 else None,
+            "shares_outstanding": capital_mn_try * 1_000_000 if capital_mn_try is not None else None,
+            "source": "isyatirim_temelozet",
+        }
+
+    return items
+
+
+def _fetch_isyatirim_basic_summary_map() -> Dict[str, Dict[str, Any]]:
+    import urllib.error
+    import urllib.request
+
+    now = time.time()
+    cached = _ISYATIRIM_BASIC_SUMMARY_CACHE.get("payload")
+    if cached and now - cached.get("_ts", 0) < _ISYATIRIM_BASIC_SUMMARY_CACHE_TTL:
+        return cached.get("items", {})
+
+    request = urllib.request.Request(
+        url=_isyatirim_basic_summary_url(),
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            html_text = response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, Exception):
+        _ISYATIRIM_BASIC_SUMMARY_CACHE["payload"] = {"_ts": now, "items": {}}
+        return {}
+
+    items = _extract_isyatirim_basic_summary_map(html_text)
+    _ISYATIRIM_BASIC_SUMMARY_CACHE["payload"] = {"_ts": now, "items": items}
+    return items
 
 
 def _extract_isyatirim_historical_averages(html_text: str, symbol: str) -> Dict[str, Any]:
@@ -3102,6 +3895,7 @@ def _xu030_payload() -> Dict[str, Any]:
     symbols = get_bist30_companies()
     base_map = _fetch_market_price_map(symbols)
     price_map = _fill_prices_via_yahoo(symbols, base_map)
+    basic_summary_map = _fetch_isyatirim_basic_summary_map()
 
     breakdown_rows = _company_breakdown_from_chunks(CONFIG.paths.chunks_v2_file)
     breakdown_map = {
@@ -3137,6 +3931,8 @@ def _xu030_payload() -> Dict[str, Any]:
                 "change": quote.get("change"),
                 "change_pct": quote.get("change_pct"),
                 "price_as_of": quote.get("as_of"),
+                "market_cap": _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary_map.get(symbol)),
+                **_kap_logo_payload_for_symbol(symbol),
             }
         )
 
@@ -3521,11 +4317,15 @@ def _latest_share_count_from_kap_cache(symbol: str) -> Optional[float]:
 
 
 def _index_weight_inputs_for_symbol(symbol: str) -> Dict[str, Optional[float]]:
-    # FDPO and index weight coefficient are not available in the current local data.
+    basic_summary = _fetch_isyatirim_basic_summary_map().get(str(symbol or "").strip().upper(), {})
+    shares = _latest_share_count_from_kap_cache(symbol)
+    if shares is None:
+        shares = _positive_float(basic_summary.get("shares_outstanding"))
+    fdpo = _positive_float(basic_summary.get("fdpo"))
     return {
-        "shares_outstanding": _latest_share_count_from_kap_cache(symbol),
-        "fdpo": None,
-        "weight_coefficient": None,
+        "shares_outstanding": shares,
+        "fdpo": fdpo,
+        "weight_coefficient": 1.0 if fdpo is not None else None,
     }
 
 
@@ -3541,10 +4341,13 @@ def _apply_index_weight_formula(
         shares = row.get("shares_outstanding")
         fdpo = row.get("fdpo")
         coefficient = row.get("weight_coefficient")
+        market_cap = row.get("market_cap")
         free_float_market_value = None
         try:
             if price is not None and shares is not None and fdpo is not None and coefficient is not None:
                 free_float_market_value = float(price) * float(shares) * float(fdpo) * float(coefficient)
+            elif market_cap is not None and fdpo is not None and coefficient is not None:
+                free_float_market_value = float(market_cap) * float(fdpo) * float(coefficient)
         except (TypeError, ValueError):
             free_float_market_value = None
         enriched_row = {
@@ -3621,6 +4424,9 @@ def _index_constituents(index_code: str, *, index_level: Any) -> tuple[List[Dict
                 "price_currency": stock.get("price_currency"),
                 "change_pct": stock.get("change_pct"),
                 "volume": stock.get("volume"),
+                "market_cap": stock.get("market_cap"),
+                "logo_url": stock.get("logo_url"),
+                "logo_source": stock.get("logo_source"),
                 "shares_outstanding": weight_inputs.get("shares_outstanding"),
                 "fdpo": weight_inputs.get("fdpo"),
                 "weight_coefficient": weight_inputs.get("weight_coefficient"),
@@ -3657,9 +4463,11 @@ def _market_index_detail_payload(index_code: str, *, force_refresh: bool = False
         "line_points": intraday.get("line_points") or [],
         "constituents": constituents,
         "weight_status": weight_status,
-        "weight_note": None
-        if weight_status == "available"
-        else "Ağırlık verisi bulunamadı: pay sayısı, FDPO ve ağırlık katsayısı eksiksiz olmadığı için puan etkisi hesaplanamadı.",
+        "weight_note": (
+            "Tahmini ağırlık: İş Yatırım halka açıklık oranı ve ağırlık katsayısı 1 varsayımıyla hesaplandı."
+            if weight_status == "available"
+            else "Ağırlık verisi bulunamadı: pay sayısı, FDPO ve ağırlık katsayısı eksiksiz olmadığı için puan etkisi hesaplanamadı."
+        ),
         "source": "yahoo_finance_chart",
         "as_of": row.get("as_of") or datetime.now(timezone.utc).isoformat(),
     }
@@ -3690,6 +4498,8 @@ def _market_commodities_payload() -> Dict[str, Any]:
             "market_state": quote.get("market_state") if quote.get("ok") else "",
             "as_of": quote.get("as_of") if quote.get("ok") else None,
             "error": None if quote.get("ok") else quote.get("error"),
+            "logo_url": None,
+            "logo_source": None,
         }
 
     items: List[Dict[str, Any]] = []
@@ -3753,6 +4563,8 @@ def _market_fx_payload() -> Dict[str, Any]:
             "market_state": quote.get("market_state") if quote.get("ok") else "",
             "as_of": quote.get("as_of") if quote.get("ok") else None,
             "error": None if quote.get("ok") else quote.get("error"),
+            "logo_url": None,
+            "logo_source": None,
         }
 
     items: List[Dict[str, Any]] = []
@@ -3779,37 +4591,27 @@ def market_fx() -> Dict[str, Any]:
     return _market_fx_payload()
 
 
-_SIDEBAR_INDEX_CANDIDATES = [
-    ("S&P 500", "S&P 500", ["^GSPC"]),
-    ("NASDAQ", "NASDAQ Composite", ["^IXIC"]),
-    ("DOW", "Dow Jones Industrial", ["^DJI"]),
-    ("DAX", "DAX Index", ["^GDAXI"]),
-    ("VIX", "Korku Endeksi", ["^VIX"]),
-]
-
-def _market_indices_payload() -> Dict[str, Any]:
-    items = [
-        _watch_index_item(symbol=symbol, label=label, yahoo_candidates=candidates)
-        for symbol, label, candidates in _SIDEBAR_INDEX_CANDIDATES
-    ]
-    return {
-        "items": items,
-        "as_of": datetime.now(timezone.utc).isoformat()
-    }
-
-@app.get("/market/indices")
-def market_indices() -> Dict[str, Any]:
-    return _market_indices_payload()
-
-
 # ── Market watch strip (single endpoint for Markets page) ────────────────
 _WATCH_CACHE: Dict[str, Any] = {}
 _WATCH_CACHE_TTL = 3
+_WATCH_GLOBAL_CACHE: Dict[str, Any] = {}
+_WATCH_GLOBAL_CACHE_TTL = 60
 _WATCH_DELAY_NOTE = "Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk)."
 
 _WATCH_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [
     ("XU100", "BIST 100", ["XU100.IS", "^XU100", "XU100"]),
     ("XU030", "BIST 30", ["XU030.IS", "^XU030", "XU030"]),
+]
+
+_WATCH_GLOBAL_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [
+    ("SP500", "S&P 500", ["^GSPC", "SPY"]),
+    ("NASDAQ", "Nasdaq", ["^IXIC", "QQQ"]),
+    ("DOW", "Dow Jones", ["^DJI", "DIA"]),
+    ("DAX", "DAX", ["^GDAXI", "DAX"]),
+    ("FTSE", "FTSE 100", ["^FTSE", "ISF.L"]),
+    ("NIKKEI", "Nikkei 225", ["^N225", "1321.T"]),
+    ("HANGSENG", "Hang Seng", ["^HSI", "2800.HK"]),
+    ("CAC40", "CAC 40", ["^FCHI", "CAC.PA"]),
 ]
 
 _WATCH_FX_SYMBOLS: List[str] = ["USD/TRY", "EUR/TRY"]
@@ -3847,6 +4649,8 @@ def _empty_watch_item(
         "market_state": "",
         "as_of": None,
         "error": error,
+        "logo_url": None,
+        "logo_source": None,
     }
 
 
@@ -3865,6 +4669,8 @@ def _normalize_watch_item(item: Dict[str, Any]) -> Dict[str, Any]:
         "market_state": item.get("market_state") or "",
         "as_of": item.get("as_of"),
         "error": item.get("error"),
+        "logo_url": item.get("logo_url"),
+        "logo_source": item.get("logo_source"),
     }
 
 
@@ -3894,7 +4700,13 @@ def _pick_watch_items(
     return selected
 
 
-def _watch_index_item(symbol: str, label: str, yahoo_candidates: List[str]) -> Dict[str, Any]:
+def _watch_index_item(
+    symbol: str,
+    label: str,
+    yahoo_candidates: List[str],
+    *,
+    fallback_currency: str = "TRY",
+) -> Dict[str, Any]:
     errors: List[str] = []
     for yahoo_symbol in yahoo_candidates:
         quote = _fetch_yahoo_quote(yahoo_symbol)
@@ -3907,10 +4719,12 @@ def _watch_index_item(symbol: str, label: str, yahoo_candidates: List[str]) -> D
                 "prev_close": quote.get("prev_close"),
                 "change": quote.get("change"),
                 "change_pct": quote.get("change_pct"),
-                "currency": quote.get("currency") or "TRY",
+                "currency": quote.get("currency") or fallback_currency,
                 "market_state": quote.get("market_state") or "",
                 "as_of": quote.get("as_of"),
                 "error": None,
+                "logo_url": None,
+                "logo_source": None,
             }
         err = str(quote.get("error") or "quote_unavailable")
         errors.append(f"{yahoo_symbol}:{err}")
@@ -3918,9 +4732,43 @@ def _watch_index_item(symbol: str, label: str, yahoo_candidates: List[str]) -> D
     return _empty_watch_item(
         symbol=symbol,
         label=label,
-        currency="TRY",
+        currency=fallback_currency,
         error="; ".join(errors[:3]) if errors else "quote_unavailable",
     )
+
+
+def _market_watch_global_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
+    now = time.time()
+    cached = _WATCH_GLOBAL_CACHE.get("payload")
+    if cached and not force_refresh and now - cached.get("_ts", 0) < _WATCH_GLOBAL_CACHE_TTL:
+        return cached["data"]
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(entry: tuple[str, str, List[str]]) -> Dict[str, Any]:
+        symbol, label, yahoo_candidates = entry
+        return _watch_index_item(
+            symbol=symbol,
+            label=label,
+            yahoo_candidates=yahoo_candidates,
+            fallback_currency="",
+        )
+
+    items: List[Dict[str, Any]] = []
+    try:
+        with ThreadPoolExecutor(max_workers=min(8, len(_WATCH_GLOBAL_INDEX_CANDIDATES))) as pool:
+            items = list(pool.map(_one, _WATCH_GLOBAL_INDEX_CANDIDATES))
+    except Exception:
+        items = [_one(entry) for entry in _WATCH_GLOBAL_INDEX_CANDIDATES]
+
+    data = {
+        "items": items,
+        "source": "yahoo_finance_chart",
+        "delay_note": _WATCH_DELAY_NOTE,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+    _WATCH_GLOBAL_CACHE["payload"] = {"_ts": now, "data": data}
+    return data
 
 
 def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
@@ -3964,3 +4812,8 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
 @app.get("/market/watch")
 def market_watch(refresh: bool = Query(False)) -> Dict[str, Any]:
     return _market_watch_payload(force_refresh=refresh)
+
+
+@app.get("/market/watch/global")
+def market_watch_global(refresh: bool = Query(False)) -> Dict[str, Any]:
+    return _market_watch_global_payload(force_refresh=refresh)

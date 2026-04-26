@@ -11,7 +11,11 @@ import type {
     MarketIndicesResponse,
     MarketIndexDetailResponse,
     MarketFlowResponse,
+    MarketStockCardsResponse,
+    MarketStockCardChartRange,
+    MarketStockCardChartResponse,
     MarketWatchResponse,
+    MarketWatchGlobalResponse,
     MarketCommoditiesResponse,
     MarketIndexResponse,
     MarketFxResponse,
@@ -77,6 +81,9 @@ async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise
             });
         } catch (error) {
             if ((error as Error)?.name === 'AbortError') {
+                if (options.signal?.aborted) {
+                    throw error;
+                }
                 if (allowRetry && attempt < maxAttempts) {
                     await sleep(retryDelayMs(attempt));
                     continue;
@@ -131,6 +138,23 @@ export const apiClient = {
         const query = params.toString();
         return fetchApi<MarketStocksResponse>(query ? `/market/stocks?${query}` : '/market/stocks');
     },
+    marketStockCards: (options: { symbols: string[]; refresh?: boolean }) => {
+        const params = new URLSearchParams();
+        params.append('symbols', options.symbols.join(','));
+        if (options.refresh) params.append('refresh', 'true');
+        return fetchApi<MarketStockCardsResponse>(`/market/stocks/cards?${params.toString()}`);
+    },
+    marketStockCardChart: (
+        symbol: string,
+        range: MarketStockCardChartRange,
+        options?: { refresh?: boolean; signal?: AbortSignal },
+    ) => {
+        const params = new URLSearchParams({ symbol, range });
+        if (options?.refresh) params.append('refresh', 'true');
+        return fetchApi<MarketStockCardChartResponse>(`/market/stocks/cards/chart?${params.toString()}`, {
+            signal: options?.signal,
+        });
+    },
     marketIndices: (options?: { refresh?: boolean }) => {
         const params = new URLSearchParams();
         if (options?.refresh) params.append('refresh', 'true');
@@ -156,6 +180,12 @@ export const apiClient = {
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
         return fetchApi<MarketWatchResponse>(query ? `/market/watch?${query}` : '/market/watch');
+    },
+    marketWatchGlobal: (options?: { refresh?: boolean }) => {
+        const params = new URLSearchParams();
+        if (options?.refresh) params.append('refresh', 'true');
+        const query = params.toString();
+        return fetchApi<MarketWatchGlobalResponse>(query ? `/market/watch/global?${query}` : '/market/watch/global');
     },
     marketXu030: () => fetchApi<MarketIndexResponse>('/market/xu030'),
     marketCommodities: () => fetchApi<MarketCommoditiesResponse>('/market/commodities'),

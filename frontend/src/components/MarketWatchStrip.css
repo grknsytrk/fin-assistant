@@ -17,12 +17,10 @@
     right: 0;
     top: 0;
     height: 1px;
-    background: linear-gradient(
-        90deg,
-        transparent,
-        color-mix(in srgb, var(--accent-color) 55%, transparent),
-        transparent
-    );
+    background: linear-gradient(90deg,
+            transparent,
+            color-mix(in srgb, var(--accent-color) 55%, transparent),
+            transparent);
     opacity: 0.85;
 }
 
@@ -112,35 +110,15 @@
 .mw-grid {
     display: grid;
     gap: 0.62rem;
-    margin-bottom: 1.2rem;
 }
 
-.mw-section-title {
-    color: var(--text-secondary);
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    margin: 0.8rem 0 0.5rem;
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    opacity: 0.8;
+.mw-grid-main {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-.mw-section-title::after {
-    content: '';
-    flex: 1;
-    height: 1px;
-    background: linear-gradient(90deg, color-mix(in srgb, var(--surface-border) 40%, transparent), transparent);
-}
-
-.mw-grid-indices,
-.mw-grid-fx,
-.mw-grid-commodities,
-.mw-grid-watchlist {
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+.mw-grid-commodities {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-top: 0.62rem;
 }
 
 .mw-card {
@@ -173,9 +151,20 @@
 
 .mw-card-head {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
     gap: 0.35rem;
+}
+
+.mw-card-symbol {
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.44rem;
+}
+
+.mw-symbol-logo {
+    flex: 0 0 auto;
 }
 
 .mw-symbol {
@@ -262,12 +251,170 @@
     color: var(--danger-color);
 }
 
+.mw-strip-compact {
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    border-color: color-mix(in srgb, var(--surface-border) 82%, transparent);
+    padding: 0;
+    background: #1b1b1a;
+    box-shadow: none;
+}
+
+.mw-strip-compact::before {
+    display: none;
+}
+
+.mw-compact-grid {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    align-items: stretch;
+    min-height: 56px;
+}
+
+.mw-card-compact {
+    min-height: 56px;
+    justify-content: center;
+    gap: 0.22rem;
+    padding: 0.48rem 1rem;
+    border: 0;
+    border-right: 1px solid color-mix(in srgb, var(--surface-border) 62%, transparent);
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+.mw-card-compact:last-of-type {
+    border-right: 0;
+}
+
+.mw-card-compact:hover {
+    background: color-mix(in srgb, var(--surface-color) 28%, transparent);
+}
+
+.mw-compact-symbol {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+}
+
+.mw-compact-head {
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.mw-compact-price-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    min-width: 0;
+}
+
+.mw-compact-price {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    font-weight: 800;
+    line-height: 1.05;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.mw-compact-change {
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.mw-compact-state,
+.mw-compact-error {
+    min-height: 56px;
+    display: flex;
+    align-items: center;
+    padding: 0 1.25rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+}
+
+.mw-compact-error {
+    color: var(--danger-color);
+}
+
+.mw-compact-sync {
+    position: absolute;
+    right: 1rem;
+    bottom: 0.35rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+/* Compact Skeleton Loading */
+@keyframes mw-shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.mw-compact-skeleton-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    min-height: 56px;
+}
+
+.mw-compact-skeleton-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.38rem;
+    padding: 0.48rem 1rem;
+    border-right: 1px solid color-mix(in srgb, var(--surface-border) 62%, transparent);
+}
+
+.mw-compact-skeleton-card:last-child {
+    border-right: 0;
+}
+
+.mw-compact-skeleton-pulse {
+    background: linear-gradient(90deg, #222221 25%, #2e2e2d 50%, #222221 75%);
+    background-size: 200% 100%;
+    animation: mw-shimmer 1.6s infinite linear;
+    border-radius: 4px;
+}
+
+.mw-compact-skeleton-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.mw-compact-skeleton-logo { width: 16px; height: 16px; border-radius: 4px; }
+.mw-compact-skeleton-symbol { width: 44px; height: 10px; }
+
+.mw-compact-skeleton-price-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.mw-compact-skeleton-price { width: 64px; height: 14px; }
+.mw-compact-skeleton-change { width: 38px; height: 10px; }
+
 @keyframes mw-flash-green {
     0% {
         background: color-mix(in srgb, var(--success-color) 24%, var(--surface-color));
         border-color: color-mix(in srgb, var(--success-color) 62%, var(--surface-border));
         box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--success-color) 32%, transparent);
     }
+
     100% {
         background: color-mix(in srgb, var(--surface-color) 90%, var(--bg-color));
         border-color: color-mix(in srgb, var(--surface-border) 86%, transparent);
@@ -281,6 +428,7 @@
         border-color: color-mix(in srgb, var(--danger-color) 62%, var(--surface-border));
         box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger-color) 32%, transparent);
     }
+
     100% {
         background: color-mix(in srgb, var(--surface-color) 90%, var(--bg-color));
         border-color: color-mix(in srgb, var(--surface-border) 86%, transparent);
@@ -288,10 +436,28 @@
     }
 }
 
+.mw-skeleton-logo-full { width: 16px; height: 16px; border-radius: 4px; }
+.mw-skeleton-label-full { width: 60px; height: 10px; }
+.mw-skeleton-price-full { width: 100px; height: 20px; margin: 0.4rem 0; }
+.mw-skeleton-change-full { width: 50px; height: 12px; }
+
+.mw-skeleton-rect {
+    border-radius: 4px;
+}
+
 @media (max-width: 1099px) {
+
     .mw-grid-main,
     .mw-grid-commodities {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .mw-compact-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .mw-card-compact:nth-of-type(2n) {
+        border-right: 0;
     }
 }
 
@@ -334,6 +500,22 @@
     .mw-grid-commodities .mw-card {
         flex: 0 0 min(76vw, 230px);
         scroll-snap-align: start;
+    }
+
+    .mw-strip-compact {
+        overflow-x: auto;
+        scrollbar-width: thin;
+    }
+
+    .mw-compact-grid {
+        display: flex;
+        min-width: max-content;
+    }
+
+    .mw-card-compact,
+    .mw-card-compact:nth-of-type(2n) {
+        flex: 0 0 190px;
+        border-right: 1px solid color-mix(in srgb, var(--surface-border) 62%, transparent);
     }
 
     .mw-foot {

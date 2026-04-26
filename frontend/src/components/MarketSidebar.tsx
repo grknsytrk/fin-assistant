@@ -9,7 +9,7 @@ import type {
 } from '../api/types';
 import './MarketSidebar.css';
 
-type TabId = 'XU100' | 'XU030' | 'ENDEKSLER' | 'DOVIZ' | 'EMTIA';
+type TabId = 'XU100' | 'XU030' | 'DOVIZ' | 'EMTIA';
 
 type PanelMode = 'markets' | 'flow';
 
@@ -21,7 +21,6 @@ const PANEL_MODES: { id: PanelMode; label: string }[] = [
 const TABS: { id: TabId; label: string }[] = [
     { id: 'XU100', label: 'XU100' },
     { id: 'XU030', label: 'XU030' },
-    { id: 'ENDEKSLER', label: 'Endeksler' },
     { id: 'DOVIZ', label: 'Döviz' },
     { id: 'EMTIA', label: 'Emtia' },
 ];
@@ -202,15 +201,10 @@ export default function MarketSidebar({
     const [fxError, setFxError] = useState<string | null>(null);
     const [fxDelayNote, setFxDelayNote] = useState<string>('');
 
-    const [indicesData, setIndicesData] = useState<any[] | null>(null);
-    const [indicesLoading, setIndicesLoading] = useState(false);
-    const [indicesError, setIndicesError] = useState<string | null>(null);
-
     const flowInFlight = useRef(false);
     const xu030InFlight = useRef(false);
     const commoditiesInFlight = useRef(false);
     const fxInFlight = useRef(false);
-    const indicesInFlight = useRef(false);
 
     const loadFlow = useCallback((options?: { refresh?: boolean; size?: number }) => {
         if (flowInFlight.current) return;
@@ -312,48 +306,25 @@ export default function MarketSidebar({
             });
     }, [fx]);
 
-    const loadIndices = useCallback((force = false) => {
-        if (indicesInFlight.current) return;
-        if (!force && indicesData) return;
-        indicesInFlight.current = true;
-        setIndicesLoading(true);
-        setIndicesError(null);
-        apiClient
-            .marketIndices()
-            .then((res) => {
-                setIndicesData(res.items || []);
-            })
-            .catch((err: any) => {
-                setIndicesError(err?.message || 'Endeks verisi alınamadı.');
-            })
-            .finally(() => {
-                indicesInFlight.current = false;
-                setIndicesLoading(false);
-            });
-    }, [indicesData]);
-
     useEffect(() => {
         if (!open) return;
         loadFlow();
         const xu030Timer = window.setTimeout(() => loadXu030(), 150);
-        const indicesTimer = window.setTimeout(() => loadIndices(), 300);
-        const fxTimer = window.setTimeout(() => loadFx(), 450);
+        const fxTimer = window.setTimeout(() => loadFx(), 400);
         const commoditiesTimer = window.setTimeout(() => loadCommodities(), 700);
         return () => {
             window.clearTimeout(xu030Timer);
-            window.clearTimeout(indicesTimer);
             window.clearTimeout(fxTimer);
             window.clearTimeout(commoditiesTimer);
         };
-    }, [open, loadFlow, loadXu030, loadIndices, loadFx, loadCommodities]);
+    }, [open, loadFlow, loadXu030, loadFx, loadCommodities]);
 
     useEffect(() => {
         if (!open) return;
         if (tab === 'XU030') loadXu030();
-        else if (tab === 'ENDEKSLER') loadIndices();
         else if (tab === 'DOVIZ') loadFx();
         else if (tab === 'EMTIA') loadCommodities();
-    }, [open, tab, loadXu030, loadIndices, loadFx, loadCommodities]);
+    }, [open, tab, loadXu030, loadFx, loadCommodities]);
 
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
@@ -377,7 +348,6 @@ export default function MarketSidebar({
         if (!open || panelMode !== 'markets') return;
         const intervalId = window.setInterval(() => {
             if (tab === 'XU030') loadXu030(true);
-            else if (tab === 'ENDEKSLER') loadIndices(true);
             else if (tab === 'DOVIZ') loadFx(true);
             else if (tab === 'EMTIA') loadCommodities(true);
             // XU100 parent'tan (MarketsView) zaten setInterval üzerinden yenilenip geliyor.
@@ -473,240 +443,213 @@ export default function MarketSidebar({
                 </div>
 
                 {panelMode === 'markets' && (
-                <section className="ms-section ms-markets ms-panel-single">
-                    <div className="ms-tabs" role="tablist" aria-label="Piyasa sekmeleri">
-                        {TABS.map((t) => (
-                            <button
-                                key={t.id}
-                                type="button"
-                                role="tab"
-                                aria-selected={tab === t.id}
-                                className={`ms-tab${tab === t.id ? ' active' : ''}`}
-                                onClick={() => setTab(t.id)}
-                            >
-                                {t.label}
-                            </button>
-                        ))}
-                    </div>
+                    <section className="ms-section ms-markets ms-panel-single">
+                        <div className="ms-tabs" role="tablist" aria-label="Piyasa sekmeleri">
+                            {TABS.map((t) => (
+                                <button
+                                    key={t.id}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={tab === t.id}
+                                    className={`ms-tab${tab === t.id ? ' active' : ''}`}
+                                    onClick={() => setTab(t.id)}
+                                >
+                                    {t.label}
+                                </button>
+                            ))}
+                        </div>
 
-                    <div className="ms-table-head">
-                        <span>Sembol</span>
-                        <span className="ms-th-right">Fiyat</span>
-                        <span className="ms-th-right">Değişim</span>
-                    </div>
+                        <div className="ms-table-head">
+                            <span>Sembol</span>
+                            <span className="ms-th-right">Fiyat</span>
+                            <span className="ms-th-right">Değişim</span>
+                        </div>
 
-                    <div className="ms-list">
-                        {tab === 'XU100' && (
-                            sortedXu100.length === 0 ? (
-                                <div className="ms-empty">Veri bulunamadı.</div>
-                            ) : (
-                                sortedXu100.map((row) => (
-                                    <FlashRow
-                                        key={row.company}
-                                        price={row.price}
-                                        onClick={() => {
-                                            onSelectTicker(row.company);
-                                            setOpen(false);
-                                        }}
-                                    >
-                                        <span className="ms-sym">{row.company}</span>
-                                        <span className="ms-price">{formatPrice(row.price, row.price_currency)}</span>
-                                        <span className={`ms-change ${changeClass(row.change_pct)}`}>
-                                            {formatPct(row.change_pct)}
-                                        </span>
-                                    </FlashRow>
-                                ))
-                            )
-                        )}
-
-                        {tab === 'XU030' && (
-                            xu030Loading && !xu030 ? (
-                                <div className="ms-empty">Yükleniyor…</div>
-                            ) : xu030Error ? (
-                                <div className="ms-empty ms-empty-error">{xu030Error}</div>
-                            ) : sortedXu030.length === 0 ? (
-                                <div className="ms-empty">Veri bulunamadı.</div>
-                            ) : (
-                                sortedXu030.map((row) => (
-                                    <FlashRow
-                                        key={row.company}
-                                        price={row.price}
-                                        onClick={() => {
-                                            onSelectTicker(row.company);
-                                            setOpen(false);
-                                        }}
-                                    >
-                                        <span className="ms-sym">{row.company}</span>
-                                        <span className="ms-price">{formatPrice(row.price, row.price_currency)}</span>
-                                        <span className={`ms-change ${changeClass(row.change_pct)}`}>
-                                            {formatPct(row.change_pct)}
-                                        </span>
-                                    </FlashRow>
-                                ))
-                            )
-                        )}
-                        
-                        {tab === 'ENDEKSLER' && (
-                            indicesLoading && !indicesData ? (
-                                <div className="ms-empty">Yükleniyor…</div>
-                            ) : indicesError ? (
-                                <div className="ms-empty ms-empty-error">{indicesError}</div>
-                            ) : !indicesData || indicesData.length === 0 ? (
-                                <div className="ms-empty">Veri bulunamadı.</div>
-                            ) : (
-                                indicesData.map((row) => (
-                                    <FlashRow
-                                        key={row.symbol}
-                                        price={row.price}
-                                        className="ms-row-static"
-                                        title={row.label}
-                                    >
-                                        <span className="ms-sym">{row.symbol}</span>
-                                        <span className="ms-price">
-                                            {formatPrice(row.price, row.currency, pickDecimals(row.price))}
-                                        </span>
-                                        <span className={`ms-change ${changeClass(row.change_pct)}`}>
-                                            {formatPct(row.change_pct)}
-                                        </span>
-                                    </FlashRow>
-                                ))
-                            )
-                        )}
-
-                        {tab === 'DOVIZ' && (
-                            fxLoading && !fx ? (
-                                <div className="ms-empty">Yükleniyor…</div>
-                            ) : fxError ? (
-                                <div className="ms-empty ms-empty-error">{fxError}</div>
-                            ) : !fx || fx.length === 0 ? (
-                                <div className="ms-empty">Veri bulunamadı.</div>
-                            ) : (
-                                <>
-                                    {fx.map((row) => (
+                        <div className="ms-list">
+                            {tab === 'XU100' && (
+                                sortedXu100.length === 0 ? (
+                                    <div className="ms-empty">Veri bulunamadı.</div>
+                                ) : (
+                                    sortedXu100.map((row) => (
                                         <FlashRow
-                                            key={row.symbol}
+                                            key={row.company}
                                             price={row.price}
-                                            className="ms-row-static"
-                                            title={row.label}
+                                            onClick={() => {
+                                                onSelectTicker(row.company);
+                                                setOpen(false);
+                                            }}
                                         >
-                                            <span className="ms-sym">{row.symbol}</span>
-                                            <span className="ms-price">
-                                                {formatPrice(row.price, row.currency, pickDecimals(row.price))}
-                                            </span>
+                                            <span className="ms-sym">{row.company}</span>
+                                            <span className="ms-price">{formatPrice(row.price, row.price_currency)}</span>
                                             <span className={`ms-change ${changeClass(row.change_pct)}`}>
                                                 {formatPct(row.change_pct)}
                                             </span>
                                         </FlashRow>
-                                    ))}
-                                    {fxDelayNote && <div className="ms-delay-note">{fxDelayNote}</div>}
-                                </>
-                            )
-                        )}
+                                    ))
+                                )
+                            )}
 
-                        {tab === 'EMTIA' && (
-                            commoditiesLoading && !commodities ? (
-                                <div className="ms-empty">Yükleniyor…</div>
-                            ) : commoditiesError ? (
-                                <div className="ms-empty ms-empty-error">{commoditiesError}</div>
-                            ) : !commodities || commodities.length === 0 ? (
-                                <div className="ms-empty">Veri bulunamadı.</div>
-                            ) : (
-                                <>
-                                    {commodities.map((row) => (
+                            {tab === 'XU030' && (
+                                xu030Loading && !xu030 ? (
+                                    <div className="ms-empty">Yükleniyor…</div>
+                                ) : xu030Error ? (
+                                    <div className="ms-empty ms-empty-error">{xu030Error}</div>
+                                ) : sortedXu030.length === 0 ? (
+                                    <div className="ms-empty">Veri bulunamadı.</div>
+                                ) : (
+                                    sortedXu030.map((row) => (
                                         <FlashRow
-                                            key={row.symbol}
+                                            key={row.company}
                                             price={row.price}
-                                            className="ms-row-static"
-                                            title={row.label}
+                                            onClick={() => {
+                                                onSelectTicker(row.company);
+                                                setOpen(false);
+                                            }}
                                         >
-                                            <span className="ms-sym">{row.symbol}</span>
-                                            <span className="ms-price">
-                                                {formatPrice(row.price, row.currency, pickDecimals(row.price))}
-                                            </span>
+                                            <span className="ms-sym">{row.company}</span>
+                                            <span className="ms-price">{formatPrice(row.price, row.price_currency)}</span>
                                             <span className={`ms-change ${changeClass(row.change_pct)}`}>
                                                 {formatPct(row.change_pct)}
                                             </span>
                                         </FlashRow>
-                                    ))}
-                                    {commoditiesDelayNote && (
-                                        <div className="ms-delay-note">{commoditiesDelayNote}</div>
-                                    )}
-                                </>
-                            )
-                        )}
-                    </div>
-                </section>
+                                    ))
+                                )
+                            )}
+
+                            {tab === 'DOVIZ' && (
+                                fxLoading && !fx ? (
+                                    <div className="ms-empty">Yükleniyor…</div>
+                                ) : fxError ? (
+                                    <div className="ms-empty ms-empty-error">{fxError}</div>
+                                ) : !fx || fx.length === 0 ? (
+                                    <div className="ms-empty">Veri bulunamadı.</div>
+                                ) : (
+                                    <>
+                                        {fx.map((row) => (
+                                            <FlashRow
+                                                key={row.symbol}
+                                                price={row.price}
+                                                className="ms-row-static"
+                                                title={row.label}
+                                            >
+                                                <span className="ms-sym">{row.symbol}</span>
+                                                <span className="ms-price">
+                                                    {formatPrice(row.price, row.currency, pickDecimals(row.price))}
+                                                </span>
+                                                <span className={`ms-change ${changeClass(row.change_pct)}`}>
+                                                    {formatPct(row.change_pct)}
+                                                </span>
+                                            </FlashRow>
+                                        ))}
+                                        {fxDelayNote && <div className="ms-delay-note">{fxDelayNote}</div>}
+                                    </>
+                                )
+                            )}
+
+                            {tab === 'EMTIA' && (
+                                commoditiesLoading && !commodities ? (
+                                    <div className="ms-empty">Yükleniyor…</div>
+                                ) : commoditiesError ? (
+                                    <div className="ms-empty ms-empty-error">{commoditiesError}</div>
+                                ) : !commodities || commodities.length === 0 ? (
+                                    <div className="ms-empty">Veri bulunamadı.</div>
+                                ) : (
+                                    <>
+                                        {commodities.map((row) => (
+                                            <FlashRow
+                                                key={row.symbol}
+                                                price={row.price}
+                                                className="ms-row-static"
+                                                title={row.label}
+                                            >
+                                                <span className="ms-sym">{row.symbol}</span>
+                                                <span className="ms-price">
+                                                    {formatPrice(row.price, row.currency, pickDecimals(row.price))}
+                                                </span>
+                                                <span className={`ms-change ${changeClass(row.change_pct)}`}>
+                                                    {formatPct(row.change_pct)}
+                                                </span>
+                                            </FlashRow>
+                                        ))}
+                                        {commoditiesDelayNote && (
+                                            <div className="ms-delay-note">{commoditiesDelayNote}</div>
+                                        )}
+                                    </>
+                                )
+                            )}
+                        </div>
+                    </section>
                 )}
 
                 {panelMode === 'flow' && (
-                <section className="ms-section ms-flow ms-panel-single">
-                    <div className="ms-flow-head">
-                        <h3>Akış</h3>
-                        <button
-                            type="button"
-                            className="ms-flow-refresh"
-                            onClick={() => loadFlow({ refresh: true })}
-                            disabled={flowLoading}
-                            title="Akışı yenile"
-                        >
-                            {flowLoading ? 'Yükleniyor…' : 'Yenile'}
-                        </button>
-                    </div>
-
-                    <div className="ms-flow-filters" role="tablist" aria-label="Akış filtresi">
-                        {FLOW_FILTERS.map((f) => (
+                    <section className="ms-section ms-flow ms-panel-single">
+                        <div className="ms-flow-head">
+                            <h3>Akış</h3>
                             <button
-                                key={f.id}
                                 type="button"
-                                role="tab"
-                                aria-selected={flowFilter === f.id}
-                                className={`ms-flow-filter${flowFilter === f.id ? ' active' : ''}`}
-                                onClick={() => setFlowFilter(f.id)}
+                                className="ms-flow-refresh"
+                                onClick={() => loadFlow({ refresh: true })}
+                                disabled={flowLoading}
+                                title="Akışı yenile"
                             >
-                                {f.label}
+                                {flowLoading ? 'Yükleniyor…' : 'Yenile'}
                             </button>
-                        ))}
-                    </div>
-
-                    <div className="ms-flow-size" role="group" aria-label="Akış boyutu">
-                        <span className="ms-flow-size-label">Kayıt</span>
-                        {FLOW_SIZE_OPTIONS.map((option) => (
-                            <button
-                                key={option.value}
-                                type="button"
-                                aria-pressed={flowSize === option.value}
-                                className={`ms-flow-size-btn${flowSize === option.value ? ' active' : ''}`}
-                                onClick={() => handleFlowSizeChange(option.value)}
-                                disabled={flowLoading && flowSize === option.value}
-                            >
-                                {option.label}
-                            </button>
-                        ))}
-                    </div>
-
-                    {flowDegraded && flowWarning && (
-                        <div className="ms-flow-warning" role="status">
-                            {flowWarning}
                         </div>
-                    )}
 
-                    {flowLoading && !flow && <div className="ms-empty">Yükleniyor…</div>}
-                    {flowError && <div className="ms-empty ms-empty-error">{flowError}</div>}
-                    {!flowLoading && !flowError && flow && filteredFlow.length === 0 && (
-                        <div className="ms-empty">Bu filtreye uygun kayıt yok.</div>
-                    )}
-                    <div className="ms-flow-list">
-                        {groupedFlow.map((group) => (
-                            <div key={group.key} className="ms-flow-group">
-                                <div className="ms-flow-group-head">
-                                    <span className="ms-flow-group-label">{group.label}</span>
-                                    <span className="ms-flow-group-count">{group.items.length}</span>
-                                </div>
-                                {group.items.map(renderFlowItem)}
+                        <div className="ms-flow-filters" role="tablist" aria-label="Akış filtresi">
+                            {FLOW_FILTERS.map((f) => (
+                                <button
+                                    key={f.id}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={flowFilter === f.id}
+                                    className={`ms-flow-filter${flowFilter === f.id ? ' active' : ''}`}
+                                    onClick={() => setFlowFilter(f.id)}
+                                >
+                                    {f.label}
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="ms-flow-size" role="group" aria-label="Akış boyutu">
+                            <span className="ms-flow-size-label">Kayıt</span>
+                            {FLOW_SIZE_OPTIONS.map((option) => (
+                                <button
+                                    key={option.value}
+                                    type="button"
+                                    aria-pressed={flowSize === option.value}
+                                    className={`ms-flow-size-btn${flowSize === option.value ? ' active' : ''}`}
+                                    onClick={() => handleFlowSizeChange(option.value)}
+                                    disabled={flowLoading && flowSize === option.value}
+                                >
+                                    {option.label}
+                                </button>
+                            ))}
+                        </div>
+
+                        {flowDegraded && flowWarning && (
+                            <div className="ms-flow-warning" role="status">
+                                {flowWarning}
                             </div>
-                        ))}
-                    </div>
-                </section>
+                        )}
+
+                        {flowLoading && !flow && <div className="ms-empty">Yükleniyor…</div>}
+                        {flowError && <div className="ms-empty ms-empty-error">{flowError}</div>}
+                        {!flowLoading && !flowError && flow && filteredFlow.length === 0 && (
+                            <div className="ms-empty">Bu filtreye uygun kayıt yok.</div>
+                        )}
+                        <div className="ms-flow-list">
+                            {groupedFlow.map((group) => (
+                                <div key={group.key} className="ms-flow-group">
+                                    <div className="ms-flow-group-head">
+                                        <span className="ms-flow-group-label">{group.label}</span>
+                                        <span className="ms-flow-group-count">{group.items.length}</span>
+                                    </div>
+                                    {group.items.map(renderFlowItem)}
+                                </div>
+                            ))}
+                        </div>
+                    </section>
                 )}
             </aside>
         </>

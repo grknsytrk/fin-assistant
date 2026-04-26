@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiClient } from '../api/client';
 import type { MarketWatchItem, MarketWatchResponse } from '../api/types';
+import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
 import './MarketWatchStrip.css';
 
-const INDEX_SYMBOLS = ['XU100', 'XU030', 'VIX', 'S&P 500', 'NASDAQ', 'DOW'] as const;
-const FX_SYMBOLS = ['USD/TRY', 'EUR/TRY'] as const;
+const PRIMARY_SYMBOLS = ['XU100', 'XU030', 'USD/TRY', 'EUR/TRY'] as const;
 const COMMODITY_SYMBOLS = ['BRENT', 'ALTIN', 'GUMUS', 'DOGALGAZ'] as const;
-const WATCHLIST_SYMBOLS = ['BIMAS', 'MGROS', 'SOKM'] as const;
 const DEFAULT_DELAY_NOTE = 'Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).';
 
 const FALLBACK_LABELS: Record<string, string> = {
@@ -18,13 +17,6 @@ const FALLBACK_LABELS: Record<string, string> = {
     ALTIN: 'Altın (Ons)',
     GUMUS: 'Gümüş (Ons)',
     DOGALGAZ: 'Doğal Gaz',
-    VIX: 'Korku Endeksi (VIX)',
-    'S&P 500': 'S&P 500',
-    NASDAQ: 'NASDAQ Composite',
-    DOW: 'Dow Jones Industrial',
-    BIMAS: 'BİM Birleşik Mağazalar',
-    MGROS: 'Migros Ticaret',
-    SOKM: 'Şok Marketler',
 };
 
 function normalizeSymbol(raw: string): string {
@@ -44,6 +36,8 @@ function placeholderItem(symbol: string): MarketWatchItem {
         market_state: '',
         as_of: null,
         error: 'data_unavailable',
+        logo_url: null,
+        logo_source: null,
     };
 }
 
@@ -98,6 +92,21 @@ function itemMetaLabel(item: MarketWatchItem): string {
     return 'Zaman bilgisi yok';
 }
 
+function compactSymbol(symbol: string): string {
+    return symbol.replace('/', '');
+}
+
+function watchItemKind(symbol: string): SymbolLogoKind {
+    const normalized = normalizeSymbol(symbol);
+    if (COMMODITY_SYMBOLS.includes(normalized as (typeof COMMODITY_SYMBOLS)[number])) {
+        return 'commodity';
+    }
+    if (normalized.includes('/') || normalized === 'DXY') {
+        return 'fx';
+    }
+    return 'index';
+}
+
 function FlashMarketCard({
     item,
     className = '',
@@ -125,7 +134,11 @@ function FlashMarketCard({
     );
 }
 
-export default function MarketWatchStrip() {
+interface MarketWatchStripProps {
+    variant?: 'panel' | 'compact';
+}
+
+export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStripProps) {
     const [payload, setPayload] = useState<MarketWatchResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -176,25 +189,73 @@ export default function MarketWatchStrip() {
         return map;
     }, [payload]);
 
-    const indexItems = useMemo(
-        () => INDEX_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
+    const primaryItems = useMemo(
+        () => PRIMARY_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
         [lookup],
     );
-    const fxItems = useMemo(
-        () => FX_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
-        [lookup],
-    );
+
     const commodityItems = useMemo(
         () => COMMODITY_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
-        [lookup],
-    );
-    const watchlistItems = useMemo(
-        () => WATCHLIST_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
         [lookup],
     );
 
     const isInitialLoading = loading && !payload;
     const delayNote = payload?.delay_note || DEFAULT_DELAY_NOTE;
+
+    if (variant === 'compact') {
+        return (
+            <section className="mw-strip mw-strip-compact" aria-label="Kompakt piyasa bandı">
+                {isInitialLoading && (
+                    <div className="mw-compact-skeleton-grid">
+                        {[...Array(4)].map((_, i) => (
+                            <div key={i} className="mw-compact-skeleton-card">
+                                <div className="mw-compact-skeleton-head">
+                                    <div className="mw-compact-skeleton-logo mw-compact-skeleton-pulse" />
+                                    <div className="mw-compact-skeleton-symbol mw-compact-skeleton-pulse" />
+                                </div>
+                                <div className="mw-compact-skeleton-price-row">
+                                    <div className="mw-compact-skeleton-price mw-compact-skeleton-pulse" />
+                                    <div className="mw-compact-skeleton-change mw-compact-skeleton-pulse" />
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+                {!isInitialLoading && !payload && error && (
+                    <div className="mw-compact-state mw-compact-error">{error}</div>
+                )}
+                {(payload || !isInitialLoading) && (
+                    <div className="mw-compact-grid">
+                        {primaryItems.map((item) => (
+                            <FlashMarketCard
+                                key={item.symbol}
+                                item={item}
+                                className="mw-card-compact"
+                            >
+                                <div className="mw-compact-head">
+                                    <SymbolLogo
+                                        symbol={item.symbol}
+                                        name={item.label}
+                                        kind={watchItemKind(item.symbol)}
+                                        logoUrl={item.logo_url}
+                                        size="xs"
+                                        className="mw-symbol-logo"
+                                    />
+                                    <div className="mw-compact-symbol">{compactSymbol(item.symbol)}</div>
+                                </div>
+                                <div className="mw-compact-price-row">
+                                    <span className="mw-compact-price">{formatPrice(item)}</span>
+                                    <span className={`mw-compact-change ${changeClass(item.change_pct)}`}>
+                                        {formatPct(item.change_pct)}
+                                    </span>
+                                </div>
+                            </FlashMarketCard>
+                        ))}
+                    </div>
+                )}
+            </section>
+        );
+    }
 
     return (
         <section className="mw-strip" aria-label="Borsa izleme bandı">
@@ -219,7 +280,32 @@ export default function MarketWatchStrip() {
             </div>
 
             {isInitialLoading && (
-                <div className="mw-state">Borsa izleme verisi yükleniyor...</div>
+                <div className="mw-skeleton-full">
+                    <div className="mw-grid mw-grid-main">
+                        {[...Array(4)].map((_, i) => (
+                            <div key={i} className="mw-card mw-card-main mw-card-skeleton-pulse">
+                                <div className="mw-card-head">
+                                    <div className="mw-skeleton-rect mw-skeleton-logo-full mw-compact-skeleton-pulse" />
+                                    <div className="mw-skeleton-rect mw-skeleton-label-full mw-compact-skeleton-pulse" />
+                                </div>
+                                <div className="mw-skeleton-rect mw-skeleton-price-full mw-compact-skeleton-pulse" />
+                                <div className="mw-skeleton-rect mw-skeleton-change-full mw-compact-skeleton-pulse" />
+                            </div>
+                        ))}
+                    </div>
+                    <div className="mw-grid mw-grid-commodities">
+                        {[...Array(4)].map((_, i) => (
+                            <div key={i} className="mw-card mw-card-skeleton-pulse">
+                                <div className="mw-card-head">
+                                    <div className="mw-skeleton-rect mw-skeleton-logo-full mw-compact-skeleton-pulse" />
+                                    <div className="mw-skeleton-rect mw-skeleton-label-full mw-compact-skeleton-pulse" />
+                                </div>
+                                <div className="mw-skeleton-rect mw-skeleton-price-full mw-compact-skeleton-pulse" />
+                                <div className="mw-skeleton-rect mw-skeleton-change-full mw-compact-skeleton-pulse" />
+                            </div>
+                        ))}
+                    </div>
+                </div>
             )}
 
             {!isInitialLoading && !payload && error && (
@@ -240,12 +326,25 @@ export default function MarketWatchStrip() {
 
             {payload && (
                 <>
-                    <div className="mw-section-title">Endeksler</div>
-                    <div className="mw-grid mw-grid-indices">
-                        {indexItems.map((item) => (
-                            <FlashMarketCard key={item.symbol} item={item}>
+                    <div className="mw-grid mw-grid-main">
+                        {primaryItems.map((item) => (
+                            <FlashMarketCard
+                                key={item.symbol}
+                                item={item}
+                                className="mw-card-main"
+                            >
                                 <div className="mw-card-head">
-                                    <span className="mw-symbol">{item.symbol}</span>
+                                    <span className="mw-card-symbol">
+                                        <SymbolLogo
+                                            symbol={item.symbol}
+                                            name={item.label}
+                                            kind={watchItemKind(item.symbol)}
+                                            logoUrl={item.logo_url}
+                                            size="xs"
+                                            className="mw-symbol-logo"
+                                        />
+                                        <span className="mw-symbol">{item.symbol}</span>
+                                    </span>
                                     <span className="mw-label">{item.label}</span>
                                 </div>
                                 <div className="mw-card-price">{formatPrice(item)}</div>
@@ -257,60 +356,36 @@ export default function MarketWatchStrip() {
                         ))}
                     </div>
 
-                    <div className="mw-section-title">Döviz</div>
-                    <div className="mw-grid mw-grid-fx">
-                        {fxItems.map((item) => (
-                            <FlashMarketCard key={item.symbol} item={item}>
-                                <div className="mw-card-head">
-                                    <span className="mw-symbol">{item.symbol}</span>
-                                    <span className="mw-label">{item.label}</span>
-                                </div>
-                                <div className="mw-card-price">{formatPrice(item)}</div>
-                                <div className={`mw-card-change ${changeClass(item.change_pct)}`}>
-                                    {formatPct(item.change_pct)}
-                                </div>
-                                <div className="mw-card-meta">{itemMetaLabel(item)}</div>
-                            </FlashMarketCard>
-                        ))}
-                    </div>
-
-                    <div className="mw-section-title">Emtia</div>
                     <div className="mw-grid mw-grid-commodities">
                         {commodityItems.map((item) => (
-                            <FlashMarketCard key={item.symbol} item={item}>
+                            <FlashMarketCard
+                                key={item.symbol}
+                                item={item}
+                            >
                                 <div className="mw-card-head">
-                                    <span className="mw-symbol">{item.symbol}</span>
+                                    <span className="mw-card-symbol">
+                                        <SymbolLogo
+                                            symbol={item.symbol}
+                                            name={item.label}
+                                            kind="commodity"
+                                            logoUrl={item.logo_url}
+                                            size="xs"
+                                            className="mw-symbol-logo"
+                                        />
+                                        <span className="mw-symbol">{item.symbol}</span>
+                                    </span>
                                     <span className="mw-label">{item.label}</span>
                                 </div>
                                 <div className="mw-card-price">{formatPrice(item)}</div>
                                 <div className={`mw-card-change ${changeClass(item.change_pct)}`}>
                                     {formatPct(item.change_pct)}
                                 </div>
-                                <div className="mw-card-meta">{itemMetaLabel(item)}</div>
-                            </FlashMarketCard>
-                        ))}
-                    </div>
-
-                    <div className="mw-section-title">İzleme Listesi (Demo Şirketleri)</div>
-                    <div className="mw-grid mw-grid-watchlist">
-                        {watchlistItems.map((item) => (
-                            <FlashMarketCard key={item.symbol} item={item}>
-                                <div className="mw-card-head">
-                                    <span className="mw-symbol">{item.symbol}</span>
-                                    <span className="mw-label">{item.label}</span>
-                                </div>
-                                <div className="mw-card-price">{formatPrice(item)}</div>
-                                <div className={`mw-card-change ${changeClass(item.change_pct)}`}>
-                                    {formatPct(item.change_pct)}
-                                </div>
-                                <div className="mw-card-meta">{itemMetaLabel(item)}</div>
                             </FlashMarketCard>
                         ))}
                     </div>
 
                     <div className="mw-foot">
                         <span className="mw-delay-note">{delayNote}</span>
-                        {loading && <span className="mw-syncing">Güncelleniyor...</span>}
                         {!loading && error && (
                             <span className="mw-soft-error">Son yenileme başarısız oldu.</span>
                         )}

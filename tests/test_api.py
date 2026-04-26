@@ -15,14 +15,18 @@ from src import kap_vyk_client
 def _reset_flow_state() -> None:
     api_module._FLOW_CACHE.clear()
     api_module._WATCH_CACHE.clear()
+    api_module._WATCH_GLOBAL_CACHE.clear()
     api_module._STOCKS_CACHE.clear()
     api_module._MARKET_PRICE_CACHE.clear()
+    api_module._INFOYATIRIM_STOCK_PAGE_CACHE.clear()
     api_module._STOCK_RETURN_BASE_CACHE.clear()
+    api_module._MARKET_STOCK_CARD_CHART_CACHE.clear()
     api_module._MARKET_INDICES_CACHE.clear()
     api_module._MARKET_INDEX_DETAIL_CACHE.clear()
     api_module._MARKET_INDEX_QUOTE_CACHE.clear()
     api_module._MARKET_INDEX_INTRADAY_CACHE.clear()
     api_module._MARKET_INDEX_RETURN_CACHE.clear()
+    api_module._ISYATIRIM_BASIC_SUMMARY_CACHE.clear()
     kap_vyk_client.reset_caches_for_tests()
 
 
@@ -294,6 +298,150 @@ def test_fetch_market_price_map_parses_volume(monkeypatch: pytest.MonkeyPatch) -
     assert payload["A1CAP"]["volume"] == 108750000.50
 
 
+def test_extract_infoyatirim_stock_page_quote_parses_single_stock_page() -> None:
+    html = """
+    <section>
+      <h1>TRABZONSPOR SPORTİF (TSPOR)</h1>
+      <div>Son İşlem Fiyatı 1.03₺</div>
+      <div>Satış 1.04₺</div>
+      <div>Günlük Değişim % 0.00%</div>
+      <div>Günlük Hacim (TL) 358,697,300₺</div>
+      <div>Günlük Değişim (TL) 0.00₺</div>
+      <div>Piyasa Değeri 7,724,999,785</div>
+      <div>F/K 23.86</div>
+      <div>PD/DD 0.77</div>
+      <div>FD/FAVÖK 11.20</div>
+    </section>
+    """
+
+    payload = api_module._extract_infoyatirim_stock_page_quote("TSPOR", html)
+
+    assert payload["price"] == 1.03
+    assert payload["change_pct"] == 0.0
+    assert payload["change"] == 0.0
+    assert payload["volume"] == 358_697_300.0
+    assert payload["market_cap"] == 7_724_999_785.0
+    assert payload["fk"] == 23.86
+    assert payload["pd_dd"] == 0.77
+    assert payload["fd_favok"] == 11.2
+    assert payload["currency"] == "TRY"
+    assert api_module._extract_infoyatirim_stock_page_quote("TSPOR", "<html></html>") == {}
+
+
+def test_fetch_market_price_map_uses_stock_page_fallback_for_missing_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    html = """
+    <table><tbody id="tableBody">
+      <tr data-symbol="A1CAP">
+        <th scope="row">A1CAP</th>
+        <td>A1 CAPITAL</td>
+        <td class="price" data-val="14.18">14.18</td>
+        <td class="change" data-val="-0.21">-0.21</td>
+        <td class="percent" data-val="-1.46">-1.46 %</td>
+        <td>108.750.000,50</td>
+      </tr>
+    </tbody></table>
+    """
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return html.encode("utf-8")
+
+    fallback_calls: List[str] = []
+
+    def fake_fallback(symbol: str) -> Dict[str, Any]:
+        fallback_calls.append(symbol)
+        if symbol == "EGEEN":
+            return {
+                "price": 6665.0,
+                "currency": "TRY",
+                "change": -17.35,
+                "change_pct": -0.26,
+                "volume": 212_043_600.0,
+                "market_state": "",
+                "as_of": "2026-04-25T09:00:00+00:00",
+            }
+        return {}
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setattr(api_module, "_fetch_infoyatirim_stock_page_quote", fake_fallback)
+
+    payload = api_module._fetch_market_price_map(["A1CAP", "EGEEN", "TSPOR"])
+
+    assert fallback_calls == ["EGEEN", "TSPOR"]
+    assert payload["A1CAP"]["price"] == 14.18
+    assert payload["EGEEN"]["price"] == 6665.0
+    assert payload["EGEEN"]["change_pct"] == -0.26
+    assert payload["EGEEN"]["volume"] == 212_043_600.0
+    assert "TSPOR" not in payload
+
+
+def test_extract_isyatirim_basic_summary_map_parses_market_caps() -> None:
+    html = """
+    <table class="dataTable" data-csvname="temelozet">
+      <thead>
+        <tr>
+          <th>Kod</th>
+          <th>Hisse Adı</th>
+          <th>Sektör</th>
+          <th>Kapanış (TL)</th>
+          <th>Piyasa Değeri (mn TL)</th>
+          <th>Piyasa Değeri (mn $)</th>
+          <th>Halka Açıklık Oranı (%)</th>
+          <th>Sermaye (mn TL)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>ASTOR</td><td>Astor Enerji</td><td>Elektrik</td><td>221,50</td><td>221.057,0</td><td>4.919,5</td><td>42,7</td><td>998,0</td></tr>
+        <tr><td>GARAN</td><td>Garanti Bankası</td><td>Bankacılık</td><td>138,00</td><td>579.600,0</td><td>12.898,7</td><td>14,0</td><td>4.200,0</td></tr>
+        <tr><td>MGROS</td><td>Migros</td><td>Perakende</td><td>638,50</td><td>115.603,1</td><td>2.572,7</td><td>50,8</td><td>181,1</td></tr>
+        <tr><td>TUPRS</td><td>Tüpraş</td><td>Petrol</td><td>269,00</td><td>518.308,0</td><td>11.534,6</td><td>48,6</td><td>1.926,8</td></tr>
+      </tbody>
+    </table>
+    """
+
+    payload = api_module._extract_isyatirim_basic_summary_map(html)
+
+    assert payload["ASTOR"]["market_cap"] == 221_057_000_000.0
+    assert payload["GARAN"]["market_cap"] == 579_600_000_000.0
+    assert payload["MGROS"]["market_cap"] == 115_603_100_000.0
+    assert payload["TUPRS"]["market_cap"] == 518_308_000_000.0
+    assert payload["ASTOR"]["fdpo"] == 0.427
+    assert payload["ASTOR"]["shares_outstanding"] == 998_000_000.0
+    assert api_module._market_cap_from_quote_and_meta(
+        {"price": 2.0},
+        {},
+        {"shares_outstanding": 10.0},
+    ) == 20.0
+
+
+def test_index_weight_inputs_use_isyatirim_fdpo_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api_module, "_latest_share_count_from_kap_cache", lambda _symbol: None)
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_isyatirim_basic_summary_map",
+        lambda: {
+            "ASTOR": {
+                "shares_outstanding": 998_000_000.0,
+                "fdpo": 0.427,
+            },
+        },
+    )
+
+    payload = api_module._index_weight_inputs_for_symbol("ASTOR")
+
+    assert payload["shares_outstanding"] == 998_000_000.0
+    assert payload["fdpo"] == 0.427
+    assert payload["weight_coefficient"] == 1.0
+
+
 def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     price_calls: List[tuple[str, ...]] = []
 
@@ -309,7 +457,11 @@ def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.M
     monkeypatch.setattr(
         api_module,
         "_load_cached_kap_market_metadata",
-        lambda _cache_dir, symbol: {"latest_quarter": "2026Q1", "has_kap_cache": symbol == "A1CAP"},
+        lambda _cache_dir, symbol: {
+            "latest_quarter": "2026Q1",
+            "has_kap_cache": symbol == "A1CAP",
+            "shares_outstanding": 100_000_000.0 if symbol == "A1CAP" else None,
+        },
     )
 
     def fake_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -334,6 +486,14 @@ def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.M
         }
 
     monkeypatch.setattr(api_module, "_fetch_market_price_map", fake_prices)
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_isyatirim_basic_summary_map",
+        lambda: {
+            "A1CAP": {"market_cap": 999_000_000_000.0, "shares_outstanding": 1_000_000.0},
+            "AEFES": {"market_cap": 38_000_000_000.0, "shares_outstanding": 2_000_000_000.0},
+        },
+    )
 
     def fake_return_bases(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         result: Dict[str, Dict[str, Any]] = {}
@@ -394,11 +554,447 @@ def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.M
     a1cap = rows[0]
     assert a1cap["company"] == "A1CAP"
     assert a1cap["volume"] == 108750000.0
+    assert a1cap["market_cap"] == 1418000000.0
     assert a1cap["return_1w_pct"] == 1.29
     assert a1cap["return_1y_pct"] == 102.57
+    assert rows[1]["market_cap"] == 38000000000.0
     assert rows[1]["return_1w_pct"] is None
     assert third.json()["index"] == "XU030"
     assert [row["company"] for row in third.json()["rows"]] == ["AEFES"]
+
+
+def test_infoyatirim_stock_page_fallback_populates_xu100_rows_and_index_impact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    list_html = """
+    <table><tbody id="tableBody">
+      <tr data-symbol="A1CAP">
+        <td>A1 CAPITAL</td>
+        <td class="price" data-val="14.18">14.18</td>
+        <td class="change" data-val="-0.21">-0.21</td>
+        <td class="percent" data-val="-1.46">-1.46 %</td>
+        <td>108.750.000</td>
+      </tr>
+    </tbody></table>
+    """
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return list_html.encode("utf-8")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setattr("app.kap_service.get_bist100_companies", lambda: ["EGEEN"])
+    monkeypatch.setattr(api_module, "_company_breakdown_from_chunks", lambda _path: [])
+    monkeypatch.setattr(
+        api_module,
+        "_load_cached_kap_market_metadata",
+        lambda _cache_dir, _symbol: {"latest_quarter": None, "has_kap_cache": False, "shares_outstanding": None},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_infoyatirim_stock_page_quote",
+        lambda symbol: {
+            "price": 6665.0,
+            "currency": "TRY",
+            "change": -17.35,
+            "change_pct": -0.26,
+            "volume": 212_043_600.0,
+            "market_cap": 20_994_800_000.0,
+            "market_state": "",
+            "as_of": "2026-04-25T09:00:00+00:00",
+        }
+        if symbol == "EGEEN"
+        else {},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_isyatirim_basic_summary_map",
+        lambda: {
+            "EGEEN": {
+                "market_cap": 20_994_800_000.0,
+                "shares_outstanding": 3_200_000.0,
+                "fdpo": 0.358,
+            },
+        },
+    )
+    monkeypatch.setattr(api_module, "_fetch_stock_return_bases_bulk", lambda _symbols: {})
+    monkeypatch.setattr(api_module, "_latest_share_count_from_kap_cache", lambda _symbol: None)
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_index_quote",
+        lambda _index_code: {
+            "symbol": "XU100",
+            "label": "BIST 100",
+            "yahoo_symbol": "XU100.IS",
+            "price": 1000.0,
+            "prev_close": 1002.6,
+            "change": -2.6,
+            "change_pct": -0.26,
+            "high": 1010.0,
+            "low": 990.0,
+            "volume": 1_000_000.0,
+            "currency": "TRY",
+            "market_state": "REGULAR",
+            "as_of": "2026-04-25T09:00:00+00:00",
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(api_module, "_fetch_index_return_bases", lambda _index_code: {})
+    monkeypatch.setattr(api_module, "_index_intraday_payload", lambda _index_code: {"line_points": []})
+
+    client = TestClient(app)
+    stocks_response = client.get("/market/stocks?index=XU100&refresh=true")
+    index_response = client.get("/market/indices/XU100?refresh=true")
+
+    assert stocks_response.status_code == 200
+    stock_row = stocks_response.json()["rows"][0]
+    assert stock_row["company"] == "EGEEN"
+    assert stock_row["price"] == 6665.0
+    assert stock_row["change_pct"] == -0.26
+    assert stock_row["volume"] == 212_043_600.0
+
+    assert index_response.status_code == 200
+    index_row = index_response.json()["constituents"][0]
+    assert index_row["symbol"] == "EGEEN"
+    assert index_row["weight_pct"] == 100.0
+    assert index_row["point_effect"] == -2.6
+
+
+def test_market_stock_cards_returns_quotes_and_line_points(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_market_price_map",
+        lambda symbols: {
+            symbol: {
+                "price": 760.0 if symbol == "BIMAS" else 325.0,
+                "currency": "TRY",
+                "change": -3.0 if symbol == "BIMAS" else 1.5,
+                "change_pct": -0.39 if symbol == "BIMAS" else 0.46,
+                "volume": 2_813_888_143.0 if symbol == "BIMAS" else 12_228_796_146.0,
+                "market_state": "REGULAR",
+                "as_of": "2026-04-25T11:00:00+00:00",
+            }
+            for symbol in symbols
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_isyatirim_basic_summary_map",
+        lambda: {
+            "BIMAS": {"market_cap": 456_000_000_000.0},
+            "THYAO": {"market_cap": 448_500_000_000.0},
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_load_cached_kap_market_metadata",
+        lambda _cache_dir, _symbol: {"latest_quarter": None, "has_kap_cache": False, "shares_outstanding": None},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_isyatirim_multiples",
+        lambda symbol: {
+            "ok": True,
+            "fk": 24.47 if symbol == "BIMAS" else 3.79,
+            "pd_dd": 2.75 if symbol == "BIMAS" else 0.49,
+            "fd_favok": 11.37 if symbol == "BIMAS" else 5.97,
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_stock_card_financial_ratios_from_cache",
+        lambda symbol: {"net_borc_favok": 0.89 if symbol == "BIMAS" else 3.13},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_stock_return_bases_bulk",
+        lambda _symbols: {
+            "BIMAS": {
+                "base_1w": 765.0,
+                "base_1m": 680.0,
+                "base_3m": 628.5,
+                "base_6m": 574.5,
+                "base_ytd": 537.0,
+                "base_1y": 452.0,
+            },
+            "THYAO": {},
+        },
+    )
+
+    def fake_intraday(symbol: str, *, force_refresh: bool = False) -> Dict[str, Any]:
+        return {
+            "line_points": [
+                {"time": "2026-04-25T08:00:00+00:00", "close": 750.0},
+                {"time": "2026-04-25T08:05:00+00:00", "close": 760.0},
+            ],
+            "high": 761.5,
+            "low": 747.0,
+            "prev_close": 763.0,
+            "volume": 3_729_933,
+            "volume_lot": 3_729_933,
+            "currency": "TRY",
+            "market_state": "REGULAR",
+            "as_of": "2026-04-25T11:00:00+00:00",
+            "yahoo_symbol": f"{symbol}.IS",
+            "error": None,
+            "force_refresh_seen": force_refresh,
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_stock_card_intraday", fake_intraday)
+
+    client = TestClient(app)
+    response = client.get("/market/stocks/cards?symbols=BIMAS,THYAO&refresh=true")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "infoyatirim_yahoo_chart"
+    assert [item["symbol"] for item in payload["items"]] == ["BIMAS", "THYAO"]
+    assert payload["items"][0]["price"] == 760.0
+    assert payload["items"][0]["change_pct"] == -0.39
+    assert payload["items"][0]["volume"] == 2_813_888_143.0
+    assert payload["items"][0]["volume_tl"] == 2_813_888_143.0
+    assert payload["items"][0]["volume_lot"] == 3_729_933
+    assert payload["items"][0]["market_cap"] == 456_000_000_000.0
+    assert payload["items"][0]["previous_close"] == 763.0
+    assert payload["items"][0]["fk"] == 24.47
+    assert payload["items"][0]["pd_dd"] == 2.75
+    assert payload["items"][0]["fd_favok"] == 11.37
+    assert payload["items"][0]["net_borc_favok"] == 0.89
+    assert payload["items"][0]["return_1w_pct"] == -0.65
+    assert payload["items"][0]["return_1m_pct"] == 11.76
+    assert payload["items"][0]["line_points"][1]["close"] == 760.0
+
+
+def test_market_stock_cards_falls_back_to_infoyatirim_multiples_when_missing_or_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_market_price_map",
+        lambda symbols: {
+            symbol: {
+                "price": 207.0 if symbol == "KCHOL" else 760.0,
+                "currency": "TRY",
+                "change": 2.1 if symbol == "KCHOL" else -3.0,
+                "change_pct": 1.02 if symbol == "KCHOL" else -0.39,
+                "volume": 3_308_601_000.0 if symbol == "KCHOL" else 2_813_888_143.0,
+                "market_state": "REGULAR",
+                "as_of": "2026-04-25T11:00:00+00:00",
+            }
+            for symbol in symbols
+        },
+    )
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: {})
+    monkeypatch.setattr(
+        api_module,
+        "_load_cached_kap_market_metadata",
+        lambda _cache_dir, _symbol: {"latest_quarter": None, "has_kap_cache": False, "shares_outstanding": None},
+    )
+
+    def fake_multiples(symbol: str) -> Dict[str, Any]:
+        if symbol == "KCHOL":
+            return {"ok": True, "fk": 0.0, "pd_dd": None, "fd_favok": 0.0}
+        return {"ok": True, "fk": 24.47, "pd_dd": 2.75, "fd_favok": 11.37}
+
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_multiples", fake_multiples)
+    monkeypatch.setattr(api_module, "_stock_card_financial_ratios_from_cache", lambda _symbol: {"net_borc_favok": None})
+    monkeypatch.setattr(api_module, "_fetch_stock_return_bases_bulk", lambda _symbols: {})
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_stock_card_intraday",
+        lambda symbol, force_refresh=False: {
+            "line_points": [],
+            "high": None,
+            "low": None,
+            "prev_close": None,
+            "volume": None,
+            "volume_lot": None,
+            "currency": "TRY",
+            "market_state": "REGULAR",
+            "as_of": "2026-04-25T11:00:00+00:00",
+            "yahoo_symbol": f"{symbol}.IS",
+            "error": None,
+        },
+    )
+
+    fallback_calls: List[str] = []
+
+    def fake_infoyatirim_quote(symbol: str) -> Dict[str, Any]:
+        fallback_calls.append(symbol)
+        if symbol == "KCHOL":
+            return {"fk": 23.86, "pd_dd": 0.77, "fd_favok": 11.2}
+        return {}
+
+    monkeypatch.setattr(api_module, "_fetch_infoyatirim_stock_page_quote", fake_infoyatirim_quote)
+
+    client = TestClient(app)
+    response = client.get("/market/stocks/cards?symbols=KCHOL,BIMAS&refresh=true")
+
+    assert response.status_code == 200
+    payload = response.json()
+    items = {item["symbol"]: item for item in payload["items"]}
+    assert items["KCHOL"]["fk"] == 23.86
+    assert items["KCHOL"]["pd_dd"] == 0.77
+    assert items["KCHOL"]["fd_favok"] == 11.2
+    assert items["BIMAS"]["fk"] == 24.47
+    assert items["BIMAS"]["pd_dd"] == 2.75
+    assert items["BIMAS"]["fd_favok"] == 11.37
+    assert fallback_calls == ["KCHOL"]
+
+
+def test_market_stock_cards_rejects_more_than_twelve_symbols() -> None:
+    client = TestClient(app)
+    symbols = ",".join(f"SYM{i}" for i in range(13))
+
+    response = client.get(f"/market/stocks/cards?symbols={symbols}")
+
+    assert response.status_code == 400
+    assert "En fazla 12" in response.json()["detail"]
+
+
+def test_market_stock_card_chart_maps_range_and_normalizes_points(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_chart(yahoo_symbol: str, *, interval: str, range_: str) -> Dict[str, Any]:
+        assert yahoo_symbol == "BIMAS.IS"
+        assert interval == "15m"
+        assert range_ == "5d"
+        return {
+            "ok": True,
+            "meta": {},
+            "points": [
+                {"time": "2026-04-25T08:30:00+00:00", "close": 752.0},
+                {"time": "2026-04-25T08:00:00+00:00", "close": 750.0},
+                {"time": "2026-04-25T08:15:00+00:00", "close": None},
+                {"time": "2026-04-25T08:30:00+00:00", "close": 753.0, "high": 754.0},
+            ],
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_raw", fake_chart)
+
+    client = TestClient(app)
+    response = client.get("/market/stocks/cards/chart?symbol=bimas.IS&range=1w&refresh=true")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "BIMAS"
+    assert payload["range"] == "1w"
+    assert payload["yahoo_symbol"] == "BIMAS.IS"
+    assert payload["source"] == "yahoo_live"
+    assert [point["time"] for point in payload["line_points"]] == [
+        "2026-04-25T08:00:00+00:00",
+        "2026-04-25T08:30:00+00:00",
+    ]
+    assert payload["line_points"][1]["close"] == 753.0
+
+
+def test_market_stock_card_chart_uses_normalized_cache_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[str] = []
+
+    def fake_chart(yahoo_symbol: str, *, interval: str, range_: str) -> Dict[str, Any]:
+        calls.append(f"{yahoo_symbol}:{interval}:{range_}")
+        return {
+            "ok": True,
+            "meta": {},
+            "points": [{"time": "2026-04-25T08:00:00+00:00", "close": 750.0}],
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_raw", fake_chart)
+
+    client = TestClient(app)
+    first = client.get("/market/stocks/cards/chart?symbol=BIMAS&range=1d")
+    second = client.get("/market/stocks/cards/chart?symbol=bimas.IS&range=1d")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert calls == ["BIMAS.IS:5m:1d"]
+    assert first.json()["source"] == "yahoo_live"
+    assert second.json()["source"] == "yahoo_cache"
+    assert first.json()["as_of"] == second.json()["as_of"]
+
+
+def test_market_stock_card_chart_rejects_invalid_symbol_and_range() -> None:
+    client = TestClient(app)
+
+    invalid_symbol = client.get("/market/stocks/cards/chart?symbol=!!!&range=1d")
+    invalid_range = client.get("/market/stocks/cards/chart?symbol=BIMAS&range=2y")
+
+    assert invalid_symbol.status_code == 400
+    assert invalid_range.status_code == 400
+
+
+def test_market_stock_card_chart_returns_error_for_no_data_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_yahoo_chart_raw",
+        lambda *_args, **_kwargs: {"ok": False, "error": "not_found"},
+    )
+
+    client = TestClient(app)
+    response = client.get("/market/stocks/cards/chart?symbol=NOTREAL&range=1m")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "NOTREAL"
+    assert payload["line_points"] == []
+    assert payload["error"] == "not_found"
+
+
+def test_fetch_stock_card_intraday_maps_chart_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_chart(_yahoo_symbol: str, *, interval: str, range_: str) -> Dict[str, Any]:
+        assert interval == "5m"
+        assert range_ == "1d"
+        return {
+            "ok": True,
+            "meta": {
+                "regularMarketPrice": 760.0,
+                "chartPreviousClose": 763.0,
+                "regularMarketDayHigh": 761.5,
+                "regularMarketDayLow": 747.0,
+                "regularMarketVolume": 3_729_933,
+                "currency": "TRY",
+                "marketState": "REGULAR",
+                "regularMarketTime": 1_777_110_000,
+            },
+            "points": [
+                {"time": "2026-04-25T08:00:00+00:00", "close": 750.0, "high": 752.0, "low": 748.0},
+                {"time": "2026-04-25T08:05:00+00:00", "close": 760.0, "high": 761.0, "low": 754.0},
+            ],
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_raw", fake_chart)
+
+    payload = api_module._fetch_stock_card_intraday("BIMAS")
+
+    assert payload["yahoo_symbol"] == "BIMAS.IS"
+    assert payload["price"] == 760.0
+    assert payload["change_pct"] == -0.39
+    assert payload["high"] == 761.5
+    assert payload["low"] == 747.0
+    assert payload["prev_close"] == 763.0
+    assert payload["volume"] == 3_729_933
+    assert payload["volume_lot"] == 3_729_933
+    assert len(payload["line_points"]) == 2
+
+
+def test_fetch_stock_card_intraday_returns_empty_on_chart_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_yahoo_chart_raw",
+        lambda *_args, **_kwargs: {"ok": False, "error": "provider_down"},
+    )
+
+    payload = api_module._fetch_stock_card_intraday("BIMAS")
+
+    assert payload["line_points"] == []
+    assert payload["price"] is None
+    assert payload["error"] == "provider_down"
 
 
 def test_market_stocks_rejects_unknown_index() -> None:
@@ -899,6 +1495,51 @@ def test_market_watch_handles_partial_data(monkeypatch: pytest.MonkeyPatch) -> N
     assert fx_eur["error"] == "instrument_not_found"
     assert commodity_altin["price"] is None
     assert commodity_altin["error"] == "instrument_not_found"
+
+
+def test_market_watch_global_returns_world_indices(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_quote(yahoo_symbol: str) -> Dict[str, Any]:
+        if yahoo_symbol == "^GSPC":
+            return _watch_quote(price=5100.0, prev_close=5000.0, currency="USD")
+        if yahoo_symbol == "^IXIC":
+            return _watch_quote(price=16000.0, prev_close=15920.0, currency="USD")
+        return {"ok": False, "error": "provider_down"}
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_quote", fake_quote)
+
+    client = TestClient(app)
+    response = client.get("/market/watch/global")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "yahoo_finance_chart"
+    symbols = [row["symbol"] for row in payload["items"]]
+    assert symbols[:2] == ["SP500", "NASDAQ"]
+    assert "DAX" in symbols
+    items = {row["symbol"]: row for row in payload["items"]}
+    assert items["SP500"]["price"] == 5100.0
+    assert items["SP500"]["currency"] == "USD"
+    assert items["DAX"]["price"] is None
+    assert items["DAX"]["error"]
+
+
+def test_market_watch_global_reuses_own_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[str] = []
+
+    def fake_quote(yahoo_symbol: str) -> Dict[str, Any]:
+        calls.append(yahoo_symbol)
+        return _watch_quote(price=100.0, prev_close=99.0, currency="USD")
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_quote", fake_quote)
+
+    client = TestClient(app)
+    first = client.get("/market/watch/global")
+    second = client.get("/market/watch/global")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(calls) == len(api_module._WATCH_GLOBAL_INDEX_CANDIDATES)
+    assert first.json()["as_of"] == second.json()["as_of"]
 
 
 # region VYK feed unit tests ------------------------------------------------

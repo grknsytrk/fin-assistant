@@ -102,6 +102,9 @@ export interface MarketUniverseRow {
   change: number | null;
   change_pct: number | null;
   price_as_of: string | null;
+  market_cap: number | null;
+  logo_url?: string | null;
+  logo_source?: 'kap' | null;
 }
 
 export interface MarketStockRow extends MarketUniverseRow {
@@ -173,6 +176,75 @@ export interface MarketIndexLinePoint {
   low?: number;
 }
 
+export type MarketStockCardChartRange = '1d' | '1w' | '1m' | '1y';
+
+export interface MarketStockCardItem {
+  symbol: string;
+  company: string;
+  yahoo_symbol: string | null;
+  price: number | null;
+  currency: string;
+  change: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  volume_lot: number | null;
+  volume_tl: number | null;
+  market_cap: number | null;
+  high: number | null;
+  low: number | null;
+  previous_close: number | null;
+  fk: number | null;
+  pd_dd: number | null;
+  fd_favok: number | null;
+  net_borc_favok: number | null;
+  return_1w_pct: number | null;
+  return_1m_pct: number | null;
+  return_3m_pct: number | null;
+  return_6m_pct: number | null;
+  return_ytd_pct: number | null;
+  return_1y_pct: number | null;
+  base_1w?: number | null;
+  high_1w?: number | null;
+  low_1w?: number | null;
+  base_1m?: number | null;
+  high_1m?: number | null;
+  low_1m?: number | null;
+  base_3m?: number | null;
+  high_3m?: number | null;
+  low_3m?: number | null;
+  base_6m?: number | null;
+  high_6m?: number | null;
+  low_6m?: number | null;
+  base_ytd?: number | null;
+  high_ytd?: number | null;
+  low_ytd?: number | null;
+  base_1y?: number | null;
+  high_1y?: number | null;
+  low_1y?: number | null;
+  market_state: string;
+  as_of: string | null;
+  line_points: MarketIndexLinePoint[];
+  error: string | null;
+  logo_url?: string | null;
+  logo_source?: 'kap' | null;
+}
+
+export interface MarketStockCardsResponse {
+  items: MarketStockCardItem[];
+  source: string;
+  as_of: string;
+}
+
+export interface MarketStockCardChartResponse {
+  symbol: string;
+  range: MarketStockCardChartRange;
+  yahoo_symbol: string | null;
+  line_points: MarketIndexLinePoint[];
+  source: 'yahoo_live' | 'yahoo_cache' | string;
+  as_of: string | null;
+  error: string | null;
+}
+
 export interface MarketIndexConstituent {
   symbol: string;
   price: number | null;
@@ -185,6 +257,8 @@ export interface MarketIndexConstituent {
   free_float_market_value: number | null;
   weight_pct: number | null;
   point_effect: number | null;
+  logo_url?: string | null;
+  logo_source?: 'kap' | null;
 }
 
 export interface MarketIndicesResponse {
@@ -235,6 +309,8 @@ export interface MarketWatchItem {
   market_state: string;
   as_of: string | null;
   error: string | null;
+  logo_url?: string | null;
+  logo_source?: 'kap' | null;
 }
 
 export interface MarketWatchSections {
@@ -245,6 +321,13 @@ export interface MarketWatchSections {
 
 export interface MarketWatchResponse {
   sections: MarketWatchSections;
+  source: string;
+  delay_note: string;
+  as_of: string;
+}
+
+export interface MarketWatchGlobalResponse {
+  items: MarketWatchItem[];
   source: string;
   delay_note: string;
   as_of: string;
@@ -262,6 +345,8 @@ export interface FxQuote {
   market_state: string;
   as_of: string | null;
   error: string | null;
+  logo_url?: string | null;
+  logo_source?: 'kap' | null;
 }
 
 export interface MarketFxResponse {
@@ -283,6 +368,8 @@ export interface CommodityQuote {
   market_state: string;
   as_of: string | null;
   error: string | null;
+  logo_url?: string | null;
+  logo_source?: 'kap' | null;
 }
 
 export interface MarketCommoditiesResponse {
