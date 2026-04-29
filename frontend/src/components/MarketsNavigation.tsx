@@ -22,6 +22,7 @@ type MarketsNavigationProps = {
     activeSection: 'markets' | 'stocks' | 'indices';
     onCollapsedChange: (collapsed: boolean) => void;
     onSectionChange: (section: 'markets' | 'stocks' | 'indices') => void;
+    onSelectTicker?: (ticker: string) => void;
 };
 
 export default function MarketsNavigation({
@@ -29,11 +30,16 @@ export default function MarketsNavigation({
     activeSection,
     onCollapsedChange,
     onSectionChange,
+    onSelectTicker,
 }: MarketsNavigationProps) {
     const navigate = (ticker: string) => {
         const normalizedTicker = ticker.trim().toUpperCase();
         if (!normalizedTicker) return;
-        window.location.href = '/?ticker=' + encodeURIComponent(normalizedTicker);
+        if (onSelectTicker) {
+            onSelectTicker(normalizedTicker);
+        } else {
+            window.location.href = '/?ticker=' + encodeURIComponent(normalizedTicker);
+        }
     };
 
     const navItems = (
@@ -62,13 +68,19 @@ export default function MarketsNavigation({
                         {!collapsed && <span className="mn-text">Hisseler</span>}
                     </div>
                 </button>
-                <a href="#" className="mn-menu-item has-submenu" title="Fonlar">
+                <button
+                    type="button"
+                    className="mn-menu-item has-submenu"
+                    title="Fonlar (yakında)"
+                    disabled
+                    aria-disabled="true"
+                >
                     <div className="mn-item-main">
                         <Coins size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Fonlar</span>}
                     </div>
                     {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
-                </a>
+                </button>
                 <button
                     type="button"
                     className={`mn-menu-item ${activeSection === 'indices' ? 'active' : ''}`}
@@ -80,64 +92,106 @@ export default function MarketsNavigation({
                         {!collapsed && <span className="mn-text">Endeksler</span>}
                     </div>
                 </button>
-                <a href="#" className="mn-menu-item" title="Aracı Kurumlar">
+                <button
+                    type="button"
+                    className="mn-menu-item"
+                    title="Aracı Kurumlar (yakında)"
+                    disabled
+                    aria-disabled="true"
+                >
                     <div className="mn-item-main">
                         <Box size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Aracı Kurumlar</span>}
                     </div>
-                </a>
-                <a href="#" className="mn-menu-item has-submenu" title="Sektörler">
+                </button>
+                <button
+                    type="button"
+                    className="mn-menu-item has-submenu"
+                    title="Sektörler (yakında)"
+                    disabled
+                    aria-disabled="true"
+                >
                     <div className="mn-item-main">
                         <Users size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Sektörler</span>}
                     </div>
                     {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
-                </a>
-                <a href="#" className="mn-menu-item has-submenu" title="Analizler">
+                </button>
+                <button
+                    type="button"
+                    className="mn-menu-item has-submenu"
+                    title="Analizler (yakında)"
+                    disabled
+                    aria-disabled="true"
+                >
                     <div className="mn-item-main">
                         <Crosshair size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Analizler</span>}
                     </div>
                     {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
-                </a>
+                </button>
             </div>
 
             <div className="mn-divider"></div>
 
             {/* Group 2 */}
             <div className="mn-menu-group">
-                <a href="#" className="mn-menu-item" title="Trade Ekranı">
+                <button
+                    type="button"
+                    className="mn-menu-item"
+                    title="Trade Ekranı (yakında)"
+                    disabled
+                    aria-disabled="true"
+                >
                     <div className="mn-item-main">
                         <TerminalSquare size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Trade Ekranı</span>}
                     </div>
-                </a>
-                <a href="#" className="mn-menu-item" title="Terminal">
+                </button>
+                <button
+                    type="button"
+                    className="mn-menu-item"
+                    title="Terminal (yakında)"
+                    disabled
+                    aria-disabled="true"
+                >
                     <div className="mn-item-main">
                         <MonitorPlay size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Terminal</span>}
                     </div>
                     {!collapsed && <ArrowUpRight size={14} className="mn-external-icon" />}
-                </a>
+                </button>
             </div>
 
             <div className="mn-divider"></div>
 
             {/* Group 3 */}
             <div className="mn-menu-group">
-                <a href="#" className="mn-menu-item has-submenu" title="Araştırma">
+                <button
+                    type="button"
+                    className="mn-menu-item has-submenu"
+                    title="Araştırma (yakında)"
+                    disabled
+                    aria-disabled="true"
+                >
                     <div className="mn-item-main">
                         <Atom size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Araştırma</span>}
                     </div>
                     {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
-                </a>
-                <a href="#" className="mn-menu-item" title="SPL Eğitimleri">
+                </button>
+                <button
+                    type="button"
+                    className="mn-menu-item"
+                    title="SPL Eğitimleri (yakında)"
+                    disabled
+                    aria-disabled="true"
+                >
                     <div className="mn-item-main">
                         <GraduationCap size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">SPL Eğitimleri</span>}
                     </div>
-                </a>
+                </button>
             </div>
         </>
     );

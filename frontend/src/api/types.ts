@@ -454,3 +454,57 @@ export interface KapSnapshotResponse {
   quarters: KapQuarter[];
   valuation?: KapValuation;
 }
+
+export interface KapOverviewCommentaryRequest {
+  company: string;
+  company_title: string;
+  latest_period: string;
+  model?: string;
+  history_context: KapOverviewHistoryContext;
+  overview_payload: {
+    income_summary: unknown[];
+    balance_summary: unknown[];
+    charts: unknown[];
+  };
+}
+
+export interface KapOverviewHistoryQuarter {
+  label: string;
+  year: number;
+  period: number;
+  metrics: Record<string, number | null>;
+  ratios: Record<string, number | null>;
+}
+
+export interface KapOverviewHistoryContext {
+  company_kind: 'generic' | 'bank' | 'insurance';
+  quarters: KapOverviewHistoryQuarter[];
+}
+
+export interface KapOverviewScorecardSubscore {
+  key: 'buyume' | 'karlilik' | 'bilanco' | 'nakit_akisi';
+  label: string;
+  score: number;
+  summary: string;
+}
+
+export interface KapOverviewScorecard {
+  overall_score: number;
+  overall_label: string;
+  summary: string;
+  seasonality_note: string;
+  score_source: 'deterministic_only' | 'ai_adjusted' | 'ai_failed_fallback';
+  subscores: KapOverviewScorecardSubscore[];
+}
+
+export interface KapOverviewCommentaryResponse {
+  ok: boolean;
+  headline: string;
+  bullets: string[];
+  risk_note: string;
+  watch_metrics: string[];
+  model_used: string;
+  scorecard: KapOverviewScorecard;
+  error: string | null;
+  debug_trace?: string[];
+}

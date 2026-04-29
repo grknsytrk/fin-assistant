@@ -2,14 +2,24 @@ import { useState } from 'react';
 import { Search, BarChart2, TrendingUp, PieChart, ShieldAlert, LineChart, Activity, ChevronRight, LayoutGrid } from 'lucide-react';
 import './MarketPage.css';
 
-export default function MarketPage() {
+interface MarketPageProps {
+    onOpenTicker?: (ticker: string) => void;
+    onOpenMarkets?: () => void;
+}
+
+export default function MarketPage({ onOpenTicker, onOpenMarkets }: MarketPageProps) {
     const [searchTerm, setSearchTerm] = useState('');
     const [activeTab, setActiveTab] = useState('Piyasa ve Tablolar');
 
     const handleSearch = (e: React.FormEvent) => {
         e.preventDefault();
         if (searchTerm.trim()) {
-            window.location.href = `/?ticker=${searchTerm.trim().toUpperCase()}`;
+            const nextTicker = searchTerm.trim().toUpperCase();
+            if (onOpenTicker) {
+                onOpenTicker(nextTicker);
+            } else {
+                window.location.href = `/?ticker=${nextTicker}`;
+            }
         }
     };
 
@@ -45,7 +55,13 @@ export default function MarketPage() {
 
                 <div 
                     className="hero-mockup-wrapper" 
-                    onClick={() => window.location.href = '/?page=markets'} 
+                    onClick={() => {
+                        if (onOpenMarkets) {
+                            onOpenMarkets();
+                        } else {
+                            window.location.href = '/?page=markets';
+                        }
+                    }}
                     style={{ cursor: 'pointer' }}
                 >
                     <img src="/hero_dashboard.png" alt="Platform Ekranı" className="mockup-full-image" />
@@ -141,7 +157,18 @@ export default function MarketPage() {
                 <div className="cta-content">
                     <h2>Doğru yatırımı keşfedin!</h2>
                     <p>Siz de profesyoneller gibi yatırım kararları alabilirsiniz.</p>
-                    <button className="cta-btn" onClick={() => window.location.href = '/?page=markets'}>Ücretsiz Başla <ChevronRight size={16} /></button>
+                    <button
+                        className="cta-btn"
+                        onClick={() => {
+                            if (onOpenMarkets) {
+                                onOpenMarkets();
+                            } else {
+                                window.location.href = '/?page=markets';
+                            }
+                        }}
+                    >
+                        Ücretsiz Başla <ChevronRight size={16} />
+                    </button>
                 </div>
                 <div className="cta-footer-links">
                     <span>Hakkımızda</span>

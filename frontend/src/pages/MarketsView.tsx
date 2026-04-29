@@ -19,6 +19,8 @@ import type {
     MarketStocksResponse,
     MarketUniverseResponse,
 } from '../api/types';
+import { DEFAULT_STOCK_RETURN_MODE } from '../routing/routes';
+import type { StockReturnMode } from '../routing/routes';
 import MarketWatchRail from '../components/MarketWatchRail';
 import MarketSidebar from '../components/MarketSidebar';
 import MarketWatchStrip from '../components/MarketWatchStrip';
@@ -28,7 +30,6 @@ import './MarketsView.css';
 
 type MarketSection = 'markets' | 'stocks' | 'indices';
 type SortDirection = 'asc' | 'desc';
-type StockReturnMode = 'absolute' | 'relative_xu100' | 'relative_xu030';
 type IndexConstituentDataSortKey = 'symbol' | 'price' | 'change_pct' | 'volume' | 'weight_pct' | 'point_effect';
 type IndexConstituentSortKey = IndexConstituentDataSortKey | 'impact_pct' | 'impact_abs';
 type StockCardDropPlacement = 'before' | 'after';
@@ -80,6 +81,7 @@ const RETURN_KEYS: StockReturnKey[] = [
 ];
 const STOCK_CARD_STORAGE_KEY = 'ragfin_market_stock_cards';
 const MAX_STOCK_CARDS = 12;
+const LIVE_MARKET_REFRESH_MS = 3000;
 const STOCK_CARD_CHART_RANGES: Array<{ id: MarketStockCardChartRange; label: string; title: string }> = [
     { id: '1d', label: 'G', title: 'Gün içi' },
     { id: '1w', label: '1H', title: '1 Hafta' },
@@ -478,15 +480,27 @@ function FlashStockRow({
     );
 }
 
+
+const isBistSymbol = (sym?: string) => {
+    if (!sym) return true;
+    const globalSymbols = ['SP500', 'NASDAQ', 'DOW', 'DAX', 'FTSE', 'CAC40', 'NIKKEI', 'HANGSENG', 'VIX', 'DXY'];
+    if (globalSymbols.includes(sym.toUpperCase())) return false;
+    if (sym.includes('/')) return false;
+    return true;
+};
+
 function IndexLineChart({
+    symbol,
     points,
     prevClose,
     changePct,
 }: {
+    symbol?: string;
     points: MarketIndexDetailResponse['line_points'];
     prevClose: number | null;
     changePct: number | null;
 }) {
+    const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const width = 1120;
     const height = 400;
     const padding = { top: 30, right: 65, bottom: 40, left: 16 };
@@ -510,8 +524,27 @@ function IndexLineChart({
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
 
-    const xFor = (index: number) =>
-        padding.left + (validPoints.length === 1 ? 0 : (index / (validPoints.length - 1)) * plotWidth);
+    const isBist = isBistSymbol(symbol);
+    const useTimeScale = isBist && validPoints.length > 0;
+    let startTimeMs = 0;
+    let endTimeMs = 0;
+    if (useTimeScale) {
+        const d = new Date(validPoints[0].time);
+        const start = new Date(d); start.setHours(10, 0, 0, 0);
+        const end = new Date(d); end.setHours(18, 0, 0, 0);
+        startTimeMs = start.getTime();
+        endTimeMs = end.getTime();
+    }
+
+    const xFor = (index: number) => {
+        if (useTimeScale) {
+            const pointTime = new Date(validPoints[index].time).getTime();
+            let ratio = (pointTime - startTimeMs) / (endTimeMs - startTimeMs);
+            ratio = Math.max(0, Math.min(1, ratio));
+            return padding.left + ratio * plotWidth;
+        }
+        return padding.left + (validPoints.length === 1 ? 0 : (index / (validPoints.length - 1)) * plotWidth);
+    };
     const yFor = (value: number) => padding.top + ((maxValue - value) / span) * plotHeight;
 
     const last = validPoints[validPoints.length - 1].close;
@@ -521,8 +554,26 @@ function IndexLineChart({
     const tickValues = Array.from({ length: tickCount }).map((_, i) => minValue + (span * i) / (tickCount - 1));
 
     // X ekseni (saat başları için tahmini çizim veya eşit dağılımlı)
-    const timeTickCount = 8;
-    const timeTicks = Array.from({ length: timeTickCount }).map((_, i) => Math.floor((validPoints.length - 1) * (i / (timeTickCount - 1))));
+    const timeTickLabels: Array<{x: number, label: string, key: string}> = [];
+    if (useTimeScale) {
+        for (let h = 10; h <= 18; h += 1) {
+            const d = new Date(validPoints[0].time);
+            d.setHours(h, 0, 0, 0);
+            timeTickLabels.push({
+                x: padding.left + ((d.getTime() - startTimeMs) / (endTimeMs - startTimeMs)) * plotWidth,
+                label: `${h.toString().padStart(2, '0')}:00`,
+                key: `fixed-${h}`
+            });
+        }
+    } else {
+        const timeTickCount = 8;
+        const timeTicks = Array.from({ length: timeTickCount }).map((_, i) => Math.floor((validPoints.length - 1) * (i / (timeTickCount - 1))));
+        timeTicks.forEach(index => {
+            const dt = new Date(validPoints[index].time);
+            const label = Number.isNaN(dt.getTime()) ? '' : dt.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+            timeTickLabels.push({ x: xFor(index), label, key: `dyn-${index}` });
+        });
+    }
 
     const chartColor = changePct != null && changePct < 0 ? '#ff4d5e' : '#22c55e';
 
@@ -532,9 +583,43 @@ function IndexLineChart({
         
     const areaData = `${pathData} L ${xFor(validPoints.length - 1)} ${height - padding.bottom} L ${padding.left} ${height - padding.bottom} Z`;
 
+    const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0) return;
+        const x = ((event.clientX - rect.left) / rect.width) * width;
+        let closestIndex = 0;
+        let minDiff = Infinity;
+        for (let i = 0; i < validPoints.length; i++) {
+            const diff = Math.abs(xFor(i) - x);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestIndex = i;
+            }
+        }
+        setHoverIndex(closestIndex);
+    };
+
+    const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+    const activeHoverIndex = hoverIndex == null ? null : clamp(hoverIndex, 0, validPoints.length - 1);
+    const hoverPoint = activeHoverIndex == null ? null : validPoints[activeHoverIndex];
+    const hoverX = activeHoverIndex == null ? null : xFor(activeHoverIndex);
+    const hoverY = hoverPoint ? yFor(hoverPoint.close) : null;
+    const tooltipWidth = 145;
+    const tooltipHeight = 60;
+    const tooltipX = hoverX == null ? 0 : clamp(hoverX + 16, padding.left, width - tooltipWidth - padding.right);
+    const tooltipY = hoverY == null ? 0 : clamp(hoverY - tooltipHeight / 2, padding.top, height - tooltipHeight - padding.bottom);
+
     return (
         <div style={{ backgroundColor: '#0f1214', borderRadius: '8px', border: '1px solid #1e2327', position: 'relative', overflow: 'hidden' }}>
-        <svg className="indices-line-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Endeks çizgi grafiği" style={{ display: 'block', width: '100%', height: 'auto', borderBottom: 'none' }}>
+        <svg 
+            className="indices-line-chart" 
+            viewBox={`0 0 ${width} ${height}`} 
+            role="img" 
+            aria-label="Endeks çizgi grafiği" 
+            style={{ display: 'block', width: '100%', height: 'auto', borderBottom: 'none' }}
+            onPointerMove={handlePointerMove}
+            onPointerLeave={() => setHoverIndex(null)}
+        >
             <defs>
                 <linearGradient id="areaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
                     <stop offset="0%" stopColor={chartColor} stopOpacity="0.24" />
@@ -575,34 +660,31 @@ function IndexLineChart({
             )}
 
             {/* Dikey Grid Zaman Etiketleri */}
-            {timeTicks.map((index) => {
-                const dt = new Date(validPoints[index].time);
-                const label = Number.isNaN(dt.getTime())
-                    ? ''
-                    : dt.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
-                const x = xFor(index);
-                return (
-                    <g key={index}>
-                        <line
-                            x1={x}
-                            x2={x}
-                            y1={padding.top}
-                            y2={height - padding.bottom}
-                            stroke="rgba(255,255,255,0.03)"
-                            strokeWidth="1"
-                        />
-                        <text x={x} y={height - 15} fill="rgba(255,255,255,0.5)" fontSize="11" fontFamily="monospace" textAnchor="middle">
-                            {label}
-                        </text>
-                    </g>
-                );
-            })}
+            {timeTickLabels.map(({ x, label, key }) => (
+                <g key={key}>
+                    <line
+                        x1={x}
+                        x2={x}
+                        y1={padding.top}
+                        y2={height - padding.bottom}
+                        stroke="rgba(255,255,255,0.03)"
+                        strokeWidth="1"
+                    />
+                    <text x={x} y={height - 15} fill="rgba(255,255,255,0.5)" fontSize="11" fontFamily="monospace" textAnchor="middle">
+                        {label}
+                    </text>
+                </g>
+            ))}
 
             {/* Alan ve Çizgi (Ağ/Line) (Açılış, yüksek, düşük kullanılmıyor, SADECE CLOSE) */}
             <path d={areaData} fill="url(#areaGrad)" />
             <path d={pathData} fill="none" stroke={chartColor} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
             
-            {/* Uç Noktası (Kapanış) Dot */}
+            {/* Uç Noktası (Kapanış) Dot ve Pulse */}
+            <circle cx={xFor(validPoints.length - 1)} cy={yFor(last)} r="4" fill={chartColor} opacity="0.6">
+                <animate attributeName="r" values="4; 14; 14" keyTimes="0; 0.5; 1" dur="2s" repeatCount="indefinite" />
+                <animate attributeName="opacity" values="0.6; 0; 0" keyTimes="0; 0.5; 1" dur="2s" repeatCount="indefinite" />
+            </circle>
             <circle cx={xFor(validPoints.length - 1)} cy={yFor(last)} r="4" fill={chartColor} />
 
             {/* Anlık Fiyat İşareti */}
@@ -611,8 +693,43 @@ function IndexLineChart({
                 <path d="M 0 0 L 6 -6 L 6 6 Z" fill={chartColor} transform="translate(-5, 0)" />
                 <text x="32" y="3" fill="#ffffff" fontSize="11" fontFamily="monospace" textAnchor="middle" fontWeight="bold">
                     {formatIndexPrice(last)}
-                </text>
+                                </text>
             </g>
+
+            {/* Hover Tooltip */}
+            {hoverPoint && hoverX != null && hoverY != null && (
+                <g className="indices-chart-hover">
+                    <line
+                        x1={hoverX}
+                        x2={hoverX}
+                        y1={padding.top}
+                        y2={height - padding.bottom}
+                        stroke="rgba(255,255,255,0.42)"
+                        strokeDasharray="4 4"
+                    />
+                    <line
+                        x1={padding.left}
+                        x2={width - padding.right}
+                        y1={hoverY}
+                        y2={hoverY}
+                        stroke="rgba(255,255,255,0.24)"
+                        strokeDasharray="5 5"
+                    />
+                    <circle cx={hoverX} cy={hoverY} r="4" fill={chartColor} stroke="#0a0c0f" strokeWidth="2" />
+                    <g transform={`translate(${tooltipX}, ${tooltipY})`}>
+                        <rect width={tooltipWidth} height={tooltipHeight} rx="4" fill="#07090b" stroke="rgba(255,255,255,0.1)" />
+                        <text x="12" y="22" fill="#d8dee9" fontSize="13" fontFamily="monospace">
+                            {new Intl.DateTimeFormat('tr-TR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(hoverPoint.time))}
+                        </text>
+                        <text x="12" y="46" fill="#f8fafc" fontSize="14" fontFamily="monospace" fontWeight="700">
+                            {symbol || 'Endeks'}
+                        </text>
+                        <text x={tooltipWidth - 12} y="46" fill="#f8fafc" fontSize="14" fontFamily="monospace" fontWeight="700" textAnchor="end">
+                            {formatIndexPrice(hoverPoint.close)}
+                        </text>
+                    </g>
+                </g>
+            )}
         </svg>
         </div>
     );
@@ -759,8 +876,29 @@ function StockCardMiniChart({
     const span = Math.max(0.01, maxValue - minValue);
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
-    const xFor = (index: number) =>
-        padding.left + (validPoints.length === 1 ? 0 : (index / (validPoints.length - 1)) * plotWidth);
+
+    const isBist = isBistSymbol(symbol);
+    const useTimeScale = isBist && selectedRange === '1d' && validPoints.length > 0;
+    let startTimeMs = 0;
+    let endTimeMs = 0;
+    if (useTimeScale) {
+        const d = new Date(validPoints[0].time);
+        const start = new Date(d); start.setHours(10, 0, 0, 0);
+        const end = new Date(d); end.setHours(18, 0, 0, 0);
+        startTimeMs = start.getTime();
+        endTimeMs = end.getTime();
+    }
+
+    const xFor = (index: number) => {
+        if (useTimeScale) {
+            const pointTime = new Date(validPoints[index].time).getTime();
+            let ratio = (pointTime - startTimeMs) / (endTimeMs - startTimeMs);
+            ratio = Math.max(0, Math.min(1, ratio));
+            return padding.left + ratio * plotWidth;
+        }
+        return padding.left + (validPoints.length === 1 ? 0 : (index / (validPoints.length - 1)) * plotWidth);
+    };
+
     const yFor = (value: number) => padding.top + ((maxValue - value) / span) * plotHeight;
     const pathData = validPoints
         .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xFor(index)} ${yFor(point.close)}`)
@@ -782,8 +920,16 @@ function StockCardMiniChart({
         const rect = event.currentTarget.getBoundingClientRect();
         if (rect.width <= 0) return;
         const x = ((event.clientX - rect.left) / rect.width) * width;
-        const rawIndex = Math.round(((x - padding.left) / plotWidth) * (validPoints.length - 1));
-        setHoverIndex(clamp(rawIndex, 0, validPoints.length - 1));
+        let closestIndex = 0;
+        let minDiff = Infinity;
+        for (let i = 0; i < validPoints.length; i++) {
+            const diff = Math.abs(xFor(i) - x);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestIndex = i;
+            }
+        }
+        setHoverIndex(closestIndex);
     };
     const activeHoverIndex = hoverIndex == null ? null : clamp(hoverIndex, 0, validPoints.length - 1);
     const hoverPoint = activeHoverIndex == null ? null : validPoints[activeHoverIndex];
@@ -820,24 +966,43 @@ function StockCardMiniChart({
                     stroke="rgba(255,255,255,0.16)"
                     strokeDasharray="3 4"
                 />
-                {timeTickIndexes.map((index) => {
-                    const x = xFor(index);
-                    return (
-                        <text
-                            key={index}
-                            x={x}
-                            y={height - 6}
-                            fill="rgba(255,255,255,0.24)"
-                            fontSize="10"
-                            fontFamily="monospace"
-                            textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
-                        >
-                            {formatStockCardAxisDate(validPoints[index].time, selectedRange)}
-                        </text>
-                    );
-                })}
+                {useTimeScale ? (
+                    <>
+                        <text x={padding.left} y={height - 6} fill="rgba(255,255,255,0.24)" fontSize="10" fontFamily="monospace" textAnchor="start">10:00</text>
+                        <text x={padding.left + plotWidth / 2} y={height - 6} fill="rgba(255,255,255,0.24)" fontSize="10" fontFamily="monospace" textAnchor="middle">14:00</text>
+                        <text x={width - padding.right} y={height - 6} fill="rgba(255,255,255,0.24)" fontSize="10" fontFamily="monospace" textAnchor="end">18:00</text>
+                    </>
+                ) : (
+                    timeTickIndexes.map((index) => {
+                        const x = xFor(index);
+                        return (
+                            <text
+                                key={index}
+                                x={x}
+                                y={height - 6}
+                                fill="rgba(255,255,255,0.24)"
+                                fontSize="10"
+                                fontFamily="monospace"
+                                textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
+                            >
+                                {formatStockCardAxisDate(validPoints[index].time, selectedRange)}
+                            </text>
+                        );
+                    })
+                )}
                 <path d={areaData} fill={`url(#${gradientId})`} />
                 <path d={pathData} fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+                
+                {selectedRange === '1d' && (
+                    <>
+                        <circle cx={xFor(validPoints.length - 1)} cy={yFor(validPoints[validPoints.length - 1].close)} r="4" fill={color} opacity="0.6">
+                            <animate attributeName="r" values="4; 14; 14" keyTimes="0; 0.5; 1" dur="2s" repeatCount="indefinite" />
+                            <animate attributeName="opacity" values="0.6; 0; 0" keyTimes="0; 0.5; 1" dur="2s" repeatCount="indefinite" />
+                        </circle>
+                        <circle cx={xFor(validPoints.length - 1)} cy={yFor(validPoints[validPoints.length - 1].close)} r="4" fill={color} />
+                    </>
+                )}
+
                 {hoverPoint && hoverX != null && hoverY != null && (
                     <g className="stock-card-chart-hover">
                         <line
@@ -1587,7 +1752,29 @@ function getTreemapTileColor(changePct: number | null, scaledMove: number): stri
     return `hsl(0 40% ${25 + scaledMove * 18}%)`;
 }
 
-export default function MarketsView() {
+interface MarketsViewProps {
+    routeSection?: MarketSection;
+    routeStockIndex?: MarketStockIndex;
+    routeSelectedIndex?: MarketIndexCode | null;
+    routeReturnMode?: StockReturnMode;
+    onNavigateSection?: (section: MarketSection) => void;
+    onNavigateStockIndex?: (index: MarketStockIndex) => void;
+    onNavigateReturnMode?: (mode: StockReturnMode) => void;
+    onNavigateIndexDetail?: (index: MarketIndexCode | null) => void;
+    onOpenTicker?: (ticker: string) => void;
+}
+
+export default function MarketsView({
+    routeSection = 'stocks',
+    routeStockIndex = 'XU100',
+    routeSelectedIndex = null,
+    routeReturnMode = DEFAULT_STOCK_RETURN_MODE,
+    onNavigateSection,
+    onNavigateStockIndex,
+    onNavigateReturnMode,
+    onNavigateIndexDetail,
+    onOpenTicker,
+}: MarketsViewProps) {
     const [market, setMarket] = useState<MarketUniverseResponse | null>(null);
     const [stocks, setStocks] = useState<MarketStocksResponse | null>(null);
     const [indices, setIndices] = useState<MarketIndicesResponse | null>(null);
@@ -1603,10 +1790,10 @@ export default function MarketsView() {
     const [searchTerm, setSearchTerm] = useState('');
     const [stockCardSearchTerm, setStockCardSearchTerm] = useState('');
     const [navCollapsed, setNavCollapsed] = useState(false);
-    const [activeSection, setActiveSection] = useState<MarketSection>('markets');
-    const [selectedIndex, setSelectedIndex] = useState<MarketIndexCode | null>(null);
-    const [stockIndex, setStockIndex] = useState<MarketStockIndex>('XU100');
-    const [returnMode, setReturnMode] = useState<StockReturnMode>('absolute');
+    const [activeSection, setActiveSection] = useState<MarketSection>(routeSection);
+    const [selectedIndex, setSelectedIndex] = useState<MarketIndexCode | null>(routeSelectedIndex);
+    const [stockIndex, setStockIndex] = useState<MarketStockIndex>(routeStockIndex);
+    const [returnMode, setReturnMode] = useState<StockReturnMode>(routeReturnMode);
     const [terminalNow, setTerminalNow] = useState(() => new Date());
     const [stockCardSymbols, setStockCardSymbols] = useState<string[]>(readStoredStockCards);
     const [stockCards, setStockCards] = useState<MarketStockCardsResponse | null>(null);
@@ -1643,6 +1830,22 @@ export default function MarketsView() {
     const draggingStockCardSymbolRef = useRef<string | null>(null);
     const [draggingStockCardSymbol, setDraggingStockCardSymbol] = useState<string | null>(null);
     const stockCardSymbolsKey = stockCardSymbols.join(',');
+
+    useEffect(() => {
+        setActiveSection(routeSection);
+    }, [routeSection]);
+
+    useEffect(() => {
+        setStockIndex(routeStockIndex);
+    }, [routeStockIndex]);
+
+    useEffect(() => {
+        setSelectedIndex(routeSelectedIndex);
+    }, [routeSelectedIndex]);
+
+    useEffect(() => {
+        setReturnMode(routeReturnMode);
+    }, [routeReturnMode]);
 
     useEffect(() => {
         if (activeSection === 'markets') {
@@ -1737,7 +1940,7 @@ export default function MarketsView() {
         loadStocks(false, true, stockIndex);
         const intervalId = window.setInterval(() => {
             loadStocks(true, true, stockIndex);
-        }, 3000);
+        }, LIVE_MARKET_REFRESH_MS);
         return () => window.clearInterval(intervalId);
     }, [activeSection, stockIndex]);
 
@@ -1753,7 +1956,7 @@ export default function MarketsView() {
         loadStockCards(false, true, stockCardSymbols);
         const intervalId = window.setInterval(() => {
             loadStockCards(true, false, stockCardSymbols);
-        }, 30000);
+        }, LIVE_MARKET_REFRESH_MS);
         return () => window.clearInterval(intervalId);
     }, [activeSection, stockCardSymbols, stockCardSymbolsKey]);
 
@@ -1762,7 +1965,7 @@ export default function MarketsView() {
         loadIndices(false, true);
         const intervalId = window.setInterval(() => {
             loadIndices(true, true);
-        }, 60000);
+        }, LIVE_MARKET_REFRESH_MS);
         return () => window.clearInterval(intervalId);
     }, [activeSection]);
 
@@ -1773,7 +1976,7 @@ export default function MarketsView() {
         loadIndexDetail(false, true, selectedIndex);
         const intervalId = window.setInterval(() => {
             loadIndexDetail(true, true, selectedIndex);
-        }, 60000);
+        }, LIVE_MARKET_REFRESH_MS);
         return () => window.clearInterval(intervalId);
     }, [activeSection, selectedIndex]);
 
@@ -1815,6 +2018,7 @@ export default function MarketsView() {
         refresh = false,
         requestedSymbols: string[] = stockCardSymbols,
     ) {
+        if (stockCardsInFlightRef.current) return;
         if (requestedSymbols.length === 0) return;
         const requestedKey = requestedSymbols.join(',');
         stockCardsInFlightRef.current = true;
@@ -2050,7 +2254,29 @@ export default function MarketsView() {
             : 'Güncel fiyatlar, finansal görünüm ve analiz erişimi tek ekranda.';
 
     const onCompanyClick = (ticker: string) => {
-        window.location.href = `/?ticker=${ticker}`;
+        const normalizedTicker = String(ticker || '').trim().toUpperCase();
+        if (!normalizedTicker) return;
+        if (onOpenTicker) {
+            onOpenTicker(normalizedTicker);
+            return;
+        }
+        window.location.href = `/?ticker=${normalizedTicker}`;
+    };
+
+    const handleStockIndexChange = (index: MarketStockIndex) => {
+        setStockIndex(index);
+        onNavigateStockIndex?.(index);
+    };
+
+    const handleReturnModeChange = (mode: StockReturnMode) => {
+        if (mode === returnMode) return;
+        setReturnMode(mode);
+        onNavigateReturnMode?.(mode);
+    };
+
+    const handleSelectIndex = (index: MarketIndexCode | null) => {
+        setSelectedIndex(index);
+        onNavigateIndexDetail?.(index);
     };
 
     const handleAddStockCard = (symbol: string) => {
@@ -2163,6 +2389,10 @@ export default function MarketsView() {
     };
 
     const handleSectionChange = (section: MarketSection) => {
+        if (onNavigateSection) {
+            onNavigateSection(section);
+            return;
+        }
         setActiveSection(section);
         setSelectedIndex(null);
     };
@@ -2223,6 +2453,7 @@ export default function MarketsView() {
                 activeSection={activeSection}
                 onCollapsedChange={setNavCollapsed}
                 onSectionChange={handleSectionChange}
+                onSelectTicker={onCompanyClick}
             />
             <div className={`markets-workspace${activeSection === 'markets' ? ' markets-workspace-with-rail' : ''}`}>
                 <div className="market-page" ref={marketPageRef}>
@@ -2455,7 +2686,7 @@ export default function MarketsView() {
                                             type="button"
                                             className={stockIndex === option ? 'active' : ''}
                                             aria-pressed={stockIndex === option}
-                                            onClick={() => setStockIndex(option)}
+                                            onClick={() => handleStockIndexChange(option)}
                                         >
                                             {option}
                                         </button>
@@ -2475,7 +2706,7 @@ export default function MarketsView() {
                                             type="button"
                                             className={returnMode === option.id ? 'active' : ''}
                                             aria-pressed={returnMode === option.id}
-                                            onClick={() => setReturnMode(option.id)}
+                                            onClick={() => handleReturnModeChange(option.id)}
                                         >
                                             {option.label}
                                         </button>
@@ -2694,7 +2925,7 @@ export default function MarketsView() {
                                                 {sortedIndices.map((row, index) => (
                                                     <tr
                                                         key={row.symbol}
-                                                        onClick={() => setSelectedIndex(row.symbol)}
+                                                        onClick={() => handleSelectIndex(row.symbol)}
                                                     >
                                                         <td className="stocks-rank">{index + 1}</td>
                                                         {INDEX_COLUMNS.map((column) => {
@@ -2747,7 +2978,7 @@ export default function MarketsView() {
             {activeSection === 'indices' && selectedIndex && (
                 <div className="indices-detail-view">
                     <div className="indices-breadcrumb">
-                        <button type="button" onClick={() => setSelectedIndex(null)}>Endeksler</button>
+                        <button type="button" onClick={() => handleSelectIndex(null)}>Endeksler</button>
                         <span>/</span>
                         <strong>{selectedIndex}</strong>
                     </div>
@@ -2815,6 +3046,7 @@ export default function MarketsView() {
 
                             <section className="indices-chart-panel">
                                 <IndexLineChart
+                                    symbol={indexDetail.symbol}
                                     points={indexDetail.line_points}
                                     prevClose={indexDetail.prev_close}
                                     changePct={indexDetail.change_pct}

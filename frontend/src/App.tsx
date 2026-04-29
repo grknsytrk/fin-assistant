@@ -1,16 +1,251 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Sun, Moon } from 'lucide-react';
+import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import MarketPage from './pages/MarketPage';
 import MarketsView from './pages/MarketsView';
 import StockDetailPage from './pages/StockDetailPage';
 import GlobalTickerSearch from './components/GlobalTickerSearch';
+import {
+  DEFAULT_MARKET_INDEX,
+  DEFAULT_STOCK_RETURN_MODE,
+  DEFAULT_STOCK_TAB,
+  ROUTE_PATHS,
+  canonicalizeStocksReturnModeSearch,
+  legacySearchToCanonical,
+  normalizeMarketIndexCode,
+  normalizeStockReturnMode,
+  normalizeStockTab,
+  normalizeTicker,
+  toMarketsIndexDetail,
+  toMarketsIndices,
+  toMarketsOverview,
+  toMarketsStocks,
+  toStocksReturnModeSearch,
+  toStockDetail,
+} from './routing/routes';
 import './index.css';
 
-function App() {
-  const [ticker, setTicker] = useState<string | null>(null);
-  const [page, setPage] = useState<string | null>(null);
+function LandingRoute() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const legacyTarget = legacySearchToCanonical(location.search);
 
-  // Theme state wrapper
+  if (legacyTarget) {
+    return <Navigate to={legacyTarget} replace />;
+  }
+
+  return (
+    <MarketPage
+      onOpenMarkets={() => navigate(toMarketsOverview())}
+      onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+    />
+  );
+}
+
+function MarketsOverviewRoute() {
+  const navigate = useNavigate();
+
+  const handleSectionNavigate = (section: 'markets' | 'stocks' | 'indices') => {
+    if (section === 'markets') {
+      navigate(toMarketsOverview());
+      return;
+    }
+    if (section === 'indices') {
+      navigate(toMarketsIndices());
+      return;
+    }
+    navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
+  };
+
+  return (
+    <MarketsView
+      routeSection="markets"
+      routeStockIndex={DEFAULT_MARKET_INDEX}
+      routeSelectedIndex={null}
+      onNavigateSection={handleSectionNavigate}
+      onNavigateStockIndex={(nextIndex) => navigate(toMarketsStocks(nextIndex))}
+      onNavigateIndexDetail={(nextIndex) => {
+        if (!nextIndex) {
+          navigate(toMarketsIndices());
+          return;
+        }
+        navigate(toMarketsIndexDetail(nextIndex));
+      }}
+      onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+    />
+  );
+}
+
+function MarketsStocksRoute() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const params = useParams<{ indexCode: string }>();
+  const rawIndexCode = String(params.indexCode || '');
+  const normalizedIndexCode = normalizeMarketIndexCode(rawIndexCode);
+  const { mode: returnMode, canonicalSearch } = canonicalizeStocksReturnModeSearch(location.search);
+  const currentSearch = location.search.startsWith('?') ? location.search.slice(1) : location.search;
+  const needsCanonicalIndex = !rawIndexCode || rawIndexCode.trim().toUpperCase() !== normalizedIndexCode;
+  const needsCanonicalSearch = canonicalSearch !== currentSearch;
+
+  const stocksPathWithMode = (
+    indexCode: string | null | undefined,
+    nextMode: string | null | undefined = returnMode,
+  ) => `${toMarketsStocks(indexCode)}${toStocksReturnModeSearch(nextMode)}`;
+
+  if (needsCanonicalIndex || needsCanonicalSearch) {
+    const canonicalPath = toMarketsStocks(normalizedIndexCode);
+    const canonicalTarget = canonicalSearch ? `${canonicalPath}?${canonicalSearch}` : canonicalPath;
+    return <Navigate to={canonicalTarget} replace />;
+  }
+
+  const handleSectionNavigate = (section: 'markets' | 'stocks' | 'indices') => {
+    if (section === 'markets') {
+      navigate(toMarketsOverview());
+      return;
+    }
+    if (section === 'indices') {
+      navigate(toMarketsIndices());
+      return;
+    }
+    navigate(stocksPathWithMode(normalizedIndexCode));
+  };
+
+  return (
+    <MarketsView
+      routeSection="stocks"
+      routeStockIndex={normalizedIndexCode}
+      routeReturnMode={returnMode}
+      routeSelectedIndex={null}
+      onNavigateSection={handleSectionNavigate}
+      onNavigateStockIndex={(nextIndex) => navigate(stocksPathWithMode(nextIndex))}
+      onNavigateReturnMode={(nextMode) => {
+        const normalizedMode = normalizeStockReturnMode(nextMode, DEFAULT_STOCK_RETURN_MODE);
+        navigate(stocksPathWithMode(normalizedIndexCode, normalizedMode));
+      }}
+      onNavigateIndexDetail={(nextIndex) => {
+        if (!nextIndex) {
+          navigate(toMarketsIndices());
+          return;
+        }
+        navigate(toMarketsIndexDetail(nextIndex));
+      }}
+      onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+    />
+  );
+}
+
+function MarketsIndicesListRoute() {
+  const navigate = useNavigate();
+
+  return (
+    <MarketsView
+      routeSection="indices"
+      routeStockIndex={DEFAULT_MARKET_INDEX}
+      routeSelectedIndex={null}
+      onNavigateSection={(section) => {
+        if (section === 'markets') {
+          navigate(toMarketsOverview());
+          return;
+        }
+        if (section === 'indices') {
+          navigate(toMarketsIndices());
+          return;
+        }
+        navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
+      }}
+      onNavigateStockIndex={(nextIndex) => navigate(toMarketsStocks(nextIndex))}
+      onNavigateIndexDetail={(nextIndex) => {
+        if (!nextIndex) {
+          navigate(toMarketsIndices());
+          return;
+        }
+        navigate(toMarketsIndexDetail(nextIndex));
+      }}
+      onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+    />
+  );
+}
+
+function MarketsIndicesDetailRoute() {
+  const navigate = useNavigate();
+  const params = useParams<{ indexCode: string }>();
+  const rawIndexCode = String(params.indexCode || '');
+  const normalizedIndexCode = normalizeMarketIndexCode(rawIndexCode);
+
+  if (!rawIndexCode || rawIndexCode.trim().toUpperCase() !== normalizedIndexCode) {
+    return <Navigate to={toMarketsIndexDetail(normalizedIndexCode)} replace />;
+  }
+
+  return (
+    <MarketsView
+      routeSection="indices"
+      routeStockIndex={DEFAULT_MARKET_INDEX}
+      routeSelectedIndex={normalizedIndexCode}
+      onNavigateSection={(section) => {
+        if (section === 'markets') {
+          navigate(toMarketsOverview());
+          return;
+        }
+        if (section === 'indices') {
+          navigate(toMarketsIndices());
+          return;
+        }
+        navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
+      }}
+      onNavigateStockIndex={(nextIndex) => navigate(toMarketsStocks(nextIndex))}
+      onNavigateIndexDetail={(nextIndex) => {
+        if (!nextIndex) {
+          navigate(toMarketsIndices());
+          return;
+        }
+        navigate(toMarketsIndexDetail(nextIndex));
+      }}
+      onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+    />
+  );
+}
+
+function StockTickerDefaultTabRedirect() {
+  const params = useParams<{ ticker: string }>();
+  return <Navigate to={toStockDetail(params.ticker, DEFAULT_STOCK_TAB)} replace />;
+}
+
+function StockDetailRoute() {
+  const navigate = useNavigate();
+  const params = useParams<{ ticker: string; tab: string }>();
+
+  const rawTicker = String(params.ticker || '');
+  const rawTab = String(params.tab || '');
+  const normalizedTicker = normalizeTicker(rawTicker);
+  const normalizedTab = normalizeStockTab(rawTab);
+
+  if (!normalizedTicker) {
+    return <Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />;
+  }
+
+  const needsCanonicalTicker = rawTicker.trim().toUpperCase() !== normalizedTicker;
+  const normalizedRawTab = normalizeStockTab(rawTab, DEFAULT_STOCK_TAB);
+  const needsCanonicalTab = rawTab.trim().toLowerCase() !== normalizedRawTab;
+
+  if (needsCanonicalTicker || needsCanonicalTab) {
+    return <Navigate to={toStockDetail(normalizedTicker, normalizedTab)} replace />;
+  }
+
+  return (
+    <StockDetailPage
+      key={normalizedTicker}
+      ticker={normalizedTicker}
+      activeTab={normalizedTab}
+      onTabChange={(nextTab) => navigate(toStockDetail(normalizedTicker, nextTab))}
+      onBack={() => navigate(toMarketsStocks(DEFAULT_MARKET_INDEX))}
+    />
+  );
+}
+
+function App() {
+  const location = useLocation();
+  const navigate = useNavigate();
+
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     return (localStorage.getItem('rag_fin_theme') as 'light' | 'dark') || 'light';
   });
@@ -20,75 +255,33 @@ function App() {
     localStorage.setItem('rag_fin_theme', theme);
   }, [theme]);
 
-  useEffect(() => {
-    // URL'den ticker okuma
-    const params = new URLSearchParams(window.location.search);
-    const urlTicker = params.get('ticker');
-    if (urlTicker) {
-      setTicker(urlTicker.toUpperCase());
-    } else {
-      setTicker(null);
+  const currentTicker = useMemo(() => {
+    const match = location.pathname.match(/^\/stocks\/([^/]+)/i);
+    if (!match?.[1]) return null;
+    try {
+      return normalizeTicker(decodeURIComponent(match[1]));
+    } catch {
+      return normalizeTicker(match[1]);
     }
-    setPage(params.get('page'));
+  }, [location.pathname]);
 
-    const handlePopState = () => {
-      const p = new URLSearchParams(window.location.search);
-      setTicker(p.get('ticker')?.toUpperCase() || null);
-      setPage(p.get('page'));
-    };
-
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
+  const isLandingPage = location.pathname === ROUTE_PATHS.landing;
+  const isMarketsView = location.pathname.startsWith(ROUTE_PATHS.markets);
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
   };
-
-  const handleBackToMarket = () => {
-    const url = new URL(window.location.href);
-    url.searchParams.delete('ticker');
-    url.searchParams.delete('section');
-    url.searchParams.delete('page');
-    window.history.pushState({}, '', url.toString());
-    setTicker(null);
-    setPage(null);
-  };
-
-  const handleGoToMarkets = () => {
-    const url = new URL(window.location.href);
-    url.searchParams.delete('ticker');
-    url.searchParams.delete('section');
-    url.searchParams.set('page', 'markets');
-    window.history.pushState({}, '', url.toString());
-    setTicker(null);
-    setPage('markets');
-  };
-
-  const handleSelectTicker = (nextTicker: string) => {
-    const normalizedTicker = nextTicker.trim().toUpperCase();
-    if (!normalizedTicker) {
-      return;
-    }
-
-    const url = new URL(window.location.href);
-    url.searchParams.set('ticker', normalizedTicker);
-    if (!url.searchParams.get('section')) {
-      url.searchParams.set('section', 'overview');
-    }
-    window.history.pushState({}, '', url.toString());
-    setTicker(normalizedTicker);
-  };
-
-  const isMarketsView = !ticker && page === 'markets';
-  const isLandingPage = !ticker && page !== 'markets';
 
   return (
     <div className="app-layout">
       {!isLandingPage && !isMarketsView && (
         <header className="app-header">
           <div className="header-content">
-            <div className="header-brand" onClick={handleBackToMarket} style={{ cursor: 'pointer' }}>
+            <div
+              className="header-brand"
+              onClick={() => navigate(toMarketsOverview())}
+              style={{ cursor: 'pointer' }}
+            >
               <div className="logo-area">
                 {/* Removed RAG-Fin Terminal text as requested */}
               </div>
@@ -97,21 +290,22 @@ function App() {
             <div className="header-actions">
               <button
                 className="nav-tab"
-                onClick={handleGoToMarkets}
+                onClick={() => navigate(toMarketsOverview())}
                 style={{
-                    marginRight: '0.5rem',
-                    padding: '0.4rem 1.2rem',
-                    background: 'color-mix(in srgb, var(--surface-color) 80%, var(--bg-color))',
-                    border: '1px solid var(--surface-border)',
-                    borderRadius: '99px',
-                    cursor: 'pointer'
+                  marginRight: '0.5rem',
+                  padding: '0.4rem 1.2rem',
+                  background: 'color-mix(in srgb, var(--surface-color) 80%, var(--bg-color))',
+                  border: '1px solid var(--surface-border)',
+                  borderRadius: '99px',
+                  cursor: 'pointer',
                 }}
               >
                 Piyasalar
               </button>
-              {!isMarketsView && (
-                <GlobalTickerSearch currentTicker={ticker} onSelectTicker={handleSelectTicker} />
-              )}
+              <GlobalTickerSearch
+                currentTicker={currentTicker}
+                onSelectTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+              />
 
               <button
                 className="theme-toggle-btn"
@@ -126,13 +320,22 @@ function App() {
       )}
 
       <main className="app-main-full">
-        {ticker ? (
-          <StockDetailPage key={ticker} ticker={ticker} onBack={handleBackToMarket} />
-        ) : page === 'markets' ? (
-          <MarketsView />
-        ) : (
-          <MarketPage />
-        )}
+        <Routes>
+          <Route path={ROUTE_PATHS.landing} element={<LandingRoute />} />
+
+          <Route path={ROUTE_PATHS.markets} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
+          <Route path={ROUTE_PATHS.marketsOverview} element={<MarketsOverviewRoute />} />
+          <Route path={ROUTE_PATHS.marketsStocks} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
+          <Route path={ROUTE_PATHS.marketsStocksIndex} element={<MarketsStocksRoute />} />
+          <Route path={ROUTE_PATHS.marketsIndices} element={<MarketsIndicesListRoute />} />
+          <Route path={ROUTE_PATHS.marketsIndicesDetail} element={<MarketsIndicesDetailRoute />} />
+
+          <Route path={ROUTE_PATHS.stocks} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
+          <Route path={ROUTE_PATHS.stockDetailNoTab} element={<StockTickerDefaultTabRedirect />} />
+          <Route path={ROUTE_PATHS.stockDetail} element={<StockDetailRoute />} />
+
+          <Route path="*" element={<Navigate to={ROUTE_PATHS.landing} replace />} />
+        </Routes>
       </main>
     </div>
   );

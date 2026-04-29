@@ -24,6 +24,18 @@ def test_load_dotenv_file_sets_env(monkeypatch, tmp_path: Path) -> None:
     assert config_module.os.getenv("RAGFIN_LLM_COMMENTARY_ENABLED") == "true"
 
 
+def test_load_dotenv_file_accepts_colon_env_syntax(monkeypatch, tmp_path: Path) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("NVIDIA_API_KEY: nvidia-test-key\n", encoding="utf-8")
+
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    config_module._LOADED_DOTENV_FILES.clear()
+
+    loaded = config_module.load_dotenv_file(dotenv)
+    assert loaded is not None
+    assert config_module.os.getenv("NVIDIA_API_KEY") == "nvidia-test-key"
+
+
 def test_resolve_config_path_reads_dotenv_override(monkeypatch, tmp_path: Path) -> None:
     override_cfg = tmp_path / "override.yaml"
     override_cfg.write_text("paths:\n  raw_dir: data/raw\n", encoding="utf-8")
@@ -35,4 +47,3 @@ def test_resolve_config_path_reads_dotenv_override(monkeypatch, tmp_path: Path) 
 
     resolved = config_module.resolve_config_path(tmp_path / "config.yaml")
     assert resolved == override_cfg.resolve()
-

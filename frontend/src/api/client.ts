@@ -19,6 +19,8 @@ import type {
     MarketCommoditiesResponse,
     MarketIndexResponse,
     MarketFxResponse,
+    KapOverviewCommentaryRequest,
+    KapOverviewCommentaryResponse,
 } from './types';
 
 const rawApiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
@@ -29,7 +31,13 @@ const STARTUP_HINT = 'Uygulama yeni baslatiliyor olabilir. Lutfen 5-10 saniye be
 const NETWORK_ERROR_MESSAGE = 'Su an baglanti kurulamiyor. Lutfen kisa bir sure sonra tekrar deneyin.';
 const SERVER_ERROR_MESSAGE = 'Islem su an tamamlanamiyor. Lutfen daha sonra tekrar deneyin.';
 const REQUEST_TIMEOUT_MS = 15000;
+const OVERVIEW_COMMENTARY_TIMEOUT_MS = Number(import.meta.env.VITE_KAP_OVERVIEW_COMMENTARY_TIMEOUT_MS || 300000);
 const TIMEOUT_MESSAGE = 'Istek suresi asildi. Lutfen tekrar deneyin.';
+
+type FetchApiOptions = RequestInit & {
+    timeoutMs?: number;
+    debugLabel?: string;
+};
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -59,29 +67,56 @@ function retryDelayMs(attempt: number): number {
     return Math.min(max, base * Math.pow(1.6, Math.max(0, attempt - 1)));
 }
 
-async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Promise<T> {
     const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
     const url = `${API_BASE}${normalizedEndpoint}`;
     const method = (options.method || 'GET').toUpperCase();
     const allowRetry = isIdempotentMethod(method);
     const maxAttempts = allowRetry ? 8 : 1;
+    const { timeoutMs, debugLabel, ...requestOptions } = options;
+    const effectiveTimeoutMs = timeoutMs ?? REQUEST_TIMEOUT_MS;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         let response: Response;
         const controller = new AbortController();
-        const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        const externalSignal = requestOptions.signal;
+        const startedAt = window.performance?.now?.() ?? Date.now();
+        const timeoutId = window.setTimeout(() => controller.abort(), effectiveTimeoutMs);
+        const abortFromExternal = () => controller.abort();
+        if (externalSignal?.aborted) {
+            controller.abort();
+        } else {
+            externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
+        }
+        if (debugLabel) {
+            console.debug(`[api:${debugLabel}] request started`, {
+                url,
+                method,
+                attempt,
+                timeoutMs: effectiveTimeoutMs,
+            });
+        }
         try {
             response = await fetch(url, {
-                ...options,
-                signal: options.signal ?? controller.signal,
+                ...requestOptions,
+                signal: controller.signal,
                 headers: {
                     'Content-Type': 'application/json',
-                    ...options.headers,
+                    ...requestOptions.headers,
                 },
             });
         } catch (error) {
+            const elapsedMs = Math.round((window.performance?.now?.() ?? Date.now()) - startedAt);
             if ((error as Error)?.name === 'AbortError') {
-                if (options.signal?.aborted) {
+                if (debugLabel) {
+                    console.debug(`[api:${debugLabel}] request aborted`, {
+                        url,
+                        method,
+                        attempt,
+                        elapsedMs,
+                    });
+                }
+                if (externalSignal?.aborted) {
                     throw error;
                 }
                 if (allowRetry && attempt < maxAttempts) {
@@ -94,18 +129,39 @@ async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise
                 await sleep(retryDelayMs(attempt));
                 continue;
             }
+            if (debugLabel) {
+                console.error(`[api:${debugLabel}] network error`, {
+                    url,
+                    method,
+                    attempt,
+                    elapsedMs,
+                    error,
+                });
+            }
             throw new Error(`${NETWORK_ERROR_MESSAGE} ${STARTUP_HINT}`);
         } finally {
             window.clearTimeout(timeoutId);
+            externalSignal?.removeEventListener('abort', abortFromExternal);
         }
 
         if (!response.ok) {
+            const elapsedMs = Math.round((window.performance?.now?.() ?? Date.now()) - startedAt);
             if (allowRetry && RETRYABLE_HTTP_STATUSES.has(response.status) && attempt < maxAttempts) {
                 await sleep(retryDelayMs(attempt));
                 continue;
             }
 
             const errorData = await response.json().catch(() => ({}));
+            if (debugLabel) {
+                console.error(`[api:${debugLabel}] http error`, {
+                    url,
+                    method,
+                    attempt,
+                    elapsedMs,
+                    status: response.status,
+                    errorData,
+                });
+            }
             const detail = typeof errorData?.detail === 'string' ? errorData.detail : null;
             if (detail && response.status < 500) {
                 throw new Error(detail);
@@ -119,6 +175,16 @@ async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise
             throw new Error(`Islem tamamlanamadi (${response.status}). Lutfen tekrar deneyin.`);
         }
 
+        if (debugLabel) {
+            const elapsedMs = Math.round((window.performance?.now?.() ?? Date.now()) - startedAt);
+            console.debug(`[api:${debugLabel}] request completed`, {
+                url,
+                method,
+                attempt,
+                elapsedMs,
+                status: response.status,
+            });
+        }
         return response.json();
     }
 
@@ -231,6 +297,15 @@ export const apiClient = {
         if (refresh) params.append('refresh', 'true');
         return fetchApi<KapSnapshotResponse>(`/kap/snapshot?${params.toString()}`);
     },
+
+    kapOverviewCommentary: (request: KapOverviewCommentaryRequest, options?: { signal?: AbortSignal }) =>
+        fetchApi<KapOverviewCommentaryResponse>('/kap/overview-commentary', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            signal: options?.signal,
+            timeoutMs: OVERVIEW_COMMENTARY_TIMEOUT_MS,
+            debugLabel: 'kap-overview-commentary',
+        }),
 
     ingest: () => fetchApi<{ message: string; pages_written: number; summary: any }>('/ingest', { method: 'POST' }),
 

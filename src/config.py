@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
@@ -288,9 +289,14 @@ def load_dotenv_file(dotenv_path: Optional[Path] = None) -> Optional[Path]:
                     continue
                 if raw.startswith("export "):
                     raw = raw[len("export ") :].strip()
-                if "=" not in raw:
+                if "=" in raw:
+                    key, value = raw.split("=", 1)
+                elif ":" in raw:
+                    key, value = raw.split(":", 1)
+                    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key.strip()):
+                        continue
+                else:
                     continue
-                key, value = raw.split("=", 1)
                 key = key.strip()
                 value = value.strip()
                 if not key:

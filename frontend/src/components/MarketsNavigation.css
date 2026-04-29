@@ -225,6 +225,16 @@
     color: #fff;
 }
 
+.mn-menu-item:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.mn-menu-item:disabled:hover {
+    background: transparent;
+    color: #a0aec0;
+}
+
 .mn-menu-item.active {
     color: #fff;
 }
@@ -243,6 +253,10 @@
 .mn-menu-item:hover .mn-icon,
 .mn-menu-item.active .mn-icon {
     color: #fff;
+}
+
+.mn-menu-item:disabled:hover .mn-icon {
+    color: #a0aec0;
 }
 
 .mn-text {

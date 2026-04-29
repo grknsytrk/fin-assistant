@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import api as api_module
 from app.api import app
 from src import kap_vyk_client
+from src.nvidia_commentary import NvidiaCommentaryError
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +59,532 @@ def test_api_feedback() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["message"] == "feedback_saved"
+
+
+def _overview_commentary_payload() -> Dict[str, Any]:
+    return {
+        "company": "BIMAS",
+        "company_title": "BIM BIRLESIK MAGAZALAR A.S.",
+        "latest_period": "2025/12",
+        "history_context": {
+            "company_kind": "generic",
+            "quarters": [
+                {
+                    "label": "2024/3",
+                    "year": 2024,
+                    "period": 1,
+                    "metrics": {
+                        "satis_gelirleri": 150_000_000_000.0,
+                        "favok": 9_800_000_000.0,
+                        "net_kar": 4_100_000_000.0,
+                        "faaliyet_nakit_akisi": 3_500_000_000.0,
+                        "serbest_nakit_akisi": 2_100_000_000.0,
+                        "ozkaynaklar": 52_000_000_000.0,
+                    },
+                    "ratios": {
+                        "favok_marji": 6.53,
+                        "net_kar_marji": 2.73,
+                        "roe": 7.88,
+                        "cari_oran": 1.28,
+                        "net_borc_ozkaynak": 0.42,
+                        "nakit_donusum": 0.51,
+                    },
+                },
+                {
+                    "label": "2024/6",
+                    "year": 2024,
+                    "period": 2,
+                    "metrics": {
+                        "satis_gelirleri": 162_000_000_000.0,
+                        "favok": 10_200_000_000.0,
+                        "net_kar": 4_600_000_000.0,
+                        "faaliyet_nakit_akisi": 3_800_000_000.0,
+                        "serbest_nakit_akisi": 2_300_000_000.0,
+                        "ozkaynaklar": 54_000_000_000.0,
+                    },
+                    "ratios": {
+                        "favok_marji": 6.3,
+                        "net_kar_marji": 2.84,
+                        "roe": 8.52,
+                        "cari_oran": 1.3,
+                        "net_borc_ozkaynak": 0.4,
+                        "nakit_donusum": 0.5,
+                    },
+                },
+                {
+                    "label": "2024/9",
+                    "year": 2024,
+                    "period": 3,
+                    "metrics": {
+                        "satis_gelirleri": 171_000_000_000.0,
+                        "favok": 10_900_000_000.0,
+                        "net_kar": 5_000_000_000.0,
+                        "faaliyet_nakit_akisi": 4_200_000_000.0,
+                        "serbest_nakit_akisi": 2_500_000_000.0,
+                        "ozkaynaklar": 56_500_000_000.0,
+                    },
+                    "ratios": {
+                        "favok_marji": 6.37,
+                        "net_kar_marji": 2.92,
+                        "roe": 8.85,
+                        "cari_oran": 1.31,
+                        "net_borc_ozkaynak": 0.39,
+                        "nakit_donusum": 0.5,
+                    },
+                },
+                {
+                    "label": "2024/12",
+                    "year": 2024,
+                    "period": 4,
+                    "metrics": {
+                        "satis_gelirleri": 180_000_000_000.0,
+                        "favok": 11_500_000_000.0,
+                        "net_kar": 5_300_000_000.0,
+                        "faaliyet_nakit_akisi": 4_500_000_000.0,
+                        "serbest_nakit_akisi": 2_700_000_000.0,
+                        "ozkaynaklar": 59_000_000_000.0,
+                    },
+                    "ratios": {
+                        "favok_marji": 6.39,
+                        "net_kar_marji": 2.94,
+                        "roe": 8.98,
+                        "cari_oran": 1.33,
+                        "net_borc_ozkaynak": 0.38,
+                        "nakit_donusum": 0.51,
+                    },
+                },
+                {
+                    "label": "2025/3",
+                    "year": 2025,
+                    "period": 1,
+                    "metrics": {
+                        "satis_gelirleri": 158_000_000_000.0,
+                        "favok": 10_400_000_000.0,
+                        "net_kar": 4_500_000_000.0,
+                        "faaliyet_nakit_akisi": 3_900_000_000.0,
+                        "serbest_nakit_akisi": 2_250_000_000.0,
+                        "ozkaynaklar": 63_000_000_000.0,
+                    },
+                    "ratios": {
+                        "favok_marji": 6.58,
+                        "net_kar_marji": 2.85,
+                        "roe": 7.14,
+                        "cari_oran": 1.36,
+                        "net_borc_ozkaynak": 0.4,
+                        "nakit_donusum": 0.5,
+                    },
+                },
+                {
+                    "label": "2025/6",
+                    "year": 2025,
+                    "period": 2,
+                    "metrics": {
+                        "satis_gelirleri": 168_000_000_000.0,
+                        "favok": 10_950_000_000.0,
+                        "net_kar": 4_900_000_000.0,
+                        "faaliyet_nakit_akisi": 4_050_000_000.0,
+                        "serbest_nakit_akisi": 2_350_000_000.0,
+                        "ozkaynaklar": 66_000_000_000.0,
+                    },
+                    "ratios": {
+                        "favok_marji": 6.52,
+                        "net_kar_marji": 2.92,
+                        "roe": 7.42,
+                        "cari_oran": 1.34,
+                        "net_borc_ozkaynak": 0.45,
+                        "nakit_donusum": 0.48,
+                    },
+                },
+                {
+                    "label": "2025/9",
+                    "year": 2025,
+                    "period": 3,
+                    "metrics": {
+                        "satis_gelirleri": 190_000_000_000.0,
+                        "favok": 11_900_000_000.0,
+                        "net_kar": 5_450_000_000.0,
+                        "faaliyet_nakit_akisi": 4_500_000_000.0,
+                        "serbest_nakit_akisi": 2_600_000_000.0,
+                        "ozkaynaklar": 69_000_000_000.0,
+                    },
+                    "ratios": {
+                        "favok_marji": 6.26,
+                        "net_kar_marji": 2.87,
+                        "roe": 7.9,
+                        "cari_oran": 1.31,
+                        "net_borc_ozkaynak": 0.46,
+                        "nakit_donusum": 0.48,
+                    },
+                },
+                {
+                    "label": "2025/12",
+                    "year": 2025,
+                    "period": 4,
+                    "metrics": {
+                        "satis_gelirleri": 210_000_000_000.0,
+                        "favok": 13_700_000_000.0,
+                        "net_kar": 6_100_000_000.0,
+                        "faaliyet_nakit_akisi": 4_900_000_000.0,
+                        "serbest_nakit_akisi": 3_050_000_000.0,
+                        "ozkaynaklar": 72_500_000_000.0,
+                    },
+                    "ratios": {
+                        "favok_marji": 6.52,
+                        "net_kar_marji": 2.9,
+                        "roe": 8.41,
+                        "cari_oran": 1.29,
+                        "net_borc_ozkaynak": 0.53,
+                        "nakit_donusum": 0.5,
+                    },
+                },
+            ],
+        },
+        "overview_payload": {
+            "income_summary": [
+                {
+                    "key": "satis_gelirleri",
+                    "label": "Satislar",
+                    "current_period": "2025/12",
+                    "current_value": 721_060_000_000.0,
+                    "current_display": "721,06 Milyar TL",
+                    "base_period": "2024/12",
+                    "base_value": 680_070_000_000.0,
+                    "base_display": "680,07 Milyar TL",
+                    "pct_change": 6.03,
+                    "pct_display": "% 6",
+                }
+            ],
+            "balance_summary": [
+                {
+                    "key": "net_borc",
+                    "label": "Net Borc",
+                    "current_period": "2025/12",
+                    "current_value": 38_570_000_000.0,
+                    "current_display": "38,57 Milyar TL",
+                    "base_period": "2025/9",
+                    "base_value": 31_120_000_000.0,
+                    "base_display": "31,12 Milyar TL",
+                    "pct_change": 23.94,
+                    "pct_display": "% 24",
+                }
+            ],
+            "charts": [
+                {
+                    "title": "Ceyreklik Satislar",
+                    "kind": "bar",
+                    "series": [
+                        {"label": "2025/9", "value": 190_000_000_000.0, "display": "190,00 Milyar TL"},
+                        {"label": "2025/12", "value": 210_000_000_000.0, "display": "210,00 Milyar TL"},
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def test_kap_overview_commentary_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_call(
+        normalized_payload: Dict[str, Any],
+        base_analysis: Dict[str, Any],
+        api_key: str,
+        model: str,
+        *,
+        debug_trace: Optional[List[str]] = None,
+    ) -> str:
+        assert api_key == "dummy-nvidia-key"
+        assert model == "minimaxai/minimax-m2.7"
+        assert normalized_payload["company"] == "BIMAS"
+        assert base_analysis["scorecard"]["overall_score"] > 0
+        assert debug_trace is not None
+        return (
+            '{"headline":"Satis ivmesi korunuyor",'
+            '"bullets":["Satislar yillik bazda artarken net borc yukselmis."],'
+            '"risk_note":"Nakit akisi ve borc trendi izlenmeli.",'
+            '"watch_metrics":["Net borc","FAVOK marji"],'
+            '"summary":"Genel gorunum dengeli, karlilik tarafi daha destekleyici.",'
+            '"seasonality_note":"Son ceyrek kendi mevsimsel bandindan belirgin kopmuyor.",'
+            '"score_adjustments":{"overall_adjustment":0.3,"subscores":['
+            '{"key":"buyume","adjustment":0.4,"summary":"Satis ve kar buyumesi ayni ceyrek bazina gore destekleyici."},'
+            '{"key":"karlilik","adjustment":0.2,"summary":"Marjlar baz etkisine ragmen korunuyor."},'
+            '{"key":"bilanco","adjustment":-0.2,"summary":"Borcluluk tarafi biraz daha dikkat gerektiriyor."},'
+            '{"key":"nakit_akisi","adjustment":0.1,"summary":"Nakit donusumu zayiflamadan suruyor."}'
+            ']}}'
+        )
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "dummy-nvidia-key")
+    monkeypatch.delenv("NVIDIA_AI_MODEL", raising=False)
+    monkeypatch.setattr("src.nvidia_commentary._call_nvidia_chat", fake_call)
+
+    client = TestClient(app)
+    response = client.post("/kap/overview-commentary", json=_overview_commentary_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["headline"] == "Satis ivmesi korunuyor"
+    assert payload["watch_metrics"] == ["Net borc", "FAVOK marji"]
+    assert payload["model_used"] == "minimaxai/minimax-m2.7"
+    assert payload["scorecard"]["score_source"] == "ai_adjusted"
+    assert len(payload["scorecard"]["subscores"]) == 4
+    assert any("validation:" in item for item in payload.get("debug_trace", []))
+
+
+def test_kap_overview_commentary_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_call(
+        normalized_payload: Dict[str, Any],
+        base_analysis: Dict[str, Any],
+        api_key: str,
+        model: str,
+        *,
+        debug_trace: Optional[List[str]] = None,
+    ) -> str:
+        assert api_key == "dummy-nvidia-key"
+        assert model == "meta/llama-4-maverick-17b-128e-instruct"
+        assert normalized_payload["model"] == "meta/llama-4-maverick-17b-128e-instruct"
+        assert base_analysis["scorecard"]["score_source"] == "deterministic_only"
+        return (
+            '{"headline":"Model override calisti",'
+            '"bullets":["Secilen model backend tarafina ulasti."],'
+            '"risk_note":"",'
+            '"watch_metrics":["Net borc"],'
+            '"summary":"Model override ile AI adjustment akisi calisti.",'
+            '"seasonality_note":"Mevsimsellik etkisi sinirli.",'
+            '"score_adjustments":{"overall_adjustment":0.1,"subscores":['
+            '{"key":"buyume","adjustment":0.1,"summary":"Buyume sinyalleri hafif olumlu."},'
+            '{"key":"karlilik","adjustment":0.0,"summary":"Karlilik notu buyuk olcude korundu."},'
+            '{"key":"bilanco","adjustment":0.0,"summary":"Bilanco notu sabit kaldi."},'
+            '{"key":"nakit_akisi","adjustment":0.0,"summary":"Nakit akisi notu sabit kaldi."}'
+            ']}}'
+        )
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "dummy-nvidia-key")
+    monkeypatch.setattr("src.nvidia_commentary._call_nvidia_chat", fake_call)
+
+    payload = _overview_commentary_payload()
+    payload["model"] = "meta/llama-4-maverick-17b-128e-instruct"
+
+    client = TestClient(app)
+    response = client.post("/kap/overview-commentary", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["model_used"] == "meta/llama-4-maverick-17b-128e-instruct"
+    assert body["scorecard"]["score_source"] == "ai_adjusted"
+
+
+def test_kap_overview_commentary_does_not_truncate_model_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    long_headline = "Uzun baslik " + ("tam cumle devam ediyor " * 20) + "ve burada bitiyor."
+    long_bullet = "Uzun madde " + ("kesilmeden devam eden finansal yorum " * 20) + "tamamlandi."
+    long_risk = "Uzun risk notu " + ("cumle bolunmeden ilerliyor " * 20) + "tamamlandi."
+    long_summary = "Uzun skor ozeti " + ("modelin gerekcesi kesilmeden aktariliyor " * 20) + "tamamlandi."
+    long_subscore = "Uzun alt skor yorumu " + ("detayli nedenler kesilmeden korunuyor " * 20) + "tamamlandi."
+
+    def fake_call(
+        normalized_payload: Dict[str, Any],
+        base_analysis: Dict[str, Any],
+        api_key: str,
+        model: str,
+        *,
+        debug_trace: Optional[List[str]] = None,
+    ) -> str:
+        return json.dumps(
+            {
+                "headline": long_headline,
+                "bullets": [long_bullet],
+                "risk_note": long_risk,
+                "watch_metrics": ["Net borc"],
+                "summary": long_summary,
+                "seasonality_note": long_summary,
+                "score_adjustments": {
+                    "overall_adjustment": 0.1,
+                    "subscores": [
+                        {"key": "buyume", "adjustment": 0.0, "summary": long_subscore},
+                        {"key": "karlilik", "adjustment": 0.0, "summary": long_subscore},
+                        {"key": "bilanco", "adjustment": 0.0, "summary": long_subscore},
+                        {"key": "nakit_akisi", "adjustment": 0.0, "summary": long_subscore},
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "dummy-nvidia-key")
+    monkeypatch.setattr("src.nvidia_commentary._call_nvidia_chat", fake_call)
+
+    client = TestClient(app)
+    response = client.post("/kap/overview-commentary", json=_overview_commentary_payload())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["headline"] == long_headline
+    assert body["bullets"] == [long_bullet]
+    assert body["risk_note"] == long_risk
+    assert body["scorecard"]["summary"] == long_summary
+    assert body["scorecard"]["seasonality_note"] == long_summary
+    assert all(item["summary"] == long_subscore for item in body["scorecard"]["subscores"])
+
+
+def test_kap_overview_commentary_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+
+    client = TestClient(app)
+    response = client.post("/kap/overview-commentary", json=_overview_commentary_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert "NVIDIA_API_KEY" in payload["error"]
+    assert payload["scorecard"]["score_source"] == "deterministic_only"
+    assert any("NVIDIA_API_KEY bulunamadi" in item for item in payload.get("debug_trace", []))
+
+
+def test_kap_overview_commentary_provider_error_includes_debug_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_call(
+        normalized_payload: Dict[str, Any],
+        base_analysis: Dict[str, Any],
+        api_key: str,
+        model: str,
+        *,
+        debug_trace: Optional[List[str]] = None,
+    ) -> str:
+        raise NvidiaCommentaryError("simule provider hatasi")
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "dummy-nvidia-key")
+    monkeypatch.setattr("src.nvidia_commentary._call_nvidia_chat", fake_call)
+
+    client = TestClient(app)
+    response = client.post("/kap/overview-commentary", json=_overview_commentary_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["error"] == "simule provider hatasi"
+    assert payload["scorecard"]["score_source"] == "ai_failed_fallback"
+    assert any("AI fallback" in item for item in payload.get("debug_trace", []))
+
+
+def test_kap_overview_commentary_invalid_ai_adjustments_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_call(
+        normalized_payload: Dict[str, Any],
+        base_analysis: Dict[str, Any],
+        api_key: str,
+        model: str,
+        *,
+        debug_trace: Optional[List[str]] = None,
+    ) -> str:
+        return (
+            '{"headline":"Eksik adjustment",'
+            '"bullets":["Model yorum yazdi ama adjustment semasi eksik."],'
+            '"risk_note":"",'
+            '"watch_metrics":["Net borc"]}'
+        )
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "dummy-nvidia-key")
+    monkeypatch.setattr("src.nvidia_commentary._call_nvidia_chat", fake_call)
+
+    client = TestClient(app)
+    response = client.post("/kap/overview-commentary", json=_overview_commentary_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["scorecard"]["score_source"] == "ai_failed_fallback"
+    assert "score_adjustments" in payload["error"]
+
+
+def test_kap_overview_commentary_rejects_large_body() -> None:
+    client = TestClient(app)
+    response = client.post(
+        "/kap/overview-commentary",
+        content=b'{"company":"' + (b"x" * (api_module.MAX_REQUEST_BYTES + 1)) + b'"}',
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 413
+
+
+def test_kap_overview_commentary_rejects_unexpected_top_level() -> None:
+    payload = _overview_commentary_payload()
+    payload["unexpected"] = True
+
+    client = TestClient(app)
+    response = client.post("/kap/overview-commentary", json=payload)
+
+    assert response.status_code == 422
+    assert "beklenmeyen alan" in response.json()["detail"]
+
+
+def test_kap_overview_commentary_requires_history_context() -> None:
+    payload = _overview_commentary_payload()
+    payload.pop("history_context")
+
+    client = TestClient(app)
+    response = client.post("/kap/overview-commentary", json=payload)
+
+    assert response.status_code == 422
+    assert "history_context" in response.json()["detail"]
+
+
+def test_kap_overview_commentary_rejects_unsupported_model() -> None:
+    payload = _overview_commentary_payload()
+    payload["model"] = "unsupported/model"
+
+    client = TestClient(app)
+    response = client.post("/kap/overview-commentary", json=payload)
+
+    assert response.status_code == 422
+    assert "desteklenmeyen model" in response.json()["detail"]
+
+
+def test_kap_overview_commentary_rejects_series_limit() -> None:
+    payload = _overview_commentary_payload()
+    payload["overview_payload"]["charts"][0]["series"] = [
+        {"label": f"2025/{idx}", "value": float(idx), "display": str(idx)}
+        for idx in range(11)
+    ]
+
+    client = TestClient(app)
+    response = client.post("/kap/overview-commentary", json=payload)
+
+    assert response.status_code == 422
+    assert "en fazla 10" in response.json()["detail"]
+
+
+def test_kap_overview_commentary_cancels_provider_task_on_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancelled = False
+
+    async def fake_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    class DisconnectingRequest:
+        async def is_disconnected(self) -> bool:
+            await asyncio.sleep(0)
+            return True
+
+    async def run_case() -> None:
+        with pytest.raises(HTTPException) as exc_info:
+            await api_module._run_overview_commentary_until_done_or_disconnected(
+                DisconnectingRequest(),  # type: ignore[arg-type]
+                {"company": "BIMAS"},
+            )
+        assert exc_info.value.status_code == 499
+
+    monkeypatch.setattr(api_module, "generate_overview_commentary", fake_generate)
+    asyncio.run(run_case())
+    assert cancelled is True
 
 
 def _flow_item(

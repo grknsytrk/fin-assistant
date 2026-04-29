@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import html
 import json
+import logging
+import math
 import os
 import re
 import time
@@ -11,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pandas import isna
@@ -22,6 +25,7 @@ from src.config import AppConfig, load_config
 from src.commentary import SAFE_EMPTY_COMMENTARY, generate_commentary
 from src.index import build_index, build_index_v2
 from src.ingest import ingest_raw_pdfs, list_pdf_files
+from src.nvidia_commentary import MAX_REQUEST_BYTES, PayloadValidationError, generate_overview_commentary
 from src.metrics_extractor import (
     QUARTER_ORDER,
     aggregate_metric_across_quarters,
@@ -45,6 +49,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = load_config(ROOT / "config.yaml")
 app = FastAPI(title="RAG-Fin API", version="0.10.0")
 FEEDBACK_FILE = CONFIG.paths.processed_dir / "feedback.jsonl"
+LOGGER = logging.getLogger("uvicorn.error")
 
 # region agent log helpers
 _DEBUG_LOG_PATH = Path("debug-0cbd9f.log")
@@ -1155,6 +1160,87 @@ def commentary(request: CommentaryRequest) -> Dict[str, Any]:
     if not any(commentary_payload.values()):
         return _empty_commentary()
     return commentary_payload
+
+
+@app.post("/kap/overview-commentary")
+async def kap_overview_commentary(request: Request) -> Dict[str, Any]:
+    started_at = time.perf_counter()
+    body = await request.body()
+    if len(body) > MAX_REQUEST_BYTES:
+        LOGGER.warning(
+            "[kap_overview_commentary] request body too large | bytes=%s limit=%s",
+            len(body),
+            MAX_REQUEST_BYTES,
+        )
+        raise HTTPException(status_code=413, detail="request body en fazla 64 KB olabilir")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        LOGGER.warning(
+            "[kap_overview_commentary] invalid json body | bytes=%s error=%s",
+            len(body),
+            exc,
+        )
+        raise HTTPException(status_code=400, detail="gecerli JSON body gerekli") from exc
+    LOGGER.info(
+        "[kap_overview_commentary] request received | company=%s latest_period=%s bytes=%s",
+        str(payload.get("company") or "").strip(),
+        str(payload.get("latest_period") or "").strip(),
+        len(body),
+    )
+    try:
+        response = await _run_overview_commentary_until_done_or_disconnected(request, payload)
+    except PayloadValidationError as exc:
+        LOGGER.warning(
+            "[kap_overview_commentary] payload validation failed | company=%s detail=%s",
+            str(payload.get("company") or "").strip(),
+            exc,
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    LOGGER.info(
+        "[kap_overview_commentary] completed | company=%s ok=%s model=%s score_source=%s elapsed_ms=%s error=%s",
+        str(payload.get("company") or "").strip(),
+        response.get("ok"),
+        response.get("model_used"),
+        ((response.get("scorecard") or {}) if isinstance(response.get("scorecard"), dict) else {}).get("score_source"),
+        elapsed_ms,
+        (str(response.get("error") or "")[:180] or None),
+    )
+    return response
+
+
+async def _run_overview_commentary_until_done_or_disconnected(
+    request: Request,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    task = asyncio.create_task(generate_overview_commentary(payload))
+    company = str(payload.get("company") or "").strip()
+    try:
+        while not task.done():
+            if await request.is_disconnected():
+                task.cancel()
+                LOGGER.info(
+                    "[kap_overview_commentary] client disconnected; cancelling NVIDIA request | company=%s",
+                    company,
+                )
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                raise HTTPException(status_code=499, detail="client disconnected")
+            try:
+                return await asyncio.wait_for(asyncio.shield(task), timeout=0.25)
+            except asyncio.TimeoutError:
+                continue
+        return await task
+    except asyncio.CancelledError:
+        task.cancel()
+        LOGGER.info(
+            "[kap_overview_commentary] request task cancelled | company=%s",
+            company,
+        )
+        raise
 
 
 @app.post("/feedback")
@@ -2550,10 +2636,10 @@ _MARKET_INDEX_DETAIL_CACHE: Dict[str, Any] = {}
 _MARKET_INDEX_QUOTE_CACHE: Dict[str, Any] = {}
 _MARKET_INDEX_INTRADAY_CACHE: Dict[str, Any] = {}
 _MARKET_INDEX_RETURN_CACHE: Dict[str, Any] = {}
-_MARKET_INDICES_CACHE_TTL = 60
-_MARKET_INDEX_DETAIL_CACHE_TTL = 60
-_MARKET_INDEX_QUOTE_CACHE_TTL = 45
-_MARKET_INDEX_INTRADAY_CACHE_TTL = 45
+_MARKET_INDICES_CACHE_TTL = 3
+_MARKET_INDEX_DETAIL_CACHE_TTL = 3
+_MARKET_INDEX_QUOTE_CACHE_TTL = 3
+_MARKET_INDEX_INTRADAY_CACHE_TTL = 3
 _MARKET_INDEX_RETURN_CACHE_TTL = 900
 _MARKET_INDEX_META: Dict[str, Dict[str, Any]] = {
     "XU100": {
@@ -4528,15 +4614,148 @@ def market_commodities() -> Dict[str, Any]:
 
 # ── FX (Döviz) ────────────────────────────────────────────
 _FX_CACHE: Dict[str, Any] = {}
-_FX_CACHE_TTL = 90
+_FX_CACHE_TTL = 3
 
-_FX_MAP: List[tuple[str, str, str]] = [
-    ("USD/TRY", "USDTRY=X", "Amerikan Doları"),
-    ("EUR/TRY", "EURTRY=X", "Euro"),
-    ("GBP/TRY", "GBPTRY=X", "İngiliz Sterlini"),
-    ("EUR/USD", "EURUSD=X", "Euro / Dolar"),
-    ("DXY", "DX-Y.NYB", "Dolar Endeksi"),
+_FX_DIRECT_MAP: List[tuple[str, List[str], str]] = [
+    ("USD/TRY", ["USDTRY=X"], "Amerikan Doları / TL"),
+    ("EUR/TRY", ["EURTRY=X"], "Euro / TL"),
+    ("GBP/TRY", ["GBPTRY=X"], "İngiliz Sterlini / TL"),
+    ("CHF/TRY", ["CHFTRY=X"], "İsviçre Frangı / TL"),
+    ("JPY/TRY", ["JPYTRY=X"], "Japon Yeni / TL"),
+    ("EUR/USD", ["EURUSD=X"], "Euro / Dolar"),
+    ("GBP/USD", ["GBPUSD=X"], "Sterlin / Dolar"),
+    ("USD/JPY", ["USDJPY=X", "JPY=X"], "Dolar / Japon Yeni"),
+    ("EUR/JPY", ["EURJPY=X"], "Euro / Japon Yeni"),
+    ("GBP/JPY", ["GBPJPY=X"], "Sterlin / Japon Yeni"),
+    ("USD/CNY", ["USDCNY=X", "CNY=X"], "Dolar / Çin Yuanı"),
+    ("EUR/CNY", ["EURCNY=X"], "Euro / Çin Yuanı"),
+    ("GBP/CNY", ["GBPCNY=X"], "Sterlin / Çin Yuanı"),
+    ("CNY/JPY", ["CNYJPY=X"], "Çin Yuanı / Japon Yeni"),
+    ("CHF/JPY", ["CHFJPY=X"], "İsviçre Frangı / Japon Yeni"),
+    ("DXY", ["DX-Y.NYB"], "Dolar Endeksi"),
 ]
+
+_FX_DERIVED_MAP: List[tuple[str, str, str, str]] = [
+    ("CNY/TRY", "Çin Yuanı / TL", "USD/TRY", "USD/CNY"),
+]
+
+_FX_ORDER: List[str] = [
+    "USD/TRY",
+    "EUR/TRY",
+    "GBP/TRY",
+    "CHF/TRY",
+    "JPY/TRY",
+    "CNY/TRY",
+    "EUR/USD",
+    "GBP/USD",
+    "USD/JPY",
+    "EUR/JPY",
+    "GBP/JPY",
+    "USD/CNY",
+    "EUR/CNY",
+    "GBP/CNY",
+    "CNY/JPY",
+    "CHF/JPY",
+    "DXY",
+]
+
+
+def _fx_quote_currency(symbol: str) -> str:
+    if "/" not in symbol:
+        return ""
+    return str(symbol or "").rsplit("/", 1)[-1].strip().upper()
+
+
+def _fx_item_from_quote(symbol: str, yahoo_symbol: str, label: str, quote: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "label": label,
+        "yahoo_symbol": yahoo_symbol,
+        "price": quote.get("price") if quote.get("ok") else None,
+        "prev_close": quote.get("prev_close") if quote.get("ok") else None,
+        "change": quote.get("change") if quote.get("ok") else None,
+        "change_pct": quote.get("change_pct") if quote.get("ok") else None,
+        "currency": _fx_quote_currency(symbol),
+        "market_state": quote.get("market_state") if quote.get("ok") else "",
+        "as_of": quote.get("as_of") if quote.get("ok") else None,
+        "error": None if quote.get("ok") else quote.get("error"),
+        "logo_url": None,
+        "logo_source": None,
+    }
+
+
+def _fx_direct_item(entry: tuple[str, List[str], str]) -> Dict[str, Any]:
+    symbol, yahoo_candidates, label = entry
+    errors: List[str] = []
+    for yahoo_symbol in yahoo_candidates:
+        quote = _fetch_yahoo_quote(yahoo_symbol)
+        if quote.get("ok") and quote.get("price") is not None:
+            return _fx_item_from_quote(symbol, yahoo_symbol, label, quote)
+        errors.append(str(quote.get("error") or "quote_unavailable"))
+
+    return _fx_item_from_quote(
+        symbol,
+        yahoo_candidates[0] if yahoo_candidates else "",
+        label,
+        {"ok": False, "error": "; ".join(errors[:3]) if errors else "quote_unavailable"},
+    )
+
+
+def _positive_number(raw: Any) -> Optional[float]:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _fx_derived_item(
+    symbol: str,
+    label: str,
+    numerator_symbol: str,
+    denominator_symbol: str,
+    items_by_symbol: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    numerator = items_by_symbol.get(numerator_symbol, {})
+    denominator = items_by_symbol.get(denominator_symbol, {})
+
+    numerator_price = _positive_number(numerator.get("price"))
+    denominator_price = _positive_number(denominator.get("price"))
+    numerator_prev = _positive_number(numerator.get("prev_close"))
+    denominator_prev = _positive_number(denominator.get("prev_close"))
+
+    price = numerator_price / denominator_price if numerator_price is not None and denominator_price is not None else None
+    prev_close = numerator_prev / denominator_prev if numerator_prev is not None and denominator_prev is not None else None
+    change = None
+    change_pct = None
+    if price is not None and prev_close is not None and prev_close > 0:
+        change = round(price - prev_close, 6)
+        change_pct = round((change / prev_close) * 100, 4)
+
+    source_symbol = "/".join(
+        item
+        for item in (
+            str(numerator.get("yahoo_symbol") or numerator_symbol),
+            str(denominator.get("yahoo_symbol") or denominator_symbol),
+        )
+        if item
+    )
+    return {
+        "symbol": symbol,
+        "label": label,
+        "yahoo_symbol": source_symbol,
+        "price": price,
+        "prev_close": prev_close,
+        "change": change,
+        "change_pct": change_pct,
+        "currency": _fx_quote_currency(symbol),
+        "market_state": numerator.get("market_state") or denominator.get("market_state") or "",
+        "as_of": numerator.get("as_of") or denominator.get("as_of"),
+        "error": None if price is not None else "derived_quote_unavailable",
+        "logo_url": None,
+        "logo_source": None,
+    }
 
 
 def _market_fx_payload() -> Dict[str, Any]:
@@ -4547,34 +4766,30 @@ def _market_fx_payload() -> Dict[str, Any]:
 
     from concurrent.futures import ThreadPoolExecutor
 
-    def _one(entry: tuple[str, str, str]) -> Dict[str, Any]:
-        symbol, yahoo_symbol, label = entry
-        quote = _fetch_yahoo_quote(yahoo_symbol)
-        currency = "TRY" if symbol.endswith("/TRY") else ("USD" if symbol.endswith("/USD") else "")
-        return {
-            "symbol": symbol,
-            "label": label,
-            "yahoo_symbol": yahoo_symbol,
-            "price": quote.get("price") if quote.get("ok") else None,
-            "prev_close": quote.get("prev_close") if quote.get("ok") else None,
-            "change": quote.get("change") if quote.get("ok") else None,
-            "change_pct": quote.get("change_pct") if quote.get("ok") else None,
-            "currency": currency,
-            "market_state": quote.get("market_state") if quote.get("ok") else "",
-            "as_of": quote.get("as_of") if quote.get("ok") else None,
-            "error": None if quote.get("ok") else quote.get("error"),
-            "logo_url": None,
-            "logo_source": None,
-        }
-
-    items: List[Dict[str, Any]] = []
+    items_by_symbol: Dict[str, Dict[str, Any]] = {}
     try:
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            for row in pool.map(_one, _FX_MAP):
-                items.append(row)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for row in pool.map(_fx_direct_item, _FX_DIRECT_MAP):
+                items_by_symbol[str(row.get("symbol") or "")] = row
     except Exception:
-        for entry in _FX_MAP:
-            items.append(_one(entry))
+        for entry in _FX_DIRECT_MAP:
+            row = _fx_direct_item(entry)
+            items_by_symbol[str(row.get("symbol") or "")] = row
+
+    for symbol, label, numerator_symbol, denominator_symbol in _FX_DERIVED_MAP:
+        items_by_symbol[symbol] = _fx_derived_item(
+            symbol,
+            label,
+            numerator_symbol,
+            denominator_symbol,
+            items_by_symbol,
+        )
+
+    items = [
+        items_by_symbol[symbol]
+        for symbol in _FX_ORDER
+        if symbol in items_by_symbol
+    ]
 
     data = {
         "items": items,

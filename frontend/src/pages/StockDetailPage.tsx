@@ -5,6 +5,7 @@ import { apiClient } from '../api/client';
 import type { KapSnapshotResponse, KapQuarter } from '../api/types';
 import { prepareOrderedQuarters } from '../utils/chartBuilders';
 import { PriceTicker } from '../components/stock/PriceTicker';
+import type { StockTab } from '../routing/routes';
 
 import StockOverview from './stock/sections/StockOverview';
 import StockFinancials from './stock/sections/StockFinancials';
@@ -13,32 +14,28 @@ import StockAsk from './stock/sections/StockAsk';
 
 interface StockDetailPageProps {
     ticker: string;
+    activeTab?: StockTab;
+    onTabChange?: (tab: StockTab) => void;
     onBack: () => void;
 }
 
-type TabType = 'overview' | 'financials' | 'kap' | 'ask';
+type TabType = StockTab;
 
-export default function StockDetailPage({ ticker, onBack }: StockDetailPageProps) {
-    const [activeTab, setActiveTab] = useState<TabType>('overview');
+export default function StockDetailPage({ ticker, activeTab = 'overview', onTabChange, onBack }: StockDetailPageProps) {
+    const [selectedTab, setSelectedTab] = useState<TabType>(activeTab);
     const [snapshot, setSnapshot] = useState<KapSnapshotResponse | null>(null);
     const [quarters, setQuarters] = useState<KapQuarter[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        const params = new URLSearchParams(window.location.search);
-        const section = params.get('section');
-        const normalizedSection = section === 'charts' ? 'overview' : section;
-        if (normalizedSection && ['overview', 'financials', 'kap', 'ask'].includes(normalizedSection)) {
-            setActiveTab(normalizedSection as TabType);
-        }
-    }, []);
-
-    useEffect(() => {
-        const url = new URL(window.location.href);
-        url.searchParams.set('section', activeTab);
-        window.history.replaceState({}, '', url.toString());
+        setSelectedTab(activeTab);
     }, [activeTab]);
+
+    const handleTabChange = (tab: TabType) => {
+        setSelectedTab(tab);
+        onTabChange?.(tab);
+    };
 
     useEffect(() => {
         let mounted = true;
@@ -46,7 +43,7 @@ export default function StockDetailPage({ ticker, onBack }: StockDetailPageProps
         setQuarters([]);
         setError(null);
         setLoading(true);
-        apiClient.kapSnapshot(ticker, false, 10)
+        apiClient.kapSnapshot(ticker, false, 12)
             .then(data => {
                 if (mounted) {
                     setSnapshot(data);
@@ -71,7 +68,7 @@ export default function StockDetailPage({ ticker, onBack }: StockDetailPageProps
         
         if (!snapshot) return null;
 
-        switch (activeTab) {
+        switch (selectedTab) {
             case 'overview':
                 return <StockOverview snapshot={snapshot} quarters={quarters} />;
             case 'financials':
@@ -94,26 +91,26 @@ export default function StockDetailPage({ ticker, onBack }: StockDetailPageProps
                 
                 <nav className="sd-nav">
                     <button 
-                        className={`sd-nav-item ${activeTab === 'overview' ? 'active' : ''}`}
-                        onClick={() => setActiveTab('overview')}
+                        className={`sd-nav-item ${selectedTab === 'overview' ? 'active' : ''}`}
+                        onClick={() => handleTabChange('overview')}
                     >
                         <Info size={16} /> Genel Bakış
                     </button>
                     <button 
-                        className={`sd-nav-item ${activeTab === 'financials' ? 'active' : ''}`}
-                        onClick={() => setActiveTab('financials')}
+                        className={`sd-nav-item ${selectedTab === 'financials' ? 'active' : ''}`}
+                        onClick={() => handleTabChange('financials')}
                     >
                         <FileText size={16} /> Finansal Tablolar
                     </button>
                     <button 
-                        className={`sd-nav-item ${activeTab === 'kap' ? 'active' : ''}`}
-                        onClick={() => setActiveTab('kap')}
+                        className={`sd-nav-item ${selectedTab === 'kap' ? 'active' : ''}`}
+                        onClick={() => handleTabChange('kap')}
                     >
                         <BookOpen size={16} /> KAP Bildirimleri
                     </button>
                     <button 
-                        className={`sd-nav-item ${activeTab === 'ask' ? 'active' : ''}`}
-                        onClick={() => setActiveTab('ask')}
+                        className={`sd-nav-item ${selectedTab === 'ask' ? 'active' : ''}`}
+                        onClick={() => handleTabChange('ask')}
                     >
                         <MessageSquare size={16} /> RAG Asistanı
                     </button>

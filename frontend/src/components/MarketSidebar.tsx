@@ -187,6 +187,10 @@ export default function MarketSidebar({
     const [flowWarning, setFlowWarning] = useState<string | null>(null);
     const [flowSize, setFlowSize] = useState<number>(() => readInitialFlowSize());
 
+    const [xu100, setXu100] = useState<MarketUniverseRow[] | null>(null);
+    const [xu100Loading, setXu100Loading] = useState(false);
+    const [xu100Error, setXu100Error] = useState<string | null>(null);
+
     const [xu030, setXu030] = useState<MarketUniverseRow[] | null>(null);
     const [xu030Loading, setXu030Loading] = useState(false);
     const [xu030Error, setXu030Error] = useState<string | null>(null);
@@ -202,6 +206,7 @@ export default function MarketSidebar({
     const [fxDelayNote, setFxDelayNote] = useState<string>('');
 
     const flowInFlight = useRef(false);
+    const xu100InFlight = useRef(false);
     const xu030InFlight = useRef(false);
     const commoditiesInFlight = useRef(false);
     const fxInFlight = useRef(false);
@@ -244,6 +249,26 @@ export default function MarketSidebar({
         [flowSize, loadFlow],
     );
 
+    const loadXu100 = useCallback((force = false) => {
+        if (xu100InFlight.current) return;
+        if (!force && xu100) return;
+        xu100InFlight.current = true;
+        setXu100Loading(true);
+        setXu100Error(null);
+        apiClient
+            .marketStocks({ index: 'XU100', refresh: force })
+            .then((res) => {
+                setXu100(res.rows || []);
+            })
+            .catch((err: unknown) => {
+                setXu100Error(err instanceof Error ? err.message : 'XU100 verisi alınamadı.');
+            })
+            .finally(() => {
+                xu100InFlight.current = false;
+                setXu100Loading(false);
+            });
+    }, [xu100]);
+
     const loadXu030 = useCallback((force = false) => {
         if (xu030InFlight.current) return;
         if (!force && xu030) return;
@@ -251,7 +276,7 @@ export default function MarketSidebar({
         setXu030Loading(true);
         setXu030Error(null);
         apiClient
-            .marketXu030()
+            .marketStocks({ index: 'XU030', refresh: force })
             .then((res) => {
                 setXu030(res.rows || []);
             })
@@ -309,22 +334,25 @@ export default function MarketSidebar({
     useEffect(() => {
         if (!open) return;
         loadFlow();
+        const xu100Timer = window.setTimeout(() => loadXu100(), 80);
         const xu030Timer = window.setTimeout(() => loadXu030(), 150);
         const fxTimer = window.setTimeout(() => loadFx(), 400);
         const commoditiesTimer = window.setTimeout(() => loadCommodities(), 700);
         return () => {
+            window.clearTimeout(xu100Timer);
             window.clearTimeout(xu030Timer);
             window.clearTimeout(fxTimer);
             window.clearTimeout(commoditiesTimer);
         };
-    }, [open, loadFlow, loadXu030, loadFx, loadCommodities]);
+    }, [open, loadFlow, loadXu100, loadXu030, loadFx, loadCommodities]);
 
     useEffect(() => {
         if (!open) return;
-        if (tab === 'XU030') loadXu030();
+        if (tab === 'XU100') loadXu100();
+        else if (tab === 'XU030') loadXu030();
         else if (tab === 'DOVIZ') loadFx();
         else if (tab === 'EMTIA') loadCommodities();
-    }, [open, tab, loadXu030, loadFx, loadCommodities]);
+    }, [open, tab, loadXu100, loadXu030, loadFx, loadCommodities]);
 
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
@@ -343,23 +371,23 @@ export default function MarketSidebar({
         return () => window.clearInterval(intervalId);
     }, [open, panelMode, loadFlow]);
 
-    // OTO YENİLEME (PİYASALAR): Panel açıkken her 10 saniyede bir diğer sekmeleri arka planda tazeleyelim
+    // OTO YENİLEME (PİYASALAR): Panel açıkken aktif sekmeyi canlı veri endpoint'inden tazeleyelim.
     useEffect(() => {
         if (!open || panelMode !== 'markets') return;
         const intervalId = window.setInterval(() => {
-            if (tab === 'XU030') loadXu030(true);
+            if (tab === 'XU100') loadXu100(true);
+            else if (tab === 'XU030') loadXu030(true);
             else if (tab === 'DOVIZ') loadFx(true);
             else if (tab === 'EMTIA') loadCommodities(true);
-            // XU100 parent'tan (MarketsView) zaten setInterval üzerinden yenilenip geliyor.
         }, 3000);
         return () => window.clearInterval(intervalId);
-    }, [open, panelMode, tab, loadXu030, loadFx, loadCommodities]);
+    }, [open, panelMode, tab, loadXu100, loadXu030, loadFx, loadCommodities]);
 
     const sortedXu100 = useMemo(() => {
-        const arr = [...rows];
+        const arr = [...(xu100 || rows)];
         arr.sort((a, b) => (b.change_pct ?? -Infinity) - (a.change_pct ?? -Infinity));
         return arr;
-    }, [rows]);
+    }, [rows, xu100]);
 
     const sortedXu030 = useMemo(() => {
         if (!xu030) return [];
@@ -467,7 +495,11 @@ export default function MarketSidebar({
 
                         <div className="ms-list">
                             {tab === 'XU100' && (
-                                sortedXu100.length === 0 ? (
+                                xu100Loading && !xu100 && rows.length === 0 ? (
+                                    <div className="ms-empty">Yükleniyor…</div>
+                                ) : xu100Error && !xu100 && rows.length === 0 ? (
+                                    <div className="ms-empty ms-empty-error">{xu100Error}</div>
+                                ) : sortedXu100.length === 0 ? (
                                     <div className="ms-empty">Veri bulunamadı.</div>
                                 ) : (
                                     sortedXu100.map((row) => (

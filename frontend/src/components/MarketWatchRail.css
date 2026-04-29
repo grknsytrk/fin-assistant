@@ -46,6 +46,39 @@
     border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
 }
 
+.mwr-head-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.mwr-watchlist-edit-btn {
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: color 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+
+.mwr-watchlist-edit-btn:hover {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--surface-border) 80%, transparent);
+    background: color-mix(in srgb, var(--surface-border) 38%, transparent);
+}
+
+.mwr-watchlist-edit-btn.is-active {
+    color: var(--accent-color);
+    border-color: color-mix(in srgb, var(--accent-color) 50%, transparent);
+    background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+}
+
 .mwr-panel-title {
     margin: 0;
     color: var(--text-primary);
@@ -89,7 +122,7 @@
 .mwr-table-head,
 .mwr-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(74px, auto) minmax(72px, auto);
+    grid-template-columns: minmax(0, 1fr) 86px 86px;
     align-items: center;
     gap: 0.6rem;
 }
@@ -101,8 +134,34 @@
     font-weight: 800;
 }
 
-.mwr-table-head span:nth-child(2),
-.mwr-table-head span:nth-child(3) {
+.mwr-sort-button {
+    min-width: 0;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.mwr-sort-button:hover,
+.mwr-sort-button.is-active {
+    color: var(--text-primary);
+}
+
+.mwr-sort-button svg {
+    width: 12px;
+    height: 12px;
+    flex: 0 0 auto;
+    opacity: 0.68;
+}
+
+.mwr-sort-button-right {
+    justify-content: flex-end;
     text-align: right;
 }
 
@@ -150,6 +209,7 @@
     background: transparent;
     color: var(--text-primary);
     text-align: left;
+    transition: background-color 0.14s ease;
 }
 
 .mwr-row-clickable {
@@ -266,7 +326,7 @@
 
 .mwr-skeleton-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(74px, auto) minmax(72px, auto);
+    grid-template-columns: minmax(0, 1fr) 86px 86px;
     align-items: center;
     gap: 0.6rem;
     padding: 0.85rem 1.15rem;
@@ -348,6 +408,294 @@
 
 .mwr-empty-action:hover {
     background: #fff;
+}
+
+/* İzleme Listesi */
+.mwr-watchlist {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.mwr-watchlist-search {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-height: 44px;
+    margin: 0.75rem 0.85rem 0;
+    padding: 0 0.72rem;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 60%, var(--surface-border));
+    border-radius: 7px;
+    background: #090a0b;
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-color) 18%, transparent);
+    transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.mwr-watchlist-search:focus-within {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 22%, transparent);
+}
+
+.mwr-watchlist-search svg {
+    color: var(--text-secondary);
+    flex: 0 0 auto;
+}
+
+.mwr-watchlist-search input {
+    width: 100%;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.84rem;
+    font-weight: 700;
+}
+
+.mwr-watchlist-search input::placeholder {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.mwr-watchlist-search-clear {
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: color 0.14s ease, background 0.14s ease;
+}
+
+.mwr-watchlist-search-clear:hover {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--surface-border) 58%, transparent);
+}
+
+.mwr-watchlist-heading {
+    padding: 0.72rem 0.95rem 0.38rem;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 800;
+}
+
+.mwr-watchlist-list {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--surface-border) 74%, var(--text-secondary)) transparent;
+}
+
+.mwr-watchlist-item {
+    display: flex;
+    align-items: center;
+    gap: 0.62rem;
+    width: 100%;
+    min-height: 50px;
+    padding: 0.45rem 0.95rem;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.14s ease;
+}
+
+.mwr-watchlist-item:hover {
+    background: color-mix(in srgb, var(--surface-border) 32%, transparent);
+}
+
+.mwr-watchlist-logo {
+    width: 32px;
+    height: 32px;
+    flex: 0 0 32px;
+}
+
+.mwr-watchlist-copy {
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex: 1;
+}
+
+.mwr-watchlist-copy strong {
+    flex: 0 0 auto;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    font-weight: 900;
+}
+
+.mwr-watchlist-price {
+    flex: 0 0 auto;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.mwr-watchlist-change {
+    flex: 0 0 auto;
+    min-width: 58px;
+    padding: 0.22rem 0.38rem;
+    border-radius: 5px;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 900;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.mwr-watchlist-change.mwr-change-up {
+    color: var(--success-color);
+    background: color-mix(in srgb, var(--success-color) 12%, transparent);
+}
+
+.mwr-watchlist-change.mwr-change-down {
+    color: var(--danger-color);
+    background: color-mix(in srgb, var(--danger-color) 13%, transparent);
+}
+
+.mwr-watchlist-change.mwr-change-flat {
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--surface-border) 42%, transparent);
+}
+
+.mwr-watchlist-saved-row {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 40%, transparent);
+}
+
+.mwr-watchlist-saved-row .mwr-watchlist-item {
+    flex: 1;
+    min-width: 0;
+}
+
+.mwr-watchlist-remove {
+    width: 30px;
+    height: 30px;
+    flex: 0 0 30px;
+    display: grid;
+    place-items: center;
+    margin-right: 0.45rem;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.14s ease, color 0.14s ease, background 0.14s ease;
+}
+
+.mwr-watchlist-saved-row:hover .mwr-watchlist-remove {
+    opacity: 1;
+}
+
+.mwr-watchlist-remove:hover {
+    color: var(--danger-color);
+    background: color-mix(in srgb, var(--danger-color) 12%, transparent);
+}
+
+.mwr-watchlist-empty-search {
+    padding: 1.5rem 0.95rem;
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+}
+
+/* İzleme listesi düzenleme modu */
+.mwr-watchlist-edit-list {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
+.mwr-watchlist-edit-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-height: 50px;
+    padding: 0.35rem 0.85rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 42%, transparent);
+    background: transparent;
+    transition: background 0.14s ease, border-color 0.14s ease;
+}
+
+.mwr-watchlist-edit-row.is-dragging {
+    opacity: 0.4;
+    background: color-mix(in srgb, var(--surface-border) 20%, transparent);
+}
+
+.mwr-watchlist-edit-reorder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 32px;
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+    cursor: grab;
+    border-radius: 4px;
+    transition: color 0.14s ease, background 0.14s ease;
+}
+
+.mwr-watchlist-edit-reorder:hover {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--surface-border) 48%, transparent);
+}
+
+.mwr-watchlist-edit-reorder:active {
+    cursor: grabbing;
+}
+
+.mwr-watchlist-edit-name {
+    flex: 1;
+    min-width: 0;
+}
+
+.mwr-watchlist-edit-name strong {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    font-weight: 900;
+}
+
+.mwr-watchlist-delete-btn {
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: color 0.14s ease, background 0.14s ease, border-color 0.14s ease;
+}
+
+.mwr-watchlist-delete-btn:hover {
+    color: var(--danger-color);
+    border-color: color-mix(in srgb, var(--danger-color) 40%, transparent);
+    background: color-mix(in srgb, var(--danger-color) 12%, transparent);
 }
 
 .mwr-dock {
@@ -448,7 +796,7 @@
 
     .mwr-table-head,
     .mwr-row {
-        grid-template-columns: minmax(0, 1fr) minmax(66px, auto) minmax(64px, auto);
+        grid-template-columns: minmax(0, 1fr) 76px 72px;
         gap: 0.45rem;
     }
 
@@ -473,4 +821,22 @@
         width: 31px;
         height: 31px;
     }
+}
+
+@keyframes mwr-flash-green {
+    0% { background-color: color-mix(in srgb, var(--success-color) 34%, transparent); }
+    100% { background-color: transparent; }
+}
+
+@keyframes mwr-flash-red {
+    0% { background-color: color-mix(in srgb, var(--danger-color) 34%, transparent); }
+    100% { background-color: transparent; }
+}
+
+.mwr-flash-up {
+    animation: mwr-flash-green 1s ease-out;
+}
+
+.mwr-flash-down {
+    animation: mwr-flash-red 1s ease-out;
 }
