@@ -9,7 +9,7 @@ import type {
 } from '../api/types';
 import './MarketSidebar.css';
 
-type TabId = 'XU100' | 'XU030' | 'DOVIZ' | 'EMTIA';
+type TabId = 'XUTUM' | 'XU100' | 'XU030' | 'DOVIZ' | 'EMTIA';
 
 type PanelMode = 'markets' | 'flow';
 
@@ -19,6 +19,7 @@ const PANEL_MODES: { id: PanelMode; label: string }[] = [
 ];
 
 const TABS: { id: TabId; label: string }[] = [
+    { id: 'XUTUM', label: 'XUTUM' },
     { id: 'XU100', label: 'XU100' },
     { id: 'XU030', label: 'XU030' },
     { id: 'DOVIZ', label: 'Döviz' },
@@ -177,7 +178,7 @@ export default function MarketSidebar({
 }) {
     const [open, setOpen] = useState(false);
     const [panelMode, setPanelMode] = useState<PanelMode>('markets');
-    const [tab, setTab] = useState<TabId>('XU100');
+    const [tab, setTab] = useState<TabId>('XUTUM');
 
     const [flow, setFlow] = useState<MarketFlowItem[] | null>(null);
     const [flowLoading, setFlowLoading] = useState(false);
@@ -186,6 +187,10 @@ export default function MarketSidebar({
     const [flowDegraded, setFlowDegraded] = useState<boolean>(false);
     const [flowWarning, setFlowWarning] = useState<string | null>(null);
     const [flowSize, setFlowSize] = useState<number>(() => readInitialFlowSize());
+
+    const [xutum, setXutum] = useState<MarketUniverseRow[] | null>(null);
+    const [xutumLoading, setXutumLoading] = useState(false);
+    const [xutumError, setXutumError] = useState<string | null>(null);
 
     const [xu100, setXu100] = useState<MarketUniverseRow[] | null>(null);
     const [xu100Loading, setXu100Loading] = useState(false);
@@ -206,6 +211,7 @@ export default function MarketSidebar({
     const [fxDelayNote, setFxDelayNote] = useState<string>('');
 
     const flowInFlight = useRef(false);
+    const xutumInFlight = useRef(false);
     const xu100InFlight = useRef(false);
     const xu030InFlight = useRef(false);
     const commoditiesInFlight = useRef(false);
@@ -248,6 +254,26 @@ export default function MarketSidebar({
         },
         [flowSize, loadFlow],
     );
+
+    const loadXutum = useCallback((force = false) => {
+        if (xutumInFlight.current) return;
+        if (!force && xutum) return;
+        xutumInFlight.current = true;
+        setXutumLoading(true);
+        setXutumError(null);
+        apiClient
+            .marketStocks({ index: 'XUTUM', refresh: force })
+            .then((res) => {
+                setXutum(res.rows || []);
+            })
+            .catch((err: unknown) => {
+                setXutumError(err instanceof Error ? err.message : 'XUTUM verisi alınamadı.');
+            })
+            .finally(() => {
+                xutumInFlight.current = false;
+                setXutumLoading(false);
+            });
+    }, [xutum]);
 
     const loadXu100 = useCallback((force = false) => {
         if (xu100InFlight.current) return;
@@ -334,25 +360,28 @@ export default function MarketSidebar({
     useEffect(() => {
         if (!open) return;
         loadFlow();
-        const xu100Timer = window.setTimeout(() => loadXu100(), 80);
-        const xu030Timer = window.setTimeout(() => loadXu030(), 150);
+        const stockTimer = window.setTimeout(() => {
+            if (tab === 'XUTUM') loadXutum();
+            else if (tab === 'XU100') loadXu100();
+            else if (tab === 'XU030') loadXu030();
+        }, 80);
         const fxTimer = window.setTimeout(() => loadFx(), 400);
         const commoditiesTimer = window.setTimeout(() => loadCommodities(), 700);
         return () => {
-            window.clearTimeout(xu100Timer);
-            window.clearTimeout(xu030Timer);
+            window.clearTimeout(stockTimer);
             window.clearTimeout(fxTimer);
             window.clearTimeout(commoditiesTimer);
         };
-    }, [open, loadFlow, loadXu100, loadXu030, loadFx, loadCommodities]);
+    }, [open, tab, loadFlow, loadXutum, loadXu100, loadXu030, loadFx, loadCommodities]);
 
     useEffect(() => {
         if (!open) return;
-        if (tab === 'XU100') loadXu100();
+        if (tab === 'XUTUM') loadXutum();
+        else if (tab === 'XU100') loadXu100();
         else if (tab === 'XU030') loadXu030();
         else if (tab === 'DOVIZ') loadFx();
         else if (tab === 'EMTIA') loadCommodities();
-    }, [open, tab, loadXu100, loadXu030, loadFx, loadCommodities]);
+    }, [open, tab, loadXutum, loadXu100, loadXu030, loadFx, loadCommodities]);
 
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
@@ -375,13 +404,20 @@ export default function MarketSidebar({
     useEffect(() => {
         if (!open || panelMode !== 'markets') return;
         const intervalId = window.setInterval(() => {
-            if (tab === 'XU100') loadXu100(true);
+            if (tab === 'XUTUM') loadXutum(true);
+            else if (tab === 'XU100') loadXu100(true);
             else if (tab === 'XU030') loadXu030(true);
             else if (tab === 'DOVIZ') loadFx(true);
             else if (tab === 'EMTIA') loadCommodities(true);
         }, 3000);
         return () => window.clearInterval(intervalId);
-    }, [open, panelMode, tab, loadXu100, loadXu030, loadFx, loadCommodities]);
+    }, [open, panelMode, tab, loadXutum, loadXu100, loadXu030, loadFx, loadCommodities]);
+
+    const sortedXutum = useMemo(() => {
+        const arr = [...(xutum || rows)];
+        arr.sort((a, b) => (b.change_pct ?? -Infinity) - (a.change_pct ?? -Infinity));
+        return arr;
+    }, [rows, xutum]);
 
     const sortedXu100 = useMemo(() => {
         const arr = [...(xu100 || rows)];
@@ -494,6 +530,33 @@ export default function MarketSidebar({
                         </div>
 
                         <div className="ms-list">
+                            {tab === 'XUTUM' && (
+                                xutumLoading && !xutum && rows.length === 0 ? (
+                                    <div className="ms-empty">Yükleniyor…</div>
+                                ) : xutumError && !xutum && rows.length === 0 ? (
+                                    <div className="ms-empty ms-empty-error">{xutumError}</div>
+                                ) : sortedXutum.length === 0 ? (
+                                    <div className="ms-empty">Veri bulunamadı.</div>
+                                ) : (
+                                    sortedXutum.map((row) => (
+                                        <FlashRow
+                                            key={row.company}
+                                            price={row.price}
+                                            onClick={() => {
+                                                onSelectTicker(row.company);
+                                                setOpen(false);
+                                            }}
+                                        >
+                                            <span className="ms-sym">{row.company}</span>
+                                            <span className="ms-price">{formatPrice(row.price, row.price_currency)}</span>
+                                            <span className={`ms-change ${changeClass(row.change_pct)}`}>
+                                                {formatPct(row.change_pct)}
+                                            </span>
+                                        </FlashRow>
+                                    ))
+                                )
+                            )}
+
                             {tab === 'XU100' && (
                                 xu100Loading && !xu100 && rows.length === 0 ? (
                                     <div className="ms-empty">Yükleniyor…</div>

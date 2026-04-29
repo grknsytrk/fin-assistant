@@ -4,11 +4,12 @@ import type { MarketWatchItem, MarketWatchResponse } from '../api/types';
 import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
 import './MarketWatchStrip.css';
 
-const PRIMARY_SYMBOLS = ['XU100', 'XU030', 'USD/TRY', 'EUR/TRY'] as const;
+const PRIMARY_SYMBOLS = ['XUTUM', 'XU100', 'XU030', 'USD/TRY', 'EUR/TRY'] as const;
 const COMMODITY_SYMBOLS = ['BRENT', 'ALTIN', 'GUMUS', 'DOGALGAZ'] as const;
 const DEFAULT_DELAY_NOTE = 'Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).';
 
 const FALLBACK_LABELS: Record<string, string> = {
+    XUTUM: 'BIST Tüm',
     XU100: 'BIST 100',
     XU030: 'BIST 30',
     'USD/TRY': 'Amerikan Doları',
@@ -262,7 +263,7 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
             <div className="mw-strip-header">
                 <div className="mw-copy">
                     <h2>Borsa İzleme Bandı</h2>
-                    <p>XU100, XU030, döviz ve emtia özetleri 3 saniyede bir otomatik güncellenir.</p>
+                    <p>XUTUM, XU100, XU030, döviz ve emtia özetleri 3 saniyede bir otomatik güncellenir.</p>
                 </div>
                 <div className="mw-meta">
                     <span className="mw-updated">Son güncelleme: {formatClock(payload?.as_of)}</span>

@@ -7,6 +7,7 @@ import type {
     CompanyBreakdownResponse,
     MarketUniverseResponse,
     MarketStocksResponse,
+    MarketStockIndex,
     MarketIndexCode,
     MarketIndicesResponse,
     MarketIndexDetailResponse,
@@ -19,6 +20,12 @@ import type {
     MarketCommoditiesResponse,
     MarketIndexResponse,
     MarketFxResponse,
+    FundAllocationsResponse,
+    FundCategoriesResponse,
+    FundDetail,
+    FundHoldingsResponse,
+    FundPerformanceResponse,
+    FundsResponse,
     KapOverviewCommentaryRequest,
     KapOverviewCommentaryResponse,
 } from './types';
@@ -37,6 +44,7 @@ const TIMEOUT_MESSAGE = 'Istek suresi asildi. Lutfen tekrar deneyin.';
 type FetchApiOptions = RequestInit & {
     timeoutMs?: number;
     debugLabel?: string;
+    exposeErrorDetail?: boolean;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -73,7 +81,7 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
     const method = (options.method || 'GET').toUpperCase();
     const allowRetry = isIdempotentMethod(method);
     const maxAttempts = allowRetry ? 8 : 1;
-    const { timeoutMs, debugLabel, ...requestOptions } = options;
+    const { timeoutMs, debugLabel, exposeErrorDetail, ...requestOptions } = options;
     const effectiveTimeoutMs = timeoutMs ?? REQUEST_TIMEOUT_MS;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -163,7 +171,7 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
                 });
             }
             const detail = typeof errorData?.detail === 'string' ? errorData.detail : null;
-            if (detail && response.status < 500) {
+            if (detail && (response.status < 500 || exposeErrorDetail)) {
                 throw new Error(detail);
             }
             if (RETRYABLE_HTTP_STATUSES.has(response.status)) {
@@ -197,7 +205,7 @@ export const apiClient = {
     stats: () => fetchApi<StatsResponse>('/stats'),
     companyBreakdown: () => fetchApi<CompanyBreakdownResponse>('/stats/company-breakdown'),
     marketUniverse: () => fetchApi<MarketUniverseResponse>('/market/universe'),
-    marketStocks: (options?: { index?: 'XU100' | 'XU030'; refresh?: boolean }) => {
+    marketStocks: (options?: { index?: MarketStockIndex; refresh?: boolean }) => {
         const params = new URLSearchParams();
         if (options?.index) params.append('index', options.index);
         if (options?.refresh) params.append('refresh', 'true');
@@ -256,6 +264,70 @@ export const apiClient = {
     marketXu030: () => fetchApi<MarketIndexResponse>('/market/xu030'),
     marketCommodities: () => fetchApi<MarketCommoditiesResponse>('/market/commodities'),
     marketFx: () => fetchApi<MarketFxResponse>('/market/fx'),
+
+    funds: (options?: {
+        q?: string;
+        fundType?: string;
+        founder?: string;
+        manager?: string;
+        risk?: string;
+        sort?: string;
+        order?: 'asc' | 'desc';
+    }) => {
+        const params = new URLSearchParams();
+        if (options?.q) params.append('q', options.q);
+        if (options?.fundType) params.append('fund_type', options.fundType);
+        if (options?.founder) params.append('founder', options.founder);
+        if (options?.manager) params.append('manager', options.manager);
+        if (options?.risk) params.append('risk', options.risk);
+        if (options?.sort) params.append('sort', options.sort);
+        if (options?.order) params.append('order', options.order);
+        const query = params.toString();
+        return fetchApi<FundsResponse>(query ? `/funds?${query}` : '/funds');
+    },
+    fundSearch: (q: string, limit = 50) => {
+        const params = new URLSearchParams({ q, limit: String(limit) });
+        return fetchApi<FundsResponse>(`/funds/search?${params.toString()}`);
+    },
+    fundCategories: () => fetchApi<FundCategoriesResponse>('/funds/categories'),
+    refreshFundsSnapshot: (lookbackDays = 10) =>
+        fetchApi<FundsResponse>(`/admin/funds/refresh-snapshot?lookback_days=${lookbackDays}`, {
+            method: 'POST',
+            timeoutMs: 120000,
+            exposeErrorDetail: true,
+        }),
+    fundDetail: (fundCode: string) => fetchApi<FundDetail>(`/funds/${encodeURIComponent(fundCode)}`),
+    fundPerformance: (fundCode: string) =>
+        fetchApi<FundPerformanceResponse>(`/funds/${encodeURIComponent(fundCode)}/performance`),
+    refreshFundPerformance: (fundCode: string, startDate: string, endDate?: string) => {
+        const params = new URLSearchParams({ start_date: startDate });
+        if (endDate) params.append('end_date', endDate);
+        return fetchApi<FundPerformanceResponse>(
+            `/admin/funds/${encodeURIComponent(fundCode)}/refresh-performance?${params.toString()}`,
+            {
+                method: 'POST',
+                timeoutMs: 180000,
+                exposeErrorDetail: true,
+            },
+        );
+    },
+    fundAllocations: (fundCode: string) =>
+        fetchApi<FundAllocationsResponse>(`/funds/${encodeURIComponent(fundCode)}/allocations`),
+    refreshFundAllocations: (fundCode: string, asOf?: string) => {
+        const params = new URLSearchParams();
+        if (asOf) params.append('as_of', asOf);
+        const suffix = params.toString() ? `?${params.toString()}` : '';
+        return fetchApi<FundAllocationsResponse>(
+            `/admin/funds/${encodeURIComponent(fundCode)}/refresh-allocations${suffix}`,
+            {
+                method: 'POST',
+                timeoutMs: 45000,
+                exposeErrorDetail: true,
+            },
+        );
+    },
+    fundHoldings: (fundCode: string) =>
+        fetchApi<FundHoldingsResponse>(`/funds/${encodeURIComponent(fundCode)}/holdings`),
 
     ask: (request: AskRequest) =>
         fetchApi<AskResponse>('/ask', {

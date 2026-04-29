@@ -1,0 +1,841 @@
+.funds-workspace {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg-color);
+}
+
+.funds-page {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    overflow-y: auto;
+    padding: 1rem 1.15rem 1.75rem;
+    color: var(--text-primary);
+}
+
+.funds-header,
+.fund-detail-hero {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
+}
+
+.funds-kicker {
+    display: inline-flex;
+    align-items: center;
+    margin-bottom: 0.35rem;
+    color: var(--accent-color);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.funds-header h1,
+.fund-detail-hero h1 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 1.72rem;
+    line-height: 1.2;
+}
+
+.funds-header p,
+.fund-detail-hero p {
+    margin: 0.42rem 0 0;
+    max-width: 68ch;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.funds-header-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(96px, 1fr));
+    gap: 0.65rem;
+    min-width: min(420px, 46vw);
+}
+
+.funds-header-stats div,
+.fund-metrics-grid div {
+    border: 1px solid color-mix(in srgb, var(--surface-border) 86%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-color) 91%, var(--bg-color));
+    padding: 0.75rem 0.85rem;
+}
+
+.funds-header-stats span,
+.fund-metrics-grid span {
+    display: block;
+    margin-bottom: 0.32rem;
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.funds-header-stats strong,
+.fund-metrics-grid strong {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 1rem;
+}
+
+.funds-source-warning {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin: 1rem 0;
+    padding: 0.72rem 0.85rem;
+    border: 1px solid color-mix(in srgb, var(--warning-color, #f59e0b) 36%, var(--surface-border));
+    border-radius: 8px;
+    background: color-mix(in srgb, #f59e0b 10%, var(--surface-color));
+    color: var(--text-primary);
+    font-size: 0.86rem;
+}
+
+.funds-source-warning span {
+    flex: 1;
+    min-width: 0;
+}
+
+.funds-refresh-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    height: 32px;
+    padding: 0 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--warning-color, #f59e0b) 42%, var(--surface-border));
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--surface-color) 84%, #f59e0b);
+    color: var(--text-primary);
+    font: inherit;
+    cursor: pointer;
+}
+
+.funds-refresh-button:disabled {
+    cursor: wait;
+    opacity: 0.72;
+}
+
+.funds-spin {
+    animation: funds-spin 0.9s linear infinite;
+}
+
+@keyframes funds-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.funds-panel,
+.fund-detail-panel {
+    margin-top: 1rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 88%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+}
+
+.funds-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.85rem;
+    padding: 0.9rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+}
+
+.funds-search {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: min(420px, 42vw);
+    height: 38px;
+    padding: 0 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 88%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--bg-color) 72%, var(--surface-color));
+    color: var(--text-secondary);
+}
+
+.funds-search input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+}
+
+.funds-filter {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+}
+
+.funds-filter select,
+.funds-sort-order,
+.fund-detail-actions a,
+.fund-back-button,
+.fund-tabs button {
+    height: 38px;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 88%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--surface-color) 86%, var(--bg-color));
+    color: var(--text-primary);
+    font: inherit;
+}
+
+.funds-filter select {
+    max-width: 180px;
+    padding: 0 0.65rem;
+}
+
+.funds-sort-order,
+.fund-back-button,
+.fund-tabs button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 0 0.75rem;
+    cursor: pointer;
+}
+
+.funds-table-wrap {
+    overflow: auto;
+    max-height: min(72vh, 780px);
+}
+
+.funds-table {
+    width: 100%;
+    min-width: 1120px;
+    border-collapse: collapse;
+    font-size: 0.84rem;
+}
+
+.funds-table th,
+.funds-table td {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 72%, transparent);
+    text-align: left;
+    vertical-align: middle;
+}
+
+.funds-table th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: color-mix(in srgb, var(--surface-color) 94%, var(--bg-color));
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.funds-th-sort {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.32rem;
+    max-width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+}
+
+.funds-th-sort-right {
+    justify-content: flex-end;
+}
+
+.funds-th-sort.active {
+    color: var(--text-primary);
+}
+
+.funds-th-sort svg {
+    flex: 0 0 auto;
+    opacity: 0.74;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.funds-table tbody tr {
+    cursor: pointer;
+}
+
+.funds-table tbody tr:hover {
+    background: color-mix(in srgb, var(--surface-color) 78%, var(--bg-color));
+}
+
+.funds-cell-right {
+    text-align: right !important;
+    font-family: var(--font-mono);
+}
+
+.funds-symbol,
+.fund-detail-title {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    min-width: 0;
+}
+
+.funds-symbol span {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+}
+
+.funds-symbol strong {
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+}
+
+.funds-symbol small {
+    max-width: 360px;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 0.74rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.funds-up {
+    color: var(--success-color);
+}
+
+.funds-down {
+    color: var(--danger-color);
+}
+
+.funds-flat {
+    color: var(--text-secondary);
+}
+
+.funds-state {
+    padding: 1.4rem;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.funds-state-error {
+    color: var(--danger-color);
+}
+
+.fund-detail {
+    max-width: 1180px;
+    margin: 0 auto;
+}
+
+.fund-back-button {
+    margin-bottom: 0.9rem;
+}
+
+.fund-detail-actions a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0 0.8rem;
+    color: var(--text-primary);
+    text-decoration: none;
+}
+
+.fund-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(116px, 1fr));
+    gap: 0.7rem;
+    margin-top: 1rem;
+}
+
+.fund-tabs {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 1rem;
+    overflow-x: auto;
+}
+
+.fund-tabs button.active {
+    border-color: color-mix(in srgb, var(--accent-color) 65%, var(--surface-border));
+    background: color-mix(in srgb, var(--accent-color) 18%, var(--surface-color));
+}
+
+.fund-detail-panel {
+    padding: 1rem;
+}
+
+.fund-detail-panel h2 {
+    margin: 0 0 0.9rem;
+    font-size: 1.05rem;
+}
+
+.fund-overview-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+}
+
+.fund-overview-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+    gap: 0.9rem;
+    align-items: stretch;
+}
+
+.fund-chart-panel,
+.fund-allocation-panel,
+.fund-heatmap-panel {
+    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+}
+
+.fund-chart-panel {
+    min-width: 0;
+    padding: 0.85rem;
+}
+
+.fund-chart-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+    margin-bottom: 0.65rem;
+}
+
+.fund-chart-ranges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.32rem;
+}
+
+.fund-chart-range {
+    min-width: 2.4rem;
+    height: 2rem;
+    padding: 0 0.55rem;
+    border-radius: 7px;
+    font-size: 0.78rem;
+}
+
+.fund-chart-range.is-active {
+    border-color: color-mix(in srgb, var(--accent-color) 66%, var(--surface-border));
+    background: color-mix(in srgb, var(--accent-color) 22%, var(--surface-color));
+    color: var(--text-primary);
+}
+
+.fund-chart-range.is-loading {
+    opacity: 0.72;
+}
+
+.fund-chart-return {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-weight: 800;
+}
+
+.fund-custom-range {
+    display: flex;
+    gap: 0.45rem;
+    margin: 0 0 0.6rem;
+}
+
+.fund-custom-range input {
+    min-width: 0;
+    height: 2rem;
+    padding: 0 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 78%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--bg-color) 84%, var(--surface-color));
+    color: var(--text-primary);
+}
+
+.fund-detail-chart {
+    display: block;
+    width: 100%;
+    height: 340px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-color) 84%, var(--surface-color));
+}
+
+.fund-chart-gridline {
+    stroke: color-mix(in srgb, var(--surface-border) 58%, transparent);
+    stroke-dasharray: 4 6;
+}
+
+.fund-chart-hoverline {
+    stroke: rgba(255, 255, 255, 0.4);
+    stroke-dasharray: 4 4;
+}
+
+.fund-chart-axis {
+    fill: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.fund-chart-tooltip-bg {
+    fill: color-mix(in srgb, var(--bg-color) 96%, black);
+    stroke: color-mix(in srgb, var(--accent-color) 30%, transparent);
+}
+
+.fund-chart-tooltip-muted {
+    fill: var(--text-secondary);
+    font-size: 12px;
+}
+
+.fund-chart-tooltip-value {
+    fill: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.fund-chart-empty {
+    display: grid;
+    min-height: 300px;
+    place-items: center;
+    color: var(--text-secondary);
+}
+
+.fund-chart-error {
+    margin-top: 0.5rem;
+    color: var(--danger-color);
+    font-size: 0.78rem;
+}
+
+.fund-allocation-panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: 1rem;
+}
+
+.fund-allocation-panel h2,
+.fund-heatmap-panel h2 {
+    margin: 0 0 0.9rem;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.fund-allocation-donut {
+    position: relative;
+    width: min(190px, 70%);
+    aspect-ratio: 1;
+    margin: 0.2rem auto 1rem;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--surface-border) 60%, var(--bg-color));
+}
+
+.fund-allocation-donut span {
+    position: absolute;
+    inset: 26%;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+}
+
+.fund-allocation-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+
+.fund-allocation-list div {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.fund-allocation-list i {
+    width: 0.68rem;
+    height: 0.68rem;
+    border-radius: 999px;
+}
+
+.fund-allocation-list span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fund-allocation-list strong {
+    font-family: var(--font-mono);
+}
+
+.fund-return-strip {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 0.55rem;
+}
+
+.fund-return-strip div,
+.fund-heatmap-stats div {
+    padding: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+}
+
+.fund-return-strip span,
+.fund-heatmap-stats span {
+    display: block;
+    margin-bottom: 0.35rem;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-transform: uppercase;
+}
+
+.fund-return-strip strong,
+.fund-heatmap-stats strong {
+    font-family: var(--font-mono);
+}
+
+.fund-heatmap-panel {
+    padding: 1rem;
+}
+
+.fund-heatmap {
+    overflow-x: auto;
+}
+
+.fund-heatmap-months,
+.fund-heatmap-row {
+    display: grid;
+    grid-template-columns: 52px repeat(12, minmax(46px, 1fr));
+    gap: 0.32rem;
+    min-width: 680px;
+}
+
+.fund-heatmap-months {
+    margin-bottom: 0.32rem;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    font-weight: 800;
+    text-align: center;
+}
+
+.fund-heatmap-row {
+    margin-bottom: 0.32rem;
+}
+
+.fund-heatmap-row strong {
+    align-self: center;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+}
+
+.fund-heatmap-cell {
+    display: grid;
+    min-height: 34px;
+    place-items: center;
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 800;
+}
+
+.fund-heatmap-cell.is-positive {
+    background: color-mix(in srgb, var(--success-color) 42%, var(--surface-color));
+    opacity: calc(0.55 + var(--heat-intensity) * 0.45);
+}
+
+.fund-heatmap-cell.is-negative {
+    background: color-mix(in srgb, var(--danger-color) 42%, var(--surface-color));
+    opacity: calc(0.55 + var(--heat-intensity) * 0.45);
+}
+
+.fund-heatmap-cell.is-empty {
+    background: color-mix(in srgb, var(--surface-border) 40%, transparent);
+}
+
+.fund-heatmap-stats {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.55rem;
+    margin-top: 0.85rem;
+}
+
+.fund-allocation-detail {
+    display: grid;
+    grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+    gap: 0.9rem;
+}
+
+.fund-allocation-table-wrap,
+.fund-history-table-wrap {
+    overflow: auto;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+    border-radius: 8px;
+}
+
+.fund-history-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.fund-history-table th,
+.fund-history-table td {
+    padding: 0.8rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 58%, transparent);
+    text-align: left;
+    white-space: nowrap;
+}
+
+.fund-history-table th {
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.fund-history-table td:not(:first-child) {
+    font-family: var(--font-mono);
+}
+
+.fund-detail-list {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(160px, 1fr));
+    gap: 0.7rem;
+    margin: 0;
+}
+
+.fund-detail-list div {
+    padding: 0.8rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+    border-radius: 8px;
+}
+
+.fund-detail-list dt {
+    margin-bottom: 0.3rem;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.fund-detail-list dd {
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.fund-chart {
+    color: var(--accent-color);
+}
+
+.fund-chart svg {
+    display: block;
+    width: 100%;
+    height: 260px;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 74%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-color) 78%, var(--surface-color));
+}
+
+.fund-chart-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 0.65rem;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+
+@media (max-width: 1080px) {
+    .funds-header,
+    .fund-detail-hero,
+    .funds-toolbar {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .funds-header-stats,
+    .fund-metrics-grid,
+    .fund-detail-list,
+    .fund-overview-grid,
+    .fund-allocation-detail {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        min-width: 0;
+    }
+
+    .fund-overview-grid,
+    .fund-allocation-detail {
+        grid-template-columns: 1fr;
+    }
+
+    .fund-return-strip,
+    .fund-heatmap-stats {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .funds-search,
+    .funds-filter {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .funds-filter {
+        flex-wrap: wrap;
+    }
+
+    .funds-filter select {
+        flex: 1 1 150px;
+        max-width: none;
+    }
+}
+
+@media (max-width: 640px) {
+    .funds-page {
+        padding: 0.85rem 0.75rem 1.4rem;
+    }
+
+    .funds-header-stats,
+    .fund-metrics-grid,
+    .fund-detail-list,
+    .fund-return-strip,
+    .fund-heatmap-stats {
+        grid-template-columns: 1fr;
+    }
+
+    .fund-detail-chart {
+        height: 260px;
+    }
+
+    .fund-chart-toolbar,
+    .fund-custom-range {
+        align-items: stretch;
+        flex-direction: column;
+    }
+}

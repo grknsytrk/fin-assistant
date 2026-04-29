@@ -10,6 +10,8 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import api as api_module
+from app import fund_service as fund_service_module
+from app import kap_service as kap_service_module
 from app.api import app
 from src import kap_vyk_client
 from src.nvidia_commentary import NvidiaCommentaryError
@@ -31,6 +33,8 @@ def _reset_flow_state() -> None:
     api_module._MARKET_INDEX_INTRADAY_CACHE.clear()
     api_module._MARKET_INDEX_RETURN_CACHE.clear()
     api_module._ISYATIRIM_BASIC_SUMMARY_CACHE.clear()
+    fund_service_module.reset_fund_caches_for_tests()
+    kap_service_module._BIST_UNIVERSE_CACHE.clear()
     kap_vyk_client.reset_caches_for_tests()
 
 
@@ -40,6 +44,58 @@ def test_api_health() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
+
+
+def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get_funds_payload(processed_dir: Any, **kwargs: Any) -> Dict[str, Any]:
+        return {
+            "status": "ok",
+            "rows": [
+                {
+                    "fund_code": "YAC",
+                    "name": "Yatirim Fonu",
+                    "fund_type": "Hisse Senedi",
+                    "price": 1.23,
+                    "daily_return": 0.5,
+                    "period_returns": {},
+                    "risk_value": 5,
+                    "currency": "TRY",
+                    "as_of": "2026-04-28",
+                    "source": "fintables_udf_history",
+                }
+            ],
+            "count": 1,
+            "total_count": 1,
+            "source": "fintables_udf_history",
+            "as_of": "2026-04-28",
+            "fetched_at": "2026-04-28T09:00:00+00:00",
+            "stale": False,
+            "degraded": False,
+            "warnings": [],
+            "source_metadata": {"source": "fintables_udf_history", "parse_status": "ok"},
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_funds_payload", fake_get_funds_payload)
+    client = TestClient(app)
+
+    response = client.get("/funds")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rows"][0]["fund_code"] == "YAC"
+    assert payload["source"] == "fintables_udf_history"
+
+
+def test_api_fund_holdings_not_parsed() -> None:
+    client = TestClient(app)
+
+    response = client.get("/funds/YAC/holdings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "not_parsed"
+    assert payload["positions"] == []
+    assert payload["source_metadata"]["parse_status"] == "not_parsed"
 
 
 def test_api_feedback() -> None:
@@ -972,11 +1028,51 @@ def test_index_weight_inputs_use_isyatirim_fdpo_fallback(monkeypatch: pytest.Mon
     assert payload["weight_coefficient"] == 1.0
 
 
+def test_bist_index_report_parser_and_fallback_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    csv_payload = """BILESEN KODU;BULTEN_ADI;ENDEKS KODU;ENDEKS ADI;ENDEKS INGILIZCE ADI;TARIH(GG/AA/YYYY)
+CONSTITUENT CODE;CONSTITUENT NAME;INDEX CODE;INDEX NAME IN TURKISH;INDEX NAME IN ENGLISH;DATE(DD/MM/YYYY)
+AAA.E;AAA TEST;XUTUM;BIST TUM;BIST ALL SHARES;29/04/2026
+BBB.E;BBB TEST;XUTUM;BIST TUM;BIST ALL SHARES;29/04/2026
+AAA.E;AAA TEST;XU100;BIST 100;BIST 100;29/04/2026
+"""
+    parsed = kap_service_module.parse_bist_index_report_csv(csv_payload)
+
+    assert parsed["XUTUM"]["symbols"] == ["AAA", "BBB"]
+    assert parsed["XUTUM"]["source_date"] == "29/04/2026"
+    assert parsed["XU100"]["symbols"] == ["AAA"]
+
+    def fail_urlopen(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("network down")
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_urlopen)
+    payload = kap_service_module.get_bist_index_universe("XUTUM", force_refresh=True)
+
+    assert payload["index"] == "XUTUM"
+    assert payload["fallback_used"] is True
+    assert payload["source"] == "borsa_istanbul_csv_fallback_snapshot"
+    assert payload["count"] == len(payload["symbols"])
+    assert "AEFES" in payload["symbols"]
+
+
 def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     price_calls: List[tuple[str, ...]] = []
 
     monkeypatch.setattr("app.kap_service.get_bist100_companies", lambda: ["A1CAP", "AEFES"])
     monkeypatch.setattr("app.kap_service.get_bist30_companies", lambda: ["AEFES"])
+    monkeypatch.setattr(
+        "app.kap_service.get_bist_index_universe",
+        lambda index, force_refresh=False: {
+            "index": str(index).upper(),
+            "symbols": ["AEFES"] if str(index).upper() == "XU030" else ["A1CAP", "AEFES"],
+            "count": 1 if str(index).upper() == "XU030" else 2,
+            "source": "test",
+            "source_url": "test://bist",
+            "source_date": "29/04/2026",
+            "fetched_at": "2026-04-29T12:00:00+00:00",
+            "cache_hit": False,
+            "fallback_used": False,
+        },
+    )
     monkeypatch.setattr(
         api_module,
         "_company_breakdown_from_chunks",
@@ -994,7 +1090,7 @@ def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.M
         },
     )
 
-    def fake_prices(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    def fake_prices(symbols: List[str], *, index_name: str = "XU100") -> Dict[str, Dict[str, Any]]:
         price_calls.append(tuple(symbols))
         return {
             "A1CAP": {
@@ -1062,6 +1158,12 @@ def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.M
         return result
 
     monkeypatch.setattr(api_module, "_fetch_stock_return_bases_bulk", fake_return_bases)
+    monkeypatch.setattr(
+        api_module,
+        "_kap_logo_payload_for_symbol",
+        lambda symbol: pytest.fail(f"market stock rows should not resolve logos over KAP: {symbol}"),
+    )
+    api_module._STOCKS_CACHE.clear()
 
     client = TestClient(app)
     first = client.get("/market/stocks?index=XU100")
@@ -1085,12 +1187,112 @@ def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.M
     assert a1cap["company"] == "A1CAP"
     assert a1cap["volume"] == 108750000.0
     assert a1cap["market_cap"] == 1418000000.0
+    assert a1cap["logo_url"] is None
+    assert a1cap["logo_source"] is None
     assert a1cap["return_1w_pct"] == 1.29
     assert a1cap["return_1y_pct"] == 102.57
     assert rows[1]["market_cap"] == 38000000000.0
     assert rows[1]["return_1w_pct"] is None
     assert third.json()["index"] == "XU030"
     assert [row["company"] for row in third.json()["rows"]] == ["AEFES"]
+
+
+def test_xutum_market_stocks_uses_cache_only_side_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.kap_service.get_bist_all_companies", lambda: ["AAA", "BBB"])
+    monkeypatch.setattr(
+        "app.kap_service.get_bist_index_universe",
+        lambda _index, force_refresh=False: {
+            "index": "XUTUM",
+            "symbols": ["AAA", "BBB"],
+            "count": 2,
+            "source": "test",
+            "source_url": "test://bist",
+            "source_date": "29/04/2026",
+            "fetched_at": "2026-04-29T12:00:00+00:00",
+            "cache_hit": False,
+            "fallback_used": False,
+        },
+    )
+    monkeypatch.setattr(api_module, "_company_breakdown_from_chunks", lambda _path: [])
+    monkeypatch.setattr(
+        api_module,
+        "_load_cached_kap_market_metadata",
+        lambda _cache_dir, _symbol: {"latest_quarter": None, "has_kap_cache": False, "shares_outstanding": None},
+    )
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: {})
+
+    def fake_price_map(symbols: List[str], *, index_name: str = "XU100") -> Dict[str, Dict[str, Any]]:
+        assert index_name == "XUTUM"
+        return {
+            symbol: {
+                "price": 10.0,
+                "currency": "TRY",
+                "change": 0.1,
+                "change_pct": 1.0,
+                "volume": 1000.0,
+                "as_of": "2026-04-29T12:00:00+00:00",
+            }
+            for symbol in symbols
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_market_price_map", fake_price_map)
+
+    def fake_return_bases(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        assert symbols == ["XUTUM", "XU100", "XU030"]
+        return {}
+
+    monkeypatch.setattr(api_module, "_fetch_stock_return_bases_bulk", fake_return_bases)
+    monkeypatch.setattr(
+        api_module,
+        "_kap_logo_payload_for_symbol",
+        lambda symbol: pytest.fail(f"XUTUM should not resolve logos over KAP: {symbol}"),
+    )
+
+    payload = api_module._market_stocks_payload(index_name="XUTUM", force_refresh=True)
+
+    assert payload["index"] == "XUTUM"
+    assert [row["company"] for row in payload["rows"]] == ["AAA", "BBB"]
+    assert payload["rows"][0]["logo_url"] is None
+    assert payload["rows"][0]["return_1w_pct"] is None
+    assert payload["universe"]["fallback_used"] is False
+
+
+def test_legacy_xu030_payload_does_not_resolve_kap_logos(monkeypatch: pytest.MonkeyPatch) -> None:
+    api_module._XU030_CACHE.clear()
+    monkeypatch.setattr("app.kap_service.get_bist30_companies", lambda: ["AKBNK"])
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_market_price_map",
+        lambda symbols: {
+            "AKBNK": {
+                "price": 64.0,
+                "currency": "TRY",
+                "change": 1.0,
+                "change_pct": 1.59,
+                "as_of": "2026-04-25T11:00:00+00:00",
+            }
+        },
+    )
+    monkeypatch.setattr(api_module, "_fill_prices_via_yahoo", lambda _symbols, base_map: base_map)
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: {})
+    monkeypatch.setattr(api_module, "_company_breakdown_from_chunks", lambda _path: [])
+    monkeypatch.setattr(
+        api_module,
+        "_load_cached_kap_market_metadata",
+        lambda _cache_dir, _symbol: {"latest_quarter": None, "has_kap_cache": False, "shares_outstanding": None},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_kap_logo_payload_for_symbol",
+        lambda symbol: pytest.fail(f"legacy XU030 should not resolve logos over KAP: {symbol}"),
+    )
+
+    payload = api_module._xu030_payload()
+
+    assert payload["index"] == "XU030"
+    assert payload["rows"][0]["company"] == "AKBNK"
+    assert payload["rows"][0]["logo_url"] is None
+    assert payload["rows"][0]["logo_source"] is None
 
 
 def test_infoyatirim_stock_page_fallback_populates_xu100_rows_and_index_impact(
@@ -1277,6 +1479,11 @@ def test_market_stock_cards_returns_quotes_and_line_points(monkeypatch: pytest.M
         }
 
     monkeypatch.setattr(api_module, "_fetch_stock_card_intraday", fake_intraday)
+    monkeypatch.setattr(
+        api_module,
+        "_kap_logo_payload_for_symbol",
+        lambda symbol: pytest.fail(f"stock cards should not resolve logos over KAP: {symbol}"),
+    )
 
     client = TestClient(app)
     response = client.get("/market/stocks/cards?symbols=BIMAS,THYAO&refresh=true")
@@ -1291,6 +1498,8 @@ def test_market_stock_cards_returns_quotes_and_line_points(monkeypatch: pytest.M
     assert payload["items"][0]["volume_tl"] == 2_813_888_143.0
     assert payload["items"][0]["volume_lot"] == 3_729_933
     assert payload["items"][0]["market_cap"] == 456_000_000_000.0
+    assert payload["items"][0]["logo_url"] is None
+    assert payload["items"][0]["logo_source"] is None
     assert payload["items"][0]["previous_close"] == 763.0
     assert payload["items"][0]["fk"] == 24.47
     assert payload["items"][0]["pd_dd"] == 2.75
@@ -1535,15 +1744,18 @@ def test_market_stocks_rejects_unknown_index() -> None:
     assert "Desteklenmeyen endeks" in response.json()["detail"]
 
 
-def test_market_indices_list_returns_xu100_and_xu030(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_market_indices_list_returns_xutum_xu100_and_xu030(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_quote(index_code: str) -> Dict[str, Any]:
+        prices = {"XUTUM": 330.0, "XU100": 110.0, "XU030": 220.0}
+        prevs = {"XUTUM": 300.0, "XU100": 100.0, "XU030": 200.0}
+        labels = {"XUTUM": "BIST Tüm", "XU100": "BIST 100", "XU030": "BIST 30"}
         return {
             "symbol": index_code,
-            "label": "BIST 100" if index_code == "XU100" else "BIST 30",
+            "label": labels[index_code],
             "yahoo_symbol": f"{index_code}.IS",
-            "price": 110.0 if index_code == "XU100" else 220.0,
-            "prev_close": 100.0 if index_code == "XU100" else 200.0,
-            "change": 10.0 if index_code == "XU100" else 20.0,
+            "price": prices[index_code],
+            "prev_close": prevs[index_code],
+            "change": prices[index_code] - prevs[index_code],
             "change_pct": 10.0,
             "high": 112.0,
             "low": 99.0,
@@ -1555,9 +1767,9 @@ def test_market_indices_list_returns_xu100_and_xu030(monkeypatch: pytest.MonkeyP
         }
 
     def fake_bases(index_code: str) -> Dict[str, Any]:
-        latest = 110.0 if index_code == "XU100" else 220.0
+        latest = {"XUTUM": 330.0, "XU100": 110.0, "XU030": 220.0}[index_code]
         return {
-            "base_1w": latest - 10.0,
+            "base_1w": latest / 1.1,
             "base_1m": latest - 20.0,
             "base_3m": latest - 30.0,
             "base_6m": latest - 40.0,
@@ -1577,8 +1789,8 @@ def test_market_indices_list_returns_xu100_and_xu030(monkeypatch: pytest.MonkeyP
 
     assert response.status_code == 200
     payload = response.json()
-    assert [row["symbol"] for row in payload["rows"]] == ["XU100", "XU030"]
-    assert payload["rows"][0]["label"] == "BIST 100"
+    assert [row["symbol"] for row in payload["rows"]] == ["XUTUM", "XU100", "XU030"]
+    assert payload["rows"][0]["label"] == "BIST Tüm"
     assert payload["rows"][0]["return_1w_pct"] == 10.0
     assert payload["rows"][0]["volume"] == 123000000.0
 
@@ -1894,7 +2106,7 @@ def test_market_watch_success_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "15dk" in payload["delay_note"]
 
     sections = payload["sections"]
-    assert [row["symbol"] for row in sections["indices"]] == ["XU100", "XU030"]
+    assert [row["symbol"] for row in sections["indices"]] == ["XUTUM", "XU100", "XU030"]
     assert [row["symbol"] for row in sections["fx"]] == ["USD/TRY", "EUR/TRY"]
     assert [row["symbol"] for row in sections["commodities"]] == ["BRENT", "ALTIN", "GUMUS", "DOGALGAZ"]
 
@@ -1904,6 +2116,8 @@ def test_market_watch_index_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def fake_quote(yahoo_symbol: str) -> Dict[str, Any]:
         calls.append(yahoo_symbol)
+        if yahoo_symbol == "XUTUM.IS":
+            return _watch_quote(price=10000.0, prev_close=9950.0)
         if yahoo_symbol == "XU100.IS":
             return {"ok": False, "error": "primary_failed"}
         if yahoo_symbol == "^XU100":
@@ -1956,7 +2170,7 @@ def test_market_watch_reuses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert counters["quote"][0] == 2
+    assert counters["quote"][0] == 3
     assert counters["fx"][0] == 1
     assert counters["commodity"][0] == 1
 

@@ -62,9 +62,12 @@ WORK_SUMMARY.md
 .tmp-chrome-debug/
 .tmp-chrome-net/
 .tmp-chrome-net2/
+.tmp-*/
+.external/
 
 # KAP Cache and PDF files
 data/processed/kap_cache/
+data/processed/funds_cache/
 data/processed/*.pdf
 debug-kap-netlog.json
 temp*.txt

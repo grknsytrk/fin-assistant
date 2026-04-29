@@ -8,23 +8,36 @@ export const ROUTE_PATHS = {
     marketsStocksIndex: '/markets/stocks/:indexCode',
     marketsIndices: '/markets/indices',
     marketsIndicesDetail: '/markets/indices/:indexCode',
+    funds: '/funds',
+    fundDetail: '/funds/:fundCode/:tab',
+    fundDetailNoTab: '/funds/:fundCode',
     stocks: '/stocks',
     stockDetail: '/stocks/:ticker/:tab',
     stockDetailNoTab: '/stocks/:ticker',
 } as const;
 
-export const MARKET_INDEX_CODES: readonly MarketStockIndex[] = ['XU100', 'XU030'] as const;
+export const MARKET_INDEX_CODES: readonly MarketStockIndex[] = ['XUTUM', 'XU100', 'XU030'] as const;
 export const STOCK_TABS = ['overview', 'financials', 'kap', 'ask'] as const;
+export const FUND_TABS = ['overview', 'allocation', 'history'] as const;
 export const STOCK_RETURN_MODES = ['absolute', 'relative_xu100', 'relative_xu030'] as const;
 
 export type StockTab = (typeof STOCK_TABS)[number];
+export type FundTab = (typeof FUND_TABS)[number];
 export type StockReturnMode = (typeof STOCK_RETURN_MODES)[number];
 
-export const DEFAULT_MARKET_INDEX: MarketStockIndex = 'XU100';
+export const DEFAULT_MARKET_INDEX: MarketStockIndex = 'XUTUM';
 export const DEFAULT_STOCK_TAB: StockTab = 'overview';
+export const DEFAULT_FUND_TAB: FundTab = 'overview';
 export const DEFAULT_STOCK_RETURN_MODE: StockReturnMode = 'absolute';
 
 export function normalizeTicker(raw: string | null | undefined): string {
+    return String(raw ?? '')
+        .trim()
+        .toUpperCase()
+        .replace(/\s+/g, '');
+}
+
+export function normalizeFundCode(raw: string | null | undefined): string {
     return String(raw ?? '')
         .trim()
         .toUpperCase()
@@ -58,6 +71,25 @@ export function normalizeStockTab(raw: string | null | undefined, fallback: Stoc
         return 'overview';
     }
     if (isValidStockTab(normalized)) {
+        return normalized;
+    }
+    return fallback;
+}
+
+export function isValidFundTab(raw: string | null | undefined): raw is FundTab {
+    const normalized = String(raw ?? '').trim().toLowerCase();
+    return FUND_TABS.includes(normalized as FundTab);
+}
+
+export function normalizeFundTab(raw: string | null | undefined, fallback: FundTab = DEFAULT_FUND_TAB): FundTab {
+    const normalized = String(raw ?? '').trim().toLowerCase();
+    if (normalized === 'performance') {
+        return 'history';
+    }
+    if (normalized === 'holdings') {
+        return 'allocation';
+    }
+    if (isValidFundTab(normalized)) {
         return normalized;
     }
     return fallback;
@@ -123,6 +155,19 @@ export function toMarketsIndices(): string {
 
 export function toMarketsIndexDetail(indexCode: string | null | undefined): string {
     return `${ROUTE_PATHS.marketsIndices}/${normalizeMarketIndexCode(indexCode)}`;
+}
+
+export function toFunds(): string {
+    return ROUTE_PATHS.funds;
+}
+
+export function toFundDetail(
+    fundCode: string | null | undefined,
+    tab: string | null | undefined = DEFAULT_FUND_TAB,
+): string {
+    const normalizedFundCode = normalizeFundCode(fundCode);
+    const safeFundCode = normalizedFundCode || 'UNKNOWN';
+    return `${ROUTE_PATHS.funds}/${encodeURIComponent(safeFundCode)}/${normalizeFundTab(tab)}`;
 }
 
 export function toStockDetail(

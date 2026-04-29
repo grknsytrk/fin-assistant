@@ -82,7 +82,10 @@ export interface CompanyBreakdownResponse {
 }
 
 export interface MarketUniverseStats {
+  index: MarketStockIndex;
+  index_count: number;
   bist100_count: number;
+  bist_all_count: number;
   rag_ready_count: number;
   kap_only_count: number;
   kap_cache_count: number;
@@ -117,8 +120,8 @@ export interface MarketStockRow extends MarketUniverseRow {
   return_1y_pct: number | null;
 }
 
-export type MarketStockIndex = 'XU100' | 'XU030';
-export type MarketIndexCode = 'XU100' | 'XU030';
+export type MarketStockIndex = 'XUTUM' | 'XU100' | 'XU030';
+export type MarketIndexCode = 'XUTUM' | 'XU100' | 'XU030';
 
 export interface MarketReturnBenchmark {
   return_1w_pct: number | null;
@@ -132,6 +135,16 @@ export interface MarketReturnBenchmark {
 
 export interface MarketUniverseResponse {
   stats: MarketUniverseStats;
+  universe?: {
+    index: MarketStockIndex;
+    count: number;
+    source?: string | null;
+    source_url?: string | null;
+    source_date?: string | null;
+    fetched_at?: string | null;
+    cache_hit?: boolean;
+    fallback_used?: boolean;
+  };
   rows: MarketUniverseRow[];
   coverage_rows: MarketUniverseRow[];
 }
@@ -141,7 +154,153 @@ export interface MarketStocksResponse {
   rows: MarketStockRow[];
   benchmarks: Record<MarketStockIndex, MarketReturnBenchmark>;
   source: string;
+  universe?: {
+    index: MarketStockIndex;
+    count: number;
+    source?: string | null;
+    source_url?: string | null;
+    source_date?: string | null;
+    fetched_at?: string | null;
+    cache_hit?: boolean;
+    fallback_used?: boolean;
+  };
   as_of: string;
+}
+
+export interface FundSourceMetadata {
+  source: string;
+  source_url?: string | null;
+  fetched_at?: string | null;
+  as_of?: string | null;
+  cache_hit?: boolean;
+  stale?: boolean;
+  parse_status?: string | null;
+  warnings?: string[];
+}
+
+export interface FundPeriodReturns {
+  '1w'?: number | null;
+  '1m'?: number | null;
+  '3m'?: number | null;
+  '6m'?: number | null;
+  ytd?: number | null;
+  '1y'?: number | null;
+}
+
+export interface FundSummary {
+  fund_code: string;
+  name: string;
+  fund_type: string | null;
+  founder_company: string | null;
+  manager_company: string | null;
+  price: number | null;
+  daily_return: number | null;
+  period_returns: FundPeriodReturns;
+  risk_value: number | null;
+  currency: string;
+  as_of: string | null;
+  source: string;
+  aum?: number | null;
+  investor_count?: number | null;
+  share_count?: number | null;
+  isin?: string | null;
+}
+
+export interface FundDetail extends FundSummary {
+  strategy: string | null;
+  benchmark: string | null;
+  management_fee: number | null;
+  tax_info: string | null;
+  fintables_url: string | null;
+  kap_url: string | null;
+  source_metadata: FundSourceMetadata;
+}
+
+export interface FundPricePoint {
+  fund_code: string;
+  date: string;
+  price: number | null;
+  daily_return: number | null;
+  aum: number | null;
+  investor_count: number | null;
+  source: string;
+}
+
+export interface FundAllocation {
+  fund_code: string;
+  allocation_type: string;
+  label: string;
+  weight: number | null;
+  report_date: string | null;
+  source: string;
+}
+
+export interface FundPortfolioPosition {
+  fund_code: string;
+  asset_code: string | null;
+  asset_name: string;
+  asset_type: string | null;
+  weight: number | null;
+  amount: number | null;
+  market_value: number | null;
+  report_date: string | null;
+  source_report_url: string | null;
+  source_type: string | null;
+  parse_confidence: number | null;
+}
+
+export interface FundsResponse {
+  status: string;
+  rows: FundSummary[];
+  count: number;
+  total_count: number;
+  source: string;
+  source_url?: string | null;
+  as_of: string | null;
+  fetched_at: string | null;
+  stale: boolean;
+  degraded: boolean;
+  warnings: string[];
+  source_metadata: FundSourceMetadata;
+}
+
+export interface FundCategoriesResponse {
+  status: string;
+  fund_types: string[];
+  founder_companies: string[];
+  manager_companies: string[];
+  risk_values: number[];
+  source_metadata: FundSourceMetadata;
+}
+
+export interface FundPerformanceResponse {
+  fund_code: string;
+  status: string;
+  points: FundPricePoint[];
+  source: string;
+  source_url?: string | null;
+  as_of: string | null;
+  fetched_at: string | null;
+  stale: boolean;
+  source_metadata: FundSourceMetadata;
+}
+
+export interface FundAllocationsResponse {
+  fund_code: string;
+  status: string;
+  allocations: FundAllocation[];
+  source: string;
+  stale?: boolean;
+  source_metadata: FundSourceMetadata;
+}
+
+export interface FundHoldingsResponse {
+  fund_code: string;
+  status: 'unavailable' | 'not_parsed' | 'ok' | string;
+  positions: FundPortfolioPosition[];
+  source: string;
+  message?: string;
+  source_metadata: FundSourceMetadata;
 }
 
 export interface MarketIndexListRow {

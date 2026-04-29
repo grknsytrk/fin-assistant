@@ -9,7 +9,8 @@ import math
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -47,9 +48,71 @@ from src.retrieve import RetrievedChunk, Retriever, RetrieverV2, RetrieverV3, Re
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = load_config(ROOT / "config.yaml")
-app = FastAPI(title="RAG-Fin API", version="0.10.0")
 FEEDBACK_FILE = CONFIG.paths.processed_dir / "feedback.jsonl"
 LOGGER = logging.getLogger("uvicorn.error")
+_FUND_COLLECTOR_TASK: Optional[asyncio.Task[None]] = None
+
+
+def _truthy_env(name: str, default: str = "1") -> bool:
+    value = os.getenv(name, default).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+async def _fund_price_collector_loop() -> None:
+    from app.fund_service import collect_daily_fund_prices
+
+    startup_delay = float(os.getenv("RAGFIN_FUND_COLLECTOR_STARTUP_DELAY_SECONDS", "60"))
+    interval = float(os.getenv("RAGFIN_FUND_COLLECTOR_INTERVAL_SECONDS", str(24 * 60 * 60)))
+    if startup_delay > 0:
+        await asyncio.sleep(startup_delay)
+    while True:
+        try:
+            result = await asyncio.to_thread(collect_daily_fund_prices, CONFIG.paths.processed_dir)
+            LOGGER.info(
+                "fund price collector completed: valid=%s skipped=%s source=%s",
+                result.get("valid_point_count"),
+                result.get("skipped_point_count"),
+                result.get("source"),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("fund price collector failed")
+        await asyncio.sleep(max(60.0, interval))
+
+
+async def _start_fund_price_collector() -> None:
+    global _FUND_COLLECTOR_TASK
+    if not _truthy_env("RAGFIN_FUND_COLLECTOR_ENABLED", "1"):
+        return
+    if _FUND_COLLECTOR_TASK and not _FUND_COLLECTOR_TASK.done():
+        return
+    _FUND_COLLECTOR_TASK = asyncio.create_task(_fund_price_collector_loop())
+
+
+async def _stop_fund_price_collector() -> None:
+    global _FUND_COLLECTOR_TASK
+    task = _FUND_COLLECTOR_TASK
+    _FUND_COLLECTOR_TASK = None
+    if not task:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    await _start_fund_price_collector()
+    try:
+        yield
+    finally:
+        await _stop_fund_price_collector()
+
+
+app = FastAPI(title="RAG-Fin API", version="0.10.0", lifespan=_lifespan)
 
 # region agent log helpers
 _DEBUG_LOG_PATH = Path("debug-0cbd9f.log")
@@ -339,16 +402,27 @@ _UNIVERSE_CACHE: Dict[str, Any] = {}
 _UNIVERSE_CACHE_TTL = 120  # 2 minutes
 
 
-def _market_universe_payload() -> Dict[str, Any]:
-    from app.kap_service import get_bist100_companies
+def _market_universe_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
+    from app.kap_service import get_bist_index_universe
 
     now_ts = time.time()
-    cached = _UNIVERSE_CACHE.get("payload")
-    if cached and now_ts - cached.get("_ts", 0) < _UNIVERSE_CACHE_TTL:
+    normalized_index = _normalize_stock_index(index_name)
+    cache_key = f"payload:{normalized_index}"
+    cached = _UNIVERSE_CACHE.get(cache_key)
+    if cached and not force_refresh and now_ts - cached.get("_ts", 0) < _UNIVERSE_CACHE_TTL:
         return cached["data"]
 
     stats = _stats_payload()
-    symbols = get_bist100_companies()
+    universe = get_bist_index_universe(normalized_index, force_refresh=force_refresh)
+    symbols = list(universe.get("symbols") or [])
+    try:
+        bist_all_count = (
+            int(universe.get("count") or 0)
+            if normalized_index == "XUTUM"
+            else int(get_bist_index_universe("XUTUM").get("count") or 0)
+        )
+    except Exception:
+        bist_all_count = int(universe.get("count") or len(symbols)) if normalized_index == "XUTUM" else 0
     breakdown_rows = _company_breakdown_from_chunks(CONFIG.paths.chunks_v2_file)
     breakdown_map = {
         str(row.get("company") or "").strip().upper(): row
@@ -356,10 +430,13 @@ def _market_universe_payload() -> Dict[str, Any]:
         if str(row.get("company") or "").strip()
     }
     cache_dir = CONFIG.paths.processed_dir / "kap_cache"
-    base_price_map = _fetch_market_price_map(symbols)
-    price_map = _fill_prices_via_yahoo(symbols, base_price_map)
+    base_price_map = _fetch_market_price_map(symbols, index_name=normalized_index)
+    price_map = (
+        base_price_map
+        if normalized_index == "XUTUM"
+        else _fill_prices_via_yahoo(symbols, base_price_map)
+    )
     basic_summary_map = _fetch_isyatirim_basic_summary_map()
-
     rows: List[Dict[str, Any]] = []
     rag_ready_count = 0
     kap_cache_count = 0
@@ -397,7 +474,7 @@ def _market_universe_payload() -> Dict[str, Any]:
                 "change_pct": quote.get("change_pct"),
                 "price_as_of": quote.get("as_of"),
                 "market_cap": _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary_map.get(symbol)),
-                **_kap_logo_payload_for_symbol(symbol),
+                **_empty_logo_payload(),
             }
         )
 
@@ -408,17 +485,30 @@ def _market_universe_payload() -> Dict[str, Any]:
 
     data = {
         "stats": {
+            "index": normalized_index,
+            "index_count": len(rows),
             "bist100_count": len(rows),
+            "bist_all_count": bist_all_count,
             "rag_ready_count": rag_ready_count,
             "kap_only_count": len(rows) - rag_ready_count,
             "kap_cache_count": kap_cache_count,
             "pdf_count": int(stats.get("pdf_count") or 0),
             "page_count": int(stats.get("page_count") or 0),
         },
+        "universe": {
+            "index": universe.get("index") or normalized_index,
+            "count": int(universe.get("count") or len(rows)),
+            "source": universe.get("source"),
+            "source_url": universe.get("source_url"),
+            "source_date": universe.get("source_date"),
+            "fetched_at": universe.get("fetched_at"),
+            "cache_hit": bool(universe.get("cache_hit")),
+            "fallback_used": bool(universe.get("fallback_used")),
+        },
         "rows": rows,
         "coverage_rows": coverage_rows,
     }
-    _UNIVERSE_CACHE["payload"] = {"_ts": now_ts, "data": data}
+    _UNIVERSE_CACHE[cache_key] = {"_ts": now_ts, "data": data}
     return data
 
 
@@ -883,12 +973,12 @@ def stats_company_breakdown() -> Dict[str, Any]:
 
 
 @app.get("/market/universe")
-def market_universe() -> Dict[str, Any]:
-    return _market_universe_payload()
+def market_universe(index: str = Query("XUTUM"), refresh: bool = Query(False)) -> Dict[str, Any]:
+    return _market_universe_payload(index_name=index, force_refresh=refresh)
 
 
 @app.get("/market/stocks")
-def market_stocks(index: str = Query("XU100"), refresh: bool = Query(False)) -> Dict[str, Any]:
+def market_stocks(index: str = Query("XUTUM"), refresh: bool = Query(False)) -> Dict[str, Any]:
     return _market_stocks_payload(index_name=index, force_refresh=refresh)
 
 
@@ -914,6 +1004,164 @@ def market_indices(refresh: bool = Query(False)) -> Dict[str, Any]:
 @app.get("/market/indices/{index_code}")
 def market_index_detail(index_code: str, refresh: bool = Query(False)) -> Dict[str, Any]:
     return _market_index_detail_payload(index_code, force_refresh=refresh)
+
+
+@app.get("/funds")
+def funds(
+    q: Optional[str] = Query(None),
+    fund_type: Optional[str] = Query(None),
+    founder: Optional[str] = Query(None),
+    manager: Optional[str] = Query(None),
+    risk: Optional[str] = Query(None),
+    sort: str = Query("fund_code"),
+    order: str = Query("asc"),
+) -> Dict[str, Any]:
+    from app.fund_service import get_funds_payload
+
+    return get_funds_payload(
+        CONFIG.paths.processed_dir,
+        q=q,
+        fund_type=fund_type,
+        founder=founder,
+        manager=manager,
+        risk=risk,
+        sort=sort,
+        order=order,
+    )
+
+
+@app.get("/funds/search")
+def funds_search(q: str = Query("", min_length=0), limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
+    from app.fund_service import get_funds_payload
+
+    payload = get_funds_payload(CONFIG.paths.processed_dir, q=q, sort="fund_code", order="asc")
+    payload["rows"] = list(payload.get("rows") or [])[:limit]
+    payload["count"] = len(payload["rows"])
+    return payload
+
+
+@app.get("/funds/categories")
+def funds_categories() -> Dict[str, Any]:
+    from app.fund_service import get_fund_categories_payload
+
+    return get_fund_categories_payload(CONFIG.paths.processed_dir)
+
+
+@app.get("/funds/{fund_code}/performance")
+def fund_performance(
+    fund_code: str,
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    fallback: bool = Query(False),
+) -> Dict[str, Any]:
+    from app.fund_service import get_fund_performance_payload
+
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date end_date sonrasinda olamaz")
+    return get_fund_performance_payload(
+        CONFIG.paths.processed_dir,
+        fund_code,
+        start_date=start_date,
+        end_date=end_date,
+        allow_upstream_fallback=fallback,
+    )
+
+
+@app.get("/funds/{fund_code}/yield-summary")
+def fund_yield_summary(fund_code: str) -> Dict[str, Any]:
+    from app.fund_service import FintablesUpstreamError, get_fund_yield_summary_payload, normalize_fund_code
+
+    normalized = normalize_fund_code(fund_code)
+    try:
+        return get_fund_yield_summary_payload(normalized)
+    except FintablesUpstreamError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/funds/{fund_code}/holdings")
+def fund_holdings(fund_code: str) -> Dict[str, Any]:
+    from app.fund_service import get_fund_holdings_payload
+
+    return get_fund_holdings_payload(CONFIG.paths.processed_dir, fund_code)
+
+
+@app.get("/funds/{fund_code}/allocations")
+def fund_allocations(fund_code: str) -> Dict[str, Any]:
+    from app.fund_service import get_fund_allocations_payload
+
+    return get_fund_allocations_payload(CONFIG.paths.processed_dir, fund_code)
+
+
+@app.get("/funds/{fund_code}")
+def fund_detail(fund_code: str) -> Dict[str, Any]:
+    from app.fund_service import get_fund_detail_payload, normalize_fund_code
+
+    normalized = normalize_fund_code(fund_code)
+    try:
+        return get_fund_detail_payload(CONFIG.paths.processed_dir, normalized)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Fon bulunamadi: {normalized}") from exc
+
+
+@app.post("/admin/funds/refresh-snapshot")
+def admin_refresh_funds_snapshot(lookback_days: int = Query(10, ge=1, le=45)) -> Dict[str, Any]:
+    from app.fund_service import FundUpstreamError, refresh_funds_snapshot
+
+    try:
+        return refresh_funds_snapshot(CONFIG.paths.processed_dir, lookback_days=lookback_days)
+    except FundUpstreamError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/admin/funds/collect-prices")
+def admin_collect_fund_prices(
+    lookback_days: int = Query(10, ge=1, le=45),
+    as_of: Optional[date] = Query(None),
+) -> Dict[str, Any]:
+    from app.fund_service import collect_daily_fund_prices
+
+    return collect_daily_fund_prices(
+        CONFIG.paths.processed_dir,
+        as_of=as_of,
+        lookback_days=lookback_days,
+    )
+
+
+@app.post("/admin/funds/{fund_code}/refresh-performance")
+def admin_refresh_fund_performance(
+    fund_code: str,
+    start_date: date = Query(...),
+    end_date: Optional[date] = Query(None),
+) -> Dict[str, Any]:
+    from app.fund_service import FundUpstreamError, refresh_fund_performance, normalize_fund_code
+
+    normalized = normalize_fund_code(fund_code)
+    effective_end_date = end_date or date.today()
+    if start_date > effective_end_date:
+        raise HTTPException(status_code=400, detail="start_date end_date sonrasinda olamaz")
+    try:
+        return refresh_fund_performance(
+            CONFIG.paths.processed_dir,
+            normalized,
+            start_date=start_date,
+            end_date=effective_end_date,
+        )
+    except FundUpstreamError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/admin/funds/{fund_code}/refresh-allocations")
+def admin_refresh_fund_allocations(
+    fund_code: str,
+    as_of: Optional[date] = Query(None),
+) -> Dict[str, Any]:
+    from app.fund_service import FundUpstreamError, normalize_fund_code, refresh_fund_allocations
+
+    normalized = normalize_fund_code(fund_code)
+    try:
+        return refresh_fund_allocations(CONFIG.paths.processed_dir, normalized, as_of=as_of)
+    except FundUpstreamError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/ingest")
@@ -2127,6 +2375,10 @@ def _kap_logo_payload_for_symbol(symbol: str) -> Dict[str, Optional[str]]:
     return dict(data)
 
 
+def _empty_logo_payload() -> Dict[str, Optional[str]]:
+    return {"logo_url": None, "logo_source": None}
+
+
 def _synth_quarter_publish_dt(year: int, period: int) -> Optional[datetime]:
     """Approximate publish date from year+period when real publishDate absent."""
     approximate = {1: (5, 15), 2: (8, 15), 3: (11, 15), 4: (3, 15)}
@@ -2630,7 +2882,8 @@ _ISYATIRIM_CACHE: Dict[str, Any] = {}
 _ISYATIRIM_CACHE_TTL = 900  # 15 minutes
 _ISYATIRIM_BASIC_SUMMARY_CACHE: Dict[str, Any] = {}
 _ISYATIRIM_BASIC_SUMMARY_CACHE_TTL = 60
-_MARKET_STOCK_INDEXES = {"XU100", "XU030"}
+_MARKET_STOCK_INDEX_ORDER = ["XUTUM", "XU100", "XU030"]
+_MARKET_STOCK_INDEXES = set(_MARKET_STOCK_INDEX_ORDER)
 _MARKET_INDICES_CACHE: Dict[str, Any] = {}
 _MARKET_INDEX_DETAIL_CACHE: Dict[str, Any] = {}
 _MARKET_INDEX_QUOTE_CACHE: Dict[str, Any] = {}
@@ -2642,6 +2895,11 @@ _MARKET_INDEX_QUOTE_CACHE_TTL = 3
 _MARKET_INDEX_INTRADAY_CACHE_TTL = 3
 _MARKET_INDEX_RETURN_CACHE_TTL = 900
 _MARKET_INDEX_META: Dict[str, Dict[str, Any]] = {
+    "XUTUM": {
+        "symbol": "XUTUM",
+        "label": "BIST Tüm",
+        "yahoo_candidates": ["XUTUM.IS", "^XUTUM", "XUTUM"],
+    },
     "XU100": {
         "symbol": "XU100",
         "label": "BIST 100",
@@ -2653,6 +2911,20 @@ _MARKET_INDEX_META: Dict[str, Dict[str, Any]] = {
         "yahoo_candidates": ["XU030.IS", "^XU030", "XU030"],
     },
 }
+
+
+def _supported_market_indexes_text() -> str:
+    return ", ".join(_MARKET_STOCK_INDEX_ORDER)
+
+
+def _normalize_stock_index(index_name: str) -> str:
+    normalized = str(index_name or "XUTUM").strip().upper()
+    if normalized not in _MARKET_STOCK_INDEXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Desteklenmeyen endeks. {_supported_market_indexes_text()} kullanin.",
+        )
+    return normalized
 _RETURN_BASE_FIELDS: List[tuple[str, str]] = [
     ("return_1w_pct", "base_1w"),
     ("return_1m_pct", "base_1m"),
@@ -2851,7 +3123,16 @@ def _merge_market_price_fallback(base: Dict[str, Any], fallback: Dict[str, Any])
     return merged
 
 
-def _fetch_market_price_map(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+def _market_price_source_url(index_name: str) -> str:
+    normalized = str(index_name or "XUTUM").strip().upper()
+    if normalized == "XUTUM":
+        return "https://infoyatirim.com/canli-borsa"
+    if normalized == "XU030":
+        return "https://infoyatirim.com/canli-borsa/xu100-bist-100-hisseleri"
+    return "https://infoyatirim.com/canli-borsa/xu100-bist-100-hisseleri"
+
+
+def _fetch_market_price_map(symbols: List[str], *, index_name: str = "XU100") -> Dict[str, Dict[str, Any]]:
     import urllib.error
     import urllib.request
 
@@ -2859,13 +3140,14 @@ def _fetch_market_price_map(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
     if not normalized_symbols:
         return {}
 
-    cache_key = ",".join(normalized_symbols)
+    normalized_index = str(index_name or "XU100").strip().upper()
+    cache_key = f"{normalized_index}:{','.join(normalized_symbols)}"
     now = time.time()
     cached = _MARKET_PRICE_CACHE.get(cache_key)
     if cached and now - cached.get("_ts", 0) < _MARKET_PRICE_CACHE_TTL:
         return cached.get("items", {})
 
-    url = "https://infoyatirim.com/canli-borsa/xu100-bist-100-hisseleri"
+    url = _market_price_source_url(normalized_index)
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -2916,7 +3198,7 @@ def _fetch_market_price_map(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         for symbol in normalized_symbols
         if _market_price_row_needs_fallback(items.get(symbol))
     ]
-    if items and missing_symbols:
+    if items and missing_symbols and normalized_index != "XUTUM":
         fallback_symbols = missing_symbols[:_INFOYATIRIM_STOCK_PAGE_FALLBACK_LIMIT]
         try:
             from concurrent.futures import ThreadPoolExecutor
@@ -3109,9 +3391,9 @@ def _returns_from_bases(current_price: Any, return_bases: Dict[str, Any]) -> Dic
 
 
 def _market_stock_benchmarks() -> Dict[str, Dict[str, Any]]:
-    base_map = _fetch_stock_return_bases_bulk(sorted(_MARKET_STOCK_INDEXES))
+    base_map = _fetch_stock_return_bases_bulk(_MARKET_STOCK_INDEX_ORDER)
     benchmarks: Dict[str, Dict[str, Any]] = {}
-    for index_name in sorted(_MARKET_STOCK_INDEXES):
+    for index_name in _MARKET_STOCK_INDEX_ORDER:
         bases = base_map.get(index_name, {})
         current_for_returns = bases.get("latest_close")
         benchmarks[index_name] = {
@@ -3122,14 +3404,25 @@ def _market_stock_benchmarks() -> Dict[str, Dict[str, Any]]:
 
 
 def _market_stock_symbols_for_index(index_name: str) -> List[str]:
-    from app.kap_service import get_bist100_companies, get_bist30_companies
+    from app.kap_service import get_bist100_companies, get_bist30_companies, get_bist_all_companies
 
-    normalized = str(index_name or "XU100").strip().upper()
+    normalized = _normalize_stock_index(index_name)
+    if normalized == "XUTUM":
+        return get_bist_all_companies()
     if normalized == "XU100":
         return get_bist100_companies()
-    if normalized == "XU030":
-        return get_bist30_companies()
-    raise HTTPException(status_code=400, detail="Desteklenmeyen endeks. XU100 veya XU030 kullanin.")
+    return get_bist30_companies()
+
+
+def _cached_stock_return_bases_bulk(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    now = time.time()
+    result: Dict[str, Dict[str, Any]] = {}
+    for symbol in symbols:
+        normalized = str(symbol or "").strip().upper()
+        cached = _STOCK_RETURN_BASE_CACHE.get(normalized)
+        if cached and now - cached.get("_ts", 0) < _STOCK_RETURN_BASE_CACHE_TTL:
+            result[normalized] = dict(cached.get("data") or {})
+    return result
 
 
 def _market_stock_row(
@@ -3164,15 +3457,15 @@ def _market_stock_row(
         "price_as_of": quote.get("as_of"),
         "volume": quote.get("volume"),
         "market_cap": _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary),
-        **_kap_logo_payload_for_symbol(symbol),
+        **_empty_logo_payload(),
         **_returns_from_bases(current_for_returns, return_bases),
     }
 
 
-def _market_stocks_payload(*, index_name: str = "XU100", force_refresh: bool = False) -> Dict[str, Any]:
-    normalized_index = str(index_name or "XU100").strip().upper()
-    if normalized_index not in _MARKET_STOCK_INDEXES:
-        raise HTTPException(status_code=400, detail="Desteklenmeyen endeks. XU100 veya XU030 kullanin.")
+def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
+    from app.kap_service import get_bist_index_universe
+
+    normalized_index = _normalize_stock_index(index_name)
     now_ts = time.time()
     cache_key = f"payload:{normalized_index}"
     cached = _STOCKS_CACHE.get(cache_key)
@@ -3180,6 +3473,19 @@ def _market_stocks_payload(*, index_name: str = "XU100", force_refresh: bool = F
         return cached["data"]
 
     symbols = _market_stock_symbols_for_index(normalized_index)
+    try:
+        universe = get_bist_index_universe(normalized_index, force_refresh=force_refresh)
+    except Exception:
+        universe = {
+            "index": normalized_index,
+            "count": len(symbols),
+            "source": None,
+            "source_url": None,
+            "source_date": None,
+            "fetched_at": None,
+            "cache_hit": False,
+            "fallback_used": False,
+        }
     breakdown_rows = _company_breakdown_from_chunks(CONFIG.paths.chunks_v2_file)
     breakdown_map = {
         str(row.get("company") or "").strip().upper(): row
@@ -3187,10 +3493,13 @@ def _market_stocks_payload(*, index_name: str = "XU100", force_refresh: bool = F
         if str(row.get("company") or "").strip()
     }
     cache_dir = CONFIG.paths.processed_dir / "kap_cache"
-    price_map = _fetch_market_price_map(symbols)
-    return_base_map = _fetch_stock_return_bases_bulk(symbols)
+    price_map = _fetch_market_price_map(symbols, index_name=normalized_index)
+    return_base_map = (
+        _cached_stock_return_bases_bulk(symbols)
+        if normalized_index == "XUTUM"
+        else _fetch_stock_return_bases_bulk(symbols)
+    )
     basic_summary_map = _fetch_isyatirim_basic_summary_map()
-
     rows = [
         _market_stock_row(
             symbol,
@@ -3207,6 +3516,16 @@ def _market_stocks_payload(*, index_name: str = "XU100", force_refresh: bool = F
         "rows": rows,
         "benchmarks": _market_stock_benchmarks(),
         "source": "infoyatirim_yahoo",
+        "universe": {
+            "index": universe.get("index") or normalized_index,
+            "count": int(universe.get("count") or len(symbols)),
+            "source": universe.get("source"),
+            "source_url": universe.get("source_url"),
+            "source_date": universe.get("source_date"),
+            "fetched_at": universe.get("fetched_at"),
+            "cache_hit": bool(universe.get("cache_hit")),
+            "fallback_used": bool(universe.get("fallback_used")),
+        },
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
     _STOCKS_CACHE[cache_key] = {"_ts": now_ts, "data": data}
@@ -3548,7 +3867,7 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
             "as_of": quote.get("as_of") or intraday.get("as_of"),
             "line_points": intraday.get("line_points") or [],
             "error": None if price is not None or intraday.get("line_points") else intraday.get("error"),
-            **_kap_logo_payload_for_symbol(symbol),
+            **_empty_logo_payload(),
             **_returns_from_bases(current_for_returns, return_bases),
         }
         items.append(item)
@@ -4018,7 +4337,7 @@ def _xu030_payload() -> Dict[str, Any]:
                 "change_pct": quote.get("change_pct"),
                 "price_as_of": quote.get("as_of"),
                 "market_cap": _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary_map.get(symbol)),
-                **_kap_logo_payload_for_symbol(symbol),
+                **_empty_logo_payload(),
             }
         )
 
@@ -4121,7 +4440,10 @@ def _fetch_yahoo_quote(yahoo_symbol: str) -> Dict[str, Any]:
 def _normalize_market_index(index_code: str) -> str:
     normalized = str(index_code or "").strip().upper()
     if normalized not in _MARKET_INDEX_META:
-        raise HTTPException(status_code=400, detail="Desteklenmeyen endeks. XU100 veya XU030 kullanin.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Desteklenmeyen endeks. {_supported_market_indexes_text()} kullanin.",
+        )
     return normalized
 
 
@@ -4324,7 +4646,7 @@ def _market_indices_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
     if cached and not force_refresh and now - cached.get("_ts", 0) < _MARKET_INDICES_CACHE_TTL:
         return cached["data"]
 
-    rows = [_market_index_row(index_code) for index_code in ["XU100", "XU030"]]
+    rows = [_market_index_row(index_code) for index_code in _MARKET_STOCK_INDEX_ORDER]
     data = {
         "rows": rows,
         "source": "yahoo_finance_chart",
@@ -4814,6 +5136,7 @@ _WATCH_GLOBAL_CACHE_TTL = 60
 _WATCH_DELAY_NOTE = "Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk)."
 
 _WATCH_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [
+    ("XUTUM", "BIST Tüm", ["XUTUM.IS", "^XUTUM", "XUTUM"]),
     ("XU100", "BIST 100", ["XU100.IS", "^XU100", "XU100"]),
     ("XU030", "BIST 30", ["XU030.IS", "^XU030", "XU030"]),
 ]

@@ -17,11 +17,13 @@ import {
 import GlobalTickerSearch from './GlobalTickerSearch';
 import './MarketsNavigation.css';
 
+export type MarketsNavigationSection = 'markets' | 'stocks' | 'funds' | 'indices';
+
 type MarketsNavigationProps = {
     collapsed: boolean;
-    activeSection: 'markets' | 'stocks' | 'indices';
+    activeSection: MarketsNavigationSection;
     onCollapsedChange: (collapsed: boolean) => void;
-    onSectionChange: (section: 'markets' | 'stocks' | 'indices') => void;
+    onSectionChange: (section: MarketsNavigationSection) => void;
     onSelectTicker?: (ticker: string) => void;
 };
 
@@ -70,16 +72,14 @@ export default function MarketsNavigation({
                 </button>
                 <button
                     type="button"
-                    className="mn-menu-item has-submenu"
-                    title="Fonlar (yakında)"
-                    disabled
-                    aria-disabled="true"
+                    className={`mn-menu-item ${activeSection === 'funds' ? 'active' : ''}`}
+                    title="Fonlar"
+                    onClick={() => onSectionChange('funds')}
                 >
                     <div className="mn-item-main">
                         <Coins size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Fonlar</span>}
                     </div>
-                    {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
                 </button>
                 <button
                     type="button"

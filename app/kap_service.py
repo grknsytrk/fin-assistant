@@ -1,8 +1,12 @@
 """KAP service layer — decouples KAP logic from Streamlit and FastAPI."""
 from __future__ import annotations
 
+import csv
+import io
 import re
+import time
 import urllib.request
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -38,14 +42,218 @@ BIST30_SYMBOLS: List[str] = [
     "ASTOR", "TOASO", "MGROS", "ASELS", "PETKM", "TUPRS",
 ]
 
+BIST_INDEX_REPORT_URL = "https://www.borsaistanbul.com/datum/hisse_endeks_ds.csv"
+BIST_INDEX_CACHE_TTL = 6 * 60 * 60
+BIST_INDEX_ORDER: List[str] = ["XUTUM", "XU100", "XU030"]
+
+# Official Borsa Istanbul XUTUM snapshot from hisse_endeks_ds.csv, dated
+# 2026-04-29. Used only when the live official CSV cannot be read.
+_BIST_ALL_FALLBACK_RAW = """
+A1CAP A1YEN AAGYO ACSEL ADEL ADESE ADGYO AEFES
+AFYON AGESA AGHOL AGROT AGYO AHGAZ AHSGY AKBNK
+AKCNS AKENR AKFGY AKFIS AKFYE AKGRT AKHAN AKMGY
+AKSA AKSEN AKSGY AKSUE AKYHO ALARK ALBRK ALCAR
+ALCTL ALFAS ALGYO ALKA ALKIM ALKLC ALTNY ALVES
+ANELE ANGEN ANHYT ANSGR ARASE ARCLK ARDYZ ARENA
+ARFYE ARMGD ARSAN ARTMS ARZUM ASELS ASGYO ASTOR
+ASUZU ATAGY ATAKP ATATP ATATR AVGYO AVHOL AVOD
+AVPGY AVTUR AYCES AYDEM AYEN AYGAZ AZTEK BAGFS
+BAHKM BAKAB BALSU BANVT BARMA BASGZ BAYRK BEGYO
+BERA BESLR BESTE BEYAZ BFREN BIENY BIGCH BIGEN
+BIGTK BIMAS BINBN BINHO BIOEN BIZIM BJKAS BLCYT
+BLUME BMSCH BMSTL BNTAS BOBET BORLS BORSK BOSSA
+BRISA BRKSN BRKVY BRLSM BRSAN BRYAT BSOKE BTCIM
+BUCIM BULGS BURCE BURVA BVSAN BYDNR CANTE CATES
+CCOLA CELHA CEMAS CEMTS CEMZY CEOEM CGCAM CIMSA
+CLEBI CMBTN CONSE COSMO CRDFA CRFSA CUSAN CVKMD
+CWENE DAGI DAPGM DARDL DCTTR DENGE DERHL DERIM
+DESA DESPC DEVA DGATE DGGYO DGNMO DITAS DMRGD
+DMSAS DNISI DOAS DOCO DOFER DOFRB DOGUB DOHOL
+DOKTA DSTKF DUNYH DURDO DURKN DYOBY DZGYO EBEBK
+ECILC ECOGR ECZYT EDATA EDIP EFOR EGEEN EGEGY
+EGEPO EGGUB EGPRO EGSER EKGYO EKOS EKSUN ELITE
+EMKEL EMPAE ENDAE ENERY ENJSA ENKAI ENSRI ENTRA
+EPLAS ERBOS ERCB EREGL ERSU ESCAR ESCOM ESEN
+ETILR EUPWR EUREN EYGYO FADE FENER FLAP FMIZP
+FONET FORMT FORTE FRIGO FRMPL FROTO FZLGY GARAN
+GARFA GEDIK GEDZA GENIL GENKM GENTS GEREL GESAN
+GIPTA GLBMD GLCVY GLRMK GLRYH GLYHO GMTAS GOKNR
+GOLTS GOODY GOZDE GRSEL GRTHO GSDDE GSDHO GSRAY
+GUBRF GUNDG GWIND GZNMI HALKB HATEK HATSN HDFGS
+HEDEF HEKTS HKTM HLGYO HOROZ HRKET HTTBT HUBVC
+HUNER HURGZ ICBCT ICUGS IDGYO IEYHO IHAAS IHEVA
+IHGZT IHLAS IHLGM IHYAY IMASM INDES INFO INGRM
+INTEM INVEO INVES ISATR ISBTR ISCTR ISDMR ISFIN
+ISGSY ISGYO ISKPL ISMEN ISSEN IZENR IZFAS IZINV
+IZMDC JANTS KAPLM KAREL KARSN KARTN KATMR KAYSE
+KBORU KCAER KCHOL KFEIN KGYO KIMMR KLGYO KLKIM
+KLMSN KLRHO KLSER KLSYN KLYPV KMPUR KNFRT KOCMT
+KONKA KONTR KONYA KOPOL KORDS KOTON KRDMA KRDMB
+KRDMD KRGYO KRONT KRPLS KRSTL KRTEK KRVGD KTLEV
+KTSKR KUTPO KUVVA KUYAS KZBGY KZGYO LIDER LIDFA
+LILAK LINK LKMNH LMKDC LOGO LRSHO LUKSK LXGYO
+LYDHO LYDYE MAALT MACKO MAGEN MAKIM MAKTK MANAS
+MARBL MARKA MARMR MARTI MAVI MCARD MEDTR MEGMT
+MEKAG MEPET MERCN MERIT MERKO METRO MEYSU MGROS
+MHRGY MIATK MNDRS MNDTR MOBTL MOGAN MOPAS MPARK
+MRGYO MRSHL MSGYO MTRKS MZHLD NATEN NETAS NETCD
+NIBAS NTGAZ NTHOL NUGYO NUHCM OBAMS OBASE ODAS
+ODINE OFSYM ONCSM ONRYT ORCAY ORGE OSMEN OSTIM
+OTKAR OTTO OYAKC OYLUM OYYAT OZATD OZGYO OZKGY
+OZRDN OZSUB OZYSR PAGYO PAHOL PAMEL PAPIL PARSN
+PASEU PATEK PCILT PEKGY PENGD PENTA PETKM PETUN
+PGSUS PINSU PKART PKENT PLTUR PNLSN PNSUT POLHO
+POLTK PRDGS PRKAB PRKME PRZMA PSDTC PSGYO QUAGR
+RALYH RAYSG REEDR RGYAS RNPOL RODRG RTALB RUBNS
+RUZYE RYGYO RYSAS SAFKR SAHOL SAMAT SANEL SANFM
+SANKO SARKY SASA SAYAS SDTTR SEGMN SEGYO SEKFK
+SEKUR SELEC SELVA SERNT SEYKM SILVR SISE SKBNK
+SKTAS SKYLP SKYMD SMART SMRTG SMRVA SNGYO SNICA
+SOKE SOKM SONME SRVGY SUNTK SURGY SUWEN SVGYO
+TABGD TARKM TATEN TATGD TAVHL TBORG TCELL TCKRC
+TDGYO TEHOL TEKTU TERA TEZOL TGSAS THYAO TKFEN
+TKNSA TLMAN TMPOL TMSN TNZTP TOASO TRALT TRCAS
+TRENJ TRGYO TRHOL TRILC TRMET TSGYO TSKB TSPOR
+TTKOM TTRAK TUCLK TUKAS TUPRS TUREX TURGG TURSG
+UCAYM UFUK ULAS ULKER ULUFA ULUSE ULUUN UNLU
+USAK VAKBN VAKFA VAKFN VAKKO VANGD VBTYZ VERTU
+VERUS VESBE VESTL VKGYO VKING VRGYO VSNMD YAPRK
+YATAS YAYLA YEOTK YESIL YGGYO YIGIT YKBNK YKSLN
+YUNSA YYLGD ZEDUR ZERGY ZGYO ZOREN ZRGYO
+"""
+
+BIST_ALL_SYMBOLS_FALLBACK: List[str] = _BIST_ALL_FALLBACK_RAW.split()
+_BIST_FALLBACK_SYMBOLS: Dict[str, List[str]] = {
+    "XUTUM": BIST_ALL_SYMBOLS_FALLBACK,
+    "XU100": BIST100_SYMBOLS,
+    "XU030": BIST30_SYMBOLS,
+}
+_BIST_UNIVERSE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _dedupe_symbols(symbols: List[str]) -> List[str]:
+    result: List[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        normalized = normalize_kap_symbol(symbol)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _normalize_bist_constituent_symbol(raw: str) -> str:
+    symbol = str(raw or "").strip().upper()
+    if symbol.endswith(".E"):
+        symbol = symbol[:-2]
+    return normalize_kap_symbol(symbol)
+
+
+def parse_bist_index_report_csv(payload: str) -> Dict[str, Dict[str, Any]]:
+    """Parse Borsa Istanbul equity index report CSV by index code."""
+    parsed: Dict[str, Dict[str, Any]] = {}
+    reader = csv.DictReader(io.StringIO(str(payload or "")), delimiter=";")
+    for row in reader:
+        raw_symbol = str(row.get("BILESEN KODU") or "").strip()
+        raw_index = str(row.get("ENDEKS KODU") or "").strip().upper()
+        if raw_symbol.upper() == "CONSTITUENT CODE" or not raw_index:
+            continue
+        symbol = _normalize_bist_constituent_symbol(raw_symbol)
+        if not symbol:
+            continue
+        bucket = parsed.setdefault(raw_index, {"symbols": [], "source_date": ""})
+        if symbol not in bucket["symbols"]:
+            bucket["symbols"].append(symbol)
+        source_date = str(row.get("TARIH(GG/AA/YYYY)") or "").strip()
+        if source_date and not bucket["source_date"]:
+            bucket["source_date"] = source_date
+    return parsed
+
+
+def _fallback_bist_universe(index_code: str, *, cache_hit: bool = False) -> Dict[str, Any]:
+    normalized = str(index_code or "").strip().upper()
+    symbols = _dedupe_symbols(_BIST_FALLBACK_SYMBOLS.get(normalized, []))
+    return {
+        "index": normalized,
+        "symbols": symbols,
+        "count": len(symbols),
+        "source": "borsa_istanbul_csv_fallback_snapshot",
+        "source_url": BIST_INDEX_REPORT_URL,
+        "source_date": "2026-04-29" if normalized == "XUTUM" else "",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "cache_hit": cache_hit,
+        "fallback_used": True,
+    }
+
+
+def get_bist_index_universe(index_code: str = "XUTUM", *, force_refresh: bool = False) -> Dict[str, Any]:
+    """Return official BIST index constituents with visible source metadata."""
+    normalized = str(index_code or "XUTUM").strip().upper()
+    if normalized not in _BIST_FALLBACK_SYMBOLS:
+        raise ValueError(f"unsupported_index:{normalized}")
+
+    now = time.time()
+    cached = _BIST_UNIVERSE_CACHE.get(normalized)
+    if cached and not force_refresh and now - cached.get("_ts", 0) < BIST_INDEX_CACHE_TTL:
+        data = dict(cached["data"])
+        data["symbols"] = list(data.get("symbols") or [])
+        data["cache_hit"] = True
+        return data
+
+    try:
+        request = urllib.request.Request(
+            BIST_INDEX_REPORT_URL,
+            headers={
+                "User-Agent": "ragfin-bist-index-loader/1.0",
+                "Accept": "text/csv,*/*",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            text = response.read().decode("utf-8-sig", errors="replace")
+        parsed = parse_bist_index_report_csv(text)
+    except Exception:
+        fallback = _fallback_bist_universe(normalized)
+        _BIST_UNIVERSE_CACHE[normalized] = {"_ts": now, "data": fallback}
+        return dict(fallback)
+
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    for code in BIST_INDEX_ORDER:
+        row = parsed.get(code, {})
+        symbols = _dedupe_symbols(list(row.get("symbols") or []))
+        fallback_used = False
+        if not symbols:
+            fallback_used = True
+            symbols = _dedupe_symbols(_BIST_FALLBACK_SYMBOLS.get(code, []))
+        data = {
+            "index": code,
+            "symbols": symbols,
+            "count": len(symbols),
+            "source": "borsa_istanbul_csv" if not fallback_used else "borsa_istanbul_csv_fallback_snapshot",
+            "source_url": BIST_INDEX_REPORT_URL,
+            "source_date": str(row.get("source_date") or ""),
+            "fetched_at": fetched_at,
+            "cache_hit": False,
+            "fallback_used": fallback_used,
+        }
+        _BIST_UNIVERSE_CACHE[code] = {"_ts": now, "data": data}
+
+    result = dict(_BIST_UNIVERSE_CACHE[normalized]["data"])
+    result["symbols"] = list(result.get("symbols") or [])
+    return result
+
+
+def get_bist_index_companies(index_code: str = "XUTUM", *, force_refresh: bool = False) -> List[str]:
+    return list(get_bist_index_universe(index_code, force_refresh=force_refresh).get("symbols") or [])
+
 
 def get_bist30_companies() -> List[str]:
-    return list(BIST30_SYMBOLS)
+    return get_bist_index_companies("XU030")
 
 
 # Search candidates are kept as a separate concept from the market universe so
 # header search can evolve independently without changing the terminal screen.
-KAP_COMPANY_CANDIDATES: List[str] = list(BIST100_SYMBOLS)
+KAP_COMPANY_CANDIDATES: List[str] = list(BIST_ALL_SYMBOLS_FALLBACK)
 
 # Prefer exchange symbols in dropdown and normalize common aliases from dataset names.
 KAP_SYMBOL_ALIASES: Dict[str, str] = {
@@ -68,7 +276,11 @@ def normalize_kap_symbol(symbol: str) -> str:
 
 
 def get_bist100_companies() -> List[str]:
-    return list(BIST100_SYMBOLS)
+    return get_bist_index_companies("XU100")
+
+
+def get_bist_all_companies() -> List[str]:
+    return get_bist_index_companies("XUTUM")
 
 
 def get_kap_companies(indexed_companies: Optional[List[str]] = None) -> List[str]:

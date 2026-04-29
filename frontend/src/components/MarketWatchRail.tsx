@@ -14,13 +14,14 @@ import type {
 } from '../api/types';
 import './MarketWatchRail.css';
 
-type RailTab = 'global' | 'commodities' | 'fx' | 'xu100' | 'xu030';
-type StockRailTab = Extract<RailTab, 'xu100' | 'xu030'>;
+type RailTab = 'global' | 'commodities' | 'fx' | 'xutum' | 'xu100' | 'xu030';
+type StockRailTab = Extract<RailTab, 'xutum' | 'xu100' | 'xu030'>;
 type RailSortKey = 'symbol' | 'price' | 'changePct';
 type RailSortDirection = 'asc' | 'desc';
 
 const LIVE_RAIL_REFRESH_MS = 3000;
 const STOCK_TAB_TO_INDEX: Record<StockRailTab, MarketStockIndex> = {
+    xutum: 'XUTUM',
     xu100: 'XU100',
     xu030: 'XU030',
 };
@@ -52,6 +53,7 @@ const RAIL_TABS: Array<{ id: RailTab; label: string }> = [
     { id: 'global', label: 'Endeks' },
     { id: 'commodities', label: 'Emtia' },
     { id: 'fx', label: 'Döviz' },
+    { id: 'xutum', label: 'XUTUM' },
     { id: 'xu100', label: 'XU100' },
     { id: 'xu030', label: 'XU030' },
 ];
@@ -203,6 +205,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
     const [globalPayload, setGlobalPayload] = useState<MarketWatchGlobalResponse | null>(null);
     const [commodityRows, setCommodityRows] = useState<CommodityQuote[] | null>(null);
     const [fxRows, setFxRows] = useState<FxQuote[] | null>(null);
+    const [xutumPayload, setXutumPayload] = useState<MarketStocksResponse | null>(null);
     const [xu100Payload, setXu100Payload] = useState<MarketStocksResponse | null>(null);
     const [xu030Payload, setXu030Payload] = useState<MarketStocksResponse | null>(null);
     const [loading, setLoading] = useState<Partial<Record<RailTab, boolean>>>({});
@@ -443,16 +446,24 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
         apiClient
             .marketStocks({ index: STOCK_TAB_TO_INDEX[tab], refresh: options?.refresh })
             .then((payload) => {
-                if (tab === 'xu100') setXu100Payload(payload);
+                if (tab === 'xutum') setXutumPayload(payload);
+                else if (tab === 'xu100') setXu100Payload(payload);
                 else setXu030Payload(payload);
                 setTabError(tab, null);
             })
             .catch((error) => {
-                const fallback = tab === 'xu100' ? 'XU100 verisi alınamadı.' : 'XU030 verisi alınamadı.';
+                const fallback =
+                    tab === 'xutum'
+                        ? 'XUTUM verisi alınamadı.'
+                        : tab === 'xu100'
+                            ? 'XU100 verisi alınamadı.'
+                            : 'XU030 verisi alınamadı.';
                 const hasRows =
-                    tab === 'xu100'
-                        ? Boolean((xu100Payload?.rows?.length || xu100Rows.length) > 0)
-                        : Boolean(xu030Payload?.rows?.length);
+                    tab === 'xutum'
+                        ? Boolean((xutumPayload?.rows?.length || xu100Rows.length) > 0)
+                        : tab === 'xu100'
+                          ? Boolean((xu100Payload?.rows?.length || xu100Rows.length) > 0)
+                          : Boolean(xu030Payload?.rows?.length);
                 if (!options?.silent || !hasRows) {
                     setTabError(tab, error instanceof Error ? error.message : fallback);
                 }
@@ -461,7 +472,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
                 inFlightRef.current[tab] = false;
                 if (!options?.silent) setTabLoading(tab, false);
             });
-    }, [xu030Payload?.rows?.length, xu100Payload?.rows?.length, xu100Rows.length]);
+    }, [xutumPayload?.rows?.length, xu030Payload?.rows?.length, xu100Payload?.rows?.length, xu100Rows.length]);
 
     useEffect(() => {
         if (isCollapsed || activeTool !== 'markets') return;
@@ -478,11 +489,13 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
             loadFxRows();
         }
 
-        if ((activeTab === 'xu100' || activeTab === 'xu030')) {
+        if ((activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030')) {
             const hasCurrentRows =
-                activeTab === 'xu100'
-                    ? Boolean((xu100Payload?.rows?.length || xu100Rows.length) > 0)
-                    : Boolean(xu030Payload?.rows?.length);
+                activeTab === 'xutum'
+                    ? Boolean((xutumPayload?.rows?.length || xu100Rows.length) > 0)
+                    : activeTab === 'xu100'
+                      ? Boolean((xu100Payload?.rows?.length || xu100Rows.length) > 0)
+                      : Boolean(xu030Payload?.rows?.length);
             loadStockTab(activeTab, { silent: hasCurrentRows, refresh: true });
         }
     }, [
@@ -496,12 +509,13 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
         loadFxRows,
         loadGlobalRows,
         loadStockTab,
+        xutumPayload?.rows?.length,
         xu030Payload?.rows?.length,
         xu100Payload?.rows?.length,
         xu100Rows.length,
     ]);
 
-    // Tüm sekmeler (endeks, emtia, döviz, xu100, xu030) için 3 saniyelik canlı polling döngüsü.
+    // Tüm sekmeler için 3 saniyelik canlı polling döngüsü.
     useEffect(() => {
         if (isCollapsed || activeTool !== 'markets') return;
 
@@ -512,7 +526,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
                 loadCommodityRows({ silent: true });
             } else if (activeTab === 'fx') {
                 loadFxRows({ silent: true });
-            } else if (activeTab === 'xu100' || activeTab === 'xu030') {
+            } else if (activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030') {
                 loadStockTab(activeTab, { silent: true, refresh: true });
             }
         }, LIVE_RAIL_REFRESH_MS);
@@ -524,8 +538,9 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
         if (activeTab === 'global') mapped = (globalPayload?.items || []).map((item) => fromWatchItem(item, 'index'));
         else if (activeTab === 'commodities') mapped = (commodityRows || []).map((item) => fromWatchItem(item, 'commodity'));
         else if (activeTab === 'fx') mapped = (fxRows || []).map((item) => fromWatchItem(item, 'fx'));
+        else if (activeTab === 'xutum') mapped = (xutumPayload?.rows || xu100Rows).map(fromStockRow);
         else if (activeTab === 'xu030') mapped = (xu030Payload?.rows || []).map(fromStockRow);
-        else mapped = (xu100Payload?.rows || xu100Rows).map(fromStockRow);
+        else mapped = (xu100Payload?.rows || []).map(fromStockRow);
 
         const order = DEFAULT_ORDER[activeTab];
         if (order) {
@@ -547,7 +562,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
             });
         }
         return mapped;
-    }, [activeTab, commodityRows, fxRows, globalPayload?.items, xu030Payload?.rows, xu100Payload?.rows, xu100Rows]);
+    }, [activeTab, commodityRows, fxRows, globalPayload?.items, xutumPayload?.rows, xu030Payload?.rows, xu100Payload?.rows, xu100Rows]);
 
     const rows = useMemo<RailRow[]>(() => {
         const sorted = [...rawRows];

@@ -1,4 +1,4 @@
-export type SymbolLogoKind = 'stock' | 'index' | 'commodity' | 'fx';
+export type SymbolLogoKind = 'stock' | 'index' | 'commodity' | 'fx' | 'fund';
 
 export const STOCK_LOGO_DOMAIN_MAP: Record<string, string | string[]> = {
     AEFES: 'anadoluefes.com',
@@ -124,6 +124,8 @@ const COMPANY_TOKEN_STOPWORDS = new Set([
 function foldTurkishToAscii(raw: string): string {
     return raw
         .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
         .replace(/ç/g, 'c')
         .replace(/ğ/g, 'g')
         .replace(/ı/g, 'i')
@@ -145,7 +147,22 @@ function uniqueLimited(values: Array<string | null | undefined>, limit = 10): st
     return out;
 }
 
+function uniquePreserveCase(values: Array<string | null | undefined>, limit = 10): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const value of values) {
+        const text = String(value || '').trim();
+        const key = text.toLowerCase();
+        if (!text || seen.has(key)) continue;
+        out.push(text);
+        seen.add(key);
+        if (out.length >= limit) break;
+    }
+    return out;
+}
+
 export const LOCAL_SYMBOL_ICON_MAP: Record<string, string> = {
+    XUTUM: '/market-icons/index-xu100.svg',
     XU100: '/market-icons/index-xu100.svg',
     XU030: '/market-icons/index-xu030.svg',
     SP500: '/market-icons/index-sp500.svg',
@@ -185,6 +202,7 @@ export const INDEX_LOGO_SLUGS: Record<string, string> = {
     NIKKEI: 'country/JP--big',
     HANGSENG: 'country/CN--big',
     CAC40: 'country/FR--big',
+    XUTUM: 'country/TR--big',
     XU100: 'country/TR--big',
     XU030: 'country/TR--big',
 };
@@ -247,10 +265,38 @@ export const TRADINGVIEW_SYMBOL_SLUG_MAP: Record<string, string> = {
 
 const rawLogoDevToken = (import.meta.env.VITE_LOGO_DEV_TOKEN as string | undefined)?.trim();
 const rawTradingViewFlag = (import.meta.env.VITE_ENABLE_TRADINGVIEW_LOGO_FALLBACK as string | undefined)?.trim().toLowerCase();
+const rawFintablesLogoFlag = (import.meta.env.VITE_FINTABLES_LOGOS_ENABLED as string | undefined)?.trim().toLowerCase();
 
 export const LOGO_DEV_TOKEN = rawLogoDevToken || '';
 export const LOGO_DEV_ENABLED = Boolean(LOGO_DEV_TOKEN);
 export const TRADINGVIEW_FALLBACK_ENABLED = rawTradingViewFlag === '1' || rawTradingViewFlag === 'true' || rawTradingViewFlag === 'yes';
+export const FINTABLES_LOGOS_ENABLED = !['0', 'false', 'no', 'off'].includes(rawFintablesLogoFlag || '');
+const FINTABLES_LOGO_BASE_URL = 'https://storage.fintables.com/media/uploads/company-logos';
+const FINTABLES_FUND_MANAGER_LOGO_BASE_URL = 'https://storage.fintables.com/media/uploads/fund-management-logos';
+const FUND_MANAGER_LOGO_SLUG_MAP: Record<string, string[]> = {
+    a1_capital_portfoy: ['a1_portfoy_icon_So2sGTy', 'a1_portfoy_icon'],
+    a1_portfoy: ['a1_portfoy_icon_So2sGTy', 'a1_portfoy_icon'],
+    aktif_portfoy: ['aktif_portfoy', 'aktif_portfoy_icon'],
+    ak_portfoy: ['akportfoy_icon'],
+    allbatross_portfoy: ['allbatross_portfoy_icon'],
+    atlas_portfoy: ['atlas_portfoy_icon'],
+    ata_portfoy: ['ata_portfoy_icon'],
+    aura_portfoy: ['aura_portfoy'],
+    bulls_portfoy: ['bulls_portfoy_icon'],
+    inveo_portfoy: ['inveo_portfoy'],
+    is_portfoy: ['is_portfoy_icon'],
+    istanbul_portfoy: ['istanbul_portfoy'],
+    pardus_portfoy: ['pardus_portfoy_icon'],
+    perform_portfoy: ['perform_portfoy'],
+    pusula_portfoy: ['pusula_portfoy_icon'],
+    qinvest_portfoy: ['qinvest_portfoy'],
+    qnb_finans_portfoy: ['qnb_finans_portfoy_icon'],
+    qnb_portfoy: ['qnb_finans_portfoy_icon'],
+    tacirler_portfoy: ['tacirler_portfoy'],
+    tera_portfoy: ['tera_portfoy_icon'],
+    vega_portfoy: ['vega_portfoy_icon'],
+    yapi_kredi_portfoy: ['yapikredi_portfoy_icon'],
+};
 
 export function normalizeLogoSymbol(symbol: string): string {
     const normalized = String(symbol || '')
@@ -259,6 +305,47 @@ export function normalizeLogoSymbol(symbol: string): string {
         .toUpperCase();
     const classSuffixMatch = normalized.match(/^([A-Z0-9]{2,12})[\s._-]+[A-Z]$/);
     return classSuffixMatch ? classSuffixMatch[1] : normalized;
+}
+
+export function fintablesLogoUrlsForSymbol(symbol: string): string[] {
+    if (!FINTABLES_LOGOS_ENABLED) return [];
+    const normalized = normalizeLogoSymbol(symbol).replace(/[^A-Z0-9]/g, '');
+    if (!/^[A-Z0-9]{2,12}$/.test(normalized)) return [];
+    return [
+        `${FINTABLES_LOGO_BASE_URL}/${normalized.toLowerCase()}_icon.png`,
+        `${FINTABLES_LOGO_BASE_URL}/${normalized}.png`,
+    ];
+}
+
+function normalizeFundManagerSlugSeed(raw: string): string {
+    return foldTurkishToAscii(raw)
+        .replace(/\ba\s*[\.\s]*s\b\.?/g, '')
+        .replace(/\bportfoy yonetimi\b/g, 'portfoy')
+        .replace(/\byonetimi\b/g, '')
+        .replace(/\banonim sirketi\b/g, '')
+        .replace(/\bsirketi\b/g, '')
+        .replace(/\bpys\b/g, 'portfoy')
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .replace(/_+/g, '_');
+}
+
+export function fintablesFundManagerLogoUrls(managerName?: string | null): string[] {
+    if (!FINTABLES_LOGOS_ENABLED) return [];
+    const slug = normalizeFundManagerSlugSeed(String(managerName || ''));
+    if (!slug) return [];
+    const mappedKeys = Object.keys(FUND_MANAGER_LOGO_SLUG_MAP).filter(
+        (key) => slug === key || slug.startsWith(`${key}_`) || slug.includes(`_${key}_`),
+    );
+    const basenames = uniquePreserveCase([
+        ...mappedKeys.flatMap((key) => FUND_MANAGER_LOGO_SLUG_MAP[key] || []),
+        `${slug}_icon`,
+        slug,
+    ]);
+    return basenames.flatMap((item) => [
+        `${FINTABLES_FUND_MANAGER_LOGO_BASE_URL}/${item}.png`,
+        `${FINTABLES_FUND_MANAGER_LOGO_BASE_URL}/${item}.jpeg`,
+    ]);
 }
 
 function sanitizeDomain(raw: string | null | undefined): string | null {

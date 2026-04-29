@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import {
     FX_COUNTRY_FLAGS,
+    fintablesFundManagerLogoUrls,
     type SymbolLogoKind,
+    fintablesLogoUrlsForSymbol,
     localIconForSymbol,
     logoDevDomainUrl,
     normalizeLogoSymbol,
@@ -12,6 +14,15 @@ import {
 import './SymbolLogo.css';
 
 export type { SymbolLogoKind };
+
+const LOGO_SUCCESS_CACHE_KEY = 'ragfin.logo.success.v2';
+const LOGO_FAILED_CACHE_KEY = 'ragfin.logo.failed.v2';
+const LOGO_SUCCESS_TTL_MS = 24 * 60 * 60 * 1000;
+const LOGO_FAILED_TTL_MS = 60 * 60 * 1000;
+const logoSuccessMemory = new Map<string, { url: string; ts: number }>();
+const logoFailedMemory = new Map<string, number>();
+let logoSuccessSessionLoaded = false;
+let logoFailedSessionLoaded = false;
 
 export type SymbolLogoProps = {
     symbol: string;
@@ -28,6 +39,115 @@ function monogramForSymbol(symbol: string): string {
     return normalized.slice(0, 2);
 }
 
+function nowMs(): number {
+    return Date.now();
+}
+
+function readSessionObject<T>(key: string): Record<string, T> {
+    if (typeof window === 'undefined') return {};
+    try {
+        const raw = window.sessionStorage.getItem(key);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function writeSessionObject<T>(key: string, payload: Record<string, T>): void {
+    if (typeof window === 'undefined') return;
+    try {
+        window.sessionStorage.setItem(key, JSON.stringify(payload));
+    } catch {
+        // Session storage can be unavailable in privacy modes; memory cache still applies.
+    }
+}
+
+function logoCacheKey(kind: SymbolLogoKind, symbol: string, name?: string, logoUrl?: string | null): string {
+    if (kind === 'fund') {
+        return `${kind}:${String(logoUrl || name || '').trim()}`;
+    }
+    return `${kind}:${normalizeLogoSymbol(symbol)}:${String(name || '').trim()}:${String(logoUrl || '').trim()}`;
+}
+
+function ensureLogoSuccessCacheLoaded(): void {
+    if (logoSuccessSessionLoaded) return;
+    const stored = readSessionObject<{ url: string; ts: number }>(LOGO_SUCCESS_CACHE_KEY);
+    Object.entries(stored).forEach(([key, value]) => {
+        if (value?.url && value?.ts) {
+            logoSuccessMemory.set(key, value);
+        }
+    });
+    logoSuccessSessionLoaded = true;
+}
+
+function ensureLogoFailedCacheLoaded(): void {
+    if (logoFailedSessionLoaded) return;
+    const stored = readSessionObject<number>(LOGO_FAILED_CACHE_KEY);
+    Object.entries(stored).forEach(([url, ts]) => {
+        if (ts) {
+            logoFailedMemory.set(url, ts);
+        }
+    });
+    logoFailedSessionLoaded = true;
+}
+
+function persistLogoSuccessCache(): void {
+    writeSessionObject(LOGO_SUCCESS_CACHE_KEY, Object.fromEntries(logoSuccessMemory));
+}
+
+function persistLogoFailedCache(): void {
+    writeSessionObject(LOGO_FAILED_CACHE_KEY, Object.fromEntries(logoFailedMemory));
+}
+
+function cachedSuccessUrl(key: string, candidates: string[]): string | null {
+    ensureLogoSuccessCacheLoaded();
+    const current = logoSuccessMemory.get(key);
+    const now = nowMs();
+    if (current && now - current.ts < LOGO_SUCCESS_TTL_MS && candidates.includes(current.url)) {
+        return current.url;
+    }
+    return null;
+}
+
+function isFailedLogoUrl(url: string): boolean {
+    ensureLogoFailedCacheLoaded();
+    const failedAt = logoFailedMemory.get(url);
+    const now = nowMs();
+    if (failedAt && now - failedAt < LOGO_FAILED_TTL_MS) return true;
+    return false;
+}
+
+function markLogoSuccess(key: string, url: string): void {
+    const now = nowMs();
+    const existing = logoSuccessMemory.get(key);
+    if (existing?.url === url && now - existing.ts < LOGO_SUCCESS_TTL_MS) return;
+    const item = { url, ts: now };
+    logoSuccessMemory.set(key, item);
+    persistLogoSuccessCache();
+}
+
+function markLogoFailed(key: string, url: string): void {
+    const ts = nowMs();
+    const existing = logoFailedMemory.get(url);
+    if (existing && ts - existing < LOGO_FAILED_TTL_MS) return;
+    logoFailedMemory.set(url, ts);
+    persistLogoFailedCache();
+
+    const success = logoSuccessMemory.get(key);
+    if (success?.url === url) {
+        logoSuccessMemory.delete(key);
+        persistLogoSuccessCache();
+    }
+}
+
+function cacheAwareCandidates(key: string, candidates: string[]): string[] {
+    const success = cachedSuccessUrl(key, candidates);
+    const remaining = candidates.filter((item) => item !== success && !isFailedLogoUrl(item));
+    return success ? [success, ...remaining] : remaining;
+}
+
 function buildCandidates({
     symbol,
     name,
@@ -42,17 +162,24 @@ function buildCandidates({
     const normalized = normalizeLogoSymbol(symbol);
     const candidates: string[] = [];
 
+    if (kind === 'fund') {
+        candidates.push(...fintablesFundManagerLogoUrls(logoUrl || name));
+        return candidates;
+    }
+
     if (kind === 'stock') {
+        candidates.push(...fintablesLogoUrlsForSymbol(normalized));
+
+        if (logoUrl) {
+            candidates.push(logoUrl);
+        }
+
         const domains = stockLogoDevDomains(normalized, name);
         for (const domain of domains) {
             const logoDevUrl = logoDevDomainUrl(domain);
             if (logoDevUrl) {
                 candidates.push(logoDevUrl);
             }
-        }
-
-        if (logoUrl) {
-            candidates.push(logoUrl);
         }
 
         const tradingViewUrl = tradingViewLogoUrl(normalized);
@@ -74,7 +201,7 @@ function buildCandidates({
     return Array.from(new Set(candidates.filter((item) => Boolean(item))));
 }
 
-export default function SymbolLogo({
+function SymbolLogo({
     symbol,
     name,
     kind,
@@ -85,9 +212,17 @@ export default function SymbolLogo({
     const normalizedSymbol = normalizeLogoSymbol(symbol);
     const fxFlags = kind === 'fx' ? FX_COUNTRY_FLAGS[normalizedSymbol] : undefined;
     const fallbackText = monogramForSymbol(normalizedSymbol);
-    const candidates = useMemo(
+    const rawCandidates = useMemo(
         () => buildCandidates({ symbol: normalizedSymbol, name, kind, logoUrl }),
         [normalizedSymbol, name, kind, logoUrl],
+    );
+    const cacheKey = useMemo(
+        () => logoCacheKey(kind, normalizedSymbol, name, logoUrl),
+        [kind, normalizedSymbol, name, logoUrl],
+    );
+    const candidates = useMemo(
+        () => cacheAwareCandidates(cacheKey, rawCandidates),
+        [cacheKey, rawCandidates],
     );
     const candidateKey = candidates.join('|');
     const [candidateIndex, setCandidateIndex] = useState(0);
@@ -153,7 +288,11 @@ export default function SymbolLogo({
                     alt={name || normalizedSymbol}
                     className="symbol-logo-image"
                     loading="lazy"
+                    onLoad={() => {
+                        markLogoSuccess(cacheKey, currentSrc);
+                    }}
                     onError={() => {
+                        markLogoFailed(cacheKey, currentSrc);
                         setCandidateIndex((prev) => prev + 1);
                     }}
                 />
@@ -163,3 +302,5 @@ export default function SymbolLogo({
         </span>
     );
 }
+
+export default memo(SymbolLogo);

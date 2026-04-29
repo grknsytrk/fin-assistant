@@ -4,8 +4,11 @@ import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 're
 import MarketPage from './pages/MarketPage';
 import MarketsView from './pages/MarketsView';
 import StockDetailPage from './pages/StockDetailPage';
+import FundsPage from './pages/FundsPage';
 import GlobalTickerSearch from './components/GlobalTickerSearch';
+import type { MarketsNavigationSection } from './components/MarketsNavigation';
 import {
+  DEFAULT_FUND_TAB,
   DEFAULT_MARKET_INDEX,
   DEFAULT_STOCK_RETURN_MODE,
   DEFAULT_STOCK_TAB,
@@ -13,9 +16,13 @@ import {
   canonicalizeStocksReturnModeSearch,
   legacySearchToCanonical,
   normalizeMarketIndexCode,
+  normalizeFundCode,
+  normalizeFundTab,
   normalizeStockReturnMode,
   normalizeStockTab,
   normalizeTicker,
+  toFundDetail,
+  toFunds,
   toMarketsIndexDetail,
   toMarketsIndices,
   toMarketsOverview,
@@ -45,9 +52,13 @@ function LandingRoute() {
 function MarketsOverviewRoute() {
   const navigate = useNavigate();
 
-  const handleSectionNavigate = (section: 'markets' | 'stocks' | 'indices') => {
+  const handleSectionNavigate = (section: MarketsNavigationSection) => {
     if (section === 'markets') {
       navigate(toMarketsOverview());
+      return;
+    }
+    if (section === 'funds') {
+      navigate(toFunds());
       return;
     }
     if (section === 'indices') {
@@ -98,9 +109,13 @@ function MarketsStocksRoute() {
     return <Navigate to={canonicalTarget} replace />;
   }
 
-  const handleSectionNavigate = (section: 'markets' | 'stocks' | 'indices') => {
+  const handleSectionNavigate = (section: MarketsNavigationSection) => {
     if (section === 'markets') {
       navigate(toMarketsOverview());
+      return;
+    }
+    if (section === 'funds') {
+      navigate(toFunds());
       return;
     }
     if (section === 'indices') {
@@ -147,6 +162,10 @@ function MarketsIndicesListRoute() {
           navigate(toMarketsOverview());
           return;
         }
+        if (section === 'funds') {
+          navigate(toFunds());
+          return;
+        }
         if (section === 'indices') {
           navigate(toMarketsIndices());
           return;
@@ -184,6 +203,10 @@ function MarketsIndicesDetailRoute() {
       onNavigateSection={(section) => {
         if (section === 'markets') {
           navigate(toMarketsOverview());
+          return;
+        }
+        if (section === 'funds') {
+          navigate(toFunds());
           return;
         }
         if (section === 'indices') {
@@ -242,6 +265,89 @@ function StockDetailRoute() {
   );
 }
 
+function FundsListRoute() {
+  const navigate = useNavigate();
+
+  const handleSectionNavigate = (section: MarketsNavigationSection) => {
+    if (section === 'markets') {
+      navigate(toMarketsOverview());
+      return;
+    }
+    if (section === 'stocks') {
+      navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
+      return;
+    }
+    if (section === 'indices') {
+      navigate(toMarketsIndices());
+      return;
+    }
+    navigate(toFunds());
+  };
+
+  return (
+    <FundsPage
+      onOpenFund={(nextFundCode, nextTab = DEFAULT_FUND_TAB) => navigate(toFundDetail(nextFundCode, nextTab))}
+      onTabChange={() => undefined}
+      onBack={() => navigate(toFunds())}
+      onNavigateSection={handleSectionNavigate}
+      onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+    />
+  );
+}
+
+function FundCodeDefaultTabRedirect() {
+  const params = useParams<{ fundCode: string }>();
+  return <Navigate to={toFundDetail(params.fundCode, DEFAULT_FUND_TAB)} replace />;
+}
+
+function FundDetailRoute() {
+  const navigate = useNavigate();
+  const params = useParams<{ fundCode: string; tab: string }>();
+  const rawFundCode = String(params.fundCode || '');
+  const rawTab = String(params.tab || '');
+  const normalizedFundCode = normalizeFundCode(rawFundCode);
+  const normalizedTab = normalizeFundTab(rawTab);
+
+  if (!normalizedFundCode) {
+    return <Navigate to={toFunds()} replace />;
+  }
+
+  const needsCanonicalFundCode = rawFundCode.trim().toUpperCase() !== normalizedFundCode;
+  const needsCanonicalTab = rawTab.trim().toLowerCase() !== normalizedTab;
+  if (needsCanonicalFundCode || needsCanonicalTab) {
+    return <Navigate to={toFundDetail(normalizedFundCode, normalizedTab)} replace />;
+  }
+
+  const handleSectionNavigate = (section: MarketsNavigationSection) => {
+    if (section === 'markets') {
+      navigate(toMarketsOverview());
+      return;
+    }
+    if (section === 'stocks') {
+      navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
+      return;
+    }
+    if (section === 'indices') {
+      navigate(toMarketsIndices());
+      return;
+    }
+    navigate(toFunds());
+  };
+
+  return (
+    <FundsPage
+      key={`${normalizedFundCode}-${normalizedTab}`}
+      fundCode={normalizedFundCode}
+      activeTab={normalizedTab}
+      onOpenFund={(nextFundCode, nextTab = DEFAULT_FUND_TAB) => navigate(toFundDetail(nextFundCode, nextTab))}
+      onTabChange={(nextTab) => navigate(toFundDetail(normalizedFundCode, nextTab))}
+      onBack={() => navigate(toFunds())}
+      onNavigateSection={handleSectionNavigate}
+      onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+    />
+  );
+}
+
 function App() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -267,6 +373,7 @@ function App() {
 
   const isLandingPage = location.pathname === ROUTE_PATHS.landing;
   const isMarketsView = location.pathname.startsWith(ROUTE_PATHS.markets);
+  const isFundsView = location.pathname.startsWith(ROUTE_PATHS.funds);
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
@@ -274,7 +381,7 @@ function App() {
 
   return (
     <div className="app-layout">
-      {!isLandingPage && !isMarketsView && (
+      {!isLandingPage && !isMarketsView && !isFundsView && (
         <header className="app-header">
           <div className="header-content">
             <div
@@ -329,6 +436,10 @@ function App() {
           <Route path={ROUTE_PATHS.marketsStocksIndex} element={<MarketsStocksRoute />} />
           <Route path={ROUTE_PATHS.marketsIndices} element={<MarketsIndicesListRoute />} />
           <Route path={ROUTE_PATHS.marketsIndicesDetail} element={<MarketsIndicesDetailRoute />} />
+
+          <Route path={ROUTE_PATHS.funds} element={<FundsListRoute />} />
+          <Route path={ROUTE_PATHS.fundDetailNoTab} element={<FundCodeDefaultTabRedirect />} />
+          <Route path={ROUTE_PATHS.fundDetail} element={<FundDetailRoute />} />
 
           <Route path={ROUTE_PATHS.stocks} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
           <Route path={ROUTE_PATHS.stockDetailNoTab} element={<StockTickerDefaultTabRedirect />} />

@@ -24,11 +24,11 @@ import type { StockReturnMode } from '../routing/routes';
 import MarketWatchRail from '../components/MarketWatchRail';
 import MarketSidebar from '../components/MarketSidebar';
 import MarketWatchStrip from '../components/MarketWatchStrip';
-import MarketsNavigation from '../components/MarketsNavigation';
+import MarketsNavigation, { type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo from '../components/SymbolLogo';
 import './MarketsView.css';
 
-type MarketSection = 'markets' | 'stocks' | 'indices';
+type MarketSection = MarketsNavigationSection;
 type SortDirection = 'asc' | 'desc';
 type IndexConstituentDataSortKey = 'symbol' | 'price' | 'change_pct' | 'volume' | 'weight_pct' | 'point_effect';
 type IndexConstituentSortKey = IndexConstituentDataSortKey | 'impact_pct' | 'impact_abs';
@@ -65,7 +65,7 @@ const STOCK_COLUMNS: Array<{ key: StockSortKey; label: string; sublabel?: string
     { key: 'return_ytd_pct', label: 'Getiri %', sublabel: 'YTA', align: 'right' },
     { key: 'return_1y_pct', label: 'Getiri %', sublabel: 'Son 1 yıl', align: 'right' },
 ];
-const STOCK_INDEX_OPTIONS: MarketStockIndex[] = ['XU100', 'XU030'];
+const STOCK_INDEX_OPTIONS: MarketStockIndex[] = ['XUTUM', 'XU100', 'XU030'];
 const RETURN_MODE_OPTIONS: Array<{ id: StockReturnMode; label: string }> = [
     { id: 'absolute', label: 'Mutlak' },
     { id: 'relative_xu100', label: "XU100'a göre" },
@@ -1766,7 +1766,7 @@ interface MarketsViewProps {
 
 export default function MarketsView({
     routeSection = 'stocks',
-    routeStockIndex = 'XU100',
+    routeStockIndex = 'XUTUM',
     routeSelectedIndex = null,
     routeReturnMode = DEFAULT_STOCK_RETURN_MODE,
     onNavigateSection,
@@ -2069,7 +2069,7 @@ export default function MarketsView({
     async function loadIndexDetail(
         silent = false,
         refresh = false,
-        requestedIndex: MarketIndexCode = selectedIndex || 'XU100',
+        requestedIndex: MarketIndexCode = selectedIndex || 'XUTUM',
     ) {
         if (indexDetailInFlightRef.current) return;
         indexDetailInFlightRef.current = true;
@@ -2248,9 +2248,9 @@ export default function MarketsView({
               : 'Piyasa Görünümü';
     const pageDescription =
         activeSection === 'indices'
-            ? 'XU100 ve XU030 endekslerini, getirileri ve endeks içi şirket hareketlerini takip edin.'
+            ? 'XUTUM, XU100 ve XU030 endekslerini, getirileri ve endeks içi şirket hareketlerini takip edin.'
             : activeSection === 'stocks'
-              ? 'XU100 ve XU030 hisselerini getiri, hacim ve piyasa değeriyle karşılaştırın.'
+              ? 'XUTUM, XU100 ve XU030 hisselerini fiyat, hacim ve piyasa değeriyle karşılaştırın.'
             : 'Güncel fiyatlar, finansal görünüm ve analiz erişimi tek ekranda.';
 
     const onCompanyClick = (ticker: string) => {
