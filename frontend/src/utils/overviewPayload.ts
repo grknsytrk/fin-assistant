@@ -8,9 +8,7 @@ import {
     CHART_WINDOW_QUARTERS,
 } from './chartBuilders';
 import {
-    _resolveMetricValueByPriority,
     _resolveMetricValue,
-    _resolveMetricDisplayByPriority,
     _resolveMetricDisplay,
     _calcPctChange,
     _pctText,
@@ -164,8 +162,9 @@ export function getOverviewSummaryRows(snapshot: KapSnapshotResponse, quarters: 
     };
 }
 
-export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters: KapQuarter[]): OverviewChartGroup[] {
+export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters: KapQuarter[], windowQuarters?: number): OverviewChartGroup[] {
     if (!quarters.length) return [];
+    const window = windowQuarters ?? CHART_WINDOW_QUARTERS;
 
     const { isBankLike, isInsuranceLike } = companyKind(snapshot, quarters);
     let barCharts: OverviewChartGroup[];
@@ -180,17 +179,17 @@ export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters
                     const gider = _resolveMetricValue(rows, idx, 'faiz_giderleri', true);
                     if (gelir === null && gider === null) return null;
                     return (gelir ?? 0) + (gider ?? 0);
-                }, (val, curr) => `${val.toLocaleString('tr-TR')} ${curr}`), CHART_WINDOW_QUARTERS),
+                }, (val, curr) => `${val.toLocaleString('tr-TR')} ${curr}`), window),
             },
             {
                 title: 'Çeyreklik Net Kar',
                 kind: 'bar' as const,
-                series: _takeLastSeries(_buildMetricSeries(quarters, 'net_kar', true), CHART_WINDOW_QUARTERS),
+                series: _takeLastSeries(_buildMetricSeries(quarters, 'net_kar', true), window),
             },
             {
                 title: 'Krediler',
                 kind: 'bar' as const,
-                series: _takeLastSeries(_buildMetricSeries(quarters, 'krediler', false), CHART_WINDOW_QUARTERS),
+                series: _takeLastSeries(_buildMetricSeries(quarters, 'krediler', false), window),
             },
         ].filter((item) => item.series.length > 0);
     } else if (isInsuranceLike) {
@@ -198,17 +197,17 @@ export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters
             {
                 title: 'Çeyreklik Prim Üretimi',
                 kind: 'bar' as const,
-                series: _takeLastSeries(_buildMetricSeries(quarters, 'prim_uretimi', true), CHART_WINDOW_QUARTERS),
+                series: _takeLastSeries(_buildMetricSeries(quarters, 'prim_uretimi', true), window),
             },
             {
                 title: 'Çeyreklik Teknik Denge',
                 kind: 'bar' as const,
-                series: _takeLastSeries(_buildMetricSeries(quarters, 'teknik_denge', true), CHART_WINDOW_QUARTERS),
+                series: _takeLastSeries(_buildMetricSeries(quarters, 'teknik_denge', true), window),
             },
             {
                 title: 'Çeyreklik Net Kar',
                 kind: 'bar' as const,
-                series: _takeLastSeries(_buildMetricSeries(quarters, 'net_kar', true), CHART_WINDOW_QUARTERS),
+                series: _takeLastSeries(_buildMetricSeries(quarters, 'net_kar', true), window),
             },
         ].filter((item) => item.series.length > 0);
     } else {
@@ -216,22 +215,22 @@ export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters
             {
                 title: 'Çeyreklik Satışlar',
                 kind: 'bar' as const,
-                series: _takeLastSeries(_buildMetricSeries(quarters, 'satis_gelirleri', true), CHART_WINDOW_QUARTERS),
+                series: _takeLastSeries(_buildMetricSeries(quarters, 'satis_gelirleri', true), window),
             },
             {
                 title: 'Çeyreklik FAVÖK',
                 kind: 'bar' as const,
-                series: _takeLastSeries(_buildMetricSeries(quarters, 'favok', true), CHART_WINDOW_QUARTERS),
+                series: _takeLastSeries(_buildMetricSeries(quarters, 'favok', true), window),
             },
             {
                 title: 'Çeyreklik Net Kâr',
                 kind: 'bar' as const,
-                series: _takeLastSeries(_buildMetricSeries(quarters, 'net_kar', true), CHART_WINDOW_QUARTERS),
+                series: _takeLastSeries(_buildMetricSeries(quarters, 'net_kar', true), window),
             },
             {
                 title: 'Çeyreklik Serbest Nakit Akışı',
                 kind: 'bar' as const,
-                series: _takeLastSeries(_buildMetricSeries(quarters, 'serbest_nakit_akisi', true), CHART_WINDOW_QUARTERS),
+                series: _takeLastSeries(_buildMetricSeries(quarters, 'serbest_nakit_akisi', true), window),
             },
         ].filter((item) => item.series.length > 0);
     }
@@ -245,11 +244,11 @@ export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters
     };
 
     const lineCharts: OverviewChartGroup[] = [
-        { title: 'Brüt Kâr Marjı', kind: 'line' as const, series: _takeLastSeries(ratioSeries.brutKarMarji, CHART_WINDOW_QUARTERS) },
-        { title: 'FAVÖK Marjı', kind: 'line' as const, series: _takeLastSeries(ratioSeries.favokMarji, CHART_WINDOW_QUARTERS) },
-        { title: 'Net Kâr Marjı', kind: 'line' as const, series: _takeLastSeries(ratioSeries.netKarMarji, CHART_WINDOW_QUARTERS) },
-        { title: 'Cari Oran', kind: 'line' as const, series: _takeLastSeries(ratioSeries.cariOran, CHART_WINDOW_QUARTERS) },
-        { title: 'Özkaynak Karlılığı (ROE)', kind: 'line' as const, series: _takeLastSeries(ratioSeries.roe, CHART_WINDOW_QUARTERS) },
+        { title: 'Brüt Kâr Marjı', kind: 'line' as const, series: _takeLastSeries(ratioSeries.brutKarMarji, window) },
+        { title: 'FAVÖK Marjı', kind: 'line' as const, series: _takeLastSeries(ratioSeries.favokMarji, window) },
+        { title: 'Net Kâr Marjı', kind: 'line' as const, series: _takeLastSeries(ratioSeries.netKarMarji, window) },
+        { title: 'Cari Oran', kind: 'line' as const, series: _takeLastSeries(ratioSeries.cariOran, window) },
+        { title: 'Özkaynak Karlılığı (ROE)', kind: 'line' as const, series: _takeLastSeries(ratioSeries.roe, window) },
     ].filter((item) => item.series.length > 0);
 
     return [...barCharts, ...lineCharts];
@@ -406,9 +405,9 @@ export function buildOverviewAiPayload(snapshot: KapSnapshotResponse, quarters: 
 
     const incomeSummary = latestQuarter
         ? incomeSummaryRows.map((row): OverviewAiSummaryRow | null => {
-            const currentValue = _resolveMetricValueByPriority(latestQuarter, row.key, ['metrics_ytd', 'metrics', 'metrics_quarterly']);
-            const baseValue = prevYearSameQuarter
-                ? _resolveMetricValueByPriority(prevYearSameQuarter, row.key, ['metrics_ytd', 'metrics', 'metrics_quarterly'])
+            const currentValue = _resolveMetricValue(quarters, latestQuarterIdx, row.key, true);
+            const baseValue = prevYearSameQuarterIdx >= 0
+                ? _resolveMetricValue(quarters, prevYearSameQuarterIdx, row.key, true)
                 : null;
             if (currentValue === null && baseValue === null) return null;
             const pct = _calcPctChange(currentValue, baseValue);
@@ -417,11 +416,11 @@ export function buildOverviewAiPayload(snapshot: KapSnapshotResponse, quarters: 
                 label: row.label,
                 current_period: currentPeriod,
                 current_value: currentValue,
-                current_display: _resolveMetricDisplayByPriority(latestQuarter, row.key, ['metrics_ytd', 'metrics', 'metrics_quarterly']),
+                current_display: _resolveMetricDisplay(quarters, latestQuarterIdx, row.key, true),
                 base_period: incomeBasePeriod,
                 base_value: baseValue,
-                base_display: prevYearSameQuarter
-                    ? _resolveMetricDisplayByPriority(prevYearSameQuarter, row.key, ['metrics_ytd', 'metrics', 'metrics_quarterly'])
+                base_display: prevYearSameQuarterIdx >= 0
+                    ? _resolveMetricDisplay(quarters, prevYearSameQuarterIdx, row.key, true)
                     : '',
                 pct_change: pct,
                 pct_display: _pctText(pct),

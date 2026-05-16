@@ -1,4 +1,4 @@
-import { useRef, useState, type MouseEvent } from 'react';
+import { useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import type { SeriesPoint } from '../../utils/chartBuilders';
 import './Charts.css';
 
@@ -9,16 +9,33 @@ type TooltipState = {
     value: string;
 };
 
+const MAX_VISIBLE_X_LABELS = 8;
+
+function shouldShowXAxisLabel(index: number, total: number): boolean {
+    if (total <= 10) {
+        return true;
+    }
+    if (index === 0 || index === total - 1) {
+        return true;
+    }
+    const interval = Math.max(2, Math.ceil((total - 2) / (MAX_VISIBLE_X_LABELS - 2)));
+    return index % interval === 0;
+}
+
 export function BarChartCard({
     title,
     series,
     highlightedIndex,
     onHighlight,
+    onOpen,
+    className,
 }: {
     title: string;
     series: SeriesPoint[];
     highlightedIndex?: number | null;
     onHighlight?: (idx: number | null) => void;
+    onOpen?: () => void;
+    className?: string;
 }) {
     const cardRef = useRef<HTMLDivElement | null>(null);
     const [tooltip, setTooltip] = useState<TooltipState | null>(null);
@@ -68,8 +85,26 @@ export function BarChartCard({
         if (onHighlight) onHighlight(null);
     };
 
+    const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+        if (!onOpen) {
+            return;
+        }
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onOpen();
+        }
+    };
+
     return (
-        <div className="kap-chart-card" ref={cardRef}>
+        <div
+            className={`kap-chart-card${onOpen ? ' kap-chart-card-clickable' : ''}${className ? ` ${className}` : ''}`}
+            ref={cardRef}
+            role={onOpen ? 'button' : undefined}
+            tabIndex={onOpen ? 0 : undefined}
+            aria-label={onOpen ? `${title} grafiğini büyüt` : undefined}
+            onClick={onOpen}
+            onKeyDown={onKeyDown}
+        >
             <h4>{title}</h4>
             <svg
                 className="kap-chart-svg"
@@ -118,9 +153,11 @@ export function BarChartCard({
                                 onMouseEnter={(event) => onHover(event, point, idx)}
                                 onMouseLeave={onLeave}
                             />
-                            <text x={x + barWidth / 2} y={height - 16} textAnchor="middle" className="kap-x-label">
-                                {point.label}
-                            </text>
+                            {shouldShowXAxisLabel(idx, series.length) && (
+                                <text x={x + barWidth / 2} y={height - 16} textAnchor="middle" className="kap-x-label">
+                                    {point.label}
+                                </text>
+                            )}
                         </g>
                     );
                 })}
@@ -140,11 +177,15 @@ export function LineChartCard({
     series,
     highlightedIndex,
     onHighlight,
+    onOpen,
+    className,
 }: {
     title: string;
     series: SeriesPoint[];
     highlightedIndex?: number | null;
     onHighlight?: (idx: number | null) => void;
+    onOpen?: () => void;
+    className?: string;
 }) {
     const cardRef = useRef<HTMLDivElement | null>(null);
     const [tooltip, setTooltip] = useState<TooltipState | null>(null);
@@ -201,8 +242,26 @@ export function LineChartCard({
         if (onHighlight) onHighlight(null);
     };
 
+    const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+        if (!onOpen) {
+            return;
+        }
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onOpen();
+        }
+    };
+
     return (
-        <div className="kap-chart-card" ref={cardRef}>
+        <div
+            className={`kap-chart-card${onOpen ? ' kap-chart-card-clickable' : ''}${className ? ` ${className}` : ''}`}
+            ref={cardRef}
+            role={onOpen ? 'button' : undefined}
+            tabIndex={onOpen ? 0 : undefined}
+            aria-label={onOpen ? `${title} grafiğini büyüt` : undefined}
+            onClick={onOpen}
+            onKeyDown={onKeyDown}
+        >
             <h4>{title}</h4>
             <svg
                 className="kap-chart-svg"
@@ -242,9 +301,11 @@ export function LineChartCard({
                                 onMouseEnter={(event) => onHover(event, point, idx)}
                                 onMouseLeave={onLeave}
                             />
-                            <text x={point.x} y={height - 16} textAnchor="middle" className="kap-x-label">
-                                {point.label}
-                            </text>
+                            {shouldShowXAxisLabel(idx, series.length) && (
+                                <text x={point.x} y={height - 16} textAnchor="middle" className="kap-x-label">
+                                    {point.label}
+                                </text>
+                            )}
                         </g>
                     );
                 })}

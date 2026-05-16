@@ -4,8 +4,7 @@ import type { KapOverviewCommentaryResponse } from '../../../api/types';
 import { apiClient } from '../../../api/client';
 import { MultiplesRow } from '../../../components/stock/MultiplesRow';
 import {
-    _resolveMetricValueByPriority, _resolveMetricValue, _resolveMetricDisplayByPriority,
-    _resolveMetricDisplay, _calcPctChange, _pctClass, _pctText, intSafe, _periodLabel,
+    _resolveMetricValue, _resolveMetricDisplay, _calcPctChange, _pctClass, _pctText, intSafe, _periodLabel,
 } from '../../../utils/formatters';
 import {
     buildOverviewAiPayload,
@@ -37,6 +36,22 @@ const OVERVIEW_AI_LOADING_STEPS = [
         detail: 'Model yalnız sınırlı adjustment ve kısa finansal gerekçeler üretiyor.',
     },
 ];
+
+const CHART_QUARTER_WINDOW_STORAGE_KEY = 'ragfin_chart_quarter_window';
+const QUARTER_WINDOW_OPTIONS = [5, 10, 15, 20] as const;
+const DEFAULT_CHART_QUARTER_WINDOW = 10;
+
+function readStoredChartQuarterWindow(): number {
+    if (typeof window === 'undefined') return DEFAULT_CHART_QUARTER_WINDOW;
+    try {
+        const raw = window.localStorage.getItem(CHART_QUARTER_WINDOW_STORAGE_KEY);
+        if (raw) {
+            const parsed = Number(raw);
+            if ((QUARTER_WINDOW_OPTIONS as readonly number[]).includes(parsed)) return parsed;
+        }
+    } catch { /* ignore */ }
+    return DEFAULT_CHART_QUARTER_WINDOW;
+}
 
 function scoreSourceLabel(source: KapOverviewCommentaryResponse['scorecard']['score_source']) {
     if (source === 'ai_adjusted') return 'AI düzeltmeli skor';
@@ -93,6 +108,25 @@ export default function StockOverview({ snapshot, quarters }: { snapshot: KapSna
             overviewAiPayload.charts.length > 0);
     const selectedModelLabel =
         OVERVIEW_AI_MODELS.find((item) => item.id === selectedModel)?.label || selectedModel;
+
+    const [chartQuarterWindow, setChartQuarterWindow] = useState(readStoredChartQuarterWindow);
+
+    const summaryWarnings = useMemo(() => {
+        const warnings: string[] = [];
+        if (snapshot.cache_stale) {
+            warnings.push(
+                snapshot.error
+                    ? `Canlı KAP yenilenemedi (${snapshot.error}); yerel cache gösteriliyor.`
+                    : 'Canlı KAP yenilenemedi; yerel cache gösteriliyor.',
+            );
+        }
+        if (latestQuarter && quarters.length < 2) {
+            warnings.push(
+                `${_periodLabel(intSafe(latestQuarter.year), intSafe(latestQuarter.period), latestQuarter.quarter)} dışında geçmiş dönem bulunamadığı için karşılaştırma kolonları boş.`,
+            );
+        }
+        return warnings;
+    }, [latestQuarter, quarters.length, snapshot.cache_stale, snapshot.error]);
 
     useEffect(() => {
         aiRequestIdRef.current += 1;
@@ -225,6 +259,13 @@ export default function StockOverview({ snapshot, quarters }: { snapshot: KapSna
                         {snapshot.analysis_note ? (
                             <p className="kap-analysis-note">{snapshot.analysis_note}</p>
                         ) : null}
+                        {summaryWarnings.length > 0 ? (
+                            <div className="kap-summary-warnings" role="status">
+                                {summaryWarnings.map((warning) => (
+                                    <p key={warning}>{warning}</p>
+                                ))}
+                            </div>
+                        ) : null}
                     </div>
 
                     <div className="kap-summary-grid">
@@ -247,17 +288,19 @@ export default function StockOverview({ snapshot, quarters }: { snapshot: KapSna
                                 </thead>
                                 <tbody>
                                     {incomeSummaryRows.map((row) => {
-                                        const currentValue = _resolveMetricValueByPriority(
-                                            latestQuarter,
+                                        const currentValue = _resolveMetricValue(
+                                            quarters,
+                                            latestQuarterIdx,
                                             row.key,
-                                            ['metrics_ytd', 'metrics', 'metrics_quarterly'],
+                                            true,
                                         );
                                         const baseValue =
-                                            prevYearSameQuarter
-                                                ? _resolveMetricValueByPriority(
-                                                    prevYearSameQuarter,
+                                            prevYearSameQuarterIdx >= 0
+                                                ? _resolveMetricValue(
+                                                    quarters,
+                                                    prevYearSameQuarterIdx,
                                                     row.key,
-                                                    ['metrics_ytd', 'metrics', 'metrics_quarterly'],
+                                                    true,
                                                 )
                                                 : null;
                                         if (currentValue === null && baseValue === null) return null;
@@ -266,18 +309,20 @@ export default function StockOverview({ snapshot, quarters }: { snapshot: KapSna
                                             <tr key={`income-${row.key}`}>
                                                 <td>{row.label}</td>
                                                 <td>
-                                                    {_resolveMetricDisplayByPriority(
-                                                        latestQuarter,
+                                                    {_resolveMetricDisplay(
+                                                        quarters,
+                                                        latestQuarterIdx,
                                                         row.key,
-                                                        ['metrics_ytd', 'metrics', 'metrics_quarterly'],
+                                                        true,
                                                     )}
                                                 </td>
                                                 <td>
-                                                    {prevYearSameQuarter
-                                                        ? _resolveMetricDisplayByPriority(
-                                                            prevYearSameQuarter,
+                                                    {prevYearSameQuarterIdx >= 0
+                                                        ? _resolveMetricDisplay(
+                                                            quarters,
+                                                            prevYearSameQuarterIdx,
                                                             row.key,
-                                                            ['metrics_ytd', 'metrics', 'metrics_quarterly'],
+                                                            true,
                                                         )
                                                         : '-'}
                                                 </td>
@@ -338,10 +383,30 @@ export default function StockOverview({ snapshot, quarters }: { snapshot: KapSna
             {quarters.length > 0 && (
                 <section className="overview-charts-shell">
                     <div className="overview-charts-head">
-                        <h3>Grafikler ve Analiz</h3>
-                        <p>İlk olarak çeyreklik bar grafikler, ardından marj ve oran trendleri.</p>
+                        <div>
+                            <h3>Grafikler ve Analiz</h3>
+                            <p>İlk olarak çeyreklik bar grafikler, ardından marj ve oran trendleri.</p>
+                        </div>
+                        <div className="overview-charts-quarter-picker">
+                            <span className="overview-charts-quarter-label">Çeyrek:</span>
+                            {QUARTER_WINDOW_OPTIONS.map((opt) => (
+                                <button
+                                    key={opt}
+                                    type="button"
+                                    className={`overview-charts-quarter-btn${chartQuarterWindow === opt ? ' is-active' : ''}`}
+                                    onClick={() => {
+                                        setChartQuarterWindow(opt);
+                                        try {
+                                            window.localStorage.setItem(CHART_QUARTER_WINDOW_STORAGE_KEY, String(opt));
+                                        } catch { /* ignore */ }
+                                    }}
+                                >
+                                    {opt}Ç
+                                </button>
+                            ))}
+                        </div>
                     </div>
-                    <StockCharts snapshot={snapshot} quarters={quarters} embedded />
+                    <StockCharts snapshot={snapshot} quarters={quarters} embedded chartWindowQuarters={chartQuarterWindow} />
                 </section>
             )}
 

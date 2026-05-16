@@ -489,21 +489,6 @@ function _resolveMetricValueByPriority(
     return null;
 }
 
-function _resolveMetricDisplayByPriority(
-    row: KapQuarter | null,
-    metricKey: string,
-    priority: Array<'metrics' | 'metrics_quarterly' | 'metrics_ytd'>,
-): string {
-    if (!row) {
-        return '-';
-    }
-    const value = _resolveMetricValueByPriority(row, metricKey, priority);
-    if (value === null) {
-        return '-';
-    }
-    return _formatMetric(value, row.currency || 'TL');
-}
-
 function _resolveMetricDisplay(
     rows: KapQuarter[],
     idx: number,
@@ -1264,17 +1249,19 @@ export default function KapPage() {
                                         </thead>
                                         <tbody>
                                             {incomeSummaryRows.map((row) => {
-                                                const currentValue = _resolveMetricValueByPriority(
-                                                    latestQuarter,
+                                                const currentValue = _resolveMetricValue(
+                                                    orderedQuarters,
+                                                    latestQuarterIdx,
                                                     row.key,
-                                                    ['metrics_ytd', 'metrics', 'metrics_quarterly'],
+                                                    true,
                                                 );
                                                 const baseValue =
-                                                    prevYearSameQuarter
-                                                        ? _resolveMetricValueByPriority(
-                                                            prevYearSameQuarter,
+                                                    prevYearSameQuarterIdx >= 0
+                                                        ? _resolveMetricValue(
+                                                            orderedQuarters,
+                                                            prevYearSameQuarterIdx,
                                                             row.key,
-                                                            ['metrics_ytd', 'metrics', 'metrics_quarterly'],
+                                                            true,
                                                         )
                                                         : null;
                                                 if (currentValue === null && baseValue === null) {
@@ -1285,18 +1272,20 @@ export default function KapPage() {
                                                     <tr key={`income-${row.key}`}>
                                                         <td>{row.label}</td>
                                                         <td>
-                                                            {_resolveMetricDisplayByPriority(
-                                                                latestQuarter,
+                                                            {_resolveMetricDisplay(
+                                                                orderedQuarters,
+                                                                latestQuarterIdx,
                                                                 row.key,
-                                                                ['metrics_ytd', 'metrics', 'metrics_quarterly'],
+                                                                true,
                                                             )}
                                                         </td>
                                                         <td>
-                                                            {prevYearSameQuarter
-                                                                ? _resolveMetricDisplayByPriority(
-                                                                    prevYearSameQuarter,
+                                                            {prevYearSameQuarterIdx >= 0
+                                                                ? _resolveMetricDisplay(
+                                                                    orderedQuarters,
+                                                                    prevYearSameQuarterIdx,
                                                                     row.key,
-                                                                    ['metrics_ytd', 'metrics', 'metrics_quarterly'],
+                                                                    true,
                                                                 )
                                                                 : '-'}
                                                         </td>

@@ -403,9 +403,9 @@ _POINT_IN_TIME_RESTATEMENT_KEYS = (
 )
 
 _ANALYSIS_NOTE = (
-    "Önceki dönem tutarları, son KAP raporlarıyla karşılaştırılabilir kalması için "
-    "güncel analitik baza taşınabilir. İlk açıklandığı hali payload içindeki "
-    "`*_original` alanlarında korunur."
+    "Çeyreklik akışlarda ilk açıklanan değerler kullanılır. Karşılaştırılabilir "
+    "bilanço ve analitik oranlarda önceki dönem tutarları güncel baza taşınabilir; "
+    "ham değerler payload içindeki `*_original` alanlarında korunur."
 )
 
 _TCMB_CONSUMER_PRICES_URL = (
@@ -638,6 +638,7 @@ def normalize_snapshot_for_frontend(raw: Dict[str, Any]) -> Dict[str, Any]:
         "stock_code": raw.get("stock_code", ""),
         "fetched_at": raw.get("fetched_at", ""),
         "cache_hit": raw.get("cache_hit", False),
+        "cache_stale": raw.get("cache_stale", False),
         "error": raw.get("error"),
         "analysis_basis": "latest_comparable",
         "analysis_note": _ANALYSIS_NOTE,

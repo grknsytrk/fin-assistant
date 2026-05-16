@@ -83,6 +83,7 @@ function MarketsOverviewRoute() {
         navigate(toMarketsIndexDetail(nextIndex));
       }}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+      onOpenFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
     />
   );
 }
@@ -145,6 +146,7 @@ function MarketsStocksRoute() {
         navigate(toMarketsIndexDetail(nextIndex));
       }}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+      onOpenFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
     />
   );
 }
@@ -181,6 +183,7 @@ function MarketsIndicesListRoute() {
         navigate(toMarketsIndexDetail(nextIndex));
       }}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+      onOpenFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
     />
   );
 }
@@ -224,6 +227,7 @@ function MarketsIndicesDetailRoute() {
         navigate(toMarketsIndexDetail(nextIndex));
       }}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+      onOpenFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
     />
   );
 }
@@ -254,6 +258,22 @@ function StockDetailRoute() {
     return <Navigate to={toStockDetail(normalizedTicker, normalizedTab)} replace />;
   }
 
+  const handleSectionNavigate = (section: MarketsNavigationSection) => {
+    if (section === 'markets') {
+      navigate(toMarketsOverview());
+      return;
+    }
+    if (section === 'funds') {
+      navigate(toFunds());
+      return;
+    }
+    if (section === 'indices') {
+      navigate(toMarketsIndices());
+      return;
+    }
+    navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
+  };
+
   return (
     <StockDetailPage
       key={normalizedTicker}
@@ -261,6 +281,9 @@ function StockDetailRoute() {
       activeTab={normalizedTab}
       onTabChange={(nextTab) => navigate(toStockDetail(normalizedTicker, nextTab))}
       onBack={() => navigate(toMarketsStocks(DEFAULT_MARKET_INDEX))}
+      onNavigateSection={handleSectionNavigate}
+      onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+      onOpenFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
     />
   );
 }
@@ -374,6 +397,7 @@ function App() {
   const isLandingPage = location.pathname === ROUTE_PATHS.landing;
   const isMarketsView = location.pathname.startsWith(ROUTE_PATHS.markets);
   const isFundsView = location.pathname.startsWith(ROUTE_PATHS.funds);
+  const isStocksView = location.pathname.startsWith(ROUTE_PATHS.stocks);
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
@@ -381,7 +405,7 @@ function App() {
 
   return (
     <div className="app-layout">
-      {!isLandingPage && !isMarketsView && !isFundsView && (
+      {!isLandingPage && !isMarketsView && !isFundsView && !isStocksView && (
         <header className="app-header">
           <div className="header-content">
             <div
@@ -412,6 +436,7 @@ function App() {
               <GlobalTickerSearch
                 currentTicker={currentTicker}
                 onSelectTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+                onSelectFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
               />
 
               <button
