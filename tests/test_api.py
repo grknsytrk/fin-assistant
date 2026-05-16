@@ -61,18 +61,18 @@ def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
                     "risk_value": 5,
                     "currency": "TRY",
                     "as_of": "2026-04-28",
-                    "source": "fintables_udf_history",
+                    "source": "tefasfon_funds",
                 }
             ],
             "count": 1,
             "total_count": 1,
-            "source": "fintables_udf_history",
+            "source": "tefasfon_funds",
             "as_of": "2026-04-28",
             "fetched_at": "2026-04-28T09:00:00+00:00",
             "stale": False,
             "degraded": False,
             "warnings": [],
-            "source_metadata": {"source": "fintables_udf_history", "parse_status": "ok"},
+            "source_metadata": {"source": "tefasfon_funds", "parse_status": "ok"},
         }
 
     monkeypatch.setattr(fund_service_module, "get_funds_payload", fake_get_funds_payload)
@@ -83,7 +83,7 @@ def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["rows"][0]["fund_code"] == "YAC"
-    assert payload["source"] == "fintables_udf_history"
+    assert payload["source"] == "tefasfon_funds"
 
 
 def test_api_fund_holdings_not_parsed() -> None:
@@ -96,6 +96,43 @@ def test_api_fund_holdings_not_parsed() -> None:
     assert payload["status"] == "not_parsed"
     assert payload["positions"] == []
     assert payload["source_metadata"]["parse_status"] == "not_parsed"
+
+
+def test_api_fund_allocations_history_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_history(processed_dir: Any, fund_code: str, *, lookback_days: int = 30) -> Dict[str, Any]:
+        return {
+            "fund_code": fund_code,
+            "status": "ok",
+            "lookback_days": lookback_days,
+            "history": [
+                {
+                    "date": "2026-04-30",
+                    "allocations": [
+                        {
+                            "fund_code": fund_code,
+                            "allocation_type": "hs",
+                            "label": "Hisse Senedi",
+                            "weight": 58.0,
+                            "report_date": "2026-04-30",
+                            "source": "tefasfon_portfolio",
+                        }
+                    ],
+                }
+            ],
+            "source": "tefasfon_portfolio",
+            "stale": False,
+            "source_metadata": {"source": "tefasfon_portfolio", "parse_status": "ok"},
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_fund_allocations_history_payload", fake_history)
+    client = TestClient(app)
+
+    response = client.get("/funds/TLY/allocations/history?lookback_days=30")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["fund_code"] == "TLY"
+    assert payload["history"][0]["allocations"][0]["label"] == "Hisse Senedi"
 
 
 def test_api_feedback() -> None:

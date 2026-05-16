@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import re
+import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -20,6 +21,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pandas import isna
 from pydantic import BaseModel, Field
+
+if not ((3, 10) <= sys.version_info[:2] < (3, 13)):
+    raise RuntimeError(
+        "RAG-Fin backend requires Python 3.10-3.12. "
+        f"Current interpreter is Python {sys.version_info.major}.{sys.version_info.minor}. "
+        "Use .external\\venv311\\Scripts\\python.exe or run .\\run.ps1."
+    )
 
 from src.answer import AnswerEngine, RulesBasedAnswerAdapter
 from src.config import AppConfig, load_config
@@ -1073,7 +1081,7 @@ def fund_yield_summary(fund_code: str) -> Dict[str, Any]:
 
     normalized = normalize_fund_code(fund_code)
     try:
-        return get_fund_yield_summary_payload(normalized)
+        return get_fund_yield_summary_payload(normalized, processed_dir=CONFIG.paths.processed_dir)
     except FintablesUpstreamError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -1090,6 +1098,20 @@ def fund_allocations(fund_code: str) -> Dict[str, Any]:
     from app.fund_service import get_fund_allocations_payload
 
     return get_fund_allocations_payload(CONFIG.paths.processed_dir, fund_code)
+
+
+@app.get("/funds/{fund_code}/allocations/history")
+def fund_allocations_history(
+    fund_code: str,
+    lookback_days: int = Query(30, ge=1, le=365),
+) -> Dict[str, Any]:
+    from app.fund_service import get_fund_allocations_history_payload
+
+    return get_fund_allocations_history_payload(
+        CONFIG.paths.processed_dir,
+        fund_code,
+        lookback_days=lookback_days,
+    )
 
 
 @app.get("/funds/{fund_code}")
@@ -4937,12 +4959,16 @@ def market_commodities() -> Dict[str, Any]:
 # ── FX (Döviz) ────────────────────────────────────────────
 _FX_CACHE: Dict[str, Any] = {}
 _FX_CACHE_TTL = 3
+_FX_RETURN_CACHE: Dict[str, Any] = {}
+_FX_RETURN_CACHE_TTL = 15 * 60
 
 _FX_DIRECT_MAP: List[tuple[str, List[str], str]] = [
     ("USD/TRY", ["USDTRY=X"], "Amerikan Doları / TL"),
     ("EUR/TRY", ["EURTRY=X"], "Euro / TL"),
     ("GBP/TRY", ["GBPTRY=X"], "İngiliz Sterlini / TL"),
     ("CHF/TRY", ["CHFTRY=X"], "İsviçre Frangı / TL"),
+    ("AUD/TRY", ["AUDTRY=X"], "Avustralya Doları / TL"),
+    ("CAD/TRY", ["CADTRY=X"], "Kanada Doları / TL"),
     ("JPY/TRY", ["JPYTRY=X"], "Japon Yeni / TL"),
     ("EUR/USD", ["EURUSD=X"], "Euro / Dolar"),
     ("GBP/USD", ["GBPUSD=X"], "Sterlin / Dolar"),
@@ -4966,6 +4992,8 @@ _FX_ORDER: List[str] = [
     "EUR/TRY",
     "GBP/TRY",
     "CHF/TRY",
+    "AUD/TRY",
+    "CAD/TRY",
     "JPY/TRY",
     "CNY/TRY",
     "EUR/USD",
@@ -4988,7 +5016,56 @@ def _fx_quote_currency(symbol: str) -> str:
     return str(symbol or "").rsplit("/", 1)[-1].strip().upper()
 
 
-def _fx_item_from_quote(symbol: str, yahoo_symbol: str, label: str, quote: Dict[str, Any]) -> Dict[str, Any]:
+def _fetch_fx_return_bases(yahoo_symbol: str) -> Dict[str, Any]:
+    normalized = str(yahoo_symbol or "").strip()
+    if not normalized:
+        return {}
+    now = time.time()
+    cached = _FX_RETURN_CACHE.get(normalized)
+    if cached and now - cached.get("_ts", 0) < _FX_RETURN_CACHE_TTL:
+        return dict(cached.get("data") or {})
+
+    chart = _fetch_yahoo_chart_raw(normalized, interval="1d", range_="1y")
+    if not chart.get("ok"):
+        _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": {}}
+        return {}
+
+    points = [
+        (datetime.fromisoformat(str(point["time"])), float(point["close"]))
+        for point in chart.get("points", [])
+        if point.get("time") and isinstance(point.get("close"), (int, float))
+    ]
+    if not points:
+        _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": {}}
+        return {}
+
+    points.sort(key=lambda item: item[0])
+    latest_dt, latest_close = points[-1]
+    year_start = datetime(latest_dt.year, 1, 1, tzinfo=timezone.utc)
+    data = {
+        "base_1w": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=7)),
+        "base_1m": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=30)),
+        "base_3m": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=91)),
+        "base_6m": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=182)),
+        "base_ytd": _pick_series_value_at_or_after(points, year_start),
+        "base_1y": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=365)),
+        "latest_close": latest_close,
+        "as_of": latest_dt.isoformat(),
+    }
+    _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": data}
+    return dict(data)
+
+
+def _fx_returns_from_bases(current_price: Any, return_bases: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    current_for_returns = current_price if current_price is not None else return_bases.get("latest_close")
+    return {
+        response_field: _return_pct(current_for_returns, return_bases.get(base_field))
+        for response_field, base_field in _RETURN_BASE_FIELDS
+    }
+
+
+def _fx_item_from_quote(symbol: str, yahoo_symbol: str, label: str, quote: Dict[str, Any], return_bases: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    period_returns = _fx_returns_from_bases(quote.get("price"), return_bases or {}) if quote.get("ok") else {}
     return {
         "symbol": symbol,
         "label": label,
@@ -5003,6 +5080,7 @@ def _fx_item_from_quote(symbol: str, yahoo_symbol: str, label: str, quote: Dict[
         "error": None if quote.get("ok") else quote.get("error"),
         "logo_url": None,
         "logo_source": None,
+        **period_returns,
     }
 
 
@@ -5012,7 +5090,8 @@ def _fx_direct_item(entry: tuple[str, List[str], str]) -> Dict[str, Any]:
     for yahoo_symbol in yahoo_candidates:
         quote = _fetch_yahoo_quote(yahoo_symbol)
         if quote.get("ok") and quote.get("price") is not None:
-            return _fx_item_from_quote(symbol, yahoo_symbol, label, quote)
+            return_bases = _fetch_fx_return_bases(yahoo_symbol) if symbol.endswith("/TRY") else None
+            return _fx_item_from_quote(symbol, yahoo_symbol, label, quote, return_bases)
         errors.append(str(quote.get("error") or "quote_unavailable"))
 
     return _fx_item_from_quote(
@@ -5077,6 +5156,12 @@ def _fx_derived_item(
         "error": None if price is not None else "derived_quote_unavailable",
         "logo_url": None,
         "logo_source": None,
+        "return_1w_pct": None,
+        "return_1m_pct": None,
+        "return_3m_pct": None,
+        "return_6m_pct": None,
+        "return_ytd_pct": None,
+        "return_1y_pct": None,
     }
 
 

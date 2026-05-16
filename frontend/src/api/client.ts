@@ -21,10 +21,12 @@ import type {
     MarketIndexResponse,
     MarketFxResponse,
     FundAllocationsResponse,
+    FundAllocationsHistoryResponse,
     FundCategoriesResponse,
     FundDetail,
     FundHoldingsResponse,
     FundPerformanceResponse,
+    FundYieldSummaryResponse,
     FundsResponse,
     KapOverviewCommentaryRequest,
     KapOverviewCommentaryResponse,
@@ -297,6 +299,11 @@ export const apiClient = {
             exposeErrorDetail: true,
         }),
     fundDetail: (fundCode: string) => fetchApi<FundDetail>(`/funds/${encodeURIComponent(fundCode)}`),
+    fundYieldSummary: (fundCode: string) =>
+        fetchApi<FundYieldSummaryResponse>(`/funds/${encodeURIComponent(fundCode)}/yield-summary`, {
+            timeoutMs: 30000,
+            exposeErrorDetail: true,
+        }),
     fundPerformance: (fundCode: string) =>
         fetchApi<FundPerformanceResponse>(`/funds/${encodeURIComponent(fundCode)}/performance`),
     refreshFundPerformance: (fundCode: string, startDate: string, endDate?: string) => {
@@ -313,6 +320,14 @@ export const apiClient = {
     },
     fundAllocations: (fundCode: string) =>
         fetchApi<FundAllocationsResponse>(`/funds/${encodeURIComponent(fundCode)}/allocations`),
+    fundAllocationsHistory: (fundCode: string, lookbackDays = 30) =>
+        fetchApi<FundAllocationsHistoryResponse>(
+            `/funds/${encodeURIComponent(fundCode)}/allocations/history?lookback_days=${lookbackDays}`,
+            {
+                timeoutMs: 60000,
+                exposeErrorDetail: true,
+            },
+        ),
     refreshFundAllocations: (fundCode: string, asOf?: string) => {
         const params = new URLSearchParams();
         if (asOf) params.append('as_of', asOf);
@@ -333,17 +348,17 @@ export const apiClient = {
         fetchApi<AskResponse>('/ask', {
             method: 'POST',
             body: JSON.stringify(request),
-        }),
+    }),
 
     feedback: (request: FeedbackRequest) =>
-        fetchApi<{ message: string; path: string; feedback: any }>('/feedback', {
+        fetchApi<{ message: string; path: string; feedback: unknown }>('/feedback', {
             method: 'POST',
             body: JSON.stringify(request),
         }),
 
     commentary: (request: {
         question: string;
-        answer_payload: Record<string, any>;
+        answer_payload: Record<string, unknown>;
         company?: string;
         year?: string;
         quarter?: string;
@@ -379,10 +394,10 @@ export const apiClient = {
             debugLabel: 'kap-overview-commentary',
         }),
 
-    ingest: () => fetchApi<{ message: string; pages_written: number; summary: any }>('/ingest', { method: 'POST' }),
+    ingest: () => fetchApi<{ message: string; pages_written: number; summary: unknown }>('/ingest', { method: 'POST' }),
 
     index: (version: 'v1' | 'v2' = 'v2') =>
-        fetchApi<{ message: string; version: string; summary: any }>('/index', {
+        fetchApi<{ message: string; version: string; summary: unknown }>('/index', {
             method: 'POST',
             body: JSON.stringify({ version }),
         }),

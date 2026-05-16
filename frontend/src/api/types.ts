@@ -26,7 +26,7 @@ export interface AskResponse {
     top_k: number;
   };
   trend?: {
-    rows: any[];
+    rows: TrendRow[];
   };
   comparison?: {
     mode: string;
@@ -58,6 +58,13 @@ export interface ComparisonRow {
   quarter: string | null;
   value: number | null;
   confidence: number | null;
+}
+
+export interface TrendRow {
+  quarter?: string | null;
+  value?: string | number | null;
+  value_display?: string | number | null;
+  [key: string]: string | number | boolean | null | undefined;
 }
 
 export interface StatsResponse {
@@ -176,6 +183,17 @@ export interface FundSourceMetadata {
   stale?: boolean;
   parse_status?: string | null;
   warnings?: string[];
+  warning?: string | null;
+  history_source_used?: string | null;
+  summary_source_used?: string | null;
+  history_source_policy?: string | null;
+  final_points_count?: number | null;
+  date_min?: string | null;
+  date_max?: string | null;
+  backfill_used?: boolean;
+  fallback_used?: boolean;
+  source_policy?: string | null;
+  adapter_version?: string | null;
 }
 
 export interface FundPeriodReturns {
@@ -185,6 +203,27 @@ export interface FundPeriodReturns {
   '6m'?: number | null;
   ytd?: number | null;
   '1y'?: number | null;
+}
+
+export type FundYieldPeriodKey = '1w' | '1m' | '3m' | '6m' | 'ytd' | '1y' | '3y' | '5y' | 'oldest';
+
+export interface FundYieldPeriodSummary {
+  prev_close_date: string | null;
+  prev_close: number | null;
+  high: number | null;
+  low: number | null;
+}
+
+export interface FundYieldSummaryResponse {
+  fund_code: string;
+  status: string;
+  source: string;
+  source_url?: string | null;
+  periods: Partial<Record<FundYieldPeriodKey, FundYieldPeriodSummary>>;
+  source_metadata: FundSourceMetadata & {
+    purpose?: string;
+    writes_fund_prices?: boolean;
+  };
 }
 
 export interface FundSummary {
@@ -289,6 +328,21 @@ export interface FundAllocationsResponse {
   fund_code: string;
   status: string;
   allocations: FundAllocation[];
+  source: string;
+  stale?: boolean;
+  source_metadata: FundSourceMetadata;
+}
+
+export interface FundAllocationHistoryDay {
+  date: string;
+  allocations: FundAllocation[];
+}
+
+export interface FundAllocationsHistoryResponse {
+  fund_code: string;
+  status: string;
+  lookback_days: number;
+  history: FundAllocationHistoryDay[];
   source: string;
   stale?: boolean;
   source_metadata: FundSourceMetadata;
@@ -506,6 +560,12 @@ export interface FxQuote {
   error: string | null;
   logo_url?: string | null;
   logo_source?: 'kap' | null;
+  return_1w_pct?: number | null;
+  return_1m_pct?: number | null;
+  return_3m_pct?: number | null;
+  return_6m_pct?: number | null;
+  return_ytd_pct?: number | null;
+  return_1y_pct?: number | null;
 }
 
 export interface MarketFxResponse {
@@ -605,6 +665,7 @@ export interface KapSnapshotResponse {
   stock_code: string;
   fetched_at: string;
   cache_hit: boolean;
+  cache_stale?: boolean;
   error?: string;
   analysis_basis?: string;
   analysis_note?: string;
