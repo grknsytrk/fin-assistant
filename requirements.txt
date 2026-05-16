@@ -8,3 +8,4 @@ PyYAML>=6.0.1
 fastapi>=0.111.0
 uvicorn>=0.30.0
 httpx>=0.27.0
+tefasfon>=1.1.0,<2

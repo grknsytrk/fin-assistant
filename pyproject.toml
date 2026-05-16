@@ -7,7 +7,7 @@ name = "ragfin"
 version = "0.16.0"
 description = "Local-first financial report assistant (RAG-Fin)"
 readme = "README.md"
-requires-python = ">=3.9,<3.13"
+requires-python = ">=3.10,<3.13"
 dependencies = [
   "pypdf>=4.2.0",
   "chromadb>=0.5.0",
@@ -19,6 +19,7 @@ dependencies = [
   "fastapi>=0.111.0",
   "uvicorn>=0.30.0",
   "httpx>=0.27.0",
+  "tefasfon>=1.1.0,<2",
 ]
 
 [project.optional-dependencies]

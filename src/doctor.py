@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from src.config import AppConfig, load_config
 
-MIN_PY = (3, 9)
+MIN_PY = (3, 10)
 MAX_PY = (3, 13)  # exclusive
 
 
@@ -44,7 +44,7 @@ def _check_python() -> CheckResult:
     return _fail(
         "python_version",
         f"{current[0]}.{current[1]}",
-        "Python 3.9-3.12 kullanin (ornek: .venv39).",
+        "Python 3.10-3.12 kullanin (ornek: Python 3.11).",
     )
 
 
@@ -126,6 +126,7 @@ def run_doctor(config_path: Optional[Path] = None) -> List[CheckResult]:
     results.append(_check_python())
     results.append(_check_import("chromadb"))
     results.append(_check_import("sentence_transformers"))
+    results.append(_check_import("tefasfon"))
     results.append(_check_model_local(cfg))
     results.append(_check_path_writable(cfg.paths.raw_dir, "path_raw_dir"))
     results.append(_check_path_writable(cfg.paths.processed_dir, "path_processed_dir"))

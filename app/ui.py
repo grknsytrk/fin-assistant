@@ -45,7 +45,7 @@ from src.ratio_engine import (
 )
 from app.ui_components import trust_badge_html, trust_level
 
-MIN_PY = (3, 9)
+MIN_PY = (3, 10)
 MAX_PY_EXCLUSIVE = (3, 13)
 CONFIG: AppConfig = load_config(ROOT / "config.yaml")
 DEFAULT_COLLECTION_NAME = CONFIG.chroma.collection_v1
@@ -281,10 +281,10 @@ def _python_version_string() -> str:
 
 def _runtime_help_message() -> str:
     return (
-        "Bu UI icin Python 3.9-3.12 gerekiyor.\n"
+        "Bu UI icin Python 3.10-3.12 gerekiyor.\n"
         f"Mevcut surum: {_python_version_string()}\n\n"
         "Ornek calistirma:\n"
-        ".\\.venv39\\Scripts\\python.exe -m streamlit run app/ui.py"
+        ".\\.venv\\Scripts\\python.exe -m streamlit run app/ui.py"
     )
 
 
@@ -2079,7 +2079,7 @@ def _render_stats_panel() -> None:
     )
 
     if stats["collection_count_v1"] is None or stats["collection_count_v2"] is None:
-        st.warning("Collection sayilari okunamadi. Python 3.9-3.12 ortaminda calistirdiginizdan emin olun.")
+        st.warning("Collection sayilari okunamadi. Python 3.10-3.12 ortaminda calistirdiginizdan emin olun.")
 
 
 def _render_data_tab() -> None:
@@ -5414,7 +5414,7 @@ def main() -> None:
 
     if not _is_supported_python():
         st.error(_runtime_help_message())
-        st.code(r".\.venv39\Scripts\python.exe -m streamlit run app/ui.py")
+        st.code(r".\.venv\Scripts\python.exe -m streamlit run app/ui.py")
         st.stop()
 
     _get_ui_settings()

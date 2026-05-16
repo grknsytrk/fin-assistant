@@ -47,7 +47,7 @@ Intended for engineers and financial analysts who need auditable, traceable answ
 ## Project Status
 
 - **Version:** 0.16.0
-- **Python:** >=3.9, <3.13
+- **Python:** >=3.10, <3.13
 - **CI:** GitHub Actions workflow (`ci-week16.yml`) runs pytest, compileall, deterministic demo preparation, and smoke metric checks on every push and PR.
 
 ## Architecture
@@ -148,7 +148,7 @@ PDF files (data/raw/)
 
 ### Prerequisites
 
-- **Python 3.9–3.12** (3.11 recommended; checked by `ragfin doctor`)
+- **Python 3.10–3.12** (3.11 recommended; checked by `ragfin doctor`)
 - **pip**
 - **Git**
 - Optional: Docker (for containerized API deployment)
@@ -218,7 +218,7 @@ Verify the installation:
 ragfin doctor
 ```
 
-`ragfin doctor` checks Python version, required imports (`chromadb`, `sentence_transformers`, `streamlit`, `fastapi`, etc.), model availability, data paths, and Chroma collection status.
+`ragfin doctor` checks Python version, required imports (`chromadb`, `sentence_transformers`, `tefasfon`, etc.), model availability, data paths, and Chroma collection status.
 
 ### Alternative: Docker (API only)
 
@@ -540,7 +540,7 @@ Streamlit runs on port 8501 by default. For production use, place it behind a re
 
 | Symptom | Likely Cause | Fix |
 |---|---|---|
-| `ragfin doctor` shows `python_version: FAIL` | Python version outside 3.9–3.12 | Create a virtual environment with a supported Python (e.g., 3.11) and reinstall dependencies. |
+| `ragfin doctor` shows `python_version: FAIL` | Python version outside 3.10–3.12 | Create a virtual environment with a supported Python (e.g., 3.11) and reinstall dependencies. |
 | `ragfin doctor` reports `import_chromadb: FAIL` or `import_sentence_transformers: FAIL` | Missing dependencies in the active environment | Activate the correct venv and run `pip install -r requirements.txt`. |
 | `POST /ask` returns `Dokümanda bulunamadı` | Data not ingested/indexed, or overly restrictive company filter | Run `python -m src.cli ingest` then `python -m src.cli index_v2`. Check `GET /stats` for available companies. Retry without the `company` filter. |
 | `POST /commentary` returns empty payload | LLM assistant disabled or API key missing | Set `RAGFIN_LLM_ASSISTANT_ENABLED=true` and provide `OPENROUTER_API_KEY` in `.env`. Restart the service. |

@@ -12,7 +12,7 @@ try:
     import chromadb
 except Exception as exc:  # pragma: no cover
     raise RuntimeError(
-        "ChromaDB import edilemedi. Python 3.9-3.12 kullanin ve requirements.txt kurulumunu tekrar yapin."
+        "ChromaDB import edilemedi. Python 3.10-3.12 kullanin ve requirements.txt kurulumunu tekrar yapin."
     ) from exc
 
 from src.embeddings import E5Embedder
