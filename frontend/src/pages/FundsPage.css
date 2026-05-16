@@ -350,12 +350,215 @@
 }
 
 .fund-detail {
-    max-width: 1180px;
+    max-width: none;
     margin: 0 auto;
 }
 
 .fund-back-button {
     margin-bottom: 0.9rem;
+}
+
+.fund-market-shell {
+    overflow: hidden;
+    margin: -0.1rem 0 1rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, #151515 86%, var(--surface-color));
+}
+
+.fund-market-breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 48px;
+    padding: 0 1.2rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 70%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    font-weight: 800;
+}
+
+.fund-breadcrumb-back,
+.fund-breadcrumb-group,
+.fund-breadcrumb-code {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+}
+
+.fund-breadcrumb-back {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    cursor: pointer;
+}
+
+.fund-breadcrumb-back:hover,
+.fund-breadcrumb-back:focus-visible,
+.fund-breadcrumb-code {
+    color: var(--text-primary);
+}
+
+.fund-market-hero {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1.2rem;
+    padding: 1.2rem;
+}
+
+.fund-market-title {
+    display: flex;
+    align-items: center;
+    gap: 0.95rem;
+    min-width: 0;
+}
+
+.fund-market-logo.symbol-logo-lg {
+    width: 80px;
+    height: 80px;
+    border-radius: 4px;
+    background: #ffffff;
+}
+
+.fund-market-copy {
+    min-width: 0;
+}
+
+.fund-market-code-row {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    min-width: 0;
+}
+
+.fund-market-code-row h1 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: clamp(2rem, 4vw, 2.8rem);
+    line-height: 1;
+    letter-spacing: 0;
+}
+
+.fund-market-copy p {
+    margin: 0.48rem 0 0;
+    color: var(--text-primary);
+    font-size: 1.02rem;
+    font-weight: 750;
+}
+
+.fund-market-copy small {
+    display: block;
+    margin-top: 0.32rem;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    line-height: 1.35;
+}
+
+.fund-icon-action,
+.fund-compare-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 36px;
+    border: 0;
+    background: color-mix(in srgb, var(--surface-color) 86%, #1f1f1f);
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.fund-icon-action {
+    width: 42px;
+    border-radius: 999px;
+}
+
+.fund-icon-action.active,
+.fund-compare-action.active {
+    color: #ffd400;
+}
+
+.fund-icon-action.active svg {
+    fill: currentColor;
+}
+
+.fund-compare-action {
+    gap: 0.45rem;
+    padding: 0 1.05rem;
+    border-radius: 999px;
+    font-weight: 850;
+}
+
+.fund-market-quote {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    min-width: 230px;
+    padding-top: 0.2rem;
+    text-align: right;
+}
+
+.fund-market-quote div {
+    display: flex;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 0.65rem;
+    flex-wrap: wrap;
+}
+
+.fund-market-quote strong {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: clamp(1.8rem, 3vw, 2.45rem);
+    font-weight: 900;
+    line-height: 1;
+}
+
+.fund-market-quote span {
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    font-weight: 900;
+}
+
+.fund-market-quote small {
+    margin-top: 0.38rem;
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    font-weight: 700;
+}
+
+.fund-market-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0;
+    border-top: 1px solid color-mix(in srgb, var(--surface-border) 58%, transparent);
+}
+
+.fund-market-stats div {
+    padding: 0.8rem 1.2rem;
+    border-right: 1px solid color-mix(in srgb, var(--surface-border) 42%, transparent);
+}
+
+.fund-market-stats div:last-child {
+    border-right: 0;
+}
+
+.fund-market-stats span {
+    display: block;
+    margin-bottom: 0.25rem;
+    color: var(--text-secondary);
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.fund-market-stats strong {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
 }
 
 .fund-detail-actions a {
@@ -376,14 +579,46 @@
 
 .fund-tabs {
     display: flex;
-    gap: 0.5rem;
-    margin-top: 1rem;
+    gap: 1.3rem;
+    min-height: 52px;
+    padding: 0 1.2rem;
+    margin-top: 0;
+    border-top: 1px solid color-mix(in srgb, var(--surface-border) 58%, transparent);
     overflow-x: auto;
 }
 
+.fund-tabs button {
+    position: relative;
+    height: auto;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-weight: 850;
+    white-space: nowrap;
+}
+
+.fund-tabs button:hover,
+.fund-tabs button:focus-visible {
+    color: var(--text-primary);
+}
+
 .fund-tabs button.active {
-    border-color: color-mix(in srgb, var(--accent-color) 65%, var(--surface-border));
-    background: color-mix(in srgb, var(--accent-color) 18%, var(--surface-color));
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-primary);
+}
+
+.fund-tabs button.active::after {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 2px;
+    background: var(--text-primary);
+    content: "";
 }
 
 .fund-detail-panel {
@@ -545,20 +780,124 @@
     text-transform: uppercase;
 }
 
-.fund-allocation-donut {
+.fund-allocation-donut-wrap {
     position: relative;
-    width: min(190px, 70%);
+    display: grid;
+    width: min(220px, 78%);
+    max-width: 230px;
     aspect-ratio: 1;
-    margin: 0.2rem auto 1rem;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--surface-border) 60%, var(--bg-color));
+    margin: 0.1rem auto 1rem;
+    place-items: center;
 }
 
-.fund-allocation-donut span {
+.fund-allocation-donut {
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.fund-allocation-donut-track {
+    fill: color-mix(in srgb, var(--surface-border) 54%, var(--bg-color));
+}
+
+.fund-allocation-donut-hole {
+    fill: color-mix(in srgb, var(--surface-color) 94%, var(--bg-color));
+    stroke: color-mix(in srgb, var(--surface-border) 62%, transparent);
+    stroke-width: 1;
+}
+
+.fund-allocation-segment {
+    cursor: pointer;
+    outline: none;
+    transform-box: fill-box;
+    transform-origin: center;
+    transition:
+        opacity 160ms ease,
+        filter 160ms ease,
+        transform 160ms ease;
+}
+
+.fund-allocation-segment:hover,
+.fund-allocation-segment:focus-visible,
+.fund-allocation-segment.is-active {
+    filter: drop-shadow(0 0 12px color-mix(in srgb, currentColor 40%, transparent));
+    transform: scale(1.025);
+}
+
+.fund-allocation-segment:focus-visible {
+    stroke: var(--text-primary);
+    stroke-width: 1.6;
+}
+
+.fund-allocation-segment.is-muted {
+    opacity: 0.32;
+    filter: saturate(0.72);
+}
+
+.fund-allocation-donut-center {
     position: absolute;
-    inset: 26%;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+    inset: 31%;
+    display: grid;
+    align-content: center;
+    justify-items: center;
+    min-width: 0;
+    padding: 0.2rem;
+    color: var(--text-primary);
+    pointer-events: none;
+    text-align: center;
+}
+
+.fund-allocation-donut-center span {
+    max-width: 100%;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 0.66rem;
+    font-weight: 800;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.fund-allocation-donut-center strong {
+    margin-top: 0.2rem;
+    font-family: var(--font-mono);
+    font-size: 0.88rem;
+}
+
+.fund-allocation-tooltip {
+    position: absolute;
+    z-index: 2;
+    min-width: 142px;
+    max-width: 190px;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 34%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-color) 95%, black);
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
+    color: var(--text-primary);
+    pointer-events: none;
+    transform: translate(-50%, -110%);
+}
+
+.fund-allocation-tooltip span {
+    display: block;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 800;
+    line-height: 1.25;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fund-allocation-tooltip strong {
+    display: block;
+    margin-top: 0.18rem;
+    color: var(--success-color);
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
 }
 
 .fund-allocation-list {
@@ -567,17 +906,34 @@
     gap: 0.55rem;
 }
 
-.fund-allocation-list div {
+.fund-allocation-row {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.45rem;
+    min-height: 1.45rem;
+    cursor: default;
+    transition:
+        opacity 160ms ease,
+        filter 160ms ease,
+        transform 160ms ease;
 }
 
-.fund-allocation-list i {
+.fund-allocation-row.is-active {
+    transform: translateX(2px);
+}
+
+.fund-allocation-row.is-muted {
+    opacity: 0.34;
+    filter: saturate(0.72);
+}
+
+.fund-allocation-list i,
+.fund-allocation-history-name i {
     width: 0.68rem;
     height: 0.68rem;
     border-radius: 999px;
+    flex: 0 0 auto;
 }
 
 .fund-allocation-list span {
@@ -588,8 +944,278 @@
     white-space: nowrap;
 }
 
+.fund-allocation-row.is-active span {
+    color: var(--accent-color);
+}
+
 .fund-allocation-list strong {
     font-family: var(--font-mono);
+}
+
+.fund-allocation-history-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    width: 100%;
+    margin-top: 0.9rem;
+    padding: 0.72rem 0.85rem;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 36%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent-color) 10%, var(--surface-color));
+    color: var(--text-primary);
+    font-weight: 800;
+    cursor: pointer;
+    transition:
+        background 160ms ease,
+        border-color 160ms ease,
+        transform 160ms ease;
+}
+
+.fund-allocation-history-button:hover,
+.fund-allocation-history-button:focus-visible {
+    border-color: color-mix(in srgb, var(--accent-color) 64%, transparent);
+    background: color-mix(in srgb, var(--accent-color) 16%, var(--surface-color));
+    transform: translateY(-1px);
+}
+
+.fund-allocation-history-button[aria-busy="true"] {
+    cursor: wait;
+    opacity: 0.68;
+    transform: none;
+}
+
+.fund-history-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+}
+
+.fund-history-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.85rem;
+}
+
+.fund-history-head h2 {
+    margin: 0;
+}
+
+.fund-history-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+}
+
+.fund-history-tabs button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    min-height: 34px;
+    padding: 0 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--surface-color) 86%, var(--bg-color));
+    color: var(--text-primary);
+    font: inherit;
+    cursor: pointer;
+}
+
+.fund-history-tabs button.active {
+    border-color: color-mix(in srgb, var(--accent-color) 65%, var(--surface-border));
+    background: color-mix(in srgb, var(--accent-color) 18%, var(--surface-color));
+}
+
+.fund-allocation-history-panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 1rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+}
+
+.fund-allocation-history-head {
+    margin-bottom: 0.95rem;
+}
+
+.fund-allocation-history-head span {
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.fund-allocation-history-head h3 {
+    margin: 0.15rem 0 0;
+    color: var(--text-primary);
+    font-size: 1rem;
+}
+
+.fund-allocation-history-range {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.8rem;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+
+.fund-allocation-history-range strong {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+}
+
+.fund-allocation-history-chart-wrap {
+    position: relative;
+    margin-bottom: 0.85rem;
+    padding: 0.85rem 0.85rem 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 70%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-color) 78%, var(--surface-color));
+}
+
+.fund-allocation-history-chart {
+    display: block;
+    width: 100%;
+    height: 320px;
+}
+
+.fund-allocation-history-chart path {
+    transition:
+        opacity 160ms ease,
+        stroke-width 160ms ease,
+        filter 160ms ease;
+}
+
+.fund-allocation-history-chart path.is-highlighted {
+    filter: drop-shadow(0 0 8px color-mix(in srgb, currentColor 24%, transparent));
+}
+
+.fund-allocation-history-gridline {
+    stroke: color-mix(in srgb, var(--surface-border) 58%, transparent);
+    stroke-dasharray: 4 6;
+}
+
+.fund-allocation-history-hoverline {
+    stroke: color-mix(in srgb, var(--text-secondary) 58%, transparent);
+    stroke-dasharray: 4 4;
+}
+
+.fund-allocation-history-tooltip {
+    position: absolute;
+    top: 1rem;
+    z-index: 4;
+    width: min(330px, calc(100% - 1.7rem));
+    padding: 0.7rem 0.78rem;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 36%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-color) 96%, black);
+    box-shadow: 0 18px 38px rgba(0, 0, 0, 0.34);
+    color: var(--text-primary);
+    pointer-events: none;
+    transform: translateX(0.55rem);
+}
+
+.fund-allocation-history-tooltip.align-right {
+    transform: translateX(calc(-100% - 0.55rem));
+}
+
+.fund-allocation-history-tooltip > strong {
+    display: block;
+    margin-bottom: 0.45rem;
+    color: var(--text-primary);
+    font-size: 0.82rem;
+}
+
+.fund-allocation-history-tooltip span {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 0.45rem;
+    min-height: 1.5rem;
+}
+
+.fund-allocation-history-tooltip i,
+.fund-allocation-history-legend i {
+    width: 0.62rem;
+    height: 0.62rem;
+    border-radius: 999px;
+}
+
+.fund-allocation-history-tooltip em {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-style: normal;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fund-allocation-history-tooltip b,
+.fund-allocation-history-tooltip small {
+    font-family: var(--font-mono);
+    white-space: nowrap;
+}
+
+.fund-allocation-history-tooltip small {
+    font-size: 0.74rem;
+    font-weight: 800;
+}
+
+.fund-allocation-history-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem 0.8rem;
+    padding: 0 0.15rem;
+}
+
+.fund-allocation-history-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+}
+
+.fund-allocation-history-table-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: min(52vh, 520px);
+    overflow: auto;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 70%, transparent);
+    border-radius: 8px;
+}
+
+.fund-allocation-history-table td {
+    vertical-align: middle;
+}
+
+.fund-allocation-history-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    max-width: 260px;
+    overflow: hidden;
+    color: var(--text-primary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fund-allocation-sparkline {
+    display: block;
+    width: 132px;
+    height: 34px;
+}
+
+.fund-allocation-sparkline-empty {
+    color: var(--text-secondary);
 }
 
 .fund-return-strip {
@@ -619,6 +1245,349 @@
 .fund-return-strip strong,
 .fund-heatmap-stats strong {
     font-family: var(--font-mono);
+}
+
+.fund-return-bounds {
+    display: block;
+    margin-top: 0.3rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    line-height: 1.35;
+}
+
+.fund-comparison-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    padding: 1rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+}
+
+.fund-comparison-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.fund-comparison-head h2 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 1rem;
+}
+
+.fund-comparison-period {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.fund-comparison-period select {
+    height: 38px;
+    min-width: 92px;
+    padding: 0 2rem 0 0.8rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
+    border-radius: 8px;
+    appearance: none;
+    background: color-mix(in srgb, var(--surface-color) 88%, var(--bg-color));
+    color: var(--text-primary);
+    font: inherit;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.fund-comparison-period svg {
+    position: absolute;
+    right: 0.65rem;
+    color: var(--text-secondary);
+    pointer-events: none;
+}
+
+.fund-comparison-chart-wrap {
+    position: relative;
+    min-height: 344px;
+}
+
+.fund-comparison-chart {
+    display: block;
+    width: 100%;
+    height: 344px;
+    overflow: visible;
+}
+
+.fund-comparison-gridline {
+    stroke: color-mix(in srgb, var(--surface-border) 58%, transparent);
+}
+
+.fund-comparison-zero {
+    stroke: color-mix(in srgb, var(--text-secondary) 30%, transparent);
+}
+
+.fund-comparison-bar-group {
+    transition: transform 340ms cubic-bezier(0.22, 1, 0.36, 1);
+    transform-box: fill-box;
+    will-change: transform;
+}
+
+.fund-comparison-bar {
+    fill: color-mix(in srgb, #1f6bff 34%, #19243f);
+    cursor: crosshair;
+    outline: none;
+    transition:
+        fill 140ms ease,
+        filter 140ms ease,
+        height 320ms cubic-bezier(0.22, 1, 0.36, 1),
+        opacity 140ms ease,
+        transform 140ms ease,
+        y 320ms cubic-bezier(0.22, 1, 0.36, 1);
+    transform-box: fill-box;
+    transform-origin: center bottom;
+}
+
+.fund-comparison-bar.is-base {
+    fill: #1f6bff;
+}
+
+.fund-comparison-bar.is-negative {
+    fill: color-mix(in srgb, var(--danger-color) 54%, #19243f);
+}
+
+.fund-comparison-bar.is-active {
+    filter: drop-shadow(0 0 12px color-mix(in srgb, #1f6bff 42%, transparent));
+    transform: scaleX(1.025);
+}
+
+.fund-comparison-bar.is-muted {
+    opacity: 0.52;
+}
+
+.fund-comparison-value-label {
+    fill: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 900;
+    transition: y 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.fund-comparison-x-label {
+    fill: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.fund-comparison-tooltip {
+    position: absolute;
+    z-index: 5;
+    min-width: 86px;
+    padding: 0.65rem 0.72rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--bg-color) 96%, black);
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.32);
+    color: var(--text-primary);
+    pointer-events: none;
+    transform: translate(12px, 12px);
+    transition:
+        left 70ms ease-out,
+        top 70ms ease-out;
+    will-change: left, top;
+}
+
+.fund-comparison-tooltip.align-left {
+    transform: translate(calc(-100% - 12px), 12px);
+}
+
+.fund-comparison-tooltip.align-up {
+    transform: translate(12px, calc(-100% - 12px));
+}
+
+.fund-comparison-tooltip.align-left.align-up {
+    transform: translate(calc(-100% - 12px), calc(-100% - 12px));
+}
+
+.fund-comparison-tooltip span {
+    display: block;
+    margin-bottom: 0.35rem;
+    color: var(--text-primary);
+    font-weight: 900;
+}
+
+.fund-comparison-tooltip strong {
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+}
+
+.fund-comparison-empty {
+    display: grid;
+    min-height: 320px;
+    place-items: center;
+    color: var(--text-secondary);
+}
+
+.fund-comparison-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+}
+
+.fund-comparison-search-wrap {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+.fund-comparison-search-button,
+.fund-comparison-search-active,
+.fund-comparison-chips button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 34px;
+    border: 0;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-border) 58%, var(--surface-color));
+    color: var(--text-primary);
+    font: inherit;
+    font-weight: 800;
+}
+
+.fund-comparison-search-button {
+    padding: 0 0.85rem;
+    cursor: pointer;
+}
+
+.fund-comparison-search-button:hover,
+.fund-comparison-search-button:focus-visible {
+    background: color-mix(in srgb, var(--surface-border) 76%, var(--surface-color));
+}
+
+.fund-comparison-search-active {
+    width: 190px;
+    padding: 0 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 72%, transparent);
+    background: color-mix(in srgb, var(--bg-color) 88%, var(--surface-color));
+}
+
+.fund-comparison-search-active input {
+    min-width: 0;
+    width: 100%;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-weight: 800;
+}
+
+.fund-comparison-search-active input::placeholder {
+    color: var(--text-secondary);
+}
+
+.fund-comparison-search-active button {
+    display: inline-grid;
+    width: 24px;
+    height: 24px;
+    flex: 0 0 auto;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    place-items: center;
+}
+
+.fund-comparison-search-active button:hover,
+.fund-comparison-search-active button:focus-visible {
+    background: color-mix(in srgb, var(--surface-border) 70%, transparent);
+    color: var(--text-primary);
+}
+
+.fund-comparison-results {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    z-index: 8;
+    width: min(300px, calc(100vw - 2rem));
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 78%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-color) 96%, black);
+    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.36);
+}
+
+.fund-comparison-results button {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.55rem;
+    width: 100%;
+    min-height: 38px;
+    padding: 0.35rem 0.45rem;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+}
+
+.fund-comparison-results button:hover,
+.fund-comparison-results button:focus-visible {
+    background: color-mix(in srgb, var(--surface-border) 62%, transparent);
+}
+
+.fund-comparison-results strong {
+    font-family: var(--font-mono);
+    font-weight: 900;
+}
+
+.fund-comparison-results span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-weight: 800;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fund-comparison-result-empty {
+    padding: 1rem 0.75rem;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.fund-comparison-chips {
+    display: flex;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.fund-comparison-chips button {
+    padding: 0 0.75rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.fund-comparison-chips button:hover,
+.fund-comparison-chips button:focus-visible {
+    background: color-mix(in srgb, var(--surface-border) 72%, var(--surface-color));
+    color: var(--text-primary);
+}
+
+.fund-comparison-chips i {
+    width: 0.58rem;
+    height: 0.58rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-secondary) 72%, transparent);
 }
 
 .fund-heatmap-panel {
@@ -725,6 +1694,17 @@
     font-family: var(--font-mono);
 }
 
+.fund-investor-cell {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.45rem;
+}
+
+.fund-investor-delta {
+    font-size: 0.78em;
+    font-weight: 800;
+}
+
 .fund-detail-list {
     display: grid;
     grid-template-columns: repeat(4, minmax(160px, 1fr));
@@ -781,6 +1761,17 @@
         flex-direction: column;
     }
 
+    .fund-market-hero {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .fund-market-quote {
+        align-items: flex-start;
+        min-width: 0;
+        text-align: left;
+    }
+
     .funds-header-stats,
     .fund-metrics-grid,
     .fund-detail-list,
@@ -821,6 +1812,49 @@
         padding: 0.85rem 0.75rem 1.4rem;
     }
 
+    .fund-market-breadcrumb {
+        gap: 0.35rem;
+        padding: 0 0.85rem;
+        overflow-x: auto;
+        white-space: nowrap;
+    }
+
+    .fund-market-hero {
+        padding: 1rem 0.85rem;
+    }
+
+    .fund-market-title {
+        align-items: flex-start;
+    }
+
+    .fund-market-logo.symbol-logo-lg {
+        width: 64px;
+        height: 64px;
+    }
+
+    .fund-market-code-row {
+        align-items: flex-start;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+    }
+
+    .fund-market-code-row h1 {
+        width: 100%;
+    }
+
+    .fund-market-stats {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .fund-market-stats div {
+        padding: 0.72rem 0.85rem;
+    }
+
+    .fund-tabs {
+        gap: 0.95rem;
+        padding: 0 0.85rem;
+    }
+
     .funds-header-stats,
     .fund-metrics-grid,
     .fund-detail-list,
@@ -833,9 +1867,60 @@
         height: 260px;
     }
 
+    .fund-comparison-head,
+    .fund-comparison-controls {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .fund-comparison-period,
+    .fund-comparison-search-wrap,
+    .fund-comparison-search-button,
+    .fund-comparison-search-active {
+        width: 100%;
+    }
+
+    .fund-comparison-chart {
+        height: 282px;
+    }
+
+    .fund-comparison-chart-wrap {
+        min-height: 282px;
+        overflow-x: auto;
+    }
+
+    .fund-comparison-results {
+        top: calc(100% + 8px);
+        bottom: auto;
+        width: 100%;
+    }
+
     .fund-chart-toolbar,
     .fund-custom-range {
         align-items: stretch;
         flex-direction: column;
+    }
+
+    .fund-history-head {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .fund-history-tabs {
+        width: 100%;
+    }
+
+    .fund-history-tabs button {
+        flex: 1 1 150px;
+    }
+
+    .fund-allocation-history-range {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+
+    .fund-allocation-sparkline {
+        width: 104px;
     }
 }

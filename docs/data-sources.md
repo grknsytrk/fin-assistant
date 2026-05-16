@@ -6,10 +6,15 @@ Bu dosya uygulamada hangi verinin nereden alindigini sabitler.
 
 ### Fon listesi / gunluk snapshot
 
-1. `fintables_udf_history`
-   - URL: `https://gate.fintables.com/barbar/udf/history?symbol={FUND_CODE}&resolution=D&from={start_unix}&to={end_unix}`
-   - Kullanim: gunluk collector, fiyat refresh ve snapshot refresh icin tek external fon veri kaynagi.
-   - Kural: snapshot refresh mevcut cache veya `RAGFIN_TARGET_FUND_CODES` ile bilinen fon kodlarini Fintables'tan gunceller.
+1. `tefasfon_funds`
+   - Paket: `tefasfon>=1.1.0,<2`
+   - API: `tefasfon.get_funds(fund_type, start_date, end_date, fund_codes=None)`
+   - Kullanim: fon kodu, fon adi, fiyat, portfoy buyuklugu, yatirimci sayisi ve liste/snapshot gorunumu.
+   - Kural: TEFAS birincil kaynaktir; en son veri olan gun icin snapshot cache yazilir.
+
+2. `tefasfon_returns`
+   - API: `tefasfon.get_returns(fund_type, basis="RB")`
+   - Kullanim: snapshot satirlarini risk ve donem getirileriyle zenginlestirir.
 
 ### Fon fiyat history
 
@@ -18,25 +23,42 @@ Bu dosya uygulamada hangi verinin nereden alindigini sabitler.
    - Unique anahtar: `fund_code + date + source`
    - Kural: `price <= 0` valid performans noktasi sayilmaz.
 
-2. `fintables_udf_history`
+2. `tefasfon_funds`
+   - API: `tefasfon.get_funds(...)`
+   - Kullanim: gunluk fiyat serisi icin ana external history adapter.
+   - DB esleme: `fonKodu` fon kodu, `tarih` tarih, `fiyat` gunluk fiyat.
+
+3. `fintables_udf_history`
    - URL: `https://gate.fintables.com/barbar/udf/history?symbol={FUND_CODE}&resolution=D&from={start_unix}&to={end_unix}`
    - Format: TradingView/UDF (`s`, `t`, `o`, `h`, `l`, `c`, `v`).
-   - Kullanim: gunluk fiyat serisi icin ana external history adapter.
+   - Kullanim: TEFAS/`tefasfon` basarisiz veya eksikse ikinci kaynak.
    - DB esleme: `t[i]` tarih, `c[i]` gunluk fiyat/close.
    - Not: `fund_prices` tablosuna yazilabilen Fintables kaynagi budur.
 
-3. External fallback yoktur.
-   - Fintables basarisiz olursa istek hata veya unavailable durumuyla doner.
+4. Source policy
+   - `tefasfon_primary_fintables_fallback`
+   - TEFAS basarisiz olursa veya hedef fon kodu TEFAS sonucunda yoksa Fintables denenir.
    - Eski cache kaynak adlari UI/API'da `legacy_cache` olarak maskelenir.
 
 ### Fon donem ozeti
 
-1. `fintables_yield_summary`
+1. `tefasfon_funds`
+   - API: fiyat history uzerinden `prev_close`, `high`, `low` donem ozeti hesaplanir.
+   - Kullanim: performans kartlari ve high/low bilgisi icin birincil kaynak.
+
+2. `fintables_yield_summary`
    - URL: `https://gate.fintables.com/barbar/server/yield?code={FUND_CODE}`
    - Format: donem bazli ozet (`1w`, `1m`, `3m`, `6m`, `ytd`, `1y`, `3y`, `5y`, `oldest`).
    - Alanlar: `prev_close_date`, `prev_close`, `high`, `low`.
-   - Kullanim: performans kartlari, high/low bilgisi, sanity-check ve ozet metrikler.
+   - Kullanim: TEFAS donem ozeti uretilemezse fallback.
    - Kural: gunluk seri kaynagi degildir; `fund_prices` tablosuna toplu fiyat noktasi olarak yazilmaz.
+
+### Fon portfoy dagilimi
+
+1. `tefasfon_portfolio`
+   - API: `tefasfon.get_portfolio(fund_type, start_date, end_date, fund_codes=None)`
+   - Kullanim: fon detayindaki varlik dagilimi donut ve tablo gorunumu.
+   - Kural: TEFAS birincil kaynaktir; Fintables allocation endpoint'i tanimli degildir.
 
 ### Kapsam filtresi
 
@@ -55,7 +77,16 @@ Konfigurasyon:
 - Env: `RAGFIN_TARGET_FUND_MANAGERS`
 - Default: `TERA,PUSULA,ATLAS,BULLS,VEGA,PARDUS,AKTIF`
 - Env: `RAGFIN_TARGET_FUND_CODES`
-- Kullanim: Fintables snapshot/collector icin cache yokken hedef fon kodlarini virgulle ver.
+- Kullanim: collector veya detay fiyat backfill icin cache yokken hedef fon kodlarini virgulle ver.
+- Env: `RAGFIN_TEFAS_FUND_TYPES`
+- Default: `SEC`
+- Gecerli degerler: `SEC,PEN,ETF,RE,VC`
+- Env: `RAGFIN_TEFAS_OPEN_ONLY`
+- Default: `1`
+- Kullanim: `tefasfon` satirindaki `tefasDurum=True` olmayan fonlar snapshot ve collector hedef evrenine alinmaz.
+- Env: `RAGFIN_FUNDS_FULL_HISTORY_START_DATE`
+- Default: `2000-01-01`
+- Kullanim: Fon performans grafigi tarih parametresi olmadan istendiginde kurulus/gecmis baslangici olarak kullanilir; gecmis veri tablosu UI'da yine son 30 satirla sinirlidir.
 
 ## Hisseler ve piyasa
 
