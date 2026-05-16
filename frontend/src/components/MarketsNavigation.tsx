@@ -25,6 +25,7 @@ type MarketsNavigationProps = {
     onCollapsedChange: (collapsed: boolean) => void;
     onSectionChange: (section: MarketsNavigationSection) => void;
     onSelectTicker?: (ticker: string) => void;
+    onSelectFund?: (fundCode: string) => void;
 };
 
 export default function MarketsNavigation({
@@ -33,6 +34,7 @@ export default function MarketsNavigation({
     onCollapsedChange,
     onSectionChange,
     onSelectTicker,
+    onSelectFund,
 }: MarketsNavigationProps) {
     const navigate = (ticker: string) => {
         const normalizedTicker = ticker.trim().toUpperCase();
@@ -227,7 +229,7 @@ export default function MarketsNavigation({
 
             {!collapsed && (
                 <div className="mn-sidebar-search">
-                    <GlobalTickerSearch onSelectTicker={navigate} />
+                    <GlobalTickerSearch onSelectTicker={navigate} onSelectFund={onSelectFund} />
                 </div>
             )}
 

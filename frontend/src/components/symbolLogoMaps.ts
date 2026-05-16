@@ -212,6 +212,8 @@ export const FX_COUNTRY_FLAGS: Record<string, { base: string; quote?: string }> 
     'EUR/TRY': { base: 'EU', quote: 'TR' },
     'GBP/TRY': { base: 'GB', quote: 'TR' },
     'CHF/TRY': { base: 'CH', quote: 'TR' },
+    'AUD/TRY': { base: 'AU', quote: 'TR' },
+    'CAD/TRY': { base: 'CA', quote: 'TR' },
     'JPY/TRY': { base: 'JP', quote: 'TR' },
     'CNY/TRY': { base: 'CN', quote: 'TR' },
     'EUR/USD': { base: 'EU', quote: 'US' },

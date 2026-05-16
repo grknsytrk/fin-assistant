@@ -1762,6 +1762,7 @@ interface MarketsViewProps {
     onNavigateReturnMode?: (mode: StockReturnMode) => void;
     onNavigateIndexDetail?: (index: MarketIndexCode | null) => void;
     onOpenTicker?: (ticker: string) => void;
+    onOpenFund?: (fundCode: string) => void;
 }
 
 export default function MarketsView({
@@ -1774,6 +1775,7 @@ export default function MarketsView({
     onNavigateReturnMode,
     onNavigateIndexDetail,
     onOpenTicker,
+    onOpenFund,
 }: MarketsViewProps) {
     const [market, setMarket] = useState<MarketUniverseResponse | null>(null);
     const [stocks, setStocks] = useState<MarketStocksResponse | null>(null);
@@ -2454,6 +2456,7 @@ export default function MarketsView({
                 onCollapsedChange={setNavCollapsed}
                 onSectionChange={handleSectionChange}
                 onSelectTicker={onCompanyClick}
+                onSelectFund={onOpenFund}
             />
             <div className={`markets-workspace${activeSection === 'markets' ? ' markets-workspace-with-rail' : ''}`}>
                 <div className="market-page" ref={marketPageRef}>
