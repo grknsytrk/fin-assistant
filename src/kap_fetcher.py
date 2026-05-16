@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,6 +21,11 @@ LIST_COMPANY_EXCEL_MEMBERS_ENDPOINT = "financialTable/listCompanyExcelMembers"
 ATTACHMENT_DETAIL_ENDPOINT = "notification/attachment-detail"
 PDF_ENDPOINT = "BildirimPdf"
 KAP_CACHE_SCHEMA_VERSION = 11
+KAP_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+KAP_RETRYABLE_HTTP_CODES = {403, 429, 500, 502, 503, 504}
 
 # Query aliases to improve company resolution against KAP ticker/search behavior.
 COMPANY_QUERY_ALIASES: Dict[str, List[str]] = {
@@ -39,6 +45,7 @@ COMPANY_QUERY_ALIASES: Dict[str, List[str]] = {
     "ASELSAN": ["ASELS", "ASELSAN"],
     "ASELS": ["ASELS", "ASELSAN"],
     "EKGYO": ["EKGYO", "EMLAK KONUT"],
+    "ENKA": ["ENKAI", "ENKA"],
     "ENKAI": ["ENKAI", "ENKA"],
     "EREGL": ["EREGL", "ERDEMIR", "EREGLI"],
     "GARAN": ["GARAN", "GARANTI"],
@@ -198,6 +205,41 @@ def _cache_file_for_company(processed_dir: Path, company: str) -> Path:
     return processed_dir / "kap_cache" / f"{slug}.json"
 
 
+def _company_cache_keys(company: str) -> List[str]:
+    company_key = str(company or "").strip().upper()
+    keys: List[str] = []
+
+    direct_aliases = COMPANY_QUERY_ALIASES.get(company_key)
+    if direct_aliases:
+        keys.extend(str(item or "").strip().upper() for item in direct_aliases)
+
+    for canonical, aliases in COMPANY_QUERY_ALIASES.items():
+        alias_keys = [str(item or "").strip().upper() for item in aliases]
+        canonical_key = str(canonical or "").strip().upper()
+        if company_key == canonical_key or company_key in alias_keys:
+            keys.append(canonical_key)
+            keys.extend(alias_keys)
+
+    keys.append(company_key)
+
+    result: List[str] = []
+    for key in keys:
+        if key and key not in result:
+            result.append(key)
+    return result or ["UNKNOWN"]
+
+
+def _read_first_cache(processed_dir: Path, company: str) -> Tuple[Path, Optional[Dict[str, Any]]]:
+    cache_keys = _company_cache_keys(company)
+    primary_path = _cache_file_for_company(processed_dir, cache_keys[0])
+    for key in cache_keys:
+        path = _cache_file_for_company(processed_dir, key)
+        cached = _read_cache(path)
+        if cached:
+            return path, cached
+    return primary_path, None
+
+
 def _read_cache(path: Path) -> Optional[Dict[str, Any]]:
     try:
         if not path.exists():
@@ -228,31 +270,84 @@ def _is_cache_fresh(payload: Dict[str, Any], ttl_hours: float) -> bool:
     return (_utc_now() - fetched_at) <= timedelta(hours=max(0.0, float(ttl_hours)))
 
 
+def _kap_request_headers(cfg: KapConfig, *, accept: str) -> Dict[str, str]:
+    user_agent = str(getattr(cfg, "user_agent", "") or "").strip() or KAP_BROWSER_USER_AGENT
+    return {
+        "Accept": accept,
+        "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+        "User-Agent": user_agent,
+        "Referer": "https://www.kap.org.tr/tr/",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+
+def _candidate_user_agents(cfg: KapConfig) -> List[str]:
+    configured = str(getattr(cfg, "user_agent", "") or "").strip()
+    if "mozilla/" in configured.lower():
+        candidates = [configured, KAP_BROWSER_USER_AGENT]
+    else:
+        candidates = [KAP_BROWSER_USER_AGENT, configured]
+    result: List[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in result:
+            result.append(candidate)
+    return result or [KAP_BROWSER_USER_AGENT]
+
+
 def _http_get_json(url: str, cfg: KapConfig) -> Any:
-    request = urllib.request.Request(
-        url,
-        method="GET",
-        headers={
-            "Accept": "application/json",
-            "Accept-Language": "tr",
-            "User-Agent": cfg.user_agent,
-        },
-    )
-    with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
-        return json.loads(response.read().decode("utf-8", errors="replace"))
+    last_error: Optional[BaseException] = None
+    for user_agent in _candidate_user_agents(cfg):
+        headers = _kap_request_headers(cfg, accept="application/json, text/plain, */*")
+        headers["User-Agent"] = user_agent
+        for attempt in range(2):
+            request = urllib.request.Request(url, method="GET", headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
+                    return json.loads(response.read().decode("utf-8", errors="replace"))
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                code = int(getattr(exc, "code", 0) or 0)
+                if code not in KAP_RETRYABLE_HTTP_CODES:
+                    raise
+                if code == 429 and attempt >= 1:
+                    raise
+                time.sleep(0.8 * (attempt + 1))
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                last_error = exc
+                break
+        if isinstance(last_error, urllib.error.HTTPError) and int(getattr(last_error, "code", 0) or 0) == 429:
+            raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("KAP JSON istegi basarisiz oldu.")
 
 
 def _http_get_text(url: str, cfg: KapConfig) -> str:
-    request = urllib.request.Request(
-        url,
-        method="GET",
-        headers={
-            "Accept-Language": "tr",
-            "User-Agent": cfg.user_agent,
-        },
-    )
-    with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
-        return response.read().decode("utf-8", errors="replace")
+    last_error: Optional[BaseException] = None
+    for user_agent in _candidate_user_agents(cfg):
+        headers = _kap_request_headers(cfg, accept="text/html,application/xhtml+xml,*/*")
+        headers["User-Agent"] = user_agent
+        for attempt in range(2):
+            request = urllib.request.Request(url, method="GET", headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
+                    return response.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                code = int(getattr(exc, "code", 0) or 0)
+                if code not in KAP_RETRYABLE_HTTP_CODES:
+                    raise
+                if code == 429 and attempt >= 1:
+                    raise
+                time.sleep(0.8 * (attempt + 1))
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last_error = exc
+                break
+        if isinstance(last_error, urllib.error.HTTPError) and int(getattr(last_error, "code", 0) or 0) == 429:
+            raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("KAP text istegi basarisiz oldu.")
 
 
 def _member_filter_url(query: str) -> str:
@@ -297,15 +392,25 @@ def _resolve_member(company: str, cfg: KapConfig) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _list_company_disclosures(member_oid: str, cfg: KapConfig, max_years_back: int = 6) -> List[Dict[str, Any]]:
+def _list_company_disclosures(
+    member_oid: str,
+    cfg: KapConfig,
+    max_years_back: int = 6,
+    max_periods: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     current_year = _utc_now().year
     rows: List[Dict[str, Any]] = []
+    requested_periods = max(1, int(max_periods)) if max_periods is not None else None
 
-    for year in range(current_year, current_year - max_years_back - 1, -1):
+    for idx, year in enumerate(range(current_year, current_year - max_years_back - 1, -1)):
+        if idx > 0:
+            time.sleep(0.7)
         url = f"{KAP_BASE_URL}/{LIST_COMPANY_EXCEL_MEMBERS_ENDPOINT}/{member_oid}/{year}/T"
         try:
             payload = _http_get_json(url, cfg)
-        except urllib.error.HTTPError:
+        except urllib.error.HTTPError as exc:
+            if int(getattr(exc, "code", 0) or 0) == 429:
+                break
             continue
         except Exception:
             continue
@@ -338,6 +443,10 @@ def _list_company_disclosures(member_oid: str, cfg: KapConfig, max_years_back: i
                     "mkk_member_oid": str(item.get("mkkMemberOid", "")).strip(),
                 }
             )
+        if requested_periods is not None:
+            period_count = len({(row["year"], row["period"]) for row in rows})
+            if period_count >= requested_periods:
+                break
 
     unique: Dict[int, Dict[str, Any]] = {}
     for row in sorted(rows, key=lambda x: (x["year"], x["period"], x["disclosure_index"]), reverse=True):
@@ -1362,8 +1471,7 @@ def fetch_kap_company_snapshot(
 
     requested_max_quarters = max(1, int(max_quarters))
 
-    cache_path = _cache_file_for_company(processed_dir, company_norm)
-    cached = _read_cache(cache_path)
+    cache_path, cached = _read_first_cache(processed_dir, company_norm)
     cache_version = int(cached.get("schema_version", 0)) if isinstance(cached, dict) else 0
     cached_quarters = list((cached or {}).get("quarters") or []) if isinstance(cached, dict) else []
     cached_period_count = len(
@@ -1390,7 +1498,11 @@ def fetch_kap_company_snapshot(
         if not member:
             raise RuntimeError(f"KAP uyelik kaydi bulunamadi: {company_norm}")
 
-        disclosures = _list_company_disclosures(member_oid=member["mkk_member_oid"], cfg=cfg)
+        disclosures = _list_company_disclosures(
+            member_oid=member["mkk_member_oid"],
+            cfg=cfg,
+            max_periods=requested_max_quarters,
+        )
         if not disclosures:
             raise RuntimeError("KAP finansal bildirim listesi bos dondu.")
 
@@ -1468,7 +1580,7 @@ def fetch_kap_company_snapshot(
             "cache_hit": False,
             "cache_stale": False,
             "schema_version": KAP_CACHE_SCHEMA_VERSION,
-            "company": company_norm,
+            "company": str(quarter_rows[0].get("stock_code", "") or company_norm).strip().upper(),
             "company_title": str(member.get("title", "")).strip(),
             "stock_code": str(quarter_rows[0].get("stock_code", "")).strip(),
             "member_oid": str(member.get("mkk_member_oid", "")).strip(),
