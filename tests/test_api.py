@@ -1720,6 +1720,122 @@ def test_market_stock_card_chart_returns_error_for_no_data_symbol(monkeypatch: p
     assert payload["error"] == "not_found"
 
 
+def test_market_comparison_history_returns_mixed_assets(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_fund_history(processed_dir: Any, fund_code: str, **kwargs: Any) -> Dict[str, Any]:
+        assert fund_code == "TLY"
+        assert kwargs["start_date"].isoformat() == "2026-04-01"
+        assert kwargs["end_date"].isoformat() == "2026-04-05"
+        return {
+            "status": "ok",
+            "source": "sqlite",
+            "points": [
+                {"date": "2026-03-31", "price": 9.8},
+                {"date": "2026-04-01", "price": 10.0},
+                {"date": "2026-04-05", "price": 10.5},
+            ],
+            "source_metadata": {},
+        }
+
+    def fake_chart(yahoo_symbol: str, *, interval: str, start_date: Any, end_date: Any) -> Dict[str, Any]:
+        assert interval == "1d"
+        assert start_date.isoformat() == "2026-04-01"
+        assert end_date.isoformat() == "2026-04-05"
+        values = {
+            "BIMAS.IS": 750.0,
+            "XU100.IS": 9500.0,
+            "USDTRY=X": 32.0,
+        }
+        base = values[yahoo_symbol]
+        return {
+            "ok": True,
+            "points": [
+                {"time": "2026-04-01T08:00:00+00:00", "close": base},
+                {"time": "2026-04-05T08:00:00+00:00", "close": base + 5.0},
+            ],
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_fund_performance_payload", fake_fund_history)
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_period_raw", fake_chart)
+
+    client = TestClient(app)
+    response = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-05",
+            "assets": [
+                {"id": "fund:TLY", "kind": "fund", "symbol": "TLY", "label": "TLY"},
+                {"id": "stock:BIMAS", "kind": "stock", "symbol": "BIMAS", "label": "BIMAS"},
+                {"id": "index:XU100", "kind": "index", "symbol": "XU100", "label": "BIST 100"},
+                {"id": "fx:USD/TRY", "kind": "fx", "symbol": "USD/TRY", "label": "Dolar"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["start_date"] == "2026-04-01"
+    assert [asset["id"] for asset in payload["assets"]] == ["fund:TLY", "stock:BIMAS", "index:XU100", "fx:USD/TRY"]
+    assert payload["assets"][0]["points"] == [
+        {"date": "2026-04-01", "value": 10.0},
+        {"date": "2026-04-05", "value": 10.5},
+    ]
+    assert payload["assets"][1]["points"][0] == {"date": "2026-04-01", "value": 750.0}
+    assert all(asset["error"] is None for asset in payload["assets"])
+
+
+def test_market_comparison_history_rejects_reversed_dates() -> None:
+    client = TestClient(app)
+    response = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2026-04-05",
+            "end_date": "2026-04-01",
+            "assets": [{"kind": "index", "symbol": "XU100"}],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "start_date" in response.json()["detail"]
+
+
+def test_market_comparison_history_returns_partial_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_fund_history(processed_dir: Any, fund_code: str, **kwargs: Any) -> Dict[str, Any]:
+        return {
+            "status": "ok",
+            "source": "sqlite",
+            "points": [{"date": "2026-04-01", "price": 10.0}],
+            "source_metadata": {},
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_fund_performance_payload", fake_fund_history)
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_yahoo_chart_period_raw",
+        lambda *_args, **_kwargs: {"ok": False, "error": "not_found", "points": []},
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-05",
+            "assets": [
+                {"id": "fund:TLY", "kind": "fund", "symbol": "TLY"},
+                {"id": "stock:NOTREAL", "kind": "stock", "symbol": "NOTREAL"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["assets"][0]["points"] == [{"date": "2026-04-01", "value": 10.0}]
+    assert payload["assets"][0]["error"] is None
+    assert payload["assets"][1]["points"] == []
+    assert payload["assets"][1]["error"] == "not_found"
+
+
 def test_fetch_stock_card_intraday_maps_chart_meta(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_chart(_yahoo_symbol: str, *, interval: str, range_: str) -> Dict[str, Any]:
         assert interval == "5m"

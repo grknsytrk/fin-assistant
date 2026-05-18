@@ -207,6 +207,19 @@ class FeedbackRequest(BaseModel):
     verdict: Literal["dogru", "yanlis"] = "yanlis"
 
 
+class MarketComparisonHistoryAsset(BaseModel):
+    id: Optional[str] = None
+    kind: Literal["fund", "stock", "index", "fx"]
+    symbol: str = Field(..., min_length=1)
+    label: Optional[str] = None
+
+
+class MarketComparisonHistoryRequest(BaseModel):
+    assets: List[MarketComparisonHistoryAsset] = Field(..., min_length=1, max_length=8)
+    start_date: date
+    end_date: date
+
+
 def _count_jsonl_rows(path: Path) -> int:
     if not path.exists():
         return 0
@@ -1022,6 +1035,13 @@ def market_stock_card_chart(
     refresh: bool = Query(False),
 ) -> Dict[str, Any]:
     return _market_stock_card_chart_payload(symbol=symbol, chart_range=range, force_refresh=refresh)
+
+
+@app.post("/market/comparison-history")
+def market_comparison_history(request: MarketComparisonHistoryRequest) -> Dict[str, Any]:
+    if request.start_date > request.end_date:
+        raise HTTPException(status_code=400, detail="start_date end_date sonrasinda olamaz")
+    return _market_comparison_history_payload(request)
 
 
 @app.get("/market/indices")
@@ -4514,21 +4534,7 @@ def _normalize_market_index(index_code: str) -> str:
     return normalized
 
 
-def _fetch_yahoo_chart_raw(yahoo_symbol: str, *, interval: str, range_: str) -> Dict[str, Any]:
-    import urllib.error
-    import urllib.request
-
-    url = (
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
-        f"?interval={interval}&range={range_}"
-    )
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, Exception) as exc:
-        return {"ok": False, "error": f"yahoo_error: {exc}", "yahoo_symbol": yahoo_symbol}
-
+def _parse_yahoo_chart_payload(data: Dict[str, Any], yahoo_symbol: str) -> Dict[str, Any]:
     try:
         result = data["chart"]["result"][0]
     except (KeyError, IndexError, TypeError) as exc:
@@ -4581,6 +4587,44 @@ def _fetch_yahoo_chart_raw(yahoo_symbol: str, *, interval: str, range_: str) -> 
         "meta": meta,
         "points": points,
     }
+
+
+def _fetch_yahoo_chart_url(url: str, yahoo_symbol: str) -> Dict[str, Any]:
+    import urllib.error
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, Exception) as exc:
+        return {"ok": False, "error": f"yahoo_error: {exc}", "yahoo_symbol": yahoo_symbol}
+
+    return _parse_yahoo_chart_payload(data, yahoo_symbol)
+
+
+def _fetch_yahoo_chart_raw(yahoo_symbol: str, *, interval: str, range_: str) -> Dict[str, Any]:
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
+        f"?interval={interval}&range={range_}"
+    )
+    return _fetch_yahoo_chart_url(url, yahoo_symbol)
+
+
+def _fetch_yahoo_chart_period_raw(
+    yahoo_symbol: str,
+    *,
+    interval: str,
+    start_date: date,
+    end_date: date,
+) -> Dict[str, Any]:
+    period1 = int(datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    period2 = int(datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
+        f"?interval={interval}&period1={period1}&period2={period2}"
+    )
+    return _fetch_yahoo_chart_url(url, yahoo_symbol)
 
 
 def _fetch_index_quote(index_code: str) -> Dict[str, Any]:
@@ -4704,6 +4748,253 @@ def _market_index_row(index_code: str, *, quote: Optional[Dict[str, Any]] = None
         "as_of": quote_row.get("as_of") or bases.get("as_of"),
         "error": quote_row.get("error"),
         **_index_returns_from_bases(current_for_returns, bases),
+    }
+
+
+def _comparison_error_message(exc: Exception) -> str:
+    detail = getattr(exc, "detail", None)
+    if detail:
+        return str(detail)
+    return str(exc) or exc.__class__.__name__
+
+
+def _comparison_history_result(
+    asset: MarketComparisonHistoryAsset,
+    *,
+    symbol: str,
+    label: Optional[str],
+    points: List[Dict[str, Any]],
+    source: str,
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "id": asset.id or f"{asset.kind}:{symbol}",
+        "kind": asset.kind,
+        "symbol": symbol,
+        "label": label or asset.label or symbol,
+        "points": points,
+        "source": source,
+        "error": error,
+    }
+
+
+def _comparison_history_points_from_chart(
+    chart: Dict[str, Any],
+    *,
+    start_date: date,
+    end_date: date,
+) -> List[Dict[str, Any]]:
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for point in list(chart.get("points") or []):
+        if not isinstance(point, dict):
+            continue
+        point_dt = _point_datetime(point.get("time"))
+        close = _numeric_chart_value(point.get("close"))
+        if point_dt is None or close is None or close <= 0:
+            continue
+        point_date = point_dt.date()
+        if point_date < start_date or point_date > end_date:
+            continue
+        date_key = point_date.isoformat()
+        deduped[date_key] = {"date": date_key, "value": close}
+    return [deduped[key] for key in sorted(deduped)]
+
+
+def _fund_comparison_history(
+    asset: MarketComparisonHistoryAsset,
+    *,
+    start_date: date,
+    end_date: date,
+) -> Dict[str, Any]:
+    from app.fund_service import get_fund_performance_payload, normalize_fund_code
+
+    symbol = normalize_fund_code(asset.symbol)
+    try:
+        payload = get_fund_performance_payload(
+            CONFIG.paths.processed_dir,
+            symbol,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        points: List[Dict[str, Any]] = []
+        for point in list(payload.get("points") or []):
+            try:
+                price = float(point.get("price"))
+            except (TypeError, ValueError):
+                continue
+            point_date = str(point.get("date") or "")
+            if not point_date or price <= 0:
+                continue
+            if point_date < start_date.isoformat() or point_date > end_date.isoformat():
+                continue
+            points.append({"date": point_date, "value": price})
+        return _comparison_history_result(
+            asset,
+            symbol=symbol,
+            label=asset.label or symbol,
+            points=points,
+            source=str(payload.get("source") or "sqlite"),
+            error=None if points else str(payload.get("source_metadata", {}).get("warning") or payload.get("status") or "data_unavailable"),
+        )
+    except Exception as exc:
+        return _comparison_history_result(
+            asset,
+            symbol=symbol,
+            label=asset.label or symbol,
+            points=[],
+            source="sqlite",
+            error=_comparison_error_message(exc),
+        )
+
+
+def _stock_comparison_history(
+    asset: MarketComparisonHistoryAsset,
+    *,
+    start_date: date,
+    end_date: date,
+) -> Dict[str, Any]:
+    try:
+        symbol = _normalize_market_stock_card_symbol(asset.symbol)
+        yahoo_symbol = f"{symbol}.IS"
+        chart = _fetch_yahoo_chart_period_raw(
+            yahoo_symbol,
+            interval="1d",
+            start_date=start_date,
+            end_date=end_date,
+        )
+        points = _comparison_history_points_from_chart(chart, start_date=start_date, end_date=end_date)
+        return _comparison_history_result(
+            asset,
+            symbol=symbol,
+            label=asset.label or symbol,
+            points=points,
+            source="yahoo_finance_chart",
+            error=None if chart.get("ok") and points else str(chart.get("error") or "data_unavailable"),
+        )
+    except Exception as exc:
+        symbol = str(asset.symbol or "").strip().upper()
+        return _comparison_history_result(
+            asset,
+            symbol=symbol,
+            label=asset.label or symbol,
+            points=[],
+            source="yahoo_finance_chart",
+            error=_comparison_error_message(exc),
+        )
+
+
+def _index_comparison_history(
+    asset: MarketComparisonHistoryAsset,
+    *,
+    start_date: date,
+    end_date: date,
+) -> Dict[str, Any]:
+    try:
+        symbol = _normalize_market_index(asset.symbol)
+        label = asset.label or _MARKET_INDEX_META[symbol]["label"]
+        errors: List[str] = []
+        for yahoo_symbol in _MARKET_INDEX_META[symbol]["yahoo_candidates"]:
+            chart = _fetch_yahoo_chart_period_raw(
+                yahoo_symbol,
+                interval="1d",
+                start_date=start_date,
+                end_date=end_date,
+            )
+            points = _comparison_history_points_from_chart(chart, start_date=start_date, end_date=end_date)
+            if chart.get("ok") and points:
+                return _comparison_history_result(
+                    asset,
+                    symbol=symbol,
+                    label=label,
+                    points=points,
+                    source="yahoo_finance_chart",
+                )
+            errors.append(str(chart.get("error") or "data_unavailable"))
+        return _comparison_history_result(
+            asset,
+            symbol=symbol,
+            label=label,
+            points=[],
+            source="yahoo_finance_chart",
+            error="; ".join(errors[:3]) if errors else "data_unavailable",
+        )
+    except Exception as exc:
+        symbol = str(asset.symbol or "").strip().upper()
+        return _comparison_history_result(
+            asset,
+            symbol=symbol,
+            label=asset.label or symbol,
+            points=[],
+            source="yahoo_finance_chart",
+            error=_comparison_error_message(exc),
+        )
+
+
+def _fx_comparison_history(
+    asset: MarketComparisonHistoryAsset,
+    *,
+    start_date: date,
+    end_date: date,
+) -> Dict[str, Any]:
+    symbol = str(asset.symbol or "").strip().upper()
+    direct_map = {entry[0]: entry for entry in _FX_DIRECT_MAP}
+    entry = direct_map.get(symbol)
+    if not entry:
+        return _comparison_history_result(
+            asset,
+            symbol=symbol,
+            label=asset.label or symbol,
+            points=[],
+            source="yahoo_finance_chart",
+            error="unsupported_fx_symbol",
+        )
+
+    _, yahoo_candidates, default_label = entry
+    errors: List[str] = []
+    for yahoo_symbol in yahoo_candidates:
+        chart = _fetch_yahoo_chart_period_raw(
+            yahoo_symbol,
+            interval="1d",
+            start_date=start_date,
+            end_date=end_date,
+        )
+        points = _comparison_history_points_from_chart(chart, start_date=start_date, end_date=end_date)
+        if chart.get("ok") and points:
+            return _comparison_history_result(
+                asset,
+                symbol=symbol,
+                label=asset.label or default_label,
+                points=points,
+                source="yahoo_finance_chart",
+            )
+        errors.append(str(chart.get("error") or "data_unavailable"))
+
+    return _comparison_history_result(
+        asset,
+        symbol=symbol,
+        label=asset.label or default_label,
+        points=[],
+        source="yahoo_finance_chart",
+        error="; ".join(errors[:3]) if errors else "data_unavailable",
+    )
+
+
+def _market_comparison_history_payload(request: MarketComparisonHistoryRequest) -> Dict[str, Any]:
+    handlers = {
+        "fund": _fund_comparison_history,
+        "stock": _stock_comparison_history,
+        "index": _index_comparison_history,
+        "fx": _fx_comparison_history,
+    }
+    return {
+        "start_date": request.start_date.isoformat(),
+        "end_date": request.end_date.isoformat(),
+        "assets": [
+            handlers[asset.kind](asset, start_date=request.start_date, end_date=request.end_date)
+            for asset in request.assets
+        ],
+        "source": "mixed",
+        "as_of": datetime.now(timezone.utc).isoformat(),
     }
 
 

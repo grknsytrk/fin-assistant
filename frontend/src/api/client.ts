@@ -21,6 +21,8 @@ import type {
     MarketCommoditiesResponse,
     MarketIndexResponse,
     MarketFxResponse,
+    MarketComparisonHistoryAssetRequest,
+    MarketComparisonHistoryResponse,
     FundAllocationsResponse,
     FundAllocationsHistoryResponse,
     FundCategoriesResponse,
@@ -232,6 +234,21 @@ export const apiClient = {
             signal: options?.signal,
         });
     },
+    marketComparisonHistory: (
+        request: {
+            assets: MarketComparisonHistoryAssetRequest[];
+            start_date: string;
+            end_date: string;
+        },
+        options?: { signal?: AbortSignal },
+    ) =>
+        fetchApi<MarketComparisonHistoryResponse>('/market/comparison-history', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            signal: options?.signal,
+            timeoutMs: 30000,
+            exposeErrorDetail: true,
+        }),
     marketIndices: (options?: { refresh?: boolean }) => {
         const params = new URLSearchParams();
         if (options?.refresh) params.append('refresh', 'true');

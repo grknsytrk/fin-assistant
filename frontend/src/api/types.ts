@@ -337,6 +337,38 @@ export interface FundPerformanceResponse {
   source_metadata: FundSourceMetadata;
 }
 
+export type MarketComparisonHistoryAssetKind = 'fund' | 'stock' | 'index' | 'fx';
+
+export interface MarketComparisonHistoryAssetRequest {
+  id?: string;
+  kind: MarketComparisonHistoryAssetKind;
+  symbol: string;
+  label?: string | null;
+}
+
+export interface MarketComparisonHistoryPoint {
+  date: string;
+  value: number;
+}
+
+export interface MarketComparisonHistoryAssetSeries {
+  id: string;
+  kind: MarketComparisonHistoryAssetKind;
+  symbol: string;
+  label: string | null;
+  points: MarketComparisonHistoryPoint[];
+  source: string;
+  error: string | null;
+}
+
+export interface MarketComparisonHistoryResponse {
+  start_date: string;
+  end_date: string;
+  assets: MarketComparisonHistoryAssetSeries[];
+  source: string;
+  as_of: string;
+}
+
 export interface FundAllocationsResponse {
   fund_code: string;
   status: string;

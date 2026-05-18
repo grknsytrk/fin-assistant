@@ -7,7 +7,10 @@ import {
     useRef,
     useState,
     type CSSProperties,
+    type Dispatch,
     type PointerEvent as ReactPointerEvent,
+    type RefObject,
+    type SetStateAction,
 } from 'react';
 import {
     ArrowLeft,
@@ -40,6 +43,7 @@ import type {
     FundYieldSummaryResponse,
     FundsResponse,
     FxQuote,
+    MarketComparisonHistoryResponse,
     MarketIndexListRow,
     MarketStockRow,
 } from '../api/types';
@@ -94,18 +98,7 @@ const FUND_HISTORY_TABS: Array<{ key: FundHistorySubtab; label: string; icon: ty
     { key: 'allocation', label: 'Fon Dağılımı', icon: BriefcaseBusiness },
 ];
 
-type FundChartRange = 'all' | '1w' | '1m' | '3m' | 'ytd' | '1y' | '5y' | 'custom';
-
-const FUND_CHART_RANGES: Array<{ id: FundChartRange; label: string; title: string }> = [
-    { id: 'all', label: 'Tüm', title: 'Kuruluştan beri' },
-    { id: '1w', label: '1H', title: '1 Hafta' },
-    { id: '1m', label: '1A', title: '1 Ay' },
-    { id: '3m', label: '3A', title: '3 Ay' },
-    { id: 'ytd', label: 'YBB', title: 'Yılbaşından Beri' },
-    { id: '1y', label: '1Y', title: '1 Yıl' },
-    { id: '5y', label: '5Y', title: '5 Yıl' },
-    { id: 'custom', label: 'Özel', title: 'Özel aralık' },
-];
+type FundChartRange = 'all' | '1w' | '1m' | '3m' | '6m' | 'ytd' | '1y' | '5y' | 'custom';
 
 const DETAIL_RETURN_PERIODS = [
     { key: '1w', label: '1H' },
@@ -118,6 +111,7 @@ const DETAIL_RETURN_PERIODS = [
 
 type ComparisonPeriod = typeof DETAIL_RETURN_PERIODS[number]['key'];
 type ComparisonAssetKind = 'fund' | 'stock' | 'index' | 'fx';
+type FundComparisonControlSurface = 'chart' | 'returns';
 
 type ComparisonAsset = {
     id: string;
@@ -128,6 +122,35 @@ type ComparisonAsset = {
     logoName?: string | null;
     logoUrl?: string | null;
     returns: Partial<Record<ComparisonPeriod, number | null>>;
+};
+
+type FundComparisonState = {
+    baseAsset: ComparisonAsset | null;
+    selectedAssets: ComparisonAsset[];
+    selectedIds: string[];
+    period: ComparisonPeriod;
+    setPeriod: Dispatch<SetStateAction<ComparisonPeriod>>;
+    query: string;
+    setQuery: Dispatch<SetStateAction<string>>;
+    searchOpen: boolean;
+    setSearchOpen: Dispatch<SetStateAction<boolean>>;
+    searchSurface: FundComparisonControlSurface | null;
+    searchResults: ComparisonAsset[];
+    addAsset: (asset: ComparisonAsset) => void;
+    removeAsset: (assetId: string) => void;
+    openSearch: (surface?: FundComparisonControlSurface) => void;
+    fundSearchLoading: boolean;
+    stocksLoading: boolean;
+    indicesLoading: boolean;
+    fxLoading: boolean;
+    inputRef: RefObject<HTMLInputElement | null>;
+};
+
+type FundChartComparisonSeries = {
+    asset: ComparisonAsset;
+    points: Array<{ date: string; value: number }>;
+    source?: string | null;
+    error?: string | null;
 };
 
 type ComparisonReturnSource = {
@@ -142,6 +165,7 @@ type ComparisonReturnSource = {
 
 const FUND_DONUT_COLORS = ['#4f46e5', '#a3e635', '#818cf8', '#84cc16', '#f472b6', '#8b5cf6', '#c084fc', '#14b8a6'];
 const DEFAULT_COMPARISON_IDS = ['index:XU100', 'index:XU030'];
+const FUND_CHART_COMPARISON_COLORS = ['#22c55e', '#60a5fa', '#f59e0b', '#f472b6', '#a78bfa', '#14b8a6', '#f97316', '#e879f9'];
 
 const STOCK_SEARCH_LABELS: Record<string, string[]> = {
     ASTOR: ['Astor Enerji A.Ş.'],
@@ -431,6 +455,7 @@ function rangeStartDate(range: FundChartRange, endDateIso: string, customStartDa
     if (range === '1w') start.setDate(start.getDate() - 7);
     if (range === '1m') start.setMonth(start.getMonth() - 1);
     if (range === '3m') start.setMonth(start.getMonth() - 3);
+    if (range === '6m') start.setMonth(start.getMonth() - 6);
     if (range === 'ytd') {
         start.setMonth(0, 1);
     }
@@ -676,75 +701,452 @@ function donutSegmentPath(startAngle: number, endAngle: number, outerRadius = 92
     ].join(' ');
 }
 
+function chartDateMs(value: string): number {
+    const ts = new Date(`${value}T00:00:00`).getTime();
+    return Number.isFinite(ts) ? ts : 0;
+}
+
+function nearestChartPoint<T extends { date: string }>(points: T[], targetDate: string): T | null {
+    if (!points.length) return null;
+    const targetTs = chartDateMs(targetDate);
+    let closest = points[0];
+    let closestDiff = Math.abs(chartDateMs(points[0].date) - targetTs);
+    for (const point of points.slice(1)) {
+        const diff = Math.abs(chartDateMs(point.date) - targetTs);
+        if (diff < closestDiff) {
+            closest = point;
+            closestDiff = diff;
+        }
+    }
+    return closest;
+}
+
+function FundChartReturnStrip({
+    periodReturns,
+    yieldPeriods,
+    currency,
+    selectedRange,
+    onRangeSelect,
+}: {
+    periodReturns: FundSummary['period_returns'] | undefined;
+    yieldPeriods?: FundYieldSummaryResponse['periods'];
+    currency?: string | null;
+    selectedRange: FundChartRange;
+    onRangeSelect: (range: FundChartRange) => void;
+}) {
+    return (
+        <div className="fund-chart-return-strip" aria-label="Dönem getirileri">
+            {DETAIL_RETURN_PERIODS.map((period) => {
+                const value = periodReturns?.[period.key];
+                const bounds = formatYieldBounds(yieldPeriods?.[period.key], currency || 'TRY');
+                return (
+                    <button
+                        type="button"
+                        key={period.key}
+                        className={selectedRange === period.key ? 'is-active' : undefined}
+                        aria-pressed={selectedRange === period.key}
+                        onClick={() => onRangeSelect(period.key)}
+                        title={bounds || period.label}
+                    >
+                        <span>{period.label}</span>
+                        <strong className={pctClass(value)}>{formatPct(value)}</strong>
+                    </button>
+                );
+            })}
+        </div>
+    );
+}
+
 function FundPerformanceChart({
     fundCode,
     points,
+    comparisonAssets,
+    comparisonHistory,
+    comparisonLoading,
+    comparisonError,
     selectedRange,
     pendingRange,
     rangeError,
     customStartDate,
     customEndDate,
+    periodReturns,
+    yieldPeriods,
+    currency,
+    comparison,
     onRangeSelect,
     onCustomStartDateChange,
     onCustomEndDateChange,
 }: {
     fundCode: string;
     points: FundPricePoint[];
+    comparisonAssets: ComparisonAsset[];
+    comparisonHistory: MarketComparisonHistoryResponse | null;
+    comparisonLoading: boolean;
+    comparisonError: string | null;
     selectedRange: FundChartRange;
     pendingRange: FundChartRange | null;
     rangeError: string | null;
     customStartDate: string;
     customEndDate: string;
+    periodReturns: FundSummary['period_returns'] | undefined;
+    yieldPeriods?: FundYieldSummaryResponse['periods'];
+    currency?: string | null;
+    comparison: FundComparisonState;
     onRangeSelect: (range: FundChartRange) => void;
     onCustomStartDateChange: (value: string) => void;
     onCustomEndDateChange: (value: string) => void;
 }) {
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const width = 860;
-    const height = 330;
-    const padding = { top: 24, right: 22, bottom: 34, left: 72 };
+    const height = 430;
+    const padding = { top: 34, right: 24, bottom: 50, left: 74 };
     const validPoints = points.filter((point) => Number.isFinite(Number(point.price)) && Number(point.price) > 0);
     const rangeReturn = validPoints.length >= 2
         ? returnBetween(Number(validPoints[validPoints.length - 1].price), Number(validPoints[0].price))
         : null;
     const color = rangeReturn == null || rangeReturn >= 0 ? '#22c55e' : '#ff4d5e';
 
+    const returnStrip = (
+        <FundChartReturnStrip
+            periodReturns={periodReturns}
+            yieldPeriods={yieldPeriods}
+            currency={currency}
+            selectedRange={selectedRange}
+            onRangeSelect={onRangeSelect}
+        />
+    );
     const controls = (
         <div className="fund-chart-toolbar">
-            <div className="fund-chart-ranges">
-                {FUND_CHART_RANGES.map((range) => (
-                    <button
-                        key={range.id}
-                        type="button"
-                        className={[
-                            'fund-chart-range',
-                            selectedRange === range.id ? 'is-active' : '',
-                            pendingRange === range.id ? 'is-loading' : '',
-                        ].filter(Boolean).join(' ')}
-                        title={range.title}
-                        aria-pressed={selectedRange === range.id}
-                        onClick={() => onRangeSelect(range.id)}
-                    >
-                        {range.label}
-                    </button>
-                ))}
+            <div className="fund-chart-range-row">
+                {returnStrip}
             </div>
-            <div className={`fund-chart-return ${pctClass(rangeReturn)}`}>{formatPct(rangeReturn)}</div>
+            <div className="fund-chart-custom-control">
+                <button
+                    type="button"
+                    className={[
+                        'fund-chart-range',
+                        selectedRange === 'custom' ? 'is-active' : '',
+                        pendingRange === 'custom' ? 'is-loading' : '',
+                    ].filter(Boolean).join(' ')}
+                    title="Özel aralık"
+                    aria-pressed={selectedRange === 'custom'}
+                    onClick={() => onRangeSelect('custom')}
+                >
+                    Özel
+                </button>
+                <div className={`fund-chart-return ${selectedRange === 'custom' ? pctClass(rangeReturn) : ''}`}>
+                    {selectedRange === 'custom' ? formatPct(rangeReturn) : '-'}
+                </div>
+            </div>
         </div>
     );
+    const customRangeInputs = selectedRange === 'custom' ? (
+        <div className="fund-custom-range">
+            <input type="date" value={customStartDate} onChange={(event) => onCustomStartDateChange(event.target.value)} />
+            <input type="date" value={customEndDate} onChange={(event) => onCustomEndDateChange(event.target.value)} />
+        </div>
+    ) : null;
 
     if (validPoints.length < 2) {
         return (
             <section className="fund-chart-panel">
                 {controls}
-                {selectedRange === 'custom' && (
-                    <div className="fund-custom-range">
-                        <input type="date" value={customStartDate} onChange={(event) => onCustomStartDateChange(event.target.value)} />
-                        <input type="date" value={customEndDate} onChange={(event) => onCustomEndDateChange(event.target.value)} />
-                    </div>
-                )}
+                {customRangeInputs}
                 <div className="fund-chart-empty">{pendingRange ? 'Grafik verisi yükleniyor...' : 'Bu aralık için grafik verisi yok.'}</div>
                 {rangeError && <div className="fund-chart-error">{rangeError}</div>}
+                {comparisonError && <div className="fund-chart-error">{comparisonError}</div>}
+            </section>
+        );
+    }
+
+    const plotWidth = width - padding.left - padding.right;
+    const plotHeight = height - padding.top - padding.bottom;
+    const gradientId = `fund-chart-area-${fundCode.replace(/[^a-zA-Z0-9]/g, '')}-${selectedRange}`;
+    const tickIndexes = Array.from(new Set([0, Math.floor((validPoints.length - 1) / 2), validPoints.length - 1]));
+    const firstChartDate = validPoints[0]?.date || null;
+    const lastChartDate = validPoints[validPoints.length - 1]?.date || null;
+    const selectedComparisonIds = comparisonAssets.map((asset) => asset.id);
+    const comparisonHistoryAssets = comparisonHistory?.assets || [];
+    const comparisonHistoryById = new Map(comparisonHistoryAssets.map((asset) => [asset.id, asset]));
+    const comparisonHistoryMatches = comparisonAssets.length > 0
+        && Boolean(comparisonHistory)
+        && comparisonHistory?.start_date === firstChartDate
+        && comparisonHistory?.end_date === lastChartDate
+        && selectedComparisonIds.every((id) => comparisonHistoryById.has(id));
+    const hasUsableComparisonSeries = comparisonHistoryMatches
+        && selectedComparisonIds.some((id) => (
+            (comparisonHistoryById.get(id)?.points || [])
+                .filter((point) => Number.isFinite(Number(point.value)) && Number(point.value) > 0)
+                .length >= 2
+        ));
+    const comparisonMode = comparisonHistoryMatches && hasUsableComparisonSeries;
+    const waitingForComparison = comparisonAssets.length > 0
+        && !comparisonMode
+        && (comparisonLoading || !comparisonHistoryMatches)
+        && !comparisonError;
+
+    if (waitingForComparison) {
+        const yTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => padding.top + ratio * plotHeight);
+        return (
+            <section className="fund-chart-panel">
+                {controls}
+                {customRangeInputs}
+                <svg
+                    className="fund-detail-chart"
+                    viewBox={`0 0 ${width} ${height}`}
+                    preserveAspectRatio="xMidYMid meet"
+                    role="img"
+                    aria-label={`${fundCode} karşılaştırmalı getiri grafiği yükleniyor`}
+                >
+                    {yTicks.map((y) => (
+                        <line key={y} x1={padding.left} x2={width - padding.right} y1={y} y2={y} className="fund-chart-gridline" />
+                    ))}
+                    {tickIndexes.map((index) => (
+                        <text
+                            key={index}
+                            x={padding.left + (index / Math.max(1, validPoints.length - 1)) * plotWidth}
+                            y={height - 10}
+                            className="fund-chart-axis"
+                            textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
+                        >
+                            {formatChartDate(validPoints[index].date, selectedRange)}
+                        </text>
+                    ))}
+                    <text x={width / 2} y={height / 2} className="fund-chart-loading-label" textAnchor="middle">
+                        Karşılaştırma grafiği hazırlanıyor...
+                    </text>
+                </svg>
+                <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" />
+                {rangeError && <div className="fund-chart-error">{rangeError}</div>}
+            </section>
+        );
+    }
+
+    if (comparisonMode) {
+        const historyById = comparisonHistoryById;
+        const baseAsset: ComparisonAsset = {
+            id: comparisonAssetId('fund', fundCode),
+            kind: 'fund',
+            symbol: fundCode,
+            label: fundCode,
+            returns: {},
+        };
+        const baseSeries: FundChartComparisonSeries = {
+            asset: baseAsset,
+            points: validPoints.map((point) => ({ date: point.date, value: Number(point.price) })),
+            source: 'fund_performance',
+        };
+        const externalSeries: FundChartComparisonSeries[] = comparisonAssets.map((asset) => {
+            const history = historyById.get(asset.id);
+            return {
+                asset,
+                points: (history?.points || [])
+                    .filter((point) => Number.isFinite(Number(point.value)) && Number(point.value) > 0)
+                    .map((point) => ({ date: point.date, value: Number(point.value) })),
+                source: history?.source,
+                error: history?.error,
+            };
+        });
+        const rawSeries = [baseSeries, ...externalSeries];
+        const normalizedSeries = rawSeries
+            .map((series, index) => {
+                const ordered = [...series.points].sort((a, b) => a.date.localeCompare(b.date));
+                const baseValue = ordered.find((point) => point.value > 0)?.value ?? null;
+                return {
+                    ...series,
+                    color: FUND_CHART_COMPARISON_COLORS[index % FUND_CHART_COMPARISON_COLORS.length],
+                    points: baseValue
+                        ? ordered.map((point) => ({
+                            date: point.date,
+                            value: ((point.value / baseValue) - 1) * 100,
+                        }))
+                        : [],
+                };
+            })
+            .filter((series) => series.points.length >= 2);
+        const returnValues = normalizedSeries.flatMap((series) => series.points.map((point) => point.value));
+        const rawMin = Math.min(0, ...returnValues);
+        const rawMax = Math.max(0, ...returnValues);
+        const rawSpan = Math.max(1, rawMax - rawMin);
+        const minValue = rawMin - rawSpan * 0.08;
+        const maxValue = rawMax + rawSpan * 0.08;
+        const span = Math.max(1, maxValue - minValue);
+        const startTs = chartDateMs(validPoints[0].date);
+        const endTs = Math.max(startTs + 1, chartDateMs(validPoints[validPoints.length - 1].date));
+        const xForDate = (date: string) => {
+            const ratio = (chartDateMs(date) - startTs) / (endTs - startTs);
+            return padding.left + Math.min(1, Math.max(0, ratio)) * plotWidth;
+        };
+        const yFor = (value: number) => padding.top + ((maxValue - value) / span) * plotHeight;
+        const yTicks = Array.from({ length: 5 }, (_, index) => maxValue - (span * index) / 4);
+        const zeroY = yFor(0);
+        const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            if (rect.width <= 0) return;
+            const x = ((event.clientX - rect.left) / rect.width) * width;
+            let closestIndex = 0;
+            let minDiff = Infinity;
+            for (let index = 0; index < validPoints.length; index += 1) {
+                const diff = Math.abs(xForDate(validPoints[index].date) - x);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    closestIndex = index;
+                }
+            }
+            setHoverIndex(closestIndex);
+        };
+        const hoverPoint = hoverIndex == null ? null : validPoints[Math.max(0, Math.min(validPoints.length - 1, hoverIndex))];
+        const hoverX = hoverPoint ? xForDate(hoverPoint.date) : null;
+        const tooltipRows = hoverPoint
+            ? normalizedSeries
+                .map((series) => {
+                    const point = nearestChartPoint(series.points, hoverPoint.date);
+                    return point ? { series, point } : null;
+                })
+                .filter((item): item is { series: typeof normalizedSeries[number]; point: { date: string; value: number } } => Boolean(item))
+                .slice(0, 4)
+            : [];
+        const tooltipWidth = 172;
+        const tooltipHeight = Math.max(48, 24 + tooltipRows.length * 15);
+        const tooltipGap = 12;
+        const tooltipShouldFlip = hoverX != null && hoverX + tooltipGap + tooltipWidth > width - padding.right;
+        const tooltipX = hoverX == null
+            ? 0
+            : tooltipShouldFlip
+                ? Math.max(8, hoverX - tooltipGap - tooltipWidth)
+                : Math.min(hoverX + tooltipGap, width - tooltipWidth - 8);
+        const tooltipY = padding.top + 8;
+
+        return (
+            <section className="fund-chart-panel">
+                {controls}
+                {customRangeInputs}
+                <svg
+                    key={`${fundCode}-${selectedRange}-${validPoints.length}-compare-${comparisonAssets.map((asset) => asset.id).join('-')}`}
+                    className="fund-detail-chart"
+                    viewBox={`0 0 ${width} ${height}`}
+                    preserveAspectRatio="xMidYMid meet"
+                    role="img"
+                    aria-label={`${fundCode} karşılaştırmalı getiri grafiği`}
+                    onPointerMove={handlePointerMove}
+                    onPointerLeave={() => setHoverIndex(null)}
+                >
+                    <defs>
+                        <clipPath id={`${gradientId}-compare-clip`}>
+                            <rect x={padding.left} y={0} width={plotWidth} height={height} className="fund-chart-reveal" />
+                        </clipPath>
+                    </defs>
+                    {yTicks.map((tick) => {
+                        const y = yFor(tick);
+                        return (
+                            <g key={tick}>
+                                <line x1={padding.left} x2={width - padding.right} y1={y} y2={y} className="fund-chart-gridline" />
+                                <text x={padding.left - 10} y={y + 4} className="fund-chart-axis" textAnchor="end">
+                                    {formatPct(tick).replace('+', '')}
+                                </text>
+                            </g>
+                        );
+                    })}
+                    <line x1={padding.left} x2={width - padding.right} y1={zeroY} y2={zeroY} className="fund-comparison-zero" />
+                    {tickIndexes.map((index) => (
+                        <text
+                            key={index}
+                            x={xForDate(validPoints[index].date)}
+                            y={height - 10}
+                            className="fund-chart-axis"
+                            textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
+                        >
+                            {formatChartDate(validPoints[index].date, selectedRange)}
+                        </text>
+                    ))}
+                    <g clipPath={`url(#${gradientId}-compare-clip)`}>
+                        {normalizedSeries.map((series) => {
+                            const pathData = series.points
+                                .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xForDate(point.date)} ${yFor(point.value)}`)
+                                .join(' ');
+                            return (
+                                <path
+                                    key={series.asset.id}
+                                    d={pathData}
+                                    fill="none"
+                                    stroke={series.color}
+                                    strokeWidth={series.asset.id === baseAsset.id ? 3 : 2.2}
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    className="fund-chart-line"
+                                />
+                            );
+                        })}
+                        {normalizedSeries.flatMap((series) => (
+                            series.points.map((point, index) => (
+                                <circle
+                                    key={`${series.asset.id}-node-${index}`}
+                                    className="fund-chart-node"
+                                    cx={xForDate(point.date)}
+                                    cy={yFor(point.value)}
+                                    r={series.asset.id === baseAsset.id ? 1.9 : 1.6}
+                                    fill={series.color}
+                                />
+                            ))
+                        ))}
+                    </g>
+                    {normalizedSeries.map((series) => {
+                        const lastPoint = series.points[series.points.length - 1];
+                        return lastPoint ? (
+                            <circle
+                                key={`${series.asset.id}-endpoint`}
+                                className="fund-chart-endpoint"
+                                cx={xForDate(lastPoint.date)}
+                                cy={yFor(lastPoint.value)}
+                                r={series.asset.id === baseAsset.id ? 4 : 3.4}
+                                fill={series.color}
+                            />
+                        ) : null;
+                    })}
+                    {hoverPoint && hoverX != null && tooltipRows.length > 0 && (
+                        <g>
+                            <line x1={hoverX} x2={hoverX} y1={padding.top} y2={height - padding.bottom} className="fund-chart-hoverline" />
+                            {tooltipRows.map(({ series, point }) => (
+                                <circle
+                                    key={`${series.asset.id}-hover`}
+                                    className="fund-chart-hover-point"
+                                    cx={xForDate(point.date)}
+                                    cy={yFor(point.value)}
+                                    r={series.asset.id === baseAsset.id ? 4 : 3.5}
+                                    fill={series.color}
+                                    stroke="#0a0c0f"
+                                    strokeWidth="1.6"
+                                />
+                            ))}
+                            <g transform={`translate(${tooltipX}, ${tooltipY})`}>
+                                <rect width={tooltipWidth} height={tooltipHeight} rx="6" className="fund-chart-tooltip-bg" />
+                                <text x="8" y="17" className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
+                                {tooltipRows.map(({ series, point }, index) => (
+                                    <g key={series.asset.id} transform={`translate(8, ${35 + index * 15})`}>
+                                        <circle cx="3.5" cy="-4" r="2.6" fill={series.color} />
+                                        <text x="12" y="0" className="fund-chart-tooltip-muted">
+                                            {(series.asset.displaySymbol || series.asset.symbol).slice(0, 8)}
+                                        </text>
+                                        <text x={tooltipWidth - 10} y="0" className="fund-chart-tooltip-value" textAnchor="end">
+                                            {formatPct(point.value)}
+                                        </text>
+                                    </g>
+                                ))}
+                            </g>
+                        </g>
+                    )}
+                </svg>
+                <div className="fund-chart-legend" aria-label="Grafik karşılaştırmaları">
+                    {normalizedSeries.map((series) => (
+                        <span key={series.asset.id}>
+                            <i style={{ background: series.color }} />
+                            {series.asset.displaySymbol || series.asset.symbol}
+                        </span>
+                    ))}
+                </div>
+                <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" />
+                {rangeError && <div className="fund-chart-error">{rangeError}</div>}
+                {comparisonError && <div className="fund-chart-error">{comparisonError}</div>}
             </section>
         );
     }
@@ -756,14 +1158,10 @@ function FundPerformanceChart({
     minValue -= rawSpan * 0.08;
     maxValue += rawSpan * 0.08;
     const span = Math.max(0.01, maxValue - minValue);
-    const plotWidth = width - padding.left - padding.right;
-    const plotHeight = height - padding.top - padding.bottom;
     const xFor = (index: number) => padding.left + (validPoints.length === 1 ? 0 : (index / (validPoints.length - 1)) * plotWidth);
     const yFor = (value: number) => padding.top + ((maxValue - value) / span) * plotHeight;
     const pathData = validPoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${xFor(index)} ${yFor(Number(point.price))}`).join(' ');
     const areaData = `${pathData} L ${xFor(validPoints.length - 1)} ${height - padding.bottom} L ${padding.left} ${height - padding.bottom} Z`;
-    const gradientId = `fund-chart-area-${fundCode.replace(/[^a-zA-Z0-9]/g, '')}-${selectedRange}`;
-    const tickIndexes = Array.from(new Set([0, Math.floor((validPoints.length - 1) / 2), validPoints.length - 1]));
     const yTicks = [0, 0.5, 1].map((ratio) => maxValue - ratio * span);
 
     const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
@@ -786,23 +1184,24 @@ function FundPerformanceChart({
     const hoverY = hoverPoint ? yFor(Number(hoverPoint.price)) : null;
     const tooltipWidth = 152;
     const tooltipHeight = 58;
-    const tooltipX = hoverX == null ? 0 : Math.min(Math.max(hoverX + 12, 8), width - tooltipWidth - 8);
+    const tooltipGap = 12;
+    const tooltipShouldFlip = hoverX != null && hoverX + tooltipGap + tooltipWidth > width - padding.right;
+    const tooltipX = hoverX == null
+        ? 0
+        : tooltipShouldFlip
+            ? Math.max(8, hoverX - tooltipGap - tooltipWidth)
+            : Math.min(hoverX + tooltipGap, width - tooltipWidth - 8);
     const tooltipY = hoverY == null ? 0 : Math.min(Math.max(hoverY - tooltipHeight / 2, padding.top), height - tooltipHeight - 8);
 
     return (
         <section className="fund-chart-panel">
             {controls}
-            {selectedRange === 'custom' && (
-                <div className="fund-custom-range">
-                    <input type="date" value={customStartDate} onChange={(event) => onCustomStartDateChange(event.target.value)} />
-                    <input type="date" value={customEndDate} onChange={(event) => onCustomEndDateChange(event.target.value)} />
-                </div>
-            )}
+            {customRangeInputs}
             <svg
                 key={`${fundCode}-${selectedRange}-${validPoints.length}`}
                 className="fund-detail-chart"
                 viewBox={`0 0 ${width} ${height}`}
-                preserveAspectRatio="none"
+                preserveAspectRatio="xMidYMid meet"
                 role="img"
                 aria-label={`${fundCode} fiyat grafiği`}
                 onPointerMove={handlePointerMove}
@@ -853,7 +1252,7 @@ function FundPerformanceChart({
                 {hoverPoint && hoverX != null && hoverY != null && (
                     <g>
                         <line x1={hoverX} x2={hoverX} y1={padding.top} y2={height - padding.bottom} className="fund-chart-hoverline" />
-                        <circle cx={hoverX} cy={hoverY} r="4" fill={color} stroke="#0a0c0f" strokeWidth="2" />
+                        <circle className="fund-chart-hover-point" cx={hoverX} cy={hoverY} r="3.6" fill={color} stroke="#0a0c0f" strokeWidth="1.6" />
                         <g transform={`translate(${tooltipX}, ${tooltipY})`}>
                             <rect width={tooltipWidth} height={tooltipHeight} rx="6" className="fund-chart-tooltip-bg" />
                             <text x="10" y="20" className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
@@ -862,11 +1261,11 @@ function FundPerformanceChart({
                     </g>
                 )}
             </svg>
-            <div className="fund-chart-meta">
-                <span>{formatDate(validPoints[0]?.date)}</span>
-                <strong>{validPoints.length} veri noktası</strong>
-                <span>{formatDate(validPoints[validPoints.length - 1]?.date)}</span>
-            </div>
+            <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" />
+            {comparisonLoading && comparisonAssets.length > 0 && (
+                <div className="fund-chart-note">Karşılaştırma geçmişi yükleniyor...</div>
+            )}
+            {comparisonError && <div className="fund-chart-error">{comparisonError}</div>}
             {rangeError && <div className="fund-chart-error">{rangeError}</div>}
         </section>
     );
@@ -1125,11 +1524,12 @@ function AllocationHistoryChart({
     };
     const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
         const rect = event.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0) return;
         const localX = event.clientX - rect.left;
         const scaledX = (localX / rect.width) * width;
         const clamped = Math.min(Math.max(scaledX, padding.left), width - padding.right);
         const ratio = chartWidth > 0 ? (clamped - padding.left) / chartWidth : 0;
-        setHoverIndex(Math.round(ratio * (dates.length - 1)));
+        setHoverIndex(Math.max(0, Math.min(dates.length - 1, Math.round(ratio * (dates.length - 1)))));
     };
     const hoverDate = hoverIndex == null ? null : dates[hoverIndex];
     const hoverRows = hoverIndex == null
@@ -1142,13 +1542,19 @@ function AllocationHistoryChart({
             }))
             .filter((item) => item.weight != null)
             .sort((a, b) => Number(b.weight) - Number(a.weight));
+    const hoverAnchorWeight = hoverRows[0]?.weight ?? null;
+    const hoverAnchorY = hoverAnchorWeight == null ? height / 2 : yForValue(Number(hoverAnchorWeight));
     const tooltipLeft = hoverIndex == null ? 0 : (xForIndex(hoverIndex) / width) * 100;
+    const tooltipTop = hoverIndex == null ? 0 : (hoverAnchorY / height) * 100;
+    const tooltipAlignRight = tooltipLeft > 62;
+    const tooltipAlignUp = hoverAnchorY > height * 0.55;
 
     return (
         <div className="fund-allocation-history-chart-wrap">
             <svg
                 className="fund-allocation-history-chart"
                 viewBox={`0 0 ${width} ${height}`}
+                preserveAspectRatio="none"
                 role="img"
                 aria-label="Varlık dağılımı zaman serisi"
                 onPointerMove={handlePointerMove}
@@ -1190,7 +1596,6 @@ function AllocationHistoryChart({
                         strokeWidth="2.8"
                         strokeLinecap="round"
                         strokeLinejoin="round"
-                        className={hoverIndex == null ? undefined : 'is-highlighted'}
                     />
                 ))}
                 {hoverIndex != null && (
@@ -1207,10 +1612,10 @@ function AllocationHistoryChart({
                                 key={trend.allocationType}
                                 cx={xForIndex(hoverIndex)}
                                 cy={yForValue(Number(weight))}
-                                r="4.4"
+                                r="3.4"
                                 fill={trend.color}
                                 stroke="#0a0c0f"
-                                strokeWidth="2"
+                                strokeWidth="1.8"
                             />
                         ))}
                     </>
@@ -1218,11 +1623,15 @@ function AllocationHistoryChart({
             </svg>
             {hoverDate && hoverRows.length ? (
                 <div
-                    className={`fund-allocation-history-tooltip${tooltipLeft > 64 ? ' align-right' : ''}`}
-                    style={{ left: `${tooltipLeft}%` }}
+                    className={[
+                        'fund-allocation-history-tooltip',
+                        tooltipAlignRight ? 'align-right' : '',
+                        tooltipAlignUp ? 'align-up' : '',
+                    ].filter(Boolean).join(' ')}
+                    style={{ left: `${tooltipLeft}%`, top: `${tooltipTop}%` }}
                 >
                     <strong>{formatDate(hoverDate)}</strong>
-                    {hoverRows.slice(0, 6).map(({ trend, weight, delta }) => (
+                    {hoverRows.slice(0, 4).map(({ trend, weight, delta }) => (
                         <span key={trend.allocationType}>
                             <i style={{ background: trend.color }} />
                             <em>{trend.label}</em>
@@ -1376,23 +1785,22 @@ function FundMonthlyHeatmap({ monthlyReturns }: { monthlyReturns: MonthlyReturn[
     );
 }
 
-function FundReturnComparison({
+function useFundComparisonState({
     selectedFund,
     baseReturns,
     funds,
     openSearchSignal,
-    containerRef,
 }: {
-    selectedFund: FundSummary;
+    selectedFund: FundSummary | null;
     baseReturns: FundSummary['period_returns'];
     funds: FundSummary[];
     openSearchSignal: number;
-    containerRef: { current: HTMLDivElement | null };
-}) {
+}): FundComparisonState {
     const [period, setPeriod] = useState<ComparisonPeriod>('1m');
     const [selectedIds, setSelectedIds] = useState<string[]>(() => [...DEFAULT_COMPARISON_IDS]);
     const [query, setQuery] = useState('');
     const [searchOpen, setSearchOpen] = useState(false);
+    const [searchSurface, setSearchSurface] = useState<FundComparisonControlSurface | null>(null);
     const [fundSearchRows, setFundSearchRows] = useState<FundSummary[]>([]);
     const [stockRows, setStockRows] = useState<MarketStockRow[]>([]);
     const [indexRows, setIndexRows] = useState<MarketIndexListRow[]>([]);
@@ -1401,51 +1809,46 @@ function FundReturnComparison({
     const [stocksLoading, setStocksLoading] = useState(false);
     const [indicesLoading, setIndicesLoading] = useState(false);
     const [fxLoading, setFxLoading] = useState(false);
-    const [hover, setHover] = useState<{ assetId: string; x: number; y: number; width: number; height: number } | null>(null);
     const inputRef = useRef<HTMLInputElement | null>(null);
     const stocksLoadedRef = useRef(false);
 
-    const selectedFundCode = normalizeCompareSymbol(selectedFund.fund_code);
-    const baseAsset = useMemo<ComparisonAsset>(() => ({
-        id: comparisonAssetId('fund', selectedFundCode),
-        kind: 'fund',
-        symbol: selectedFundCode,
-        label: selectedFund.name,
-        logoName: selectedFund.founder_company || selectedFund.manager_company || selectedFund.name,
-        returns: {
-            '1w': baseReturns?.['1w'] ?? selectedFund.period_returns?.['1w'] ?? null,
-            '1m': baseReturns?.['1m'] ?? selectedFund.period_returns?.['1m'] ?? null,
-            '3m': baseReturns?.['3m'] ?? selectedFund.period_returns?.['3m'] ?? null,
-            '6m': baseReturns?.['6m'] ?? selectedFund.period_returns?.['6m'] ?? null,
-            ytd: baseReturns?.ytd ?? selectedFund.period_returns?.ytd ?? null,
-            '1y': baseReturns?.['1y'] ?? selectedFund.period_returns?.['1y'] ?? null,
-        },
-    }), [baseReturns, selectedFund, selectedFundCode]);
+    const selectedFundCode = normalizeCompareSymbol(selectedFund?.fund_code);
+    const baseAsset = useMemo<ComparisonAsset | null>(() => {
+        if (!selectedFund || !selectedFundCode) return null;
+        return {
+            id: comparisonAssetId('fund', selectedFundCode),
+            kind: 'fund',
+            symbol: selectedFundCode,
+            label: selectedFund.name,
+            logoName: selectedFund.founder_company || selectedFund.manager_company || selectedFund.name,
+            returns: {
+                '1w': baseReturns?.['1w'] ?? selectedFund.period_returns?.['1w'] ?? null,
+                '1m': baseReturns?.['1m'] ?? selectedFund.period_returns?.['1m'] ?? null,
+                '3m': baseReturns?.['3m'] ?? selectedFund.period_returns?.['3m'] ?? null,
+                '6m': baseReturns?.['6m'] ?? selectedFund.period_returns?.['6m'] ?? null,
+                ytd: baseReturns?.ytd ?? selectedFund.period_returns?.ytd ?? null,
+                '1y': baseReturns?.['1y'] ?? selectedFund.period_returns?.['1y'] ?? null,
+            },
+        };
+    }, [baseReturns, selectedFund, selectedFundCode]);
 
     useEffect(() => {
         setSelectedIds([...DEFAULT_COMPARISON_IDS]);
         setQuery('');
         setSearchOpen(false);
-        setHover(null);
+        setSearchSurface(null);
     }, [selectedFundCode]);
 
     useEffect(() => {
+        if (!selectedFundCode) return;
         let alive = true;
         setIndicesLoading(true);
         setFxLoading(true);
         Promise.allSettled([apiClient.marketIndices(), apiClient.marketFx()])
             .then(([indicesResult, fxResult]) => {
                 if (!alive) return;
-                if (indicesResult.status === 'fulfilled') {
-                    setIndexRows(indicesResult.value.rows || []);
-                } else {
-                    setIndexRows([]);
-                }
-                if (fxResult.status === 'fulfilled') {
-                    setFxRows(fxResult.value.items || []);
-                } else {
-                    setFxRows([]);
-                }
+                setIndexRows(indicesResult.status === 'fulfilled' ? indicesResult.value.rows || [] : []);
+                setFxRows(fxResult.status === 'fulfilled' ? fxResult.value.items || [] : []);
             })
             .finally(() => {
                 if (alive) {
@@ -1456,7 +1859,7 @@ function FundReturnComparison({
         return () => {
             alive = false;
         };
-    }, []);
+    }, [selectedFundCode]);
 
     const ensureStockRows = useCallback(() => {
         if (stocksLoadedRef.current || stocksLoading) return;
@@ -1474,16 +1877,17 @@ function FundReturnComparison({
             .finally(() => setStocksLoading(false));
     }, [stocksLoading]);
 
-    const openSearch = useCallback(() => {
+    const openSearch = useCallback((surface: FundComparisonControlSurface = 'returns') => {
+        setSearchSurface(surface);
         setSearchOpen(true);
         ensureStockRows();
         window.setTimeout(() => inputRef.current?.focus(), 0);
     }, [ensureStockRows]);
 
     useEffect(() => {
-        if (openSearchSignal <= 0) return;
-        openSearch();
-    }, [openSearch, openSearchSignal]);
+        if (openSearchSignal <= 0 || !selectedFundCode) return;
+        openSearch('returns');
+    }, [openSearch, openSearchSignal, selectedFundCode]);
 
     useEffect(() => {
         const trimmed = query.trim();
@@ -1514,6 +1918,7 @@ function FundReturnComparison({
     }, [query, searchOpen]);
 
     const allAssets = useMemo(() => {
+        if (!selectedFundCode) return [];
         const currentFundId = comparisonAssetId('fund', selectedFundCode);
         const mergedFunds = new Map<string, FundSummary>();
         for (const row of funds) {
@@ -1569,7 +1974,171 @@ function FundReturnComparison({
             .map((item) => item.asset);
     }, [allAssets, query, selectedIds]);
 
+    const addAsset = useCallback((asset: ComparisonAsset) => {
+        setSelectedIds((current) => current.includes(asset.id) ? current : [...current, asset.id]);
+        setQuery('');
+        setSearchOpen(false);
+    }, []);
+
+    const removeAsset = useCallback((assetId: string) => {
+        setSelectedIds((current) => current.filter((id) => id !== assetId));
+    }, []);
+
+    return {
+        baseAsset,
+        selectedAssets,
+        selectedIds,
+        period,
+        setPeriod,
+        query,
+        setQuery,
+        searchOpen,
+        setSearchOpen,
+        searchSurface,
+        searchResults,
+        addAsset,
+        removeAsset,
+        openSearch,
+        fundSearchLoading,
+        stocksLoading,
+        indicesLoading,
+        fxLoading,
+        inputRef,
+    };
+}
+
+function FundComparisonControls({
+    comparison,
+    surface,
+    className,
+}: {
+    comparison: FundComparisonState;
+    surface: FundComparisonControlSurface;
+    className?: string;
+}) {
+    const {
+        selectedAssets,
+        query,
+        setQuery,
+        searchOpen,
+        setSearchOpen,
+        searchSurface,
+        searchResults,
+        addAsset,
+        removeAsset,
+        openSearch,
+        fundSearchLoading,
+        stocksLoading,
+        indicesLoading,
+        fxLoading,
+        inputRef,
+    } = comparison;
+    const surfaceOpen = searchOpen && searchSurface === surface;
+
+    return (
+        <div className={`fund-comparison-controls${className ? ` ${className}` : ''}`}>
+            <div className="fund-comparison-search-wrap">
+                {surfaceOpen ? (
+                    <div className="fund-comparison-search-active">
+                        <Search size={15} aria-hidden="true" />
+                        <input
+                            ref={inputRef}
+                            value={query}
+                            onChange={(event) => setQuery(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === 'Escape') {
+                                    setSearchOpen(false);
+                                    setQuery('');
+                                }
+                                if (event.key === 'Enter' && searchResults[0]) {
+                                    event.preventDefault();
+                                    addAsset(searchResults[0]);
+                                }
+                            }}
+                            placeholder="Karşılaştır"
+                            aria-label="Fon, hisse, endeks veya döviz ara"
+                        />
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setSearchOpen(false);
+                                setQuery('');
+                            }}
+                            aria-label="Aramayı kapat"
+                        >
+                            <X size={15} aria-hidden="true" />
+                        </button>
+                    </div>
+                ) : (
+                    <button type="button" className="fund-comparison-search-button" onClick={() => openSearch(surface)}>
+                        <Search size={15} aria-hidden="true" />
+                        Karşılaştırma
+                    </button>
+                )}
+                {surfaceOpen && (
+                    <div className="fund-comparison-results">
+                        {query.trim() ? (
+                            searchResults.length ? (
+                                searchResults.map((asset) => (
+                                    <button key={asset.id} type="button" onClick={() => addAsset(asset)}>
+                                        <SymbolLogo
+                                            symbol={asset.symbol}
+                                            name={asset.logoName || asset.label}
+                                            kind={comparisonLogoKind(asset.kind)}
+                                            logoUrl={asset.logoUrl}
+                                            size="sm"
+                                        />
+                                        <strong>{asset.displaySymbol || asset.symbol}</strong>
+                                        <span>{asset.label}</span>
+                                    </button>
+                                ))
+                            ) : (
+                                <div className="fund-comparison-result-empty">
+                                    {fundSearchLoading || stocksLoading || indicesLoading || fxLoading ? 'Aranıyor...' : 'Sonuç bulunamadı.'}
+                                </div>
+                            )
+                        ) : (
+                            <div className="fund-comparison-result-empty">Fon, hisse, endeks veya döviz yazın.</div>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            <div className="fund-comparison-chips" aria-label="Seçili karşılaştırmalar">
+                {selectedAssets.map((asset) => (
+                    <button
+                        key={asset.id}
+                        type="button"
+                        onClick={() => removeAsset(asset.id)}
+                        title={`${asset.displaySymbol || asset.symbol} karşılaştırmadan çıkar`}
+                    >
+                        <i />
+                        {asset.displaySymbol || asset.symbol}
+                    </button>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function FundReturnComparison({
+    comparison,
+    containerRef,
+}: {
+    comparison: FundComparisonState;
+    containerRef: { current: HTMLDivElement | null };
+}) {
+    const [hover, setHover] = useState<{ assetId: string; x: number; y: number; width: number; height: number } | null>(null);
+    const {
+        baseAsset,
+        selectedAssets,
+        selectedIds,
+        period,
+        setPeriod,
+    } = comparison;
+
     const chartItems = useMemo(() => {
+        if (!baseAsset) return [];
         const items = [baseAsset, ...selectedAssets]
             .map((asset) => ({
                 asset,
@@ -1586,6 +2155,10 @@ function FundReturnComparison({
     useEffect(() => {
         setHover(null);
     }, [period, selectedIds]);
+
+    if (!baseAsset) {
+        return null;
+    }
 
     const chartWidth = 1040;
     const chartHeight = 340;
@@ -1609,16 +2182,6 @@ function FundReturnComparison({
     const hoverItem = hover ? chartItems.find((item) => item.asset.id === hover.assetId) || null : null;
     const tooltipAlignX = hover && hover.x > hover.width - 180 ? 'left' : 'right';
     const tooltipAlignY = hover && hover.y > hover.height - 110 ? 'up' : 'down';
-
-    const addAsset = useCallback((asset: ComparisonAsset) => {
-        setSelectedIds((current) => current.includes(asset.id) ? current : [...current, asset.id]);
-        setQuery('');
-        setSearchOpen(false);
-    }, []);
-
-    const removeAsset = useCallback((assetId: string) => {
-        setSelectedIds((current) => current.filter((id) => id !== assetId));
-    }, []);
 
     const handleBarPointerMove = (event: ReactPointerEvent<SVGRectElement>, assetId: string) => {
         const rect = event.currentTarget.ownerSVGElement?.getBoundingClientRect();
@@ -1747,81 +2310,7 @@ function FundReturnComparison({
                 ) : null}
             </div>
 
-            <div className="fund-comparison-controls">
-                <div className="fund-comparison-search-wrap">
-                    {searchOpen ? (
-                        <div className="fund-comparison-search-active">
-                            <Search size={15} aria-hidden="true" />
-                            <input
-                                ref={inputRef}
-                                value={query}
-                                onChange={(event) => setQuery(event.target.value)}
-                                onKeyDown={(event) => {
-                                    if (event.key === 'Escape') {
-                                        setSearchOpen(false);
-                                        setQuery('');
-                                    }
-                                    if (event.key === 'Enter' && searchResults[0]) {
-                                        event.preventDefault();
-                                        addAsset(searchResults[0]);
-                                    }
-                                }}
-                                placeholder="Karşılaştır"
-                                aria-label="Fon, hisse, endeks veya döviz ara"
-                            />
-                            <button type="button" onClick={() => setSearchOpen(false)} aria-label="Aramayı kapat">
-                                <X size={15} aria-hidden="true" />
-                            </button>
-                        </div>
-                    ) : (
-                        <button type="button" className="fund-comparison-search-button" onClick={openSearch}>
-                            <Search size={15} aria-hidden="true" />
-                            Karşılaştırma
-                        </button>
-                    )}
-                    {searchOpen && (
-                        <div className="fund-comparison-results">
-                            {query.trim() ? (
-                                searchResults.length ? (
-                                    searchResults.map((asset) => (
-                                        <button key={asset.id} type="button" onClick={() => addAsset(asset)}>
-                                            <SymbolLogo
-                                                symbol={asset.symbol}
-                                                name={asset.logoName || asset.label}
-                                                kind={comparisonLogoKind(asset.kind)}
-                                                logoUrl={asset.logoUrl}
-                                                size="sm"
-                                            />
-                                            <strong>{asset.displaySymbol || asset.symbol}</strong>
-                                            <span>{asset.label}</span>
-                                        </button>
-                                    ))
-                                ) : (
-                                    <div className="fund-comparison-result-empty">
-                                        {fundSearchLoading || stocksLoading || indicesLoading || fxLoading ? 'Aranıyor...' : 'Sonuç bulunamadı.'}
-                                    </div>
-                                )
-                            ) : (
-                                <div className="fund-comparison-result-empty">Fon, hisse, endeks veya döviz yazın.</div>
-                            )}
-                        </div>
-                    )}
-                </div>
-
-                <div className="fund-comparison-chips" aria-label="Seçili karşılaştırmalar">
-                    {selectedAssets.map((asset) => (
-                        <button
-                            key={asset.id}
-                            type="button"
-                            onClick={() => removeAsset(asset.id)}
-                            title={`${asset.displaySymbol || asset.symbol} karşılaştırmadan çıkar`}
-                        >
-                            <i />
-                            {asset.displaySymbol || asset.symbol}
-                        </button>
-                    ))}
-                </div>
-            </div>
+            <FundComparisonControls comparison={comparison} surface="returns" />
         </section>
     );
 }
@@ -1946,6 +2435,9 @@ export default function FundsPage({
     const allocationRefreshAttemptedRef = useRef(new Set<string>());
     const comparisonPanelRef = useRef<HTMLDivElement | null>(null);
     const [comparisonSearchOpenSignal, setComparisonSearchOpenSignal] = useState(0);
+    const [comparisonHistory, setComparisonHistory] = useState<MarketComparisonHistoryResponse | null>(null);
+    const [comparisonHistoryLoading, setComparisonHistoryLoading] = useState(false);
+    const [comparisonHistoryError, setComparisonHistoryError] = useState<string | null>(null);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -2181,6 +2673,68 @@ export default function FundsPage({
         },
         [detailLatestPrice, selectedFund, yieldSummary],
     );
+    const comparisonState = useFundComparisonState({
+        selectedFund,
+        baseReturns: detailPeriodReturns,
+        funds: funds?.rows || [],
+        openSearchSignal: comparisonSearchOpenSignal,
+    });
+    const comparisonChartStartDate = chartPoints[0]?.date || null;
+    const comparisonChartEndDate = chartPoints[chartPoints.length - 1]?.date || null;
+    const comparisonAssets = comparisonState.selectedAssets;
+    const comparisonAssetRequests = useMemo(
+        () => comparisonAssets.map((asset) => ({
+            id: asset.id,
+            kind: asset.kind,
+            symbol: asset.symbol,
+            label: asset.displaySymbol || asset.label,
+        })),
+        [comparisonAssets],
+    );
+    const comparisonAssetRequestKey = comparisonAssetRequests
+        .map((asset) => `${asset.id}:${asset.kind}:${asset.symbol}:${asset.label || ''}`)
+        .join('|');
+    useEffect(() => {
+        if (!comparisonAssetRequests.length || !comparisonChartStartDate || !comparisonChartEndDate) {
+            setComparisonHistory(null);
+            setComparisonHistoryError(null);
+            setComparisonHistoryLoading(false);
+            return;
+        }
+        if (pendingChartRange) {
+            setComparisonHistoryError(null);
+            setComparisonHistoryLoading(true);
+            return;
+        }
+        const controller = new AbortController();
+        setComparisonHistoryError(null);
+        setComparisonHistoryLoading(true);
+        apiClient
+            .marketComparisonHistory(
+                {
+                    start_date: comparisonChartStartDate,
+                    end_date: comparisonChartEndDate,
+                    assets: comparisonAssetRequests,
+                },
+                { signal: controller.signal },
+            )
+            .then((payload) => {
+                setComparisonHistory(payload);
+            })
+            .catch((err) => {
+                if ((err as Error)?.name === 'AbortError') return;
+                setComparisonHistory(null);
+                setComparisonHistoryError(err instanceof Error ? err.message : 'Karşılaştırma geçmişi alınamadı.');
+            })
+            .finally(() => {
+                if (!controller.signal.aborted) {
+                    setComparisonHistoryLoading(false);
+                }
+            });
+        return () => {
+            controller.abort();
+        };
+    }, [comparisonAssetRequestKey, comparisonChartEndDate, comparisonChartStartDate, pendingChartRange]);
     const detailSourceWarnings = useMemo(() => {
         if (!fundCode) return [];
         const warnings = [
@@ -2597,11 +3151,19 @@ export default function FundsPage({
                                                 <FundPerformanceChart
                                                     fundCode={selectedFund.fund_code}
                                                     points={chartPoints}
+                                                    comparisonAssets={comparisonState.selectedAssets}
+                                                    comparisonHistory={comparisonHistory}
+                                                    comparisonLoading={comparisonHistoryLoading}
+                                                    comparisonError={comparisonHistoryError}
+                                                    comparison={comparisonState}
                                                     selectedRange={chartRange}
                                                     pendingRange={pendingChartRange}
                                                     rangeError={chartRangeError}
                                                     customStartDate={customStartDate}
                                                     customEndDate={customEndDate}
+                                                    periodReturns={detailPeriodReturns}
+                                                    yieldPeriods={yieldSummary?.periods}
+                                                    currency={selectedFund.currency}
                                                     onRangeSelect={handleChartRangeSelect}
                                                     onCustomStartDateChange={handleCustomStartDateChange}
                                                     onCustomEndDateChange={handleCustomEndDateChange}
@@ -2613,24 +3175,8 @@ export default function FundsPage({
                                                     historyLoading={allocationHistoryLoading}
                                                 />
                                             </div>
-                                            <div className="fund-return-strip">
-                                                {DETAIL_RETURN_PERIODS.map((period) => {
-                                                    const value = detailPeriodReturns?.[period.key];
-                                                    const bounds = formatYieldBounds(yieldSummary?.periods[period.key], selectedFund.currency);
-                                                    return (
-                                                        <div key={period.key}>
-                                                            <span>{period.label}</span>
-                                                            <strong className={pctClass(value)}>{formatPct(value)}</strong>
-                                                            {bounds && <small className="fund-return-bounds">{bounds}</small>}
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
                                             <FundReturnComparison
-                                                selectedFund={selectedFund}
-                                                baseReturns={detailPeriodReturns}
-                                                funds={funds?.rows || []}
-                                                openSearchSignal={comparisonSearchOpenSignal}
+                                                comparison={comparisonState}
                                                 containerRef={comparisonPanelRef}
                                             />
                                             {yieldLoading && !yieldSummary && (
