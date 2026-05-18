@@ -702,7 +702,7 @@ function FundPerformanceChart({
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const width = 860;
     const height = 330;
-    const padding = { top: 24, right: 22, bottom: 34, left: 52 };
+    const padding = { top: 24, right: 22, bottom: 34, left: 72 };
     const validPoints = points.filter((point) => Number.isFinite(Number(point.price)) && Number(point.price) > 0);
     const rangeReturn = validPoints.length >= 2
         ? returnBetween(Number(validPoints[validPoints.length - 1].price), Number(validPoints[0].price))
@@ -799,6 +799,7 @@ function FundPerformanceChart({
                 </div>
             )}
             <svg
+                key={`${fundCode}-${selectedRange}-${validPoints.length}`}
                 className="fund-detail-chart"
                 viewBox={`0 0 ${width} ${height}`}
                 preserveAspectRatio="none"
@@ -812,6 +813,9 @@ function FundPerformanceChart({
                         <stop offset="0%" stopColor={color} stopOpacity="0.24" />
                         <stop offset="100%" stopColor={color} stopOpacity="0" />
                     </linearGradient>
+                    <clipPath id={`${gradientId}-clip`}>
+                        <rect x={padding.left} y={0} width={plotWidth} height={height} className="fund-chart-reveal" />
+                    </clipPath>
                 </defs>
                 {yTicks.map((tick) => {
                     const y = yFor(tick);
@@ -835,9 +839,17 @@ function FundPerformanceChart({
                         {formatChartDate(validPoints[index].date, selectedRange)}
                     </text>
                 ))}
-                <path d={areaData} fill={`url(#${gradientId})`} />
-                <path d={pathData} fill="none" stroke={color} strokeWidth="2.7" strokeLinecap="round" strokeLinejoin="round" />
-                <circle cx={xFor(validPoints.length - 1)} cy={yFor(Number(validPoints[validPoints.length - 1].price))} r="4" fill={color} />
+                <g clipPath={`url(#${gradientId}-clip)`}>
+                    <path d={areaData} fill={`url(#${gradientId})`} />
+                    <path d={pathData} fill="none" stroke={color} strokeWidth="2.7" strokeLinecap="round" strokeLinejoin="round" />
+                </g>
+                <circle
+                    className="fund-chart-endpoint"
+                    cx={xFor(validPoints.length - 1)}
+                    cy={yFor(Number(validPoints[validPoints.length - 1].price))}
+                    r="4"
+                    fill={color}
+                />
                 {hoverPoint && hoverX != null && hoverY != null && (
                     <g>
                         <line x1={hoverX} x2={hoverX} y1={padding.top} y2={height - padding.bottom} className="fund-chart-hoverline" />
@@ -1620,6 +1632,15 @@ function FundReturnComparison({
         });
     };
 
+    const handleSvgPointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const target = event.target as Element | null;
+        if (!target || !(target instanceof SVGElement)) return;
+        // Only keep hover state while pointer is genuinely over a bar.
+        if (!target.classList.contains('fund-comparison-bar')) {
+            setHover(null);
+        }
+    };
+
     return (
         <section className="fund-comparison-panel" ref={containerRef} aria-label="Getiri karşılaştırma">
             <div className="fund-comparison-head">
@@ -1641,6 +1662,7 @@ function FundReturnComparison({
                         viewBox={`0 0 ${chartWidth} ${chartHeight}`}
                         role="img"
                         aria-label="Seçili varlıkların dönem getirileri"
+                        onPointerMove={handleSvgPointerMove}
                         onPointerLeave={() => setHover(null)}
                     >
                         {ticks.map((tick) => {

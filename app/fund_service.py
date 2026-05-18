@@ -475,12 +475,14 @@ def _filter_tefas_open_rows(rows: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[s
     skipped_unknown = 0
     for row in materialized:
         status = _tefas_open_status(row)
-        if status is True:
-            filtered.append(row)
-        elif status is False:
+        if status is False:
             skipped_closed += 1
-        else:
+            continue
+        if status is None:
+            # The TEFAS adapter does not always emit a tefas_open flag; treat unknown
+            # rows as open instead of dropping them so the snapshot stays complete.
             skipped_unknown += 1
+        filtered.append(row)
     return filtered, skipped_closed, skipped_unknown
 
 
@@ -2253,17 +2255,22 @@ class TefasFonClient:
             except TefasUpstreamError as exc:
                 warnings.append(f"tefasfon_range_returns failed: {exc}")
             open_rows, skipped_closed, skipped_unknown = _filter_tefas_open_rows(fund_rows)
-            if skipped_closed or skipped_unknown:
+            if skipped_closed:
                 warnings.append(
-                    "tefas_open_only skipped "
-                    f"{skipped_closed + skipped_unknown} non-open fund rows "
-                    f"(closed={skipped_closed}, unknown={skipped_unknown})"
+                    f"tefas_open_only skipped {skipped_closed} closed fund rows"
                 )
             if TEFAS_OPEN_ONLY and not open_rows:
                 warnings.append(f"tefas_open_only returned no open rows for {target_date.isoformat()}")
                 continue
             fund_rows = open_rows
-            return fund_rows, warnings
+            # Drop the per-day "no rows" lookback noise once we successfully resolved a
+            # snapshot. Weekends and Turkish holidays naturally have no TEFAS data and
+            # those messages would otherwise be surfaced as a fallback warning banner.
+            kept_warnings = [
+                w for w in warnings
+                if "returned no rows" not in w and "tefas_open_only returned no open rows" not in w
+            ]
+            return fund_rows, kept_warnings
         return [], warnings
 
     def fetch_latest_portfolio(
@@ -2655,11 +2662,9 @@ def refresh_funds_snapshot(processed_dir: Path, *, lookback_days: int = 10) -> D
         lookback_days=max(1, lookback_days),
     )
     rows, skipped_closed, skipped_unknown = _filter_tefas_open_rows(rows)
-    if skipped_closed or skipped_unknown:
+    if skipped_closed:
         warnings.append(
-            "tefas_open_only skipped "
-            f"{skipped_closed + skipped_unknown} non-open fund rows "
-            f"(closed={skipped_closed}, unknown={skipped_unknown})"
+            f"tefas_open_only skipped {skipped_closed} closed fund rows"
         )
     if not rows:
         payload = dict(existing_snapshot)

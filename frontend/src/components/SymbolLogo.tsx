@@ -66,9 +66,12 @@ function writeSessionObject<T>(key: string, payload: Record<string, T>): void {
 
 function logoCacheKey(kind: SymbolLogoKind, symbol: string, name?: string, logoUrl?: string | null): string {
     if (kind === 'fund') {
+        // Fund logos are derived from the manager name / logoUrl, so keep those in the key.
         return `${kind}:${String(logoUrl || name || '').trim()}`;
     }
-    return `${kind}:${normalizeLogoSymbol(symbol)}:${String(name || '').trim()}:${String(logoUrl || '').trim()}`;
+    // For everything else (stocks, indices, fx) the symbol uniquely identifies the logo,
+    // regardless of whether the surrounding label is "Hisse" or the full company name.
+    return `${kind}:${normalizeLogoSymbol(symbol)}`;
 }
 
 function ensureLogoSuccessCacheLoaded(): void {
@@ -145,7 +148,11 @@ function markLogoFailed(key: string, url: string): void {
 function cacheAwareCandidates(key: string, candidates: string[]): string[] {
     const success = cachedSuccessUrl(key, candidates);
     const remaining = candidates.filter((item) => item !== success && !isFailedLogoUrl(item));
-    return success ? [success, ...remaining] : remaining;
+    if (success) return [success, ...remaining];
+    if (remaining.length > 0) return remaining;
+    // All candidates are currently marked as failed; fall back to the original list so
+    // a transient network failure doesn't permanently lock the symbol to its monogram.
+    return candidates;
 }
 
 function buildCandidates({
@@ -257,7 +264,7 @@ function SymbolLogo({
                         src={tradingViewCountryFlagUrl(fxFlags.quote)}
                         alt={`${fxFlags.quote} flag`}
                         className="symbol-logo-fx-flag symbol-logo-fx-flag-back"
-                        loading="lazy"
+                        decoding="async"
                         onError={() => {
                             setFxFlagFailed(true);
                         }}
@@ -267,7 +274,7 @@ function SymbolLogo({
                     src={tradingViewCountryFlagUrl(fxFlags.base)}
                     alt={`${fxFlags.base} flag`}
                     className="symbol-logo-fx-flag symbol-logo-fx-flag-front"
-                    loading="lazy"
+                    decoding="async"
                     onError={() => {
                         setFxFlagFailed(true);
                     }}
@@ -287,7 +294,7 @@ function SymbolLogo({
                     src={currentSrc}
                     alt={name || normalizedSymbol}
                     className="symbol-logo-image"
-                    loading="lazy"
+                    decoding="async"
                     onLoad={() => {
                         markLogoSuccess(cacheKey, currentSrc);
                     }}

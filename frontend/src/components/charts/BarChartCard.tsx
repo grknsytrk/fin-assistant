@@ -18,7 +18,8 @@ function shouldShowXAxisLabel(index: number, total: number): boolean {
     if (index === 0 || index === total - 1) {
         return true;
     }
-    const interval = Math.max(2, Math.ceil((total - 2) / (MAX_VISIBLE_X_LABELS - 2)));
+    const visibleLabels = total > 16 ? 6 : MAX_VISIBLE_X_LABELS;
+    const interval = Math.max(2, Math.ceil((total - 1) / (visibleLabels - 1)));
     return index % interval === 0;
 }
 
@@ -104,6 +105,7 @@ export function BarChartCard({
             aria-label={onOpen ? `${title} grafiğini büyüt` : undefined}
             onClick={onOpen}
             onKeyDown={onKeyDown}
+            onMouseLeave={onLeave}
         >
             <h4>{title}</h4>
             <svg
@@ -261,6 +263,7 @@ export function LineChartCard({
             aria-label={onOpen ? `${title} grafiğini büyüt` : undefined}
             onClick={onOpen}
             onKeyDown={onKeyDown}
+            onMouseLeave={onLeave}
         >
             <h4>{title}</h4>
             <svg

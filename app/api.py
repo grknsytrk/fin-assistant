@@ -242,9 +242,23 @@ def _stats_payload() -> Dict[str, Any]:
     }
 
 
+_AVAILABLE_COMPANIES_CACHE: Dict[str, Any] = {}
+
+
 def _available_companies_from_chunks(chunks_file: Path) -> List[str]:
     if not chunks_file.exists():
         return []
+    try:
+        stat = chunks_file.stat()
+        cache_key = str(chunks_file.resolve())
+        cached = _AVAILABLE_COMPANIES_CACHE.get(cache_key)
+        signature = (stat.st_mtime_ns, stat.st_size)
+        if cached and cached.get("signature") == signature:
+            return list(cached.get("companies") or [])
+    except Exception:
+        cache_key = ""
+        signature = None
+
     companies = set()
     with chunks_file.open("r", encoding="utf-8") as f:
         for line in f:
@@ -257,7 +271,13 @@ def _available_companies_from_chunks(chunks_file: Path) -> List[str]:
             company = str(payload.get("company", "")).strip()
             if company:
                 companies.add(company.upper())
-    return sorted(companies)
+    result = sorted(companies)
+    if cache_key and signature:
+        _AVAILABLE_COMPANIES_CACHE[cache_key] = {
+            "signature": signature,
+            "companies": result,
+        }
+    return result
 
 
 def _company_breakdown_from_chunks(chunks_file: Path) -> List[Dict[str, Any]]:
@@ -2704,7 +2724,31 @@ def kap_companies() -> Dict[str, Any]:
     from app.kap_service import get_kap_companies
 
     indexed = _available_companies_from_chunks(CONFIG.paths.chunks_v2_file)
-    return {"companies": get_kap_companies(indexed)}
+    companies = get_kap_companies(indexed)
+    cache_dir = CONFIG.paths.processed_dir / "kap_cache"
+    items: List[Dict[str, Any]] = []
+    for symbol in companies:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized:
+            continue
+        cached_meta = _load_cached_kap_market_metadata(cache_dir, normalized)
+        title = str(cached_meta.get("company_title") or "").strip()
+        company_code = str(cached_meta.get("company") or normalized).strip().upper()
+        aliases = [normalized]
+        if company_code and company_code != normalized:
+            aliases.append(company_code)
+        if title:
+            aliases.append(title)
+        items.append(
+            {
+                "symbol": normalized,
+                "title": title or None,
+                "aliases": aliases,
+                "latest_quarter": cached_meta.get("latest_quarter"),
+                "has_kap_cache": bool(cached_meta.get("has_kap_cache")),
+            }
+        )
+    return {"companies": companies, "items": items}
 
 
 @app.get("/kap/snapshot")
@@ -2724,6 +2768,7 @@ def kap_snapshot(
         processed_dir=CONFIG.paths.processed_dir,
         force_refresh=refresh,
         max_quarters=max_quarters,
+        use_cache_when_complete=not refresh,
     )
     normalized = normalize_snapshot_for_frontend(raw)
 

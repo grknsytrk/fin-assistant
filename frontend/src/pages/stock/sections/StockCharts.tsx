@@ -1,4 +1,6 @@
 import { useMemo, useState, useCallback, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { X } from 'lucide-react';
 import type { KapSnapshotResponse, KapQuarter } from '../../../api/types';
 import { BarChartCard, LineChartCard } from '../../../components/charts/BarChartCard';
 import { buildOverviewChartGroups, type OverviewChartGroup } from '../../../utils/overviewPayload';
@@ -8,9 +10,16 @@ type StockChartsProps = {
     quarters: KapQuarter[];
     embedded?: boolean;
     chartWindowQuarters?: number;
+    extraCharts?: OverviewChartGroup[];
 };
 
-export default function StockCharts({ snapshot, quarters, embedded = false, chartWindowQuarters }: StockChartsProps) {
+export default function StockCharts({
+    snapshot,
+    quarters,
+    embedded = false,
+    chartWindowQuarters,
+    extraCharts = [],
+}: StockChartsProps) {
     const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null);
     const [expandedChart, setExpandedChart] = useState<OverviewChartGroup | null>(null);
     const handleHighlight = useCallback((idx: number | null) => {
@@ -21,7 +30,10 @@ export default function StockCharts({ snapshot, quarters, embedded = false, char
         setHighlightedIndex(null);
     }, []);
 
-    const chartGroups = useMemo(() => buildOverviewChartGroups(snapshot, quarters, chartWindowQuarters), [snapshot, quarters, chartWindowQuarters]);
+    const chartGroups = useMemo(
+        () => [...extraCharts, ...buildOverviewChartGroups(snapshot, quarters, chartWindowQuarters)],
+        [extraCharts, snapshot, quarters, chartWindowQuarters],
+    );
     const barCharts = useMemo(() => chartGroups.filter((chart) => chart.kind === 'bar'), [chartGroups]);
     const activeRatios = useMemo(() => chartGroups.filter((chart) => chart.kind === 'line'), [chartGroups]);
 
@@ -37,6 +49,39 @@ export default function StockCharts({ snapshot, quarters, embedded = false, char
         document.addEventListener('keydown', onKeyDown);
         return () => document.removeEventListener('keydown', onKeyDown);
     }, [closeExpandedChart, expandedChart]);
+
+    const expandedChartModal = expandedChart ? (
+        <div className="kap-chart-modal-backdrop" role="presentation" onClick={closeExpandedChart}>
+            <div
+                className="kap-chart-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`${expandedChart.title} grafiği`}
+                onClick={(event) => event.stopPropagation()}
+            >
+                <button className="kap-chart-modal-close" type="button" onClick={closeExpandedChart} aria-label="Grafiği kapat">
+                    <X size={18} strokeWidth={2.4} aria-hidden="true" />
+                </button>
+                {expandedChart.kind === 'bar' ? (
+                    <BarChartCard
+                        title={expandedChart.title}
+                        series={expandedChart.series}
+                        highlightedIndex={highlightedIndex}
+                        onHighlight={handleHighlight}
+                        className="kap-chart-card-expanded"
+                    />
+                ) : (
+                    <LineChartCard
+                        title={expandedChart.title}
+                        series={expandedChart.series}
+                        highlightedIndex={highlightedIndex}
+                        onHighlight={handleHighlight}
+                        className="kap-chart-card-expanded"
+                    />
+                )}
+            </div>
+        </div>
+    ) : null;
 
     return (
         <div className={`section-charts${embedded ? ' section-charts-embedded' : ' fade-in'}`}>
@@ -70,38 +115,7 @@ export default function StockCharts({ snapshot, quarters, embedded = false, char
                 </div>
             )}
 
-            {expandedChart && (
-                <div className="kap-chart-modal-backdrop" role="presentation" onClick={closeExpandedChart}>
-                    <div
-                        className="kap-chart-modal"
-                        role="dialog"
-                        aria-modal="true"
-                        aria-label={`${expandedChart.title} grafiği`}
-                        onClick={(event) => event.stopPropagation()}
-                    >
-                        <button className="kap-chart-modal-close" type="button" onClick={closeExpandedChart} aria-label="Grafiği kapat">
-                            ×
-                        </button>
-                        {expandedChart.kind === 'bar' ? (
-                            <BarChartCard
-                                title={expandedChart.title}
-                                series={expandedChart.series}
-                                highlightedIndex={highlightedIndex}
-                                onHighlight={handleHighlight}
-                                className="kap-chart-card-expanded"
-                            />
-                        ) : (
-                            <LineChartCard
-                                title={expandedChart.title}
-                                series={expandedChart.series}
-                                highlightedIndex={highlightedIndex}
-                                onHighlight={handleHighlight}
-                                className="kap-chart-card-expanded"
-                            />
-                        )}
-                    </div>
-                </div>
-            )}
+            {expandedChartModal ? createPortal(expandedChartModal, document.body) : null}
         </div>
     );
 }

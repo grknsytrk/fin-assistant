@@ -674,13 +674,24 @@
     min-width: 2.4rem;
     height: 2rem;
     padding: 0 0.55rem;
+    border: 1px solid transparent;
     border-radius: 7px;
+    background: transparent;
+    color: var(--text-secondary);
     font-size: 0.78rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.fund-chart-range:hover {
+    background: color-mix(in srgb, var(--surface-border) 38%, transparent);
+    color: var(--text-primary);
 }
 
 .fund-chart-range.is-active {
-    border-color: color-mix(in srgb, var(--accent-color) 66%, var(--surface-border));
-    background: color-mix(in srgb, var(--accent-color) 22%, var(--surface-color));
+    border-color: color-mix(in srgb, var(--accent-color) 56%, transparent);
+    background: color-mix(in srgb, var(--accent-color) 18%, transparent);
     color: var(--text-primary);
 }
 
@@ -713,9 +724,39 @@
 .fund-detail-chart {
     display: block;
     width: 100%;
-    height: 340px;
+    height: 420px;
     border-radius: 8px;
     background: color-mix(in srgb, var(--bg-color) 84%, var(--surface-color));
+}
+
+.fund-chart-reveal {
+    transform-box: fill-box;
+    transform-origin: left center;
+    animation: fund-chart-reveal-anim 720ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+.fund-chart-endpoint {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: fund-chart-endpoint-anim 720ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+@keyframes fund-chart-reveal-anim {
+    from { transform: scaleX(0); }
+    to   { transform: scaleX(1); }
+}
+
+@keyframes fund-chart-endpoint-anim {
+    0%   { opacity: 0; transform: scale(0.4); }
+    85%  { opacity: 0; transform: scale(0.4); }
+    100% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .fund-chart-reveal,
+    .fund-chart-endpoint {
+        animation: none;
+    }
 }
 
 .fund-chart-gridline {
@@ -1327,9 +1368,7 @@
 }
 
 .fund-comparison-bar-group {
-    transition: transform 340ms cubic-bezier(0.22, 1, 0.36, 1);
     transform-box: fill-box;
-    will-change: transform;
 }
 
 .fund-comparison-bar {
@@ -1339,12 +1378,7 @@
     transition:
         fill 140ms ease,
         filter 140ms ease,
-        height 320ms cubic-bezier(0.22, 1, 0.36, 1),
-        opacity 140ms ease,
-        transform 140ms ease,
-        y 320ms cubic-bezier(0.22, 1, 0.36, 1);
-    transform-box: fill-box;
-    transform-origin: center bottom;
+        opacity 140ms ease;
 }
 
 .fund-comparison-bar.is-base {
@@ -1357,7 +1391,6 @@
 
 .fund-comparison-bar.is-active {
     filter: drop-shadow(0 0 12px color-mix(in srgb, #1f6bff 42%, transparent));
-    transform: scaleX(1.025);
 }
 
 .fund-comparison-bar.is-muted {
@@ -1369,7 +1402,7 @@
     font-family: var(--font-mono);
     font-size: 13px;
     font-weight: 900;
-    transition: y 320ms cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
 }
 
 .fund-comparison-x-label {
@@ -1391,10 +1424,6 @@
     color: var(--text-primary);
     pointer-events: none;
     transform: translate(12px, 12px);
-    transition:
-        left 70ms ease-out,
-        top 70ms ease-out;
-    will-change: left, top;
 }
 
 .fund-comparison-tooltip.align-left {
@@ -1748,9 +1777,10 @@
     display: flex;
     justify-content: space-between;
     gap: 1rem;
-    margin-top: 0.65rem;
+    margin-top: 0.4rem;
     color: var(--text-secondary);
-    font-size: 0.82rem;
+    font-size: 0.74rem;
+    opacity: 0.85;
 }
 
 @media (max-width: 1080px) {

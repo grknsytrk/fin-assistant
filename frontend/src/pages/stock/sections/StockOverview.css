@@ -68,6 +68,17 @@
     color: var(--text-primary);
 }
 
+.overview-charts-quarter-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.42;
+}
+
+.overview-charts-quarter-btn:disabled:hover {
+    background: transparent;
+    border-color: var(--surface-border);
+    color: var(--text-secondary);
+}
+
 .overview-charts-quarter-btn.is-active {
     background: var(--accent-color);
     border-color: var(--accent-color);
@@ -226,6 +237,335 @@
 
 .kap-summary-table tr:last-child td {
     border-bottom: none;
+}
+
+.kap-premium-panel {
+    display: grid;
+    gap: 1rem;
+    padding: 1.1rem 1.25rem;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--border-radius);
+    background: var(--surface-color);
+}
+
+.kap-premium-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--surface-border);
+}
+
+.kap-premium-head h3 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 1rem;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.kap-premium-head p {
+    margin: 0.35rem 0 0;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
+.kap-premium-head a {
+    color: var(--accent-color);
+    border: 1px solid color-mix(in srgb, var(--accent-color) 34%, var(--surface-border));
+    border-radius: 0.45rem;
+    padding: 0.38rem 0.58rem;
+    font-size: 0.76rem;
+    font-weight: 700;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.kap-premium-latest {
+    display: grid;
+    grid-template-columns: 0.85fr 1fr;
+    gap: 0.9rem;
+}
+
+.kap-premium-latest > div {
+    min-width: 0;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 70%, transparent);
+    border-radius: 0.5rem;
+    padding: 0.75rem 0.85rem;
+    background: color-mix(in srgb, var(--surface-color) 92%, white 8%);
+}
+
+.kap-premium-latest span,
+.kap-premium-latest small {
+    display: block;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.kap-premium-latest strong {
+    display: block;
+    margin-top: 0.25rem;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.kap-premium-latest small {
+    margin-top: 0.25rem;
+    font-size: 0.76rem;
+    letter-spacing: 0;
+}
+
+.kap-premium-chart-block {
+    display: grid;
+    gap: 0.75rem;
+}
+
+.kap-premium-charts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+}
+
+.kap-premium-chart-card {
+    min-width: 0;
+    padding: 0.95rem 1rem;
+    background: color-mix(in srgb, var(--surface-color) 94%, white 6%);
+}
+
+.kap-premium-chart-card h4 {
+    margin-bottom: 0.65rem;
+    font-size: 0.86rem;
+    text-transform: uppercase;
+    letter-spacing: 0.035em;
+}
+
+.kap-premium-seasonal-card {
+    position: relative;
+    grid-column: 1 / -1;
+    min-width: 0;
+    padding: 0.95rem 1rem 0.75rem;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--border-radius);
+    background: color-mix(in srgb, var(--surface-color) 94%, white 6%);
+}
+
+.kap-premium-seasonal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.35rem;
+}
+
+.kap-premium-seasonal-head h4 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 0.86rem;
+    font-weight: 700;
+    letter-spacing: 0.035em;
+    text-transform: uppercase;
+}
+
+.kap-premium-seasonal-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.7rem;
+}
+
+.kap-premium-seasonal-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.32rem;
+    color: var(--text-primary);
+    font-size: 0.76rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.kap-premium-seasonal-legend i {
+    display: inline-block;
+    width: 0.82rem;
+    height: 0.82rem;
+    border-radius: 1px;
+}
+
+.kap-premium-average-legend {
+    width: 1.05rem !important;
+    height: 0.16rem !important;
+    border-radius: 999px !important;
+    background: var(--text-primary);
+}
+
+.kap-premium-yoy-legend {
+    border-radius: 999px !important;
+    background: #f59b62;
+}
+
+.kap-premium-seasonal-svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+}
+
+.kap-premium-seasonal-grid {
+    stroke: color-mix(in srgb, var(--surface-border) 78%, transparent);
+    stroke-width: 1;
+}
+
+.kap-premium-seasonal-axis,
+.kap-premium-seasonal-x-label {
+    fill: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    pointer-events: none;
+}
+
+.kap-premium-seasonal-bar {
+    opacity: 0.92;
+    transition: opacity 0.16s ease, filter 0.16s ease;
+}
+
+.kap-premium-seasonal-bar:hover {
+    filter: brightness(1.12);
+    opacity: 1;
+}
+
+.kap-premium-average-line {
+    fill: none;
+    stroke: var(--text-primary);
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.kap-premium-average-point {
+    fill: var(--text-primary);
+    stroke: color-mix(in srgb, var(--surface-color) 80%, #000 20%);
+    stroke-width: 1.5;
+}
+
+.kap-premium-yoy-point {
+    fill: #f59b62;
+    stroke: color-mix(in srgb, var(--surface-color) 82%, #000 18%);
+    stroke-width: 1.2;
+}
+
+.kap-premium-yoy-label-bg,
+.kap-premium-yoy-label {
+    pointer-events: none;
+}
+
+.kap-premium-yoy-label-bg.is-positive {
+    fill: color-mix(in srgb, var(--accent-color) 72%, #071426 28%);
+}
+
+.kap-premium-yoy-label-bg.is-negative {
+    fill: color-mix(in srgb, var(--danger-color) 78%, #16070a 22%);
+}
+
+.kap-premium-yoy-label {
+    fill: #fff;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.kap-premium-table-scroll {
+    overflow-x: auto;
+}
+
+.kap-premium-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.83rem;
+}
+
+.kap-premium-table th,
+.kap-premium-table td {
+    padding: 0.58rem 0.7rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 40%, transparent);
+    text-align: right;
+    white-space: nowrap;
+}
+
+.kap-premium-table th {
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.kap-premium-table td {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+.kap-premium-table th:first-child,
+.kap-premium-table td:first-child {
+    text-align: left;
+}
+
+.kap-premium-table a {
+    color: var(--text-primary);
+    text-decoration: none;
+}
+
+.kap-premium-table a:hover {
+    color: var(--accent-color);
+}
+
+.kap-premium-table tr:last-child td {
+    border-bottom: none;
+}
+
+.kap-premium-latest .pct-positive,
+.kap-premium-table .pct-positive {
+    color: var(--success-color);
+}
+
+.kap-premium-latest .pct-negative,
+.kap-premium-table .pct-negative {
+    color: var(--danger-color);
+}
+
+.kap-premium-latest .pct-neutral,
+.kap-premium-table .pct-neutral {
+    color: var(--text-secondary);
+}
+
+@media (max-width: 760px) {
+    .kap-premium-head {
+        flex-direction: column;
+    }
+
+    .kap-premium-seasonal-head {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .kap-premium-seasonal-legend {
+        justify-content: flex-start;
+    }
+
+    .kap-premium-latest,
+    .kap-premium-charts {
+        grid-template-columns: 1fr;
+    }
 }
 
 .kap-summary-pct-cell {

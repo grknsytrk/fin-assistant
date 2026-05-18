@@ -91,7 +91,8 @@
     min-width: 0;
     display: flex;
     align-items: center;
-    gap: 0.35rem;
+    flex-wrap: wrap;
+    gap: 0.25rem;
     overflow-x: auto;
     scrollbar-width: none;
 }
@@ -101,13 +102,13 @@
 }
 
 .mwr-tab {
-    min-height: 34px;
-    padding: 0 0.58rem;
+    min-height: 32px;
+    padding: 0 0.42rem;
     border: 0;
     border-radius: 8px;
     background: color-mix(in srgb, var(--surface-border) 44%, transparent);
     color: var(--text-secondary);
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     font-weight: 800;
     white-space: nowrap;
     cursor: pointer;

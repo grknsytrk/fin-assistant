@@ -3,6 +3,7 @@ import type {
     AskResponse,
     StatsResponse,
     FeedbackRequest,
+    KapCompaniesResponse,
     KapSnapshotResponse,
     CompanyBreakdownResponse,
     MarketUniverseResponse,
@@ -287,9 +288,11 @@ export const apiClient = {
         const query = params.toString();
         return fetchApi<FundsResponse>(query ? `/funds?${query}` : '/funds');
     },
-    fundSearch: (q: string, limit = 50) => {
+    fundSearch: (q: string, limit = 50, options?: { signal?: AbortSignal }) => {
         const params = new URLSearchParams({ q, limit: String(limit) });
-        return fetchApi<FundsResponse>(`/funds/search?${params.toString()}`);
+        return fetchApi<FundsResponse>(`/funds/search?${params.toString()}`, {
+            signal: options?.signal,
+        });
     },
     fundCategories: () => fetchApi<FundCategoriesResponse>('/funds/categories'),
     refreshFundsSnapshot: (lookbackDays = 10) =>
@@ -377,7 +380,7 @@ export const apiClient = {
         return `${API_BASE}/export?${params.toString()}`;
     },
 
-    kapCompanies: () => fetchApi<{ companies: string[] }>('/kap/companies'),
+    kapCompanies: () => fetchApi<KapCompaniesResponse>('/kap/companies'),
 
     kapSnapshot: (company: string, refresh = false, maxQuarters = 10) => {
         const params = new URLSearchParams({ company, max_quarters: String(maxQuarters) });

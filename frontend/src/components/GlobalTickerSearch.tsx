@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Search, X } from 'lucide-react';
 import { apiClient } from '../api/client';
-import type { FundSummary, MarketStockRow } from '../api/types';
+import type { FundSummary, KapCompanySearchItem, MarketStockRow } from '../api/types';
 import SymbolLogo from './SymbolLogo';
 import './GlobalTickerSearch.css';
 
@@ -28,6 +28,7 @@ interface GlobalTickerSearchProps {
 
 const RECENT_SEARCHES_KEY = 'ragfin.globalSearch.recent.v1';
 const MAX_RECENT_SEARCHES = 8;
+const MIN_FUND_SEARCH_QUERY_LENGTH = 2;
 
 const STOCK_SYMBOL_ALIASES: Record<string, string> = {
   BIM: 'BIMAS',
@@ -155,6 +156,28 @@ function companyCodeToResult(code: string): SearchResult {
   };
 }
 
+function companySearchItemToResult(item: KapCompanySearchItem): SearchResult {
+  const symbol = normalizeStockSymbol(item.symbol);
+  const title = String(item.title || '').trim();
+  const displayName = title || STOCK_SEARCH_LABELS[symbol]?.[0] || 'Hisse';
+  const aliases = new Set<string>([
+    ...getStockAliases(symbol, item.symbol),
+    ...(item.aliases || []),
+    title,
+  ].filter(Boolean));
+  return {
+    id: resultId('stock', symbol),
+    type: 'stock',
+    symbol,
+    title: displayName,
+    subtitle: displayName,
+    aliases: [...aliases],
+    price: null,
+    changePct: null,
+    logoName: displayName,
+  };
+}
+
 function fundRowToResult(row: FundSummary): SearchResult {
   const symbol = normalizeSymbol(row.fund_code);
   return {
@@ -223,8 +246,10 @@ export default function GlobalTickerSearch({
 }: GlobalTickerSearchProps) {
   const [stockRows, setStockRows] = useState<MarketStockRow[]>([]);
   const [companyCodes, setCompanyCodes] = useState<string[]>([]);
+  const [companyItems, setCompanyItems] = useState<KapCompanySearchItem[]>([]);
   const [stocksLoaded, setStocksLoaded] = useState(false);
   const [stocksLoading, setStocksLoading] = useState(false);
+  const [stockQuotesLoaded, setStockQuotesLoaded] = useState(false);
   const [fundRows, setFundRows] = useState<FundSummary[]>([]);
   const [fundsLoading, setFundsLoading] = useState(false);
   const [query, setQuery] = useState('');
@@ -233,45 +258,73 @@ export default function GlobalTickerSearch({
   const [recentSearches, setRecentSearches] = useState<SearchResult[]>(() => readRecentSearches());
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-  const trimmedQuery = query.trim();
+  const deferredQuery = useDeferredValue(query);
+  const trimmedQuery = deferredQuery.trim();
   const normalizedQuery = normalizeSearchText(trimmedQuery);
-  const normalizedSymbolQuery = normalizeSymbol(trimmedQuery);
+  const normalizedSymbolQuery = normalizeSymbol(query.trim());
 
   useEffect(() => {
     if (!isOpen || stocksLoaded) return;
+    let active = true;
     setStocksLoading(true);
-    Promise.allSettled([apiClient.marketStocks({ index: 'XUTUM' }), apiClient.kapCompanies()])
-      .then(([stocksResult, companiesResult]) => {
-        if (stocksResult.status === 'fulfilled') {
-          setStockRows(stocksResult.value.rows || []);
-        }
-        if (companiesResult.status === 'fulfilled') {
-          setCompanyCodes([...(companiesResult.value.companies || [])].map(normalizeSymbol).filter(Boolean));
-        }
+    apiClient.kapCompanies()
+      .then((payload) => {
+        if (!active) return;
+        const companies = [...(payload.companies || [])].map(normalizeSymbol).filter(Boolean);
+        setCompanyCodes(companies);
+        setCompanyItems(payload.items || []);
         setStocksLoaded(true);
       })
       .catch(() => {
+        if (!active) return;
         setStockRows([]);
         setCompanyCodes([]);
+        setCompanyItems([]);
       })
-      .finally(() => setStocksLoading(false));
+      .finally(() => {
+        if (active) setStocksLoading(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [isOpen, stocksLoaded]);
 
   useEffect(() => {
-    if (!isOpen || !trimmedQuery) {
+    if (!isOpen || stockQuotesLoaded) return;
+    let active = true;
+    apiClient
+      .marketStocks({ index: 'XUTUM' })
+      .then((payload) => {
+        if (!active) return;
+        setStockRows(payload.rows || []);
+        setStockQuotesLoaded(true);
+      })
+      .catch(() => {
+        // Quotes are optional; the search still works without live prices.
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOpen, stockQuotesLoaded]);
+
+  useEffect(() => {
+    if (!isOpen || trimmedQuery.length < MIN_FUND_SEARCH_QUERY_LENGTH) {
       setFundRows([]);
       setFundsLoading(false);
       return;
     }
     let active = true;
-    setFundsLoading(true);
+    const controller = new AbortController();
     const timer = window.setTimeout(() => {
+      if (!active) return;
+      setFundsLoading(true);
       apiClient
-        .fundSearch(trimmedQuery, 12)
+        .fundSearch(trimmedQuery, 12, { signal: controller.signal })
         .then((payload) => {
           if (active) setFundRows(payload.rows || []);
         })
-        .catch(() => {
+        .catch((error) => {
+          if ((error as Error)?.name === 'AbortError') return;
           if (active) setFundRows([]);
         })
         .finally(() => {
@@ -281,6 +334,7 @@ export default function GlobalTickerSearch({
     return () => {
       active = false;
       window.clearTimeout(timer);
+      controller.abort();
     };
   }, [isOpen, trimmedQuery]);
 
@@ -300,13 +354,32 @@ export default function GlobalTickerSearch({
     };
   }, [isOpen]);
 
-  const stockResults = useMemo(() => {
+  const stockBaseResults = useMemo(() => {
     const rowResults = stockRows.map(stockRowToResult);
-    const rowSymbols = new Set(rowResults.map((item) => item.symbol));
+    const resultMap = new Map<string, SearchResult>();
+    for (const result of rowResults) {
+      resultMap.set(result.symbol, result);
+    }
+
+    for (const item of companyItems) {
+      const result = companySearchItemToResult(item);
+      if (!resultMap.has(result.symbol)) {
+        resultMap.set(result.symbol, result);
+      }
+    }
+
+    const rowSymbols = new Set(resultMap.keys());
     const fallbackResults = companyCodes
       .filter((code) => !rowSymbols.has(normalizeStockSymbol(code)))
       .map(companyCodeToResult);
-    return [...rowResults, ...fallbackResults]
+    for (const result of fallbackResults) {
+      resultMap.set(result.symbol, result);
+    }
+    return [...resultMap.values()];
+  }, [companyCodes, companyItems, stockRows]);
+
+  const stockResults = useMemo(() => {
+    return stockBaseResults
       .filter((item) => item.symbol !== normalizeSymbol(currentTicker))
       .filter((item) => resultMatches(item, normalizedQuery))
       .sort((a, b) => {
@@ -315,7 +388,7 @@ export default function GlobalTickerSearch({
         return aStarts - bStarts || a.symbol.localeCompare(b.symbol, 'tr');
       })
       .slice(0, 10);
-  }, [companyCodes, currentTicker, normalizedQuery, stockRows]);
+  }, [currentTicker, normalizedQuery, stockBaseResults]);
 
   const fundResults = useMemo(() => {
     return fundRows.map(fundRowToResult).filter((item) => resultMatches(item, normalizedQuery)).slice(0, 10);
@@ -323,7 +396,22 @@ export default function GlobalTickerSearch({
 
   const visibleResults = useMemo(() => {
     if (!normalizedQuery) {
-      return recentSearches;
+      if (stockRows.length === 0) return recentSearches;
+      const quoteBySymbol = new Map<string, MarketStockRow>();
+      for (const row of stockRows) {
+        quoteBySymbol.set(normalizeStockSymbol(row.company), row);
+      }
+      return recentSearches.map((item) => {
+        if (item.type !== 'stock') return item;
+        const quote = quoteBySymbol.get(item.symbol);
+        if (!quote) return item;
+        return {
+          ...item,
+          price: quote.price ?? item.price,
+          changePct: quote.change_pct ?? item.changePct,
+          logoUrl: quote.logo_url ?? item.logoUrl,
+        };
+      });
     }
     const seen = new Set<string>();
     return [...stockResults, ...fundResults].filter((item) => {
@@ -331,7 +419,7 @@ export default function GlobalTickerSearch({
       seen.add(item.id);
       return true;
     }).slice(0, 14);
-  }, [fundResults, normalizedQuery, recentSearches, stockResults]);
+  }, [fundResults, normalizedQuery, recentSearches, stockResults, stockRows]);
 
   useEffect(() => {
     setHighlightedIndex(0);
@@ -390,7 +478,10 @@ export default function GlobalTickerSearch({
     }
   };
 
-  const isSearching = Boolean(normalizedQuery) && (stocksLoading || fundsLoading);
+  const isSearching = Boolean(normalizedQuery) && (
+    (stocksLoading && stockBaseResults.length === 0) ||
+    fundsLoading
+  );
 
   return (
     <div className="global-search">
@@ -458,13 +549,21 @@ export default function GlobalTickerSearch({
                         <em>{result.subtitle}</em>
                       </span>
                       <span className="global-search-result-meta">
-                        <span className="global-search-result-price">
-                          {result.type === 'stock' && result.price != null ? <small>G</small> : null}
-                          {formatSearchPrice(result.price, result.type)}
-                        </span>
-                        <span className={`global-search-result-change ${changeClass(result.changePct)}`}>
-                          {formatSearchPct(result.changePct)}
-                        </span>
+                        {result.price == null && result.changePct == null ? (
+                          <span className="global-search-result-kind">
+                            {result.type === 'fund' ? 'Fon' : 'Hisse'}
+                          </span>
+                        ) : (
+                          <>
+                            <span className="global-search-result-price">
+                              {result.type === 'stock' && result.price != null ? <small>G</small> : null}
+                              {formatSearchPrice(result.price, result.type)}
+                            </span>
+                            <span className={`global-search-result-change ${changeClass(result.changePct)}`}>
+                              {formatSearchPct(result.changePct)}
+                            </span>
+                          </>
+                        )}
                       </span>
                     </button>
                   ))}

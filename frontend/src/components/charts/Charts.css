@@ -14,7 +14,7 @@
 }
 
 .kap-charts-grid-3 {
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .kap-charts-grid-lines {
@@ -159,63 +159,77 @@
     position: fixed;
     inset: 0;
     z-index: 1200;
-    display: grid;
-    place-items: center;
-    padding: clamp(1rem, 3vw, 2.5rem);
-    background: color-mix(in srgb, #020617 62%, transparent);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: clamp(1rem, 3vw, 2rem);
+    overflow: auto;
+    background: color-mix(in srgb, #020617 76%, transparent);
+    backdrop-filter: blur(5px);
+    -webkit-backdrop-filter: blur(5px);
 }
 
 .kap-chart-modal {
     position: relative;
-    width: min(960px, 96vw);
-    max-height: min(760px, 92vh);
+    width: min(1040px, calc(100vw - 3rem));
+    max-height: calc(100dvh - 3rem);
 }
 
 .kap-chart-card-expanded {
     cursor: default;
-    padding: clamp(1.25rem, 2.5vw, 2rem);
-    border-color: color-mix(in srgb, var(--accent-color) 38%, var(--surface-border));
-    box-shadow: 0 28px 72px color-mix(in srgb, #000 42%, transparent);
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-height: calc(100dvh - 3rem);
+    padding: clamp(1.1rem, 2vw, 1.5rem);
+    border-color: color-mix(in srgb, var(--surface-border) 86%, var(--accent-color));
+    border-radius: 8px;
+    background: color-mix(in srgb, #101318 92%, var(--surface-color));
+    box-shadow: 0 24px 64px rgb(0 0 0 / 44%);
+    overflow: hidden;
 }
 
 .kap-chart-card-expanded h4 {
-    font-size: clamp(1.05rem, 1.8vw, 1.35rem);
-    margin-right: 2.75rem;
+    flex: 0 0 auto;
+    color: color-mix(in srgb, var(--text-primary) 94%, white);
+    font-size: clamp(1rem, 1.6vw, 1.2rem);
+    font-weight: 650;
+    margin: 0 3rem 0.8rem 0;
 }
 
 .kap-chart-card-expanded .kap-chart-svg {
     display: block;
-    max-height: 68vh;
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: min(64dvh, 560px);
 }
 
 .kap-chart-modal-close {
     position: absolute;
-    top: 0.95rem;
-    right: 0.95rem;
+    top: 0.9rem;
+    right: 0.9rem;
     z-index: 2;
-    display: grid;
-    place-items: center;
-    width: 2.25rem;
-    height: 2.25rem;
-    border: 1px solid var(--surface-border);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
     border-radius: 999px;
-    background: color-mix(in srgb, var(--surface-color) 90%, #000 10%);
+    background: color-mix(in srgb, #111827 78%, transparent);
     color: var(--text-primary);
     cursor: pointer;
-    font-size: 1.1rem;
-    font-weight: 700;
-    line-height: 1;
+    line-height: 0;
     transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
 }
 
 .kap-chart-modal-close:hover,
 .kap-chart-modal-close:focus-visible {
-    border-color: color-mix(in srgb, var(--accent-color) 62%, var(--surface-border));
-    background: color-mix(in srgb, var(--accent-color) 16%, var(--surface-color));
+    border-color: color-mix(in srgb, var(--text-secondary) 58%, var(--surface-border));
+    background: color-mix(in srgb, var(--surface-color) 92%, white 8%);
     outline: none;
-    transform: scale(1.04);
+    transform: translateY(-1px);
 }
 
 @media (max-width: 900px) {
@@ -228,7 +242,23 @@
         padding: 0.75rem;
     }
 
+    .kap-chart-modal {
+        width: calc(100vw - 1.5rem);
+        max-height: calc(100dvh - 1.5rem);
+    }
+
     .kap-chart-card-expanded {
+        max-height: calc(100dvh - 1.5rem);
         padding: 1rem;
+    }
+
+    .kap-chart-card-expanded .kap-chart-svg {
+        max-height: 62dvh;
+    }
+}
+
+@media (min-width: 901px) and (max-width: 1180px) {
+    .kap-charts-grid-3 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }

@@ -20,6 +20,9 @@ STOCK_DOMAIN_MAP: Dict[str, str] = {
     "AKBNK": "akbank.com",
     "ASELS": "aselsan.com",
     "BIMAS": "bim.com.tr",
+    "EBEBK": "e-bebek.com",
+    "ECOGR": "ecogreenenerji.com",
+    "EGEGY": "egeyapigyo.com",
     "EREGL": "erdemir.com.tr",
     "GARAN": "garanti.com.tr",
     "ISCTR": "isbank.com.tr",
@@ -55,6 +58,9 @@ TRADINGVIEW_SLUG_MAP: Dict[str, str] = {
     "AEFES": "anadolu-efes",
     "ASELS": "aselsan",
     "BIMAS": "bim",
+    "EBEBK": "ebebek-magazacilik--600.png",
+    "ECOGR": "ecogreen-enerji-as--600.png",
+    "EGEGY": "egeyapi-avrupa-gmyo--600.png",
     "ENKAI": "enka-insaat",
     "EREGL": "eregli-demir",
     "KCHOL": "koc",
@@ -163,7 +169,8 @@ def _probe_symbol(
 
     if include_tradingview:
         slug = TRADINGVIEW_SLUG_MAP.get(symbol, symbol.lower())
-        tv_url = f"https://s3-symbol-logo.tradingview.com/{slug}.svg"
+        suffix = "" if slug.lower().endswith((".svg", ".png", ".jpg", ".jpeg", ".webp")) else ".svg"
+        tv_url = f"https://s3-symbol-logo.tradingview.com/{slug}{suffix}"
         tv_resp = _safe_get(session, tv_url)
         tv_ok = _is_ok_image(tv_resp["status"] or 0, tv_resp["content_type"], tv_resp["bytes"], min_bytes=500)
         row["tradingview"] = {

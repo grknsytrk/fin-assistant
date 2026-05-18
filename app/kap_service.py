@@ -314,6 +314,7 @@ def get_kap_snapshot(
     processed_dir: Path,
     force_refresh: bool = False,
     max_quarters: int = 10,
+    use_cache_when_complete: bool = False,
 ) -> Dict[str, Any]:
     """Fetch a raw snapshot via kap_fetcher with correct keyword args."""
     normalized_company = normalize_kap_symbol(company)
@@ -323,6 +324,7 @@ def get_kap_snapshot(
         processed_dir=processed_dir,
         force_refresh=force_refresh,
         max_quarters=max_quarters,
+        use_cache_when_complete=use_cache_when_complete,
     )
 
 
@@ -642,6 +644,9 @@ def normalize_snapshot_for_frontend(raw: Dict[str, Any]) -> Dict[str, Any]:
         "error": raw.get("error"),
         "analysis_basis": "latest_comparable",
         "analysis_note": _ANALYSIS_NOTE,
+        "insurance_premium_disclosures": _normalize_insurance_premium_disclosures(
+            raw.get("insurance_premium_disclosures") or []
+        ),
     }
 
     quarters = raw.get("quarters") or []
@@ -751,3 +756,49 @@ def _fmt_number(val: Optional[float], currency: str = "TL") -> str:
     else:
         formatted = f"{sign}{abs_val:,.0f}"
     return f"{formatted} {currency}"
+
+
+def _fmt_pct(val: Optional[float]) -> str:
+    if val is None:
+        return "-"
+    return f"% {val:.0f}"
+
+
+def _normalize_insurance_premium_disclosures(rows: List[Any]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        monthly = _safe_number(row.get("monthly_gross_premium"))
+        ytd = _safe_number(row.get("ytd_gross_premium"))
+        prev_monthly = _safe_number(row.get("previous_year_monthly_gross_premium"))
+        prev_ytd = _safe_number(row.get("previous_year_ytd_gross_premium"))
+        monthly_yoy = _safe_number(row.get("monthly_yoy_pct"))
+        ytd_yoy = _safe_number(row.get("ytd_yoy_pct"))
+        normalized.append(
+            {
+                "year": row.get("year"),
+                "month": row.get("month"),
+                "period_label": row.get("period_label"),
+                "period_start": row.get("period_start"),
+                "period_end": row.get("period_end"),
+                "published_at": row.get("published_at"),
+                "disclosure_index": row.get("disclosure_index"),
+                "summary": row.get("summary"),
+                "source_url": row.get("source_url"),
+                "monthly_gross_premium": monthly,
+                "monthly_gross_premium_display": _fmt_number(monthly, "TL"),
+                "ytd_gross_premium": ytd,
+                "ytd_gross_premium_display": _fmt_number(ytd, "TL"),
+                "previous_year_monthly_gross_premium": prev_monthly,
+                "previous_year_monthly_gross_premium_display": _fmt_number(prev_monthly, "TL"),
+                "previous_year_ytd_gross_premium": prev_ytd,
+                "previous_year_ytd_gross_premium_display": _fmt_number(prev_ytd, "TL"),
+                "monthly_yoy_pct": monthly_yoy,
+                "monthly_yoy_pct_display": _fmt_pct(monthly_yoy),
+                "ytd_yoy_pct": ytd_yoy,
+                "ytd_yoy_pct_display": _fmt_pct(ytd_yoy),
+            }
+        )
+    normalized.sort(key=lambda item: (int(item.get("year") or 0), int(item.get("month") or 0)))
+    return normalized

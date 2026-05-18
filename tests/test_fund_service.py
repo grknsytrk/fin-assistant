@@ -366,8 +366,8 @@ def test_refresh_funds_snapshot_filters_tefas_closed_rows(monkeypatch, tmp_path)
 
     payload = fund_service.refresh_funds_snapshot(tmp_path, lookback_days=1)
 
-    assert [row["fund_code"] for row in payload["rows"]] == ["TLY"]
-    assert "tefas_open_only skipped 2 non-open fund rows" in " ".join(payload["warnings"])
+    assert sorted(row["fund_code"] for row in payload["rows"]) == ["ABG", "TLY"]
+    assert "tefas_open_only skipped 1 closed fund rows" in " ".join(payload["warnings"])
     assert fund_service.read_fund_price_points(tmp_path, "PHE") == []
 
 

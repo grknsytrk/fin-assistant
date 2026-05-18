@@ -32,6 +32,9 @@ export const STOCK_LOGO_DOMAIN_MAP: Record<string, string | string[]> = {
     ENKAI: 'enka.com',
     EREGL: 'erdemir.com.tr',
     ENERY: 'enerya.com.tr',
+    EBEBK: 'e-bebek.com',
+    ECOGR: 'ecogreenenerji.com',
+    EGEGY: 'egeyapigyo.com',
     EUPWR: 'europowerenerji.com.tr',
     FENER: 'fenerbahce.org/fbfutbol/',
     FROTO: 'ford.com.tr',
@@ -258,6 +261,9 @@ export const TRADINGVIEW_SYMBOL_SLUG_MAP: Record<string, string> = {
     BIMAS: 'bim',
     ENKAI: 'enka-insaat',
     EREGL: 'eregli-demir',
+    EBEBK: 'ebebek-magazacilik--600.png',
+    ECOGR: 'ecogreen-enerji-as--600.png',
+    EGEGY: 'egeyapi-avrupa-gmyo--600.png',
     KCHOL: 'koc',
     PGSUS: 'pegasus',
     TAVHL: 'tav-havalimanlari',
@@ -434,7 +440,8 @@ export function tradingViewLogoUrl(
         mappedSlug ||
         (options?.requireMappedSlug ? '' : normalized.toLowerCase().replace(/\//g, '-'));
     if (!slug) return null;
-    return `https://s3-symbol-logo.tradingview.com/${slug}.svg`;
+    const hasKnownExtension = /\.(svg|png|jpe?g|webp)$/i.test(slug);
+    return `https://s3-symbol-logo.tradingview.com/${slug}${hasKnownExtension ? '' : '.svg'}`;
 }
 
 export function logoDevDomainUrl(domain: string | null): string | null {

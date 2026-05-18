@@ -212,6 +212,20 @@
   color: #8b8d91;
 }
 
+.global-search-result-kind {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.45rem;
+  padding: 0 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: #aeb4bf;
+  font-family: inherit;
+  font-size: 0.76rem;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
 .global-search-empty {
   padding: 2rem 0.55rem 2.4rem;
   color: #8b8d91;

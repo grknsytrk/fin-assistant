@@ -77,6 +77,19 @@ export interface StatsResponse {
   companies: string[];
 }
 
+export interface KapCompanySearchItem {
+  symbol: string;
+  title: string | null;
+  aliases?: string[];
+  latest_quarter?: string | null;
+  has_kap_cache?: boolean;
+}
+
+export interface KapCompaniesResponse {
+  companies: string[];
+  items?: KapCompanySearchItem[];
+}
+
 export interface CompanyBreakdownRow {
   company: string;
   chunks: number;
@@ -658,6 +671,30 @@ export interface KapValuation {
   assumptions: string[];
 }
 
+export interface KapInsurancePremiumDisclosure {
+  year: number | null;
+  month: number | null;
+  period_label: string | null;
+  period_start: string | null;
+  period_end: string | null;
+  published_at: string | null;
+  disclosure_index: number | null;
+  summary: string | null;
+  source_url: string | null;
+  monthly_gross_premium: number | null;
+  monthly_gross_premium_display: string;
+  ytd_gross_premium: number | null;
+  ytd_gross_premium_display: string;
+  previous_year_monthly_gross_premium: number | null;
+  previous_year_monthly_gross_premium_display: string;
+  previous_year_ytd_gross_premium: number | null;
+  previous_year_ytd_gross_premium_display: string;
+  monthly_yoy_pct: number | null;
+  monthly_yoy_pct_display: string;
+  ytd_yoy_pct: number | null;
+  ytd_yoy_pct_display: string;
+}
+
 export interface KapSnapshotResponse {
   ok: boolean;
   company: string;
@@ -673,6 +710,7 @@ export interface KapSnapshotResponse {
   summary: Record<string, KapMetricValue>;
   quarters: KapQuarter[];
   valuation?: KapValuation;
+  insurance_premium_disclosures?: KapInsurancePremiumDisclosure[];
 }
 
 export interface KapOverviewCommentaryRequest {
