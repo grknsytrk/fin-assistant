@@ -8,6 +8,37 @@
   - `Fiyat / Yatırımcı`: historical price, return, portfolio size, investor count.
   - `Fon Dağılımı`: historical asset allocation / portfolio breakdown.
 
+## Commit Conventions
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) for every commit. Keep the subject line under ~72 characters and write it in lower case, present tense.
+
+Format:
+
+```
+<type>(<scope>): <short summary>
+```
+
+Common types used in this repo:
+
+- `feat`: a new user-facing feature.
+- `fix`: a bug fix.
+- `chore`: tooling, dependencies, configs, or other non-functional housekeeping.
+- `refactor`: code change that neither fixes a bug nor adds a feature.
+- `docs`: documentation-only changes (README, AGENTS.md, comments).
+- `test`: adding or updating tests.
+- `perf`: performance improvements.
+- `build` / `ci`: build system or CI workflow changes.
+- `style`: formatting, whitespace, lint fixes with no code behavior change.
+
+Scope is optional but encouraged when the change is localized, e.g. `kap`, `tefas`, `ui`, `market`, `funds-frontend`.
+
+Examples:
+
+- `fix(kap): mark cache as stale when requested depth is missing`
+- `feat(funds-frontend): add Fon Dağılımı tab to Geçmiş Veriler`
+- `chore(ci): bump pytest to 8.x`
+- `docs(agents): document conventional commit policy`
+
 ## TEFAS / tefasfon v1.1.0
 
 Use `tefasfon` as the primary TEFAS adapter for fund data. It does not require Chrome/browser automation.
