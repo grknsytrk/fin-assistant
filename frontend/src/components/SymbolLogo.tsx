@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import {
     FX_COUNTRY_FLAGS,
+    explicitLogoUrlsForSymbol,
     fintablesFundManagerLogoUrls,
     type SymbolLogoKind,
     fintablesLogoUrlsForSymbol,
@@ -175,6 +176,7 @@ function buildCandidates({
     }
 
     if (kind === 'stock') {
+        candidates.push(...explicitLogoUrlsForSymbol(normalized));
         candidates.push(...fintablesLogoUrlsForSymbol(normalized));
 
         if (logoUrl) {

@@ -79,6 +79,8 @@ export const STOCK_LOGO_DOMAIN_MAP: Record<string, string | string[]> = {
     SOKM: 'sokmarket.com.tr',
     TABGD: 'tabgida.com.tr',
     TCELL: 'turkcell.com.tr',
+    TERA: 'terayatirim.com',
+    TEHOL: 'terayatirim.com',
     TAVHL: 'tavhavalimanlari.com.tr',
     THYAO: 'turkishairlines.com',
     TKFEN: 'tekfen.com.tr',
@@ -87,6 +89,7 @@ export const STOCK_LOGO_DOMAIN_MAP: Record<string, string | string[]> = {
     TTKOM: 'turktelekom.com.tr',
     TTRAK: 'turktraktor.com.tr',
     TRALT: 'turkaltinisletmeleri.com',
+    TRHOL: 'dagi.com.tr',
     TRENJ: 'turkaltinisletmeleri.com',
     TRMET: 'turkaltinisletmeleri.com',
     TUREX: 'turexturizm.com.tr',
@@ -281,6 +284,16 @@ export const TRADINGVIEW_FALLBACK_ENABLED = rawTradingViewFlag === '1' || rawTra
 export const FINTABLES_LOGOS_ENABLED = !['0', 'false', 'no', 'off'].includes(rawFintablesLogoFlag || '');
 const FINTABLES_LOGO_BASE_URL = 'https://storage.fintables.com/media/uploads/company-logos';
 const FINTABLES_FUND_MANAGER_LOGO_BASE_URL = 'https://storage.fintables.com/media/uploads/fund-management-logos';
+const SYMBOL_LOGO_ALIAS_MAP: Record<string, string> = {
+    TEHOL: 'TERA',
+};
+const EXPLICIT_SYMBOL_LOGO_URL_MAP: Record<string, string[]> = {
+    TRHOL: ['https://s3-symbol-logo.tradingview.com/dagi-yatirim-holding--big.svg'],
+    TEHOL: [
+        `${FINTABLES_LOGO_BASE_URL}/tera_icon.png`,
+        `${FINTABLES_LOGO_BASE_URL}/TERA.png`,
+    ],
+};
 const FUND_MANAGER_LOGO_SLUG_MAP: Record<string, string[]> = {
     a1_capital_portfoy: ['a1_portfoy_icon_So2sGTy', 'a1_portfoy_icon'],
     a1_portfoy: ['a1_portfoy_icon_So2sGTy', 'a1_portfoy_icon'],
@@ -315,9 +328,19 @@ export function normalizeLogoSymbol(symbol: string): string {
     return classSuffixMatch ? classSuffixMatch[1] : normalized;
 }
 
+function logoLookupSymbol(symbol: string): string {
+    const normalized = normalizeLogoSymbol(symbol);
+    return SYMBOL_LOGO_ALIAS_MAP[normalized] || normalized;
+}
+
+export function explicitLogoUrlsForSymbol(symbol: string): string[] {
+    const normalized = normalizeLogoSymbol(symbol);
+    return EXPLICIT_SYMBOL_LOGO_URL_MAP[normalized] || [];
+}
+
 export function fintablesLogoUrlsForSymbol(symbol: string): string[] {
     if (!FINTABLES_LOGOS_ENABLED) return [];
-    const normalized = normalizeLogoSymbol(symbol).replace(/[^A-Z0-9]/g, '');
+    const normalized = logoLookupSymbol(symbol).replace(/[^A-Z0-9]/g, '');
     if (!/^[A-Z0-9]{2,12}$/.test(normalized)) return [];
     return [
         `${FINTABLES_LOGO_BASE_URL}/${normalized.toLowerCase()}_icon.png`,
