@@ -193,6 +193,7 @@ export interface FundSourceMetadata {
   fetched_at?: string | null;
   as_of?: string | null;
   cache_hit?: boolean;
+  cache_policy?: string | null;
   stale?: boolean;
   parse_status?: string | null;
   warnings?: string[];
@@ -200,11 +201,16 @@ export interface FundSourceMetadata {
   history_source_used?: string | null;
   summary_source_used?: string | null;
   history_source_policy?: string | null;
+  primary_source?: string | null;
+  fallback_reason?: string | null;
+  tefasfon_adapter_version?: string | null;
   final_points_count?: number | null;
   date_min?: string | null;
   date_max?: string | null;
   backfill_used?: boolean;
   fallback_used?: boolean;
+  cached_fallback_points_present?: boolean;
+  cached_fallback_point_count?: number | null;
   source_policy?: string | null;
   adapter_version?: string | null;
 }
@@ -293,9 +299,14 @@ export interface FundPortfolioPosition {
   asset_name: string;
   asset_type: string | null;
   weight: number | null;
+  previous_weight?: number | null;
+  weight_change?: number | null;
+  change_status?: 'new' | 'increased' | 'decreased' | 'removed' | 'unchanged' | string | null;
   amount: number | null;
   market_value: number | null;
+  price?: number | null;
   report_date: string | null;
+  previous_report_date?: string | null;
   source_report_url: string | null;
   source_type: string | null;
   parse_confidence: number | null;
