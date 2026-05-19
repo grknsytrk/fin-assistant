@@ -208,14 +208,22 @@ function formatCardPositiveRatio(value: number | null | undefined): string {
     return formatCardRatio(value);
 }
 
-function hasStockCardCoreData(item: MarketStockCardItem | null | undefined): boolean {
+function hasStockCardLoadedData(item: MarketStockCardItem | null | undefined): boolean {
     if (!item) return false;
-    const hasPrice = Number.isFinite(item.price) && (item.price ?? 0) > 0;
-    const hasHigh = Number.isFinite(item.high);
-    const hasLow = Number.isFinite(item.low);
-    const hasPreviousClose = Number.isFinite(item.previous_close);
+    if (item.error) return true;
+    const hasMarketField = [
+        item.price,
+        item.change_pct,
+        item.high,
+        item.low,
+        item.previous_close,
+        item.volume,
+        item.volume_lot,
+        item.volume_tl,
+        item.market_cap,
+    ].some((value) => Number.isFinite(value));
     const hasChart = (item.line_points ?? []).some((point) => Number.isFinite(point.close));
-    return hasPrice && hasHigh && hasLow && hasPreviousClose && hasChart;
+    return hasMarketField || hasChart;
 }
 
 function formatCardFullNumber(value: number | null | undefined): string {
@@ -2033,7 +2041,7 @@ export default function MarketsView({
             setStockCardsError(null);
             const readySymbols = new Set(
                 (payload.items ?? [])
-                    .filter((item) => hasStockCardCoreData(item))
+                    .filter((item) => hasStockCardLoadedData(item))
                     .map((item) => item.symbol),
             );
             if (readySymbols.size > 0) {
@@ -2639,9 +2647,10 @@ export default function MarketsView({
                                 >
                                     {stockCardSymbols.map((symbol) => {
                                         const item = stockCardsBySymbol.get(symbol) || emptyStockCardItem(symbol);
+                                        const hasLoadedItem = stockCardsBySymbol.has(symbol);
                                         const isCardLoading =
-                                            stockCardPendingSet.has(symbol)
-                                            || (stockCardsLoading && !stockCardsBySymbol.has(symbol));
+                                            !hasLoadedItem
+                                            && (stockCardPendingSet.has(symbol) || stockCardsLoading);
                                         return (
                                             <MarketStockCard
                                                 key={symbol}
