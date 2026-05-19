@@ -2957,6 +2957,8 @@ _STOCKS_CACHE_TTL = 3
 _MARKET_STOCK_CARD_CHART_CACHE: Dict[str, Any] = {}
 _MARKET_STOCK_CARD_CHART_CACHE_TTL = 45
 _MARKET_STOCK_CARD_LIMIT = 12
+_MARKET_STOCK_CARD_PREVIOUS_SESSION_LOOKBACK_DAYS = 10
+_TURKEY_TIMEZONE = timezone(timedelta(hours=3))
 _MARKET_STOCK_CARD_CHART_RANGES: Dict[str, Dict[str, Any]] = {
     "1d": {"interval": "5m", "range": "1d", "ttl": 30},
     "1w": {"interval": "15m", "range": "5d", "ttl": 60},
@@ -3714,6 +3716,39 @@ def _normalize_stock_card_line_points(raw_points: Any) -> List[Dict[str, Any]]:
     return [deduped[key] for key in sorted(deduped)]
 
 
+def _fetch_previous_stock_card_intraday_chart(yahoo_symbol: str) -> Dict[str, Any]:
+    today = datetime.now(_TURKEY_TIMEZONE).date()
+    errors: List[str] = []
+    for offset in range(1, _MARKET_STOCK_CARD_PREVIOUS_SESSION_LOOKBACK_DAYS + 1):
+        session_date = today - timedelta(days=offset)
+        if session_date.weekday() >= 5:
+            continue
+        chart = _fetch_yahoo_chart_period_raw(
+            yahoo_symbol,
+            interval="5m",
+            start_date=session_date,
+            end_date=session_date,
+        )
+        points = _normalize_stock_card_line_points(chart.get("points") if chart.get("ok") else [])
+        if points:
+            meta = dict(chart.get("meta") or {})
+            meta["fallbackTradingDate"] = session_date.isoformat()
+            chart = dict(chart)
+            chart["meta"] = meta
+            chart["points"] = points
+            chart["fallback_trading_date"] = session_date.isoformat()
+            return chart
+        error = chart.get("error") if isinstance(chart, dict) else None
+        if error:
+            errors.append(str(error))
+    return {
+        "ok": False,
+        "error": errors[-1] if errors else "previous_session_unavailable",
+        "yahoo_symbol": yahoo_symbol,
+        "points": [],
+    }
+
+
 def _fetch_stock_card_chart(symbol: str, chart_range: str, *, force_refresh: bool = False) -> Dict[str, Any]:
     ticker = _normalize_market_stock_card_symbol(symbol)
     normalized_range = _normalize_stock_card_chart_range(chart_range)
@@ -3730,12 +3765,20 @@ def _fetch_stock_card_chart(symbol: str, chart_range: str, *, force_refresh: boo
     fetched_at = datetime.now(timezone.utc).isoformat()
     chart = _fetch_yahoo_chart_raw(yahoo_symbol, interval=config["interval"], range_=config["range"])
     points = _normalize_stock_card_line_points(chart.get("points") if chart.get("ok") else [])
+    source = "yahoo_live"
+    if normalized_range == "1d" and chart.get("ok") and not points:
+        fallback_chart = _fetch_previous_stock_card_intraday_chart(yahoo_symbol)
+        fallback_points = _normalize_stock_card_line_points(fallback_chart.get("points") if fallback_chart.get("ok") else [])
+        if fallback_points:
+            chart = fallback_chart
+            points = fallback_points
+            source = "yahoo_previous_session"
     payload = {
         "symbol": ticker,
         "range": normalized_range,
         "yahoo_symbol": yahoo_symbol,
         "line_points": points,
-        "source": "yahoo_live",
+        "source": source,
         "as_of": fetched_at,
         "error": None if chart.get("ok") and points else chart.get("error") or "chart_unavailable",
         "meta": chart.get("meta") or {},
@@ -3773,8 +3816,16 @@ def _fetch_stock_card_intraday(symbol: str, *, force_refresh: bool = False) -> D
             for point in points
             if isinstance(point.get("low"), (int, float))
         ]
+        volumes = [
+            point.get("volume")
+            for point in points
+            if isinstance(point.get("volume"), (int, float))
+        ]
         meta_payload = chart_payload.get("meta") or {}
+        last_close = points[-1].get("close") if points else None
         price = meta_payload.get("regularMarketPrice")
+        if price is None and isinstance(last_close, (int, float)):
+            price = last_close
         prev_close = meta_payload.get("chartPreviousClose") or meta_payload.get("previousClose")
         change = None
         change_pct = None
@@ -3802,8 +3853,8 @@ def _fetch_stock_card_intraday(symbol: str, *, force_refresh: bool = False) -> D
             "change_pct": change_pct,
             "high": meta_payload.get("regularMarketDayHigh") or (max(highs) if highs else None),
             "low": meta_payload.get("regularMarketDayLow") or (min(lows) if lows else None),
-            "volume": meta_payload.get("regularMarketVolume"),
-            "volume_lot": meta_payload.get("regularMarketVolume"),
+            "volume": meta_payload.get("regularMarketVolume") or (sum(volumes) if volumes else None),
+            "volume_lot": meta_payload.get("regularMarketVolume") or (sum(volumes) if volumes else None),
             "currency": meta_payload.get("currency") or "TRY",
             "market_state": meta_payload.get("marketState") or "",
             "as_of": as_of or chart_payload.get("as_of"),

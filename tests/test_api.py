@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -86,16 +86,354 @@ def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     assert payload["source"] == "tefasfon_funds"
 
 
-def test_api_fund_holdings_not_parsed() -> None:
+def _patch_holdings_cache_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    monkeypatch.setattr(
+        fund_service_module,
+        "_holdings_path",
+        lambda _processed_dir, fund_code: tmp_path / f"{fund_code}.json",
+    )
+
+
+def test_api_fund_holdings_unavailable_when_kap_fund_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    monkeypatch.setattr(fund_service_module, "_kap_search_fund_metadata", lambda _fund_code: None)
     client = TestClient(app)
 
     response = client.get("/funds/YAC/holdings")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "not_parsed"
+    assert payload["status"] == "unavailable"
     assert payload["positions"] == []
-    assert payload["source_metadata"]["parse_status"] == "not_parsed"
+    assert payload["source_metadata"]["parse_status"] == "unavailable"
+
+
+def test_api_fund_holdings_parses_kap_reports_and_deltas(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    latest_text = """
+FON PORTFÖY DEĞERİ TABLOSU
+Hisse Senedi
+DSTKF Destek Finans Faktoring A.S. 1.000,00 10,00 10.000,00 23,60TRYTRADSTKFXXX
+TERA Tera Yatirim Menkul Degerler A.S. 2.000,00 5,00 20.000,00 12,86TRYTRATERAXXX
+BIMAS Bim Birlesik Magazalar A.S. 100,00 5,00 500,00 1,25TRYTRABIMASXXX
+"""
+    previous_text = """
+FON PORTFÖY DEĞERİ TABLOSU
+Hisse Senedi
+DSTKF Destek Finans Faktoring A.S. 1.000,00 10,00 10.000,00 20,45TRYTRADSTKFXXX
+TERA Tera Yatirim Menkul Degerler A.S. 2.000,00 5,00 20.000,00 24,31TRYTRATERAXXX
+AKBNK Akbank T.A.S. 300,00 2,00 600,00 3,00TRYTRAAKBNKXXX
+"""
+
+    def fake_detail(disclosure_index: int) -> Dict[str, Any]:
+        if disclosure_index == 200:
+            return {
+                "disclosure": {"disclosureBasic": {"disclosureIndex": 200, "year": 2026, "donem": 4}},
+                "attachments": [{"objId": "latest", "fileName": "TST_2026.04.pdf", "fileExtension": "pdf"}],
+            }
+        return {
+            "disclosure": {"disclosureBasic": {"disclosureIndex": 100, "year": 2026, "donem": 3}},
+            "attachments": [{"objId": "previous", "fileName": "TST_2026.03.pdf", "fileExtension": "pdf"}],
+        }
+
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_search_fund_metadata",
+        lambda _fund_code: {"fund_code": "TST", "fund_oid": "fund-oid", "fund_name": "Test Fon"},
+    )
+    monkeypatch.setattr(fund_service_module, "_kap_portfolio_subject_oid", lambda _fund_oid: "subject-oid")
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_list_portfolio_disclosures",
+        lambda _fund_oid, _subject_oid: [
+            {"disclosureBasic": {"disclosureIndex": 200, "publishDate": "01.05.2026 10:00:00"}},
+            {"disclosureBasic": {"disclosureIndex": 100, "publishDate": "01.04.2026 10:00:00"}},
+        ],
+    )
+    monkeypatch.setattr(fund_service_module, "_kap_fetch_report_detail", fake_detail)
+    monkeypatch.setattr(fund_service_module, "_kap_download_attachment", lambda obj_id: str(obj_id).encode("utf-8"))
+    monkeypatch.setattr(
+        fund_service_module,
+        "_extract_kap_pdf_text",
+        lambda data: latest_text if data == b"latest" else previous_text,
+    )
+    client = TestClient(app)
+
+    response = client.get("/funds/TST/holdings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    positions = {item["asset_code"]: item for item in payload["positions"]}
+    assert positions["DSTKF"]["weight"] == 23.6
+    assert positions["DSTKF"]["previous_weight"] == 20.45
+    assert positions["DSTKF"]["weight_change"] == pytest.approx(3.15)
+    assert positions["DSTKF"]["change_status"] == "increased"
+    assert positions["TERA"]["change_status"] == "decreased"
+    assert positions["BIMAS"]["change_status"] == "new"
+    assert positions["AKBNK"]["change_status"] == "removed"
+    assert payload["source_metadata"]["latest_report"]["file_name"] == "TST_2026.04.pdf"
+
+
+def test_api_fund_holdings_reuses_monthly_report_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    cache_payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {
+                "fund_code": "TLY",
+                "asset_code": "DSTKF",
+                "asset_name": "DESTEK FİNANS FAKTORİNG A.Ş.",
+                "asset_type": "local_equity",
+                "weight": 23.63,
+                "previous_weight": 20.43,
+                "weight_change": 3.2,
+                "change_status": "increased",
+                "amount": None,
+                "market_value": None,
+                "price": None,
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": "https://www.kap.org.tr/tr/Bildirim/1601574",
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            }
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "message": None,
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-05-01T00:00:00+00:00",
+            "as_of": "2026-04-30",
+            "cache_hit": False,
+            "stale": False,
+            "parse_status": "ok",
+            "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
+            "latest_report": {"report_date": "2026-04-30", "source_url": "https://www.kap.org.tr/tr/Bildirim/1601574"},
+            "previous_report": {"report_date": "2026-03-31", "source_url": "https://www.kap.org.tr/tr/Bildirim/1583104"},
+            "warnings": [],
+        },
+    }
+    (tmp_path / "TLY.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 19))
+    monkeypatch.setattr(
+        fund_service_module,
+        "refresh_fund_holdings",
+        lambda *_args, **_kwargs: pytest.fail("monthly holdings cache should be reused"),
+    )
+    client = TestClient(app)
+
+    response = client.get("/funds/TLY/holdings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["positions"][0]["asset_code"] == "DSTKF"
+    assert payload["source_metadata"]["cache_hit"] is True
+    assert payload["source_metadata"]["cache_policy"] == "monthly_report"
+
+
+def test_kap_holdings_parser_keeps_only_equities_and_funds() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+Hisse Türk
+TRHOL Tera Finansal Yatirimlar Holding A.S. 1.000,00 10,00 10.000,00 5,98TRYTRATACYO91Q7
+TEHOL Tera Yatirim Teknoloji Holding A.S. 1.000,00 10,00 10.000,00 2,46TRYTRAGLOBL91Q0
+BORÇLANMA SENETLERİ
+TRFTRYBE2614 Tera Yatirim Bankasi A.S. 05/10/26 154 0,00 3.540.000,00 100,248100 29/04/26 46,423707 102,968512 3.645.085,09 94,42 2,87TL 813652091 2,90TRFTRYBE2614
+T.REPO
+AC2 - (BORSA DISI) PARDUS PORTFÖY YÖNETİMİ A.Ş. 04/05/26 0 43,00 6.530.630,99 43,000000 30/04/26 1.828.523,76 6.530.630,99 43,000000 6.530.630,99 19,40 5,14TL 5,20TRYA1PY00081
+MEVDUAT
+TÜRKİYE VAKIFLAR BANKASI T.A.O. 04/05/26 0 40,25 2.019.927,00 30/04/26 2.028.837,29 40,250000 2.028.837,29 33,49 1,60TL 1,61
+V-AY İÇİNDE YAPILAN GİDERLER
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="TST",
+        report_date="2026-04-30",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert set(by_code) == {"TRHOL", "TEHOL"}
+    assert by_code["TRHOL"]["asset_type"] == "local_equity"
+    assert by_code["TEHOL"]["asset_type"] == "local_equity"
+    assert "AC2" not in by_code
+    assert "TÜRK" not in by_code
+    assert "TÜRKİYE" not in by_code
+
+
+def test_kap_holdings_parser_ignores_table_headers_and_splits_funds() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+TOPLAM
+(FPD
+GÖRE)
+GRUP
+(%)TOPLAM DEĞERGÜNLÜK BR
+DEĞER
+REPO TEMİNAT
+TUTARI
+DÖVİZ
+CİNSİ
+BORSA
+SÖZLEŞM
+E NO
+ISIN KODU
+HİSSE SENETLERİ
+Hisse Türk
+AKBNK AKBANK
+T.A.Ş.
+18.653.248,00 69,718033 30/04/26 73,200000 1.365.417.753,60 4,66 3,67TL 80100511 3,67TRAAKBNK91N6
+T.REPO
+AC2 - (BORSA DISI) PARDUS PORTFÖY YÖNETİMİ A.Ş. 04/05/26 0 43,00 6.530.630,99 43,000000 30/04/26 1.828.523,76 6.530.630,99 43,000000 6.530.630,99 19,40 5,14TL 5,20TRYA1PY00081
+Y.Fonu Türk
+PKZ-PUSULA
+PORTFÖY KUZEY
+HİSSE SENEDİ
+SERBEST FON (TL)
+(HİSSE SENEDİ
+YOĞUN FON)
+PUSULA
+PORTFÖY
+YÖNETİMİ
+A.Ş.
+296.567.139,00 7,259739 24/04/26 8,213626 2.435.891.563,64 37,90 6,55TL 6,55TRYPSLP00093
+PNU - PUSULA
+PORTFÖY İKİNCİ
+PARA PİYASASI (TL)
+FONU
+PUSULA
+PORTFÖY
+YÖNETİMİ
+A.Ş.
+1.937.627.250,00 1,042159 29/04/26 1,065972 2.065.456.394,94 32,14 5,56TL 5,55TRYPSLP00168
+TRT131027T36 HAZİNE 0 10.000,00 1,00 10.000,00 0,68TL 0,68TRT131027T36
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="PHE",
+        report_date="2026-04-30",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert by_code["AKBNK"]["asset_type"] == "local_equity"
+    assert by_code["AKBNK"]["asset_name"] == "AKBANK T.A.Ş."
+    assert by_code["PKZ"]["asset_type"] == "fund"
+    assert by_code["PNU"]["asset_type"] == "fund"
+    assert "CİNSİ" not in by_code
+    assert "AC2" not in by_code
+    assert "TRT131027T36" not in by_code
+
+
+def test_kap_holdings_parser_drops_orphan_page_header_before_position() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+Hisse Türk
+KONTR Kontrolmatik
+Teknoloji
+1.627.564,00 17,215647 22/12/25 8,620000 14.029.601,68 0,02 0,01TL 80100511 0,01TREKNTR00013
+Mart-2026
+TLY-TERA PORTFÖY BİRİNCİ SERBEST FON
+TOPLAM
+(FPD
+GÖRE)
+GRUP
+(%)TOPLAM DEĞERGÜNLÜK BR
+DEĞER
+REPO TEMİNAT
+TUTARI
+DÖVİZ
+CİNSİ
+BORSA
+SÖZLEŞM
+E NO
+TOPLAM
+(FTD
+GÖRE)
+ISIN KODU
+Enerji ve
+Mühendislik
+A.Ş.
+PEKGY PEKER
+GAYRİMEN
+KUL
+YATIRIM
+ORTAKLIĞI
+A.Ş
+506.822.154,00 12,515982 31/03/26 14,300000 7.247.556.802,20 12,23 7,50TL 80100511 7,55TREPEGY00022
+PEKGY PEKER
+GAYRİMEN
+KUL
+YATIRIM
+ORTAKLIĞI
+A.Ş
+389.798,00 12,518149 31/03/26 14,300000 5.574.111,40 0,01 0,01TL 80100511 0,01TREPEGY00022
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="TLY",
+        report_date="2026-03-31",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert by_code["PEKGY"]["weight"] == 7.55
+    assert by_code["PEKGY"]["asset_type"] == "local_equity"
+    assert "TLY" not in by_code
+    assert "ENERJI" not in by_code
+
+
+def test_api_fund_holdings_partial_when_pdf_not_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_search_fund_metadata",
+        lambda _fund_code: {"fund_code": "BAD", "fund_oid": "fund-oid", "fund_name": "Bad Fon"},
+    )
+    monkeypatch.setattr(fund_service_module, "_kap_portfolio_subject_oid", lambda _fund_oid: "subject-oid")
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_list_portfolio_disclosures",
+        lambda _fund_oid, _subject_oid: [
+            {"disclosureBasic": {"disclosureIndex": 200, "publishDate": "01.05.2026 10:00:00"}},
+        ],
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_fetch_report_detail",
+        lambda _idx: {
+            "disclosure": {"disclosureBasic": {"disclosureIndex": 200, "year": 2026, "donem": 4}},
+            "attachments": [{"objId": "latest", "fileName": "BAD_2026.04.pdf", "fileExtension": "pdf"}],
+        },
+    )
+    monkeypatch.setattr(fund_service_module, "_kap_download_attachment", lambda _obj_id: b"latest")
+    monkeypatch.setattr(fund_service_module, "_extract_kap_pdf_text", lambda _data: "parse edilemeyen metin")
+    client = TestClient(app)
+
+    response = client.get("/funds/BAD/holdings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "partial"
+    assert payload["positions"] == []
+    assert payload["source_metadata"]["parse_status"] == "partial"
 
 
 def test_api_fund_allocations_history_schema(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1691,6 +2029,52 @@ def test_market_stock_card_chart_uses_normalized_cache_key(monkeypatch: pytest.M
     assert first.json()["source"] == "yahoo_live"
     assert second.json()["source"] == "yahoo_cache"
     assert first.json()["as_of"] == second.json()["as_of"]
+
+
+def test_market_stock_card_chart_falls_back_to_previous_session_when_daily_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    period_calls: List[date] = []
+
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_yahoo_chart_raw",
+        lambda *_args, **_kwargs: {"ok": True, "meta": {}, "points": []},
+    )
+
+    def fake_period_chart(
+        yahoo_symbol: str,
+        *,
+        interval: str,
+        start_date: date,
+        end_date: date,
+    ) -> Dict[str, Any]:
+        assert yahoo_symbol == "BIMAS.IS"
+        assert interval == "5m"
+        assert start_date == end_date
+        assert start_date.weekday() < 5
+        period_calls.append(start_date)
+        return {
+            "ok": True,
+            "meta": {"chartPreviousClose": 100.0},
+            "points": [
+                {"time": f"{start_date.isoformat()}T07:00:00+00:00", "close": 101.0, "high": 102.0, "low": 99.0},
+                {"time": f"{start_date.isoformat()}T07:05:00+00:00", "close": 103.0, "high": 104.0, "low": 100.0},
+            ],
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_period_raw", fake_period_chart)
+
+    client = TestClient(app)
+    response = client.get("/market/stocks/cards/chart?symbol=BIMAS&range=1d&refresh=true")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "yahoo_previous_session"
+    assert payload["error"] is None
+    assert len(payload["line_points"]) == 2
+    assert payload["line_points"][-1]["close"] == 103.0
+    assert period_calls
 
 
 def test_market_stock_card_chart_rejects_invalid_symbol_and_range() -> None:

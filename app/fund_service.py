@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import concurrent.futures
+import io
 import json
 import os
 import re
@@ -12,8 +13,8 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urlencode
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -75,6 +76,7 @@ TEFAS_OPEN_ONLY = os.getenv("RAGFIN_TEFAS_OPEN_ONLY", "1").strip().lower() not i
 FUNDS_SNAPSHOT_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_TTL_SECONDS", str(24 * 60 * 60)))
 FUNDS_HISTORY_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HISTORY_TTL_SECONDS", str(24 * 60 * 60)))
 FUNDS_ALLOCATION_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_ALLOCATION_TTL_SECONDS", str(24 * 60 * 60)))
+FUNDS_HOLDINGS_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_TTL_SECONDS", str(7 * 24 * 60 * 60)))
 FUNDS_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_FUNDS_HISTORY_CHUNK_DAYS", "60"))
 FUNDS_WEB_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_FUNDS_WEB_HISTORY_CHUNK_DAYS", "30"))
 FUNDS_WEB_HISTORY_SLEEP_SECONDS = float(os.getenv("RAGFIN_FUNDS_WEB_HISTORY_SLEEP_SECONDS", "0.35"))
@@ -82,8 +84,17 @@ FUNDS_DETAIL_MAX_WORKERS = int(os.getenv("RAGFIN_FUNDS_DETAIL_MAX_WORKERS", "16"
 FUNDS_COLLECTOR_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_COLLECTOR_LOOKBACK_DAYS", "30"))
 FUNDS_AUTO_FETCH_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_AUTO_FETCH_LOOKBACK_DAYS", "30"))
 FUNDS_AUTO_FETCH_NEGATIVE_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_AUTO_FETCH_NEGATIVE_TTL_SECONDS", "60"))
+FUNDS_OVERVIEW_METRIC_MONTHS = int(os.getenv("RAGFIN_FUNDS_OVERVIEW_METRIC_MONTHS", "6"))
+FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS", "10"))
 FUNDS_FULL_HISTORY_START_DATE = os.getenv("RAGFIN_FUNDS_FULL_HISTORY_START_DATE", "2000-01-01").strip() or "2000-01-01"
 FUND_PRICES_DB_FILENAME = os.getenv("RAGFIN_FUND_PRICES_DB_FILENAME", "fund_prices.sqlite3")
+KAP_BASE_URL = os.getenv("RAGFIN_KAP_BASE_URL", "https://www.kap.org.tr").rstrip("/")
+KAP_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_KAP_TIMEOUT_SECONDS", "20"))
+KAP_PORTFOLIO_ALLOCATION_SUBJECT_OID = os.getenv(
+    "RAGFIN_KAP_PORTFOLIO_ALLOCATION_SUBJECT_OID",
+    "8aca490d502e34b801502e380044002b",
+).strip()
+KAP_HOLDINGS_LOOKBACK_DAYS = int(os.getenv("RAGFIN_KAP_HOLDINGS_LOOKBACK_DAYS", "365"))
 
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
 _AUTO_FETCH_LOCK = threading.Lock()
@@ -240,6 +251,14 @@ def _allocations_path(processed_dir: Path, fund_code: str) -> Path:
 def _allocations_history_path(processed_dir: Path, fund_code: str, lookback_days: int) -> Path:
     bounded = max(1, min(365, int(lookback_days)))
     return _allocations_dir(processed_dir) / f"{normalize_fund_code(fund_code)}_history_{bounded}d.json"
+
+
+def _holdings_dir(processed_dir: Path) -> Path:
+    return _fund_cache_dir(processed_dir) / "holdings"
+
+
+def _holdings_path(processed_dir: Path, fund_code: str) -> Path:
+    return _holdings_dir(processed_dir) / f"{normalize_fund_code(fund_code)}.json"
 
 
 def _fund_prices_db_path(processed_dir: Path) -> Path:
@@ -2083,6 +2102,22 @@ class TefasFonClient:
         executor.shutdown(wait=False)
         return _dataframe_records(frame, context=context)
 
+    def _call_records(self, callback: Callable[[], List[Dict[str, Any]]], *, context: str) -> List[Dict[str, Any]]:
+        timeout_seconds = max(1.0, TEFAS_TIMEOUT_SECONDS)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="tefasfon-direct")
+        future = executor.submit(callback)
+        try:
+            records = future.result(timeout=timeout_seconds)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise TefasUpstreamError(f"{context} timed out after {timeout_seconds:g}s") from exc
+        except Exception as exc:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise TefasUpstreamError(f"{context} failed: {exc}") from exc
+        executor.shutdown(wait=False)
+        return records
+
     def fetch_funds(
         self,
         *,
@@ -2126,6 +2161,20 @@ class TefasFonClient:
             rows.extend(_tefasfon_rows(records, source=TEFASFON_RETURNS_SOURCE, fund_type=fund_type))
         return rows
 
+    def fetch_daily_funds_snapshot(self, as_of: date) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        direct_errors: List[str] = []
+        for fund_type in self.fund_types:
+            try:
+                rows.extend(self._fetch_funds_snapshot_direct(as_of, fund_type=fund_type))
+            except TefasUpstreamError as exc:
+                direct_errors.append(str(exc))
+        if rows:
+            return rows
+        if direct_errors:
+            raise TefasUpstreamError("; ".join(direct_errors))
+        return []
+
     def fetch_portfolio(
         self,
         *,
@@ -2164,6 +2213,46 @@ class TefasFonClient:
             else:
                 rows.extend(normalized_rows)
         return rows
+
+    def _fetch_funds_snapshot_direct(
+        self,
+        as_of: date,
+        *,
+        fund_type: str,
+    ) -> List[Dict[str, Any]]:
+        fund_type_code = str(fund_type).strip().upper()
+
+        def fetch_records() -> List[Dict[str, Any]]:
+            from tefasfon import getter as tefas_getter  # type: ignore
+
+            fon_tipi = tefas_getter._FUND_TIPI[fund_type_code]
+            portal_url = tefas_getter._FUND_PORTAL[fund_type_code]
+            fund_url_param = tefas_getter._FUND_URL_PARAM[fund_type_code]
+            endpoint = tefas_getter._API_ENDPOINT["general_information"]
+            as_of_iso = as_of.strftime("%Y-%m-%d")
+            session = tefas_getter._new_session(portal_url, as_of_iso, as_of_iso, fund_url_param)
+            base_payload = {
+                "fonTipi": fon_tipi,
+                "fonKodu": None,
+                "aramaMetni": None,
+                "fonTurKod": None,
+                "fonGrubu": None,
+                "sfonTurKod": None,
+                "basTarih": as_of.strftime("%Y%m%d"),
+                "bitTarih": as_of.strftime("%Y%m%d"),
+                "basSira": 1,
+                "bitSira": 1000,
+                "fonTurAciklama": None,
+                "dil": "TR",
+                "kurucuKod": None,
+            }
+            return tefas_getter._get_all_pages(session, endpoint, base_payload, portal_url, as_of_iso, as_of_iso)
+
+        records = self._call_records(
+            fetch_records,
+            context=f"tefasfon direct funds snapshot {as_of.isoformat()}",
+        )
+        return _tefasfon_rows(records, source=TEFASFON_FUNDS_SOURCE, fund_type=fund_type_code)
 
     def _fetch_portfolio_direct(
         self,
@@ -2215,12 +2304,61 @@ class TefasFonClient:
 
     def fetch_history(self, fund_code: str, start_date: date, end_date: date) -> List[Dict[str, Any]]:
         normalized = normalize_fund_code(fund_code)
-        rows = self.fetch_funds(start_date=start_date, end_date=end_date, fund_codes=[normalized])
-        return [
-            row
-            for row in rows
-            if normalize_fund_code(str(row.get("fonKodu") or row.get("fund_code") or "")) == normalized
-        ]
+        if not normalized or start_date > end_date:
+            return []
+
+        def matching_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            return [
+                row
+                for row in rows
+                if normalize_fund_code(str(row.get("fonKodu") or row.get("fund_code") or "")) == normalized
+            ]
+
+        day_span = (end_date - start_date).days
+        if day_span <= 120:
+            return matching_rows(self.fetch_funds(start_date=start_date, end_date=end_date, fund_codes=[normalized]))
+
+        rows_by_date: Dict[str, Dict[str, Any]] = {}
+
+        def add_rows(rows: Iterable[Dict[str, Any]]) -> None:
+            for row in matching_rows(rows):
+                point_date = _fund_date(_first_present(row, "date", "tarih", "TARIH", "TARIHSTR"))
+                if point_date:
+                    rows_by_date[point_date] = row
+
+        recent_start = max(start_date, end_date - timedelta(days=35))
+        recent_error: Optional[TefasUpstreamError] = None
+        try:
+            add_rows(self.fetch_funds(start_date=recent_start, end_date=end_date, fund_codes=[normalized]))
+        except TefasUpstreamError as exc:
+            recent_error = exc
+
+        current_month = _month_start(start_date)
+        while current_month <= end_date:
+            target_date = min(_month_end(current_month), end_date)
+            if target_date >= recent_start:
+                current_month = _shift_month(current_month, 1)
+                continue
+            lower_bound = max(current_month, target_date - timedelta(days=max(0, FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS)))
+            current = target_date
+            while current >= lower_bound:
+                if current.weekday() >= 5:
+                    current -= timedelta(days=1)
+                    continue
+                try:
+                    snapshot_rows = self.fetch_daily_funds_snapshot(current)
+                except TefasUpstreamError:
+                    break
+                matched = matching_rows(snapshot_rows)
+                if matched:
+                    add_rows(matched)
+                    break
+                current -= timedelta(days=1)
+            current_month = _shift_month(current_month, 1)
+
+        if not rows_by_date and recent_error is not None:
+            raise recent_error
+        return [rows_by_date[point_date] for point_date in sorted(rows_by_date)]
 
     def fetch_latest_fund_list_snapshot(self, *, as_of: date, lookback_days: int = 10) -> Tuple[List[Dict[str, Any]], List[str]]:
         warnings: List[str] = []
@@ -2636,7 +2774,10 @@ def _fetch_tefasfon_daily_snapshots_for_codes(
             current += timedelta(days=1)
             continue
         try:
-            day_rows = tefas.fetch_funds(start_date=current, end_date=current)
+            if hasattr(tefas, "fetch_daily_funds_snapshot"):
+                day_rows = tefas.fetch_daily_funds_snapshot(current)  # type: ignore[attr-defined]
+            else:
+                day_rows = tefas.fetch_funds(start_date=current, end_date=current)
         except TefasUpstreamError as exc:
             warnings.append(f"tefasfon_funds daily snapshot failed for {current.isoformat()}: {exc}")
             current += timedelta(days=1)
@@ -3136,6 +3277,8 @@ def _fund_performance_payload_from_points(
     storage_result: Optional[Dict[str, Any]] = None,
     backfill_used: bool = False,
     fallback_used: bool = False,
+    fallback_reason: Optional[str] = None,
+    overview_metric_backfill: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     ordered = _valid_performance_points(points, normalized_code)
     latest_point_date = ordered[-1]["date"] if ordered else None
@@ -3153,6 +3296,11 @@ def _fund_performance_payload_from_points(
     date_min = ordered[0]["date"] if ordered else None
     date_max = ordered[-1]["date"] if ordered else None
     history_source_used = _dominant_price_source(ordered) or TEFASFON_FUNDS_SOURCE
+    fallback_point_count = sum(
+        1
+        for point in ordered
+        if _normalize_price_source(str(point.get("source") or "")) == FINTABLES_UDF_HISTORY_SOURCE
+    )
     metadata: Dict[str, Any] = {
         "source": "sqlite",
         "source_url": str(_fund_prices_db_path(processed_dir)),
@@ -3167,7 +3315,12 @@ def _fund_performance_payload_from_points(
         "history_source_used": history_source_used,
         "history_source_policy": FUND_HISTORY_SOURCE_POLICY,
         "source_policy": FUND_HISTORY_SOURCE_POLICY,
+        "primary_source": "tefasfon",
+        "tefasfon_adapter_version": _tefasfon_adapter_version(),
         "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason,
+        "cached_fallback_points_present": fallback_point_count > 0,
+        "cached_fallback_point_count": fallback_point_count,
         "final_points_count": len(ordered),
         "date_min": date_min,
         "date_max": date_max,
@@ -3191,6 +3344,8 @@ def _fund_performance_payload_from_points(
             "skipped_count": storage_result.get("skipped_count"),
             "warning_count": storage_result.get("warning_count"),
         }
+    if overview_metric_backfill is not None:
+        metadata["overview_metric_backfill"] = overview_metric_backfill
 
     return {
         "fund_code": normalized_code,
@@ -3263,10 +3418,148 @@ def _history_cache_covers_requested_span(
     return gap_days <= 3 or _business_days_between(latest + timedelta(days=1), end_date) <= 3
 
 
-def _auto_fetch_key(processed_dir: Path, fund_code: str, start_date: date, end_date: date) -> str:
+def _month_start(value: date) -> date:
+    return date(value.year, value.month, 1)
+
+
+def _shift_month(month_start: date, offset: int) -> date:
+    month_index = month_start.year * 12 + (month_start.month - 1) + offset
+    return date(month_index // 12, (month_index % 12) + 1, 1)
+
+
+def _month_end(month_start: date) -> date:
+    next_month = _shift_month(month_start, 1)
+    return next_month - timedelta(days=1)
+
+
+def _month_key(value: date) -> str:
+    return f"{value.year:04d}-{value.month:02d}"
+
+
+def _fund_point_date(point: Dict[str, Any]) -> Optional[date]:
+    raw_date = point.get("date")
+    if not isinstance(raw_date, str):
+        return None
+    try:
+        return date.fromisoformat(raw_date)
+    except ValueError:
+        return None
+
+
+def _overview_metric_targets(end_date: date) -> List[Dict[str, Any]]:
+    visible_months = max(1, FUNDS_OVERVIEW_METRIC_MONTHS)
+    end_month = _month_start(end_date)
+    targets: List[Dict[str, Any]] = []
+    for offset in range(-visible_months, 1):
+        month_start = _shift_month(end_month, offset)
+        target_date = min(_month_end(month_start), end_date)
+        targets.append(
+            {
+                "month": _month_key(month_start),
+                "month_start": month_start,
+                "target_date": target_date,
+            }
+        )
+    return targets
+
+
+def _latest_point_for_month(
+    points: List[Dict[str, Any]],
+    *,
+    month: str,
+    target_date: date,
+) -> Optional[Dict[str, Any]]:
+    latest: Optional[Tuple[date, Dict[str, Any]]] = None
+    for point in points:
+        point_date = _fund_point_date(point)
+        if point_date is None or _month_key(point_date) != month or point_date > target_date:
+            continue
+        if latest is None or point_date > latest[0]:
+            latest = (point_date, point)
+    return latest[1] if latest else None
+
+
+def _has_overview_metrics(point: Optional[Dict[str, Any]]) -> bool:
+    if point is None:
+        return False
+    aum = _coerce_float(point.get("aum"))
+    investor_count = _coerce_int(point.get("investor_count"))
+    return aum is not None and aum > 0 and investor_count is not None
+
+
+def _missing_overview_metric_targets(points: List[Dict[str, Any]], *, end_date: date) -> List[Dict[str, Any]]:
+    missing: List[Dict[str, Any]] = []
+    for target in _overview_metric_targets(end_date):
+        point = _latest_point_for_month(
+            points,
+            month=str(target["month"]),
+            target_date=target["target_date"],
+        )
+        if not _has_overview_metrics(point):
+            missing.append(target)
+    return missing
+
+
+def _fetch_fund_overview_metric_rows(
+    fund_code: str,
+    targets: List[Dict[str, Any]],
+    *,
+    client: TefasFonClient,
+) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[str]]:
+    normalized = normalize_fund_code(fund_code)
+    rows: List[Dict[str, Any]] = []
+    fetched_months: Dict[str, str] = {}
+    warnings: List[str] = []
+
+    for target in targets:
+        month = str(target["month"])
+        target_date = target["target_date"]
+        lower_bound = max(target["month_start"], target_date - timedelta(days=max(0, FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS)))
+        current = target_date
+        matched = False
+        while current >= lower_bound:
+            if current.weekday() >= 5:
+                current -= timedelta(days=1)
+                continue
+            try:
+                snapshot_rows = client.fetch_daily_funds_snapshot(current)
+            except TefasUpstreamError as exc:
+                warnings.append(f"tefasfon_funds overview metric snapshot failed for {current.isoformat()}: {exc}")
+                break
+            match = next(
+                (
+                    row
+                    for row in snapshot_rows
+                    if normalize_fund_code(str(row.get("fonKodu") or row.get("fund_code") or "")) == normalized
+                ),
+                None,
+            )
+            if match:
+                rows.append(match)
+                fetched_months[month] = current.isoformat()
+                matched = True
+                break
+            current -= timedelta(days=1)
+        if not matched:
+            warnings.append(
+                f"tefasfon_funds overview metric row not found for {normalized} around {target_date.isoformat()}"
+            )
+
+    return rows, fetched_months, warnings
+
+
+def _auto_fetch_key(
+    processed_dir: Path,
+    fund_code: str,
+    start_date: date,
+    end_date: date,
+    *,
+    namespace: str = "history",
+) -> str:
     return ":".join(
         [
             str(_fund_prices_db_path(processed_dir)),
+            namespace,
             normalize_fund_code(fund_code),
             start_date.isoformat(),
             end_date.isoformat(),
@@ -3348,6 +3641,120 @@ def _auto_refresh_fund_performance(
             event.set()
 
 
+def _auto_refresh_fund_overview_metrics(
+    processed_dir: Path,
+    fund_code: str,
+    *,
+    points: List[Dict[str, Any]],
+    end_date: date,
+) -> Dict[str, Any]:
+    normalized = normalize_fund_code(fund_code)
+    missing_targets = _missing_overview_metric_targets(points, end_date=end_date)
+    metadata: Dict[str, Any] = {
+        "attempted": False,
+        "missing_months": [str(target["month"]) for target in missing_targets],
+        "fetched_months": {},
+        "upserted_count": 0,
+        "skipped_count": 0,
+        "warning_count": 0,
+        "warnings": [],
+    }
+    if not normalized or not missing_targets:
+        return metadata
+
+    client = TefasFonClient()
+    if not hasattr(client, "fetch_daily_funds_snapshot"):
+        return metadata
+
+    key = _auto_fetch_key(
+        processed_dir,
+        normalized,
+        missing_targets[0]["target_date"],
+        missing_targets[-1]["target_date"],
+        namespace="overview-metrics:" + ",".join(str(target["month"]) for target in missing_targets),
+    )
+    recent_failure = _recent_auto_fetch_failure(key)
+    if recent_failure:
+        metadata["warnings"] = [f"fund overview metric backfill skipped after recent failure: {recent_failure}"]
+        metadata["warning_count"] = 1
+        metadata["skipped_recent_failure"] = True
+        return metadata
+
+    owner = False
+    with _AUTO_FETCH_LOCK:
+        event = _AUTO_FETCH_IN_FLIGHT.get(key)
+        if event is None:
+            event = threading.Event()
+            _AUTO_FETCH_IN_FLIGHT[key] = event
+            owner = True
+
+    if not owner:
+        waited = event.wait(timeout=max(1.0, TEFAS_TIMEOUT_SECONDS + 5.0))
+        if not waited:
+            metadata["warnings"] = ["fund overview metric backfill already in progress"]
+            metadata["warning_count"] = 1
+            return metadata
+        recent_failure = _recent_auto_fetch_failure(key)
+        if recent_failure:
+            metadata["warnings"] = [f"fund overview metric backfill skipped after recent failure: {recent_failure}"]
+            metadata["warning_count"] = 1
+        return metadata
+
+    try:
+        metadata["attempted"] = True
+        rows, fetched_months, warnings = _fetch_fund_overview_metric_rows(
+            normalized,
+            missing_targets,
+            client=client,
+        )
+        storage_result: Dict[str, Any] = {
+            "upserted_count": 0,
+            "skipped_count": 0,
+            "warnings": [],
+        }
+        if rows:
+            storage_result = upsert_fund_price_points(
+                processed_dir,
+                rows,
+                source=TEFASFON_FUNDS_SOURCE,
+                fallback_code=normalized,
+            )
+        storage_warnings = [
+            str(item.get("warning") or "invalid_price_row")
+            for item in list(storage_result.get("warnings") or [])
+        ]
+        all_warnings = warnings + storage_warnings
+        metadata.update(
+            {
+                "fetched_months": fetched_months,
+                "fetched_point_count": len(rows),
+                "upserted_count": storage_result.get("upserted_count", 0),
+                "skipped_count": storage_result.get("skipped_count", 0),
+                "warning_count": len(all_warnings),
+                "warnings": all_warnings,
+            }
+        )
+        if not rows:
+            error = "overview metric snapshots returned no matching fund rows"
+            _remember_auto_fetch_failure(key, error)
+            metadata["warnings"] = all_warnings + [error]
+            metadata["warning_count"] = len(metadata["warnings"])
+        return metadata
+    except FundUpstreamError as exc:
+        error = str(exc)
+        _remember_auto_fetch_failure(key, error)
+        metadata["attempted"] = True
+        metadata["warnings"] = [f"fund overview metric backfill failed: {error}"]
+        metadata["warning_count"] = 1
+        return metadata
+    finally:
+        with _AUTO_FETCH_LOCK:
+            current = _AUTO_FETCH_IN_FLIGHT.get(key)
+            if current is event:
+                _AUTO_FETCH_IN_FLIGHT.pop(key, None)
+            event.set()
+
+
 def refresh_fund_performance(
     processed_dir: Path,
     fund_code: str,
@@ -3360,17 +3767,22 @@ def refresh_fund_performance(
     points: List[Dict[str, Any]] = []
     source_used = TEFASFON_FUNDS_SOURCE
     fallback_used = False
+    fallback_reason: Optional[str] = None
+    tefas_failure_reason: Optional[str] = None
     try:
         points = TefasFonClient().fetch_history(normalized, start_date, end_date)
         if not _valid_performance_points(points, normalized):
-            warnings.append("tefasfon_funds returned no valid points")
+            tefas_failure_reason = "tefasfon_funds returned no valid points"
+            warnings.append(tefas_failure_reason)
             points = []
     except TefasUpstreamError as exc:
-        warnings.append(f"tefasfon_funds failed: {exc}")
+        tefas_failure_reason = f"tefasfon_funds failed: {exc}"
+        warnings.append(tefas_failure_reason)
         points = []
 
     if not points:
         fallback_used = True
+        fallback_reason = tefas_failure_reason or "tefasfon_funds returned no valid points"
         source_used = FINTABLES_UDF_HISTORY_SOURCE
         try:
             points = fetch_fintables_udf_history(normalized, start_date, end_date)
@@ -3409,6 +3821,7 @@ def refresh_fund_performance(
         storage_result=storage_result,
         backfill_used=True,
         fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
     )
     _write_json(_history_path(processed_dir, normalized), payload)
     return payload
@@ -3470,6 +3883,24 @@ def get_fund_performance_payload(
             end_date=query_end,
         )
 
+    overview_metric_backfill: Optional[Dict[str, Any]] = None
+    overview_metric_backfill_attempted = False
+    if full_history_requested and points:
+        overview_metric_backfill = _auto_refresh_fund_overview_metrics(
+            processed_dir,
+            normalized,
+            points=points,
+            end_date=effective_end,
+        )
+        overview_metric_backfill_attempted = bool(overview_metric_backfill.get("attempted"))
+        if overview_metric_backfill_attempted:
+            points = _read_daily_fund_price_points(
+                processed_dir,
+                normalized,
+                start_date=query_start,
+                end_date=query_end,
+            )
+
     if not points:
         warnings = ["fund price database has no valid TEFAS/Fintables points for this fund/range"] + auto_warnings
         return {
@@ -3495,7 +3926,10 @@ def get_fund_performance_payload(
                 "history_source_used": None,
                 "history_source_policy": FUND_HISTORY_SOURCE_POLICY,
                 "source_policy": FUND_HISTORY_SOURCE_POLICY,
+                "primary_source": "tefasfon",
+                "tefasfon_adapter_version": _tefasfon_adapter_version(),
                 "fallback_used": any("fintables_udf_history" in warning for warning in warnings),
+                "fallback_reason": "tefasfon_and_fintables_unavailable" if any("fintables_udf_history" in warning for warning in warnings) else None,
                 "final_points_count": 0,
                 "date_min": None,
                 "date_max": None,
@@ -3503,20 +3937,35 @@ def get_fund_performance_payload(
                 "requested_start_date": effective_start.isoformat(),
                 "requested_end_date": effective_end.isoformat(),
                 "auto_fetch_attempted": auto_fetch_attempted,
+                "overview_metric_backfill": overview_metric_backfill,
             },
         }
+    dominant_source = _dominant_price_source(points)
+    cached_fallback_is_primary = dominant_source == FINTABLES_UDF_HISTORY_SOURCE
     return _fund_performance_payload_from_points(
         processed_dir,
         normalized,
         points,
         start_date=effective_start,
         end_date=effective_end,
-        cache_hit=not auto_fetch_attempted,
-        stale=False if auto_fetch_attempted and not auto_warnings else None,
-        parse_status="ok_fund_history_auto" if auto_fetch_attempted and not auto_warnings else None,
+        cache_hit=not auto_fetch_attempted and not overview_metric_backfill_attempted,
+        stale=False if (auto_fetch_attempted or overview_metric_backfill_attempted) and not auto_warnings else None,
+        parse_status=(
+            "ok_fund_history_auto"
+            if auto_fetch_attempted and not auto_warnings
+            else "ok_fund_history_overview_metrics_auto"
+            if overview_metric_backfill_attempted and not auto_warnings
+            else None
+        ),
         warnings=auto_warnings,
-        backfill_used=auto_fetch_attempted,
-        fallback_used=any(_normalize_price_source(str(point.get("source") or "")) == FINTABLES_UDF_HISTORY_SOURCE for point in points),
+        backfill_used=auto_fetch_attempted or overview_metric_backfill_attempted,
+        fallback_used=cached_fallback_is_primary,
+        fallback_reason=(
+            "cached_fintables_points_primary"
+            if cached_fallback_is_primary
+            else None
+        ),
+        overview_metric_backfill=overview_metric_backfill,
     )
 
 
@@ -3777,23 +4226,1005 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
     payload["source_metadata"] = meta
     return payload
 
-def get_fund_holdings_payload(processed_dir: Path, fund_code: str) -> Dict[str, Any]:
+
+KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
+KAP_HOLDINGS_PARSE_VERSION = 6
+_KAP_NUMBER_PATTERN = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d+|-?\d+,\d+")
+_KAP_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{2,4}\b")
+_KAP_ISIN_TAIL_PATTERN = re.compile(
+    r"(?P<weight>-?\d{1,3}(?:[,.]\d{1,6}))\s*(?:TL|TRY|USD|EUR|JPY|GBP)?\s*[A-Z]{2}[A-Z0-9]{6,}\s*$",
+    flags=re.IGNORECASE,
+)
+_KAP_POSITION_STOPWORDS = {
+    "AÇIKLAMA",
+    "BIRIM",
+    "BİRİM",
+    "BORSA",
+    "DİĞER",
+    "DÖVİZ",
+    "FAIZ",
+    "FAİZ",
+    "FON",
+    "FONU",
+    "HISSE",
+    "HİSSE",
+    "I",
+    "II",
+    "III",
+    "IV",
+    "V",
+    "VI",
+    "GRUP",
+    "ISIN",
+    "İÇ",
+    "İHRAÇCI",
+    "MENKUL",
+    "NOMINAL",
+    "NOMİNAL",
+    "ORAN",
+    "PORTFÖY",
+    "SATIN",
+    "SIRKETIN",
+    "ŞIRKETIN",
+    "ŞİRKETİN",
+    "TARIH",
+    "TARİH",
+    "TOPLAM",
+    "TUTAR",
+    "VADE",
+}
+_KAP_INCLUDED_HOLDING_TYPES = {"local_equity", "fund"}
+_KAP_EXTRA_STOCK_SYMBOLS = {
+    # Keep the parser tolerant of very recent KAP rows before the bundled
+    # BIST universe fallback is refreshed.
+    "DSTKF",
+    "TERA",
+    "TEHOL",
+    "TRHOL",
+}
+_KAP_BIST_STOCK_SYMBOLS: Optional[set[str]] = None
+_KAP_TURKISH_MONTH_WORDS = {
+    "OCAK",
+    "SUBAT",
+    "ŞUBAT",
+    "MART",
+    "NISAN",
+    "NİSAN",
+    "MAYIS",
+    "HAZIRAN",
+    "HAZİRAN",
+    "TEMMUZ",
+    "AGUSTOS",
+    "AĞUSTOS",
+    "EYLUL",
+    "EYLÜL",
+    "EKIM",
+    "EKİM",
+    "KASIM",
+    "ARALIK",
+}
+
+
+def _kap_headers(accept: str = "application/json, text/plain, */*") -> Dict[str, str]:
+    return {
+        "Accept": accept,
+        "Accept-Language": "tr",
+        "Content-Type": "application/json",
+        "Referer": f"{KAP_BASE_URL}/tr/",
+        "User-Agent": FINTABLES_USER_AGENT,
+    }
+
+
+def _kap_url(path: str) -> str:
+    if str(path).startswith(("http://", "https://")):
+        return str(path)
+    return f"{KAP_BASE_URL}/{str(path).lstrip('/')}"
+
+
+def _kap_get_json(path: str) -> Any:
+    with httpx.Client(timeout=KAP_TIMEOUT_SECONDS, follow_redirects=True, headers=_kap_headers()) as client:
+        response = client.get(_kap_url(path))
+        response.raise_for_status()
+        return response.json()
+
+
+def _kap_post_json(path: str, payload: Dict[str, Any]) -> Any:
+    with httpx.Client(timeout=KAP_TIMEOUT_SECONDS, follow_redirects=True, headers=_kap_headers()) as client:
+        response = client.post(_kap_url(path), json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
+def _kap_get_text(path: str) -> str:
+    with httpx.Client(timeout=KAP_TIMEOUT_SECONDS, follow_redirects=True, headers=_kap_headers("text/html,*/*")) as client:
+        response = client.get(_kap_url(path))
+        response.raise_for_status()
+        return response.text
+
+
+def _kap_get_bytes(path: str, accept: str = "application/pdf,*/*") -> bytes:
+    with httpx.Client(timeout=KAP_TIMEOUT_SECONDS, follow_redirects=True, headers=_kap_headers(accept)) as client:
+        response = client.get(_kap_url(path))
+        response.raise_for_status()
+        return bytes(response.content)
+
+
+def _kap_search_fund_metadata(fund_code: str) -> Optional[Dict[str, Any]]:
+    normalized = normalize_fund_code(fund_code)
+    if not normalized:
+        return None
+    payload = _kap_post_json("/tr/api/search/combined", {"keyword": normalized})
+    candidates: List[Dict[str, Any]] = []
+    if isinstance(payload, list):
+        for group in payload:
+            if not isinstance(group, dict):
+                continue
+            results = group.get("results")
+            if isinstance(results, list):
+                candidates.extend(row for row in results if isinstance(row, dict))
+    for row in candidates:
+        if str(row.get("searchType") or "").upper() != "F":
+            continue
+        candidate_code = normalize_fund_code(_normalize_match_text(row.get("cmpOrFundCode")))
+        if candidate_code != normalized:
+            continue
+        fund_oid = str(row.get("memberOrFundOid") or "").strip()
+        if not fund_oid:
+            continue
+        return {
+            "fund_code": normalized,
+            "fund_oid": fund_oid,
+            "fund_name": str(row.get("searchValue") or "").strip() or None,
+        }
+    return None
+
+
+def _kap_portfolio_subject_oid(fund_oid: str) -> str:
+    oid = str(fund_oid or "").strip()
+    if not oid:
+        return KAP_PORTFOLIO_ALLOCATION_SUBJECT_OID
+    try:
+        html = _kap_get_text(f"/tr/fon-bildirimleri/{quote(oid)}")
+    except Exception:
+        return KAP_PORTFOLIO_ALLOCATION_SUBJECT_OID
+    match = re.search(
+        r'\\?"value\\?"\s*:\s*\\?"([^"\\]+)\\?"\s*,\s*\\?"label\\?"\s*:\s*\\?"Portföy Dağılım Raporu',
+        html,
+    )
+    if match:
+        return match.group(1)
+    return KAP_PORTFOLIO_ALLOCATION_SUBJECT_OID
+
+
+def _kap_disclosure_basic(row: Dict[str, Any]) -> Dict[str, Any]:
+    basic = row.get("disclosureBasic")
+    return dict(basic) if isinstance(basic, dict) else dict(row)
+
+
+def _kap_disclosure_index(row: Dict[str, Any]) -> Optional[int]:
+    basic = _kap_disclosure_basic(row)
+    try:
+        value = int(basic.get("disclosureIndex") or row.get("disclosureIndex") or 0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _parse_kap_datetime(raw: Any) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    for fmt in ("%d.%m.%Y %H:%M:%S", "%Y.%m.%d %H:%M:%S", "%d.%m.%Y", "%Y.%m.%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _kap_list_portfolio_disclosures(fund_oid: str, subject_oid: str) -> List[Dict[str, Any]]:
+    oid = quote(str(fund_oid or "").strip())
+    subject = quote(str(subject_oid or KAP_PORTFOLIO_ALLOCATION_SUBJECT_OID).strip())
+    if not oid:
+        return []
+    year = _utc_now().year
+    ranges = [str(max(30, min(2555, KAP_HOLDINGS_LOOKBACK_DAYS))), str(year), str(year - 1)]
+    rows_by_index: Dict[int, Dict[str, Any]] = {}
+    for range_value in ranges:
+        try:
+            payload = _kap_get_json(f"/tr/api/disclosure/filter/FILTERYFBF/{oid}/{subject}/{quote(range_value)}")
+        except Exception:
+            continue
+        if not isinstance(payload, list):
+            continue
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            disclosure_index = _kap_disclosure_index(row)
+            if disclosure_index:
+                rows_by_index[disclosure_index] = dict(row)
+        if len(rows_by_index) >= 2 and range_value.isdigit() and int(range_value) >= 365:
+            break
+    rows = list(rows_by_index.values())
+    rows.sort(
+        key=lambda row: (
+            _parse_kap_datetime(_kap_disclosure_basic(row).get("publishDate")) or datetime.min,
+            _kap_disclosure_index(row) or 0,
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def _kap_fetch_report_detail(disclosure_index: int) -> Optional[Dict[str, Any]]:
+    payload = _kap_get_json(f"/tr/api/notification/attachment-detail/{int(disclosure_index)}")
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return dict(payload[0])
+    if isinstance(payload, dict):
+        return dict(payload)
+    return None
+
+
+def _kap_report_basic(detail: Dict[str, Any]) -> Dict[str, Any]:
+    disclosure = detail.get("disclosure")
+    if isinstance(disclosure, dict):
+        basic = disclosure.get("disclosureBasic")
+        if isinstance(basic, dict):
+            return dict(basic)
+    basic = detail.get("disclosureBasic")
+    return dict(basic) if isinstance(basic, dict) else {}
+
+
+def _kap_report_attachments(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
+    attachments = detail.get("attachments")
+    if not isinstance(attachments, list):
+        return []
+    return [dict(item) for item in attachments if isinstance(item, dict)]
+
+
+def _kap_download_attachment(obj_id: str) -> bytes:
+    return _kap_get_bytes(f"/tr/api/file/download/{quote(str(obj_id or '').strip())}")
+
+
+def _extract_kap_pdf_text(data: bytes) -> str:
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return ""
+    pdf_data = bytes(data or b"")
+    pdf_start = pdf_data.find(b"%PDF")
+    if pdf_start > 0:
+        pdf_data = pdf_data[pdf_start:]
+    try:
+        reader = PdfReader(io.BytesIO(pdf_data))
+    except Exception:
+        return ""
+    parts: List[str] = []
+    for page in reader.pages:
+        try:
+            parts.append(page.extract_text() or "")
+        except Exception:
+            continue
+    return "\n".join(part for part in parts if part)
+
+
+def _month_end_iso(year: int, month: int) -> Optional[str]:
+    if year < 1900 or month < 1 or month > 12:
+        return None
+    next_month = date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1)
+    return (next_month - timedelta(days=1)).isoformat()
+
+
+def _kap_report_date(detail: Dict[str, Any]) -> Optional[str]:
+    basic = _kap_report_basic(detail)
+    for attachment in _kap_report_attachments(detail):
+        filename = str(attachment.get("fileName") or "")
+        match = re.search(r"_(20\d{2})[._-](\d{1,2})", filename)
+        if match:
+            return _month_end_iso(int(match.group(1)), int(match.group(2)))
+    try:
+        year = int(basic.get("year") or 0)
+        month = int(basic.get("donem") or 0)
+    except (TypeError, ValueError):
+        return None
+    return _month_end_iso(year, month)
+
+
+def _kap_source_url(disclosure_index: Any) -> Optional[str]:
+    try:
+        idx = int(disclosure_index or 0)
+    except (TypeError, ValueError):
+        return None
+    return f"{KAP_BASE_URL}/tr/Bildirim/{idx}" if idx > 0 else None
+
+
+def _kap_number_matches(block: str) -> List[re.Match[str]]:
+    date_spans = [match.span() for match in _KAP_DATE_PATTERN.finditer(block)]
+
+    def inside_date(span: Tuple[int, int]) -> bool:
+        return any(span[0] >= start and span[1] <= end for start, end in date_spans)
+
+    return [match for match in _KAP_NUMBER_PATTERN.finditer(block) if not inside_date(match.span())]
+
+
+def _kap_stock_symbol_set() -> set[str]:
+    global _KAP_BIST_STOCK_SYMBOLS
+    if _KAP_BIST_STOCK_SYMBOLS is not None:
+        return _KAP_BIST_STOCK_SYMBOLS
+    symbols: set[str] = set()
+    try:
+        from app.kap_service import BIST_ALL_SYMBOLS_FALLBACK
+
+        symbols.update(normalize_fund_code(symbol) for symbol in BIST_ALL_SYMBOLS_FALLBACK)
+    except Exception:
+        pass
+    symbols.update(_KAP_EXTRA_STOCK_SYMBOLS)
+    _KAP_BIST_STOCK_SYMBOLS = {symbol for symbol in symbols if symbol}
+    return _KAP_BIST_STOCK_SYMBOLS
+
+
+def _kap_is_stock_symbol(code: str) -> bool:
+    symbol = normalize_fund_code(code).replace(".", "")
+    return bool(symbol and symbol in _kap_stock_symbol_set())
+
+
+def _kap_stock_name_from_cache(processed_dir: Path, code: str) -> Optional[str]:
+    symbol = normalize_fund_code(code).replace(".", "")
+    if not symbol:
+        return None
+    payload = _read_json(processed_dir / "kap_cache" / f"{symbol}.json")
+    if not payload:
+        return None
+    for key in ("company_title", "title", "companyName", "name"):
+        value = str(payload.get(key) or "").strip()
+        if value and normalize_fund_code(value) != symbol:
+            return value
+    return None
+
+
+def _kap_fund_name_map(processed_dir: Path) -> Dict[str, str]:
+    payload = _read_json(_snapshot_path(processed_dir))
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return {}
+    result: Dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        code = normalize_fund_code(row.get("fund_code")).replace(".", "")
+        name = str(row.get("name") or "").strip()
+        if code and name:
+            result[code] = name
+    return result
+
+
+def _kap_looks_like_equity_symbol(code: str) -> bool:
+    symbol = normalize_fund_code(code).replace(".", "")
+    return bool(re.fullmatch(r"[A-Z0-9]{3,6}", symbol))
+
+
+def _kap_looks_like_fund_symbol(code: str) -> bool:
+    symbol = normalize_fund_code(code).replace(".", "")
+    if not symbol or symbol in _KAP_POSITION_STOPWORDS:
+        return False
+    if symbol.startswith(("TRT", "TRF", "TRB", "TRD", "F_")):
+        return False
+    return bool(re.fullmatch(r"[A-Z0-9]{3,6}", symbol))
+
+
+def _kap_is_included_holding_type(asset_type: Any) -> bool:
+    return str(asset_type or "").strip().lower() in _KAP_INCLUDED_HOLDING_TYPES
+
+
+def _kap_asset_type_from_context(context: str, code: str, name: str) -> str:
+    context_norm = _normalize_match_text(context)
+    name_norm = _normalize_match_text(name)
+    haystack = _normalize_match_text(f"{context} {code} {name}")
+    symbol = normalize_fund_code(code)
+    has_equity_context = any(token in context_norm for token in ("HISSE SENEDI", "HISSE SENETLERI", "HISSE"))
+    has_fund_context = any(token in context_norm for token in ("Y.FONU", "YATIRIM FONU", "BORSA Y", "BYF", "FON SEPETI"))
+    has_excluded_context = any(
+        token in context_norm
+        for token in ("REPO", "TAHVIL", "BONO", "BORCLANMA", "HAZINE", "KIRA SERTIFIKASI", "DOVIZ", "NAKIT", "MEVDUAT", "TEMINAT")
+    )
+    if _kap_is_stock_symbol(symbol):
+        return "local_equity"
+    if has_equity_context and _kap_looks_like_equity_symbol(symbol):
+        return "local_equity"
+    if has_fund_context and _kap_looks_like_fund_symbol(symbol):
+        return "fund"
+    if not has_excluded_context and _kap_looks_like_fund_symbol(symbol) and any(token in name_norm for token in ("YATIRIM FONU", "PORTFOY", "BYF", "FON")):
+        return "fund"
+    if any(token in haystack for token in ("REPO", "TAHVIL", "BONO", "BORCLANMA", "HAZINE", "KIRA SERTIFIKASI")):
+        return "debt"
+    if symbol in {"USD", "EUR", "JPY", "GBP"} or any(token in haystack for token in ("DOVIZ", "NAKIT", "MEVDUAT", "TEMINAT")):
+        return "cash_fx"
+    if symbol.startswith(("TRT", "TRF", "TRB")):
+        return "debt"
+    return "other"
+
+
+def _kap_category_marker(line: str) -> Optional[str]:
+    norm = _normalize_match_text(line)
+    if not norm or len(norm) > 80:
+        return None
+    if norm in {"HISSE", "HISSE SENEDI", "HISSE SENETLERI"}:
+        return "Hisse Senedi"
+    if norm in {"Y.FONU", "YATIRIM FONU", "BORSA Y.FONU", "BYF"}:
+        return "Yatırım Fonu/BYF"
+    if norm in {"T.REPO", "REPO", "BORCLANMA SENETLERI", "KIRA SERTIFIKALARI"}:
+        return "Borçlanma"
+    if norm in {"MEVDUAT", "NAKIT", "DOVIZ/NAKIT", "DOVIZ NAKIT"}:
+        return "Döviz/Nakit"
+    return None
+
+
+def _kap_strip_inline_category(line: str) -> Tuple[str, Optional[str]]:
+    text = str(line or "").strip()
+    patterns = (
+        (r"^Hisse(?:\s+Senedi|\s+Senetleri)?(?:\s+(?:T.rk|Turk|Türk|Yabanc.|Yabanci|Yabancı))?(?:\s+|$)", "Hisse Senedi"),
+        (r"^(?:(?:Borsa|Yabanc.|Yabanci|Yabancı|T.rk|Turk|Türk)\s+)?(?:Y\.?\s*Fonu|Yatırım\s+Fonu|BYF)(?:\s+(?:T.rk|Turk|Türk|Yabanc.|Yabanci|Yabancı))?(?:\s+|$)", "Yatırım Fonu/BYF"),
+        (r"^T\.?\s*REPO(?:\s+|$)", "Borçlanma"),
+        (r"^Döviz\s*/?\s*Nakit(?:\s+|$)", "Döviz/Nakit"),
+        (r"^VIOP\s+Nakit\s+Teminatı(?:\s+|$)", "Döviz/Nakit"),
+        (r"^(?:T.rk|Turk|Türk|Yabanc.|Yabanci|Yabancı)(?:\s+|$)", None),
+    )
+    for pattern, marker in patterns:
+        match = re.match(pattern, text, flags=re.IGNORECASE)
+        if match:
+            stripped = text[match.end():].strip()
+            if _normalize_match_text(stripped) in {"TURK", "YABANCI"}:
+                stripped = ""
+            return stripped, marker
+    return text, None
+
+
+def _kap_line_starts_position(line: str) -> bool:
+    text = str(line or "").strip()
+    if not text:
+        return False
+    norm = _normalize_match_text(text)
+    if not _kap_number_matches(text) and "PORTFOY" in norm and "FON" in norm:
+        return False
+    first = text.split()[0].strip(":-,;")
+    if not first or first.upper() in _KAP_POSITION_STOPWORDS:
+        return False
+    first_norm = _normalize_match_text(first)
+    if any(first_norm.startswith(f"{month}-20") for month in _KAP_TURKISH_MONTH_WORDS):
+        return False
+    if first[:1].isdigit() or len(first) < 2 or len(first) > 16:
+        return False
+    return bool(re.match(r"^[A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9._-]*$", first, flags=re.IGNORECASE))
+
+
+def _kap_row_complete(block: str) -> bool:
+    compact = " ".join(str(block or "").split())
+    if _KAP_ISIN_TAIL_PATTERN.search(compact):
+        return True
+    numbers = _kap_number_matches(compact)
+    if len(numbers) < 4:
+        return False
+    return any(token in compact.upper() for token in (" TL", "TRY", "USD", "EUR", "JPY", "GBP"))
+
+
+def _kap_buffer_is_header_noise(buffer: List[str]) -> bool:
+    compact = " ".join(str(part or "").strip() for part in buffer if str(part or "").strip())
+    if not compact or _kap_number_matches(compact):
+        return False
+    norm = _normalize_match_text(compact)
+    header_terms = (
+        "TOPLAM",
+        "FPD",
+        "FTD",
+        "GORE",
+        "GRUP",
+        "ISIN KODU",
+        "MENKUL KIYMET",
+        "REPO TEMINAT",
+        "DOVIZ",
+        "BORSA",
+        "SOZLESM",
+    )
+    if "PORTFOY" in norm and "FON" in norm and any(term in norm for term in header_terms):
+        return True
+    first_raw = compact.split()[0].strip(":-,;()") if compact.split() else ""
+    if "-" in first_raw:
+        first_left = normalize_fund_code(first_raw.split("-", 1)[0]).replace(".", "")
+        if _kap_looks_like_fund_symbol(first_left):
+            return False
+    raw_tokens = compact.split()
+    if len(raw_tokens) > 2 and raw_tokens[1] == "-":
+        first_left = normalize_fund_code(raw_tokens[0].strip(":-,;()")).replace(".", "")
+        if _kap_looks_like_fund_symbol(first_left):
+            return False
+    tokens = [normalize_fund_code(token.strip(":-,;()")).replace(".", "") for token in compact.split()]
+    tokens = [token for token in tokens if token]
+    if any(_kap_is_stock_symbol(token) for token in tokens[:4]):
+        return False
+    return True
+
+
+def _parse_kap_holding_block(
+    block: str,
+    *,
+    fund_code: str,
+    category_context: str,
+    report_date: Optional[str],
+    source_url: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    compact = " ".join(str(block or "").replace("\xa0", " ").split())
+    norm = _normalize_match_text(compact)
+    if not compact or "GRUP TOPLAMI" in norm or "TOPLAM" == norm:
+        return None
+
+    code_match = re.match(r"(?P<code>[A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9._-]{1,15})\b", compact, flags=re.IGNORECASE)
+    if not code_match:
+        return None
+    code = code_match.group("code").strip().upper()
+    if "-" in code:
+        left, right = code.split("-", 1)
+        if _kap_looks_like_fund_symbol(left):
+            code = left
+            compact = f"{left} {right} {compact[code_match.end():]}".strip()
+            code_match = re.match(r"(?P<code>[A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9._-]{1,15})\b", compact, flags=re.IGNORECASE)
+            if not code_match:
+                return None
+    if code in _KAP_POSITION_STOPWORDS:
+        return None
+
+    number_matches = _kap_number_matches(compact)
+    if len(number_matches) < 3:
+        return None
+
+    first_number_start = number_matches[0].start()
+    raw_name = compact[code_match.end():first_number_start].strip(" -")
+    raw_name = _KAP_DATE_PATTERN.sub(" ", raw_name)
+    asset_name = " ".join(raw_name.split()) or code
+    tail = _KAP_ISIN_TAIL_PATTERN.search(compact)
+    weight = _coerce_float(tail.group("weight")) if tail else None
+    parsed_numbers = [_coerce_float(match.group(0)) for match in number_matches]
+    numbers = [value for value in parsed_numbers if value is not None]
+    if weight is None:
+        small_values = [value for value in numbers[-4:] if abs(value) <= 100]
+        weight = small_values[-1] if small_values else None
+    if weight is None:
+        return None
+
+    amount = numbers[0] if numbers else None
+    values_before_weight = numbers[:-1] if numbers and abs(numbers[-1] - float(weight)) < 0.0001 else numbers
+    market_value = next((value for value in reversed(values_before_weight) if abs(value) > 100), None)
+    asset_type = _kap_asset_type_from_context(category_context, code, asset_name)
+    return {
+        "fund_code": fund_code,
+        "asset_code": code,
+        "asset_name": asset_name,
+        "asset_type": asset_type,
+        "weight": round(float(weight), 6),
+        "previous_weight": None,
+        "weight_change": None,
+        "change_status": "unchanged",
+        "amount": amount,
+        "market_value": market_value,
+        "price": None,
+        "report_date": report_date,
+        "previous_report_date": None,
+        "source_report_url": source_url,
+        "source_type": "kap_pdf",
+        "parse_confidence": 0.82,
+    }
+
+
+def _parse_kap_holdings_pdf_text(
+    text: str,
+    *,
+    fund_code: str,
+    report_date: Optional[str],
+    source_url: Optional[str],
+) -> List[Dict[str, Any]]:
+    raw_text = str(text or "")
+    start_match = re.search(r"(?:III\s*[-–]\s*)?FON\s+PORTF[ÖO]Y\s+DE[ĞG]ER[İI]", raw_text, flags=re.IGNORECASE)
+    if start_match:
+        raw_text = raw_text[start_match.start():]
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    positions: List[Dict[str, Any]] = []
+    current_category = ""
+    buffer: List[str] = []
+    buffer_category = ""
+
+    def flush() -> None:
+        nonlocal buffer, buffer_category
+        if not buffer:
+            return
+        parsed = _parse_kap_holding_block(
+            " ".join(buffer),
+            fund_code=fund_code,
+            category_context=buffer_category,
+            report_date=report_date,
+            source_url=source_url,
+        )
+        if parsed and _kap_is_included_holding_type(parsed.get("asset_type")):
+            positions.append(parsed)
+        buffer = []
+        buffer_category = ""
+
+    for line in lines:
+        original_line = line
+        line, inline_marker = _kap_strip_inline_category(line)
+        if inline_marker and buffer and not _kap_row_complete(" ".join(buffer)):
+            if _kap_buffer_is_header_noise(buffer):
+                buffer = []
+                buffer_category = ""
+            else:
+                line = original_line
+                inline_marker = None
+        if inline_marker:
+            if buffer:
+                flush()
+            current_category = inline_marker
+            if not line:
+                continue
+        norm = _normalize_match_text(line)
+        marker = _kap_category_marker(line)
+        if marker and len(_kap_number_matches(line)) < 2 and buffer and not _kap_row_complete(" ".join(buffer)):
+            if _kap_buffer_is_header_noise(buffer):
+                buffer = []
+                buffer_category = ""
+            else:
+                marker = None
+        if marker and len(_kap_number_matches(line)) < 2 and (not buffer or _kap_row_complete(" ".join(buffer))):
+            if buffer:
+                flush()
+            current_category = marker
+            continue
+        if not current_category:
+            continue
+        if "GRUP TOPLAMI" in norm:
+            flush()
+            continue
+        if buffer and _kap_line_starts_position(line) and not _kap_row_complete(" ".join(buffer)):
+            if _kap_buffer_is_header_noise(buffer):
+                buffer = []
+                buffer_category = ""
+        if not buffer and not _kap_line_starts_position(line):
+            continue
+        if buffer and _kap_line_starts_position(line) and _kap_row_complete(" ".join(buffer)):
+            flush()
+        if not buffer:
+            buffer_category = current_category
+        buffer.append(line)
+        if _kap_row_complete(" ".join(buffer)):
+            flush()
+    flush()
+
+    best_by_key: Dict[str, Dict[str, Any]] = {}
+    for position in positions:
+        key = normalize_fund_code(position.get("asset_code") or position.get("asset_name"))
+        if not key:
+            continue
+        existing = best_by_key.get(key)
+        if not existing or abs(float(position.get("weight") or 0)) > abs(float(existing.get("weight") or 0)):
+            best_by_key[key] = position
+    return sorted(best_by_key.values(), key=lambda row: abs(float(row.get("weight") or 0)), reverse=True)
+
+
+def _position_key(position: Dict[str, Any]) -> str:
+    return normalize_fund_code(position.get("asset_code") or position.get("asset_name"))
+
+
+def _normalize_holding_positions_for_response(
+    processed_dir: Path,
+    positions: List[Dict[str, Any]],
+    *,
+    fund_code: str,
+) -> List[Dict[str, Any]]:
+    fund_names = _kap_fund_name_map(processed_dir)
+    current_fund_code = normalize_fund_code(fund_code).replace(".", "")
+    normalized_rows: List[Dict[str, Any]] = []
+    for position in positions:
+        code = normalize_fund_code(position.get("asset_code")).replace(".", "")
+        if not code or code in _KAP_POSITION_STOPWORDS:
+            continue
+        if "-" in code:
+            left = code.split("-", 1)[0]
+            if fund_names.get(left) or _kap_looks_like_fund_symbol(left):
+                code = left
+        if code == current_fund_code:
+            continue
+        row = dict(position)
+        row["asset_code"] = code
+        if _kap_is_stock_symbol(code):
+            row["asset_type"] = "local_equity"
+            row["asset_name"] = _kap_stock_name_from_cache(processed_dir, code) or str(row.get("asset_name") or code).strip() or code
+        else:
+            row_type = str(row.get("asset_type") or "").strip().lower()
+            name_norm = _normalize_match_text(row.get("asset_name") or "")
+            looks_like_named_fund = any(token in name_norm for token in ("YATIRIM FONU", "BORSA YATIRIM FONU", " FONU", "FON ", "BYF"))
+            if not _kap_looks_like_fund_symbol(code) or not (row_type == "fund" or looks_like_named_fund or fund_names.get(code)):
+                continue
+            row["asset_type"] = "fund"
+            row["asset_name"] = fund_names.get(code) or str(row.get("asset_name") or code).strip() or code
+        normalized_rows.append(row)
+    return normalized_rows
+
+
+def _merge_holding_positions(
+    latest_positions: List[Dict[str, Any]],
+    previous_positions: List[Dict[str, Any]],
+    *,
+    latest_report_date: Optional[str],
+    previous_report_date: Optional[str],
+) -> List[Dict[str, Any]]:
+    previous_by_key = {_position_key(position): position for position in previous_positions if _position_key(position)}
+    latest_keys: set[str] = set()
+    merged: List[Dict[str, Any]] = []
+    for position in latest_positions:
+        key = _position_key(position)
+        latest_keys.add(key)
+        previous = previous_by_key.get(key)
+        current_weight = _coerce_float(position.get("weight"))
+        previous_weight = _coerce_float(previous.get("weight")) if previous else None
+        delta = None
+        status = "new" if previous is None else "unchanged"
+        if current_weight is not None and previous_weight is not None:
+            delta = round(current_weight - previous_weight, 6)
+            if delta > 0.005:
+                status = "increased"
+            elif delta < -0.005:
+                status = "decreased"
+        elif current_weight is not None and previous is None:
+            delta = current_weight
+        merged_position = dict(position)
+        merged_position["previous_weight"] = previous_weight
+        merged_position["previous_report_date"] = previous_report_date
+        merged_position["weight_change"] = delta
+        merged_position["change_status"] = status
+        merged.append(merged_position)
+
+    for key, previous in previous_by_key.items():
+        if key in latest_keys:
+            continue
+        previous_weight = _coerce_float(previous.get("weight"))
+        removed = dict(previous)
+        removed["weight"] = 0.0
+        removed["previous_weight"] = previous_weight
+        removed["previous_report_date"] = previous_report_date
+        removed["weight_change"] = round(-previous_weight, 6) if previous_weight is not None else None
+        removed["change_status"] = "removed"
+        removed["report_date"] = latest_report_date or previous.get("report_date")
+        merged.append(removed)
+
+    return sorted(
+        merged,
+        key=lambda row: max(abs(float(row.get("weight") or 0)), abs(float(row.get("previous_weight") or 0))),
+        reverse=True,
+    )
+
+
+def _kap_report_positions(
+    detail: Dict[str, Any],
+    *,
+    fund_code: str,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    basic = _kap_report_basic(detail)
+    disclosure_index = basic.get("disclosureIndex")
+    report_date = _kap_report_date(detail)
+    source_url = _kap_source_url(disclosure_index)
+    attachments = _kap_report_attachments(detail)
+    pdf_attachment = next(
+        (
+            attachment
+            for attachment in attachments
+            if str(attachment.get("fileExtension") or "").strip().lower() == "pdf"
+            and str(attachment.get("objId") or "").strip()
+        ),
+        None,
+    )
+    metadata = {
+        "disclosure_index": disclosure_index,
+        "file_name": pdf_attachment.get("fileName") if pdf_attachment else None,
+        "report_date": report_date,
+        "source_url": source_url,
+    }
+    if not pdf_attachment:
+        metadata["warning"] = "KAP report has no PDF attachment"
+        return [], metadata
+    data = _kap_download_attachment(str(pdf_attachment.get("objId") or ""))
+    text = _extract_kap_pdf_text(data)
+    positions = _parse_kap_holdings_pdf_text(
+        text,
+        fund_code=fund_code,
+        report_date=report_date,
+        source_url=source_url,
+    )
+    if not positions:
+        metadata["warning"] = "KAP PDF text parsed but no position rows were detected"
+    return positions, metadata
+
+
+def _unavailable_holdings_payload(
+    fund_code: str,
+    *,
+    message: str,
+    warnings: Optional[List[str]] = None,
+    cache_hit: bool = False,
+) -> Dict[str, Any]:
     normalized = normalize_fund_code(fund_code)
     return {
         "fund_code": normalized,
-        "status": "not_parsed",
+        "status": "unavailable",
         "positions": [],
-        "source": "kap",
-        "message": "KAP holdings are report-based and will be parsed in V2.",
+        "source": KAP_HOLDINGS_SOURCE,
+        "message": message,
         "source_metadata": {
-            "source": "kap",
-            "source_url": None,
-            "fetched_at": None,
+            "source": KAP_HOLDINGS_SOURCE,
+            "source_url": KAP_BASE_URL,
+            "fetched_at": _utc_now_iso(),
             "as_of": None,
-            "cache_hit": False,
+            "cache_hit": cache_hit,
             "stale": True,
-            "parse_status": "not_parsed",
-            "warnings": ["KAP fund holdings are V2 scope"],
+            "parse_status": "unavailable",
+            "parser_version": KAP_HOLDINGS_PARSE_VERSION,
+            "warnings": list(warnings or [message]),
         },
     }
 
+
+def _parse_iso_date(value: Any) -> Optional[date]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _holdings_cache_is_stale(cached_meta: Dict[str, Any]) -> bool:
+    cached_parser_version = _coerce_int(cached_meta.get("parser_version"))
+    if cached_parser_version != KAP_HOLDINGS_PARSE_VERSION:
+        return True
+
+    latest_report = cached_meta.get("latest_report")
+    latest_report_date = None
+    if isinstance(latest_report, dict):
+        latest_report_date = _parse_iso_date(latest_report.get("report_date"))
+    if latest_report_date is None:
+        latest_report_date = _parse_iso_date(cached_meta.get("as_of"))
+
+    # KAP portfolio distribution reports are monthly. If the cached report is
+    # from the current or immediately previous report month, there is no older
+    # PDF content to refetch repeatedly during the same month.
+    if latest_report_date is not None:
+        today = _utc_now().date()
+        month_age = (today.year - latest_report_date.year) * 12 + today.month - latest_report_date.month
+        if month_age <= 1:
+            return False
+
+    age = _cache_age_seconds(cached_meta.get("fetched_at"))
+    return age is None or age > FUNDS_HOLDINGS_TTL_SECONDS
+
+
+def refresh_fund_holdings(processed_dir: Path, fund_code: str) -> Dict[str, Any]:
+    normalized = normalize_fund_code(fund_code)
+    metadata = _kap_search_fund_metadata(normalized)
+    if not metadata:
+        return _unavailable_holdings_payload(
+            normalized,
+            message="KAP fon kaydı bulunamadı.",
+            warnings=[f"KAP fund search returned no exact match for {normalized}"],
+        )
+    fund_oid = str(metadata.get("fund_oid") or "").strip()
+    subject_oid = _kap_portfolio_subject_oid(fund_oid)
+    disclosures = _kap_list_portfolio_disclosures(fund_oid, subject_oid)
+    if not disclosures:
+        return _unavailable_holdings_payload(
+            normalized,
+            message="KAP portföy dağılım bildirimi bulunamadı.",
+            warnings=[f"KAP portfolio allocation disclosures not found for {normalized}"],
+        )
+
+    warnings: List[str] = []
+    report_payloads: List[Tuple[List[Dict[str, Any]], Dict[str, Any]]] = []
+    for row in disclosures[:2]:
+        disclosure_index = _kap_disclosure_index(row)
+        if not disclosure_index:
+            continue
+        detail = _kap_fetch_report_detail(disclosure_index)
+        if not detail:
+            warnings.append(f"KAP disclosure detail unavailable: {disclosure_index}")
+            continue
+        positions, report_meta = _kap_report_positions(detail, fund_code=normalized)
+        if report_meta.get("warning"):
+            warnings.append(str(report_meta["warning"]))
+        report_payloads.append((positions, report_meta))
+
+    latest_positions = report_payloads[0][0] if report_payloads else []
+    latest_meta = report_payloads[0][1] if report_payloads else {}
+    previous_positions = report_payloads[1][0] if len(report_payloads) > 1 else []
+    previous_meta = report_payloads[1][1] if len(report_payloads) > 1 else {}
+    if not latest_positions:
+        payload = _unavailable_holdings_payload(
+            normalized,
+            message="KAP portföy PDF'i parse edilemedi.",
+            warnings=warnings or ["KAP PDF position parser returned no rows"],
+        )
+        payload["status"] = "partial"
+        payload["source_metadata"]["parse_status"] = "partial"
+        payload["source_metadata"]["fund_oid"] = fund_oid
+        payload["source_metadata"]["subject_oid"] = subject_oid
+        payload["source_metadata"]["latest_report"] = latest_meta or None
+        payload["source_metadata"]["previous_report"] = previous_meta or None
+        _write_json(_holdings_path(processed_dir, normalized), payload)
+        return payload
+
+    if not previous_positions:
+        warnings.append("Önceki ay portföy raporu parse edilemedi veya bulunamadı.")
+    positions = _merge_holding_positions(
+        latest_positions,
+        previous_positions,
+        latest_report_date=latest_meta.get("report_date"),
+        previous_report_date=previous_meta.get("report_date"),
+    )
+    positions = _normalize_holding_positions_for_response(processed_dir, positions, fund_code=normalized)
+    parse_status = "ok" if latest_positions and previous_positions else "partial"
+    payload = {
+        "fund_code": normalized,
+        "status": parse_status,
+        "positions": positions,
+        "source": KAP_HOLDINGS_SOURCE,
+        "message": None,
+        "source_metadata": {
+            "source": KAP_HOLDINGS_SOURCE,
+            "source_url": latest_meta.get("source_url") or KAP_BASE_URL,
+            "fetched_at": _utc_now_iso(),
+            "as_of": latest_meta.get("report_date"),
+            "cache_hit": False,
+            "stale": False,
+            "parse_status": parse_status,
+            "parser_version": KAP_HOLDINGS_PARSE_VERSION,
+            "fund_oid": fund_oid,
+            "subject_oid": subject_oid,
+            "fund_name": metadata.get("fund_name"),
+            "latest_report": latest_meta or None,
+            "previous_report": previous_meta or None,
+            "warnings": warnings,
+        },
+    }
+    _write_json(_holdings_path(processed_dir, normalized), payload)
+    return payload
+
+
+def get_fund_holdings_payload(processed_dir: Path, fund_code: str) -> Dict[str, Any]:
+    normalized = normalize_fund_code(fund_code)
+    path = _holdings_path(processed_dir, normalized)
+    cached = _read_json(path)
+    if cached:
+        cached_meta = cached.get("source_metadata", {}) if isinstance(cached.get("source_metadata"), dict) else {}
+        stale = _holdings_cache_is_stale(cached_meta)
+        if not stale:
+            payload = dict(cached)
+            meta = dict(cached_meta)
+            meta["cache_hit"] = True
+            meta["stale"] = False
+            meta["cache_policy"] = "monthly_report"
+            payload["source_metadata"] = meta
+            return payload
+    try:
+        return refresh_fund_holdings(processed_dir, normalized)
+    except Exception as exc:
+        if cached:
+            payload = dict(cached)
+            meta = dict(payload.get("source_metadata") or {})
+            warnings = list(meta.get("warnings") or [])
+            warnings.append(f"KAP holdings refresh failed: {exc}")
+            meta["warnings"] = warnings
+            meta["cache_hit"] = True
+            meta["stale"] = True
+            payload["source_metadata"] = meta
+            payload["status"] = "partial" if payload.get("positions") else "unavailable"
+            return payload
+        return _unavailable_holdings_payload(
+            normalized,
+            message="KAP portföy içeriği alınamadı.",
+            warnings=[f"KAP holdings refresh failed: {exc}"],
+        )
