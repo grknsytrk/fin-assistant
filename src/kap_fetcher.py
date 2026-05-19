@@ -2989,7 +2989,11 @@ def fetch_kap_company_snapshot(
             cached["cache_hit"] = True
             cached["cache_stale"] = True
             cached["error"] = str(exc)
-            if cached["ok"] and _cached_period_count(cached) > 0:
+            if (
+                cached["ok"]
+                and _cached_period_count(cached) > 0
+                and cache_has_requested_depth
+            ):
                 cached["cache_stale"] = False
                 cached.pop("error", None)
             return _ensure_insurance_premium_disclosures(
