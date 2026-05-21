@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
 from app import fund_service
+from app.reference_data import get_instrument, upsert_instrument
 
 
 def test_fintables_defaults_match_current_history_contract() -> None:
@@ -179,6 +180,7 @@ def test_funds_payload_reads_stale_first_snapshot(tmp_path) -> None:
                 "period_returns": {"1w": None, "1m": None, "3m": None, "6m": None, "ytd": None, "1y": None},
                 "risk_value": 5,
                 "currency": "TRY",
+                "aum": 400_000_000,
                 "as_of": "2026-04-28",
                 "source": "fintables_udf_history",
             }
@@ -201,6 +203,112 @@ def test_funds_payload_reads_stale_first_snapshot(tmp_path) -> None:
     assert payload["count"] == 1
     assert payload["rows"][0]["fund_code"] == "TLY"
     assert payload["source_metadata"]["cache_hit"] is True
+
+
+def test_funds_payload_lists_all_managers_above_min_aum(tmp_path) -> None:
+    snapshot = {
+        "status": "ok",
+        "rows": [
+            {
+                "fund_code": "BIG",
+                "name": "XYZ PORTFOY BUYUK FON",
+                "founder_company": "XYZ PORTFOY",
+                "price": 1.0,
+                "aum": 500_000_000,
+                "as_of": "2026-05-20",
+                "source": "tefasfon_funds",
+            },
+            {
+                "fund_code": "LOW",
+                "name": "TERA PORTFOY KUCUK FON",
+                "founder_company": "TERA PORTFOY",
+                "price": 1.0,
+                "aum": 299_999_999,
+                "as_of": "2026-05-20",
+                "source": "tefasfon_funds",
+            },
+        ],
+        "source": "tefasfon_funds",
+        "source_url": "https://pypi.org/project/tefasfon/",
+        "as_of": "2026-05-20",
+        "fetched_at": "2026-05-20T09:00:00+00:00",
+        "stale": False,
+        "degraded": False,
+        "warnings": [],
+        "source_metadata": {"source": "tefasfon_funds", "parse_status": "ok"},
+    }
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    payload = fund_service.get_funds_payload(tmp_path, sort="fund_code", order="asc")
+    search_payload = fund_service.get_funds_payload(tmp_path, sort="fund_code", order="asc", min_aum=None)
+
+    assert [row["fund_code"] for row in payload["rows"]] == ["BIG"]
+    assert payload["source_metadata"]["list_min_aum"] == 300_000_000
+    assert [row["fund_code"] for row in search_payload["rows"]] == ["BIG", "LOW"]
+
+
+def test_funds_payload_auto_refreshes_stale_tefas_snapshot(monkeypatch, tmp_path) -> None:
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "rows": [
+                    {
+                        "fund_code": "OLD",
+                        "name": "OLD FUND",
+                        "price": 1.0,
+                        "aum": 500_000_000,
+                        "as_of": "2026-05-20",
+                        "source": "tefasfon_funds",
+                    }
+                ],
+                "source": "tefasfon_funds",
+                "as_of": "2026-05-20",
+                "fetched_at": "2026-05-20T09:00:00+00:00",
+                "stale": False,
+                "degraded": False,
+                "warnings": [],
+                "source_metadata": {"source": "tefasfon_funds"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_refresh(processed_dir, *, lookback_days):
+        refreshed = {
+            "status": "ok",
+            "rows": [
+                {
+                    "fund_code": "TLY",
+                    "name": "TERA PORTFOY TEST FONU",
+                    "price": 5518.5,
+                    "daily_return": 0.04,
+                    "aum": 500_000_000,
+                    "as_of": fund_service._latest_fund_snapshot_target_date().isoformat(),
+                    "source": "tefasfon_funds",
+                }
+            ],
+            "source": "tefasfon_funds",
+            "as_of": fund_service._latest_fund_snapshot_target_date().isoformat(),
+            "fetched_at": fund_service._utc_now_iso(),
+            "stale": False,
+            "degraded": False,
+            "warnings": [],
+            "source_metadata": {"source": "tefasfon_funds"},
+        }
+        (processed_dir / "funds_cache" / "funds_latest.json").write_text(json.dumps(refreshed), encoding="utf-8")
+        return refreshed
+
+    monkeypatch.setattr(fund_service, "refresh_funds_snapshot", fake_refresh)
+
+    payload = fund_service.get_funds_payload(tmp_path, auto_refresh=True, min_aum=None)
+
+    assert [row["fund_code"] for row in payload["rows"]] == ["TLY"]
+    assert payload["rows"][0]["daily_return"] == 0.04
 
 
 def test_funds_payload_empty_cache_degraded(tmp_path) -> None:
@@ -286,6 +394,42 @@ def test_fund_history_gap_ignores_turkey_market_holidays() -> None:
     assert fund_service._business_days_between(date(2021, 7, 20), date(2021, 7, 23)) == 0
 
 
+def test_latest_tefasfon_snapshot_daily_return_skips_turkey_market_holidays() -> None:
+    class FakeTefasFonClient(fund_service.TefasFonClient):
+        def __init__(self) -> None:
+            super().__init__(fund_types=["SEC"])
+            self.range_calls = []
+
+        def fetch_funds(self, *, start_date, end_date, fund_codes=None):
+            assert start_date == date(2026, 5, 20)
+            assert end_date == date(2026, 5, 20)
+            return [
+                {
+                    "fonKodu": "TLY",
+                    "fonUnvan": "TERA PORTFOY TEST FONU",
+                    "tarih": "2026-05-20",
+                    "fiyat": 5516.308655,
+                }
+            ]
+
+        def fetch_returns(self, *, start_date=None, end_date=None, fund_codes=None):
+            if start_date is None or end_date is None:
+                return []
+            self.range_calls.append((start_date, end_date))
+            if start_date == date(2026, 5, 18) and end_date == date(2026, 5, 20):
+                return [{"fonKodu": "TLY", "getiriOrani": 0.4995}]
+            return []
+
+    client = FakeTefasFonClient()
+
+    rows, warnings = client.fetch_latest_fund_list_snapshot(as_of=date(2026, 5, 20), lookback_days=1)
+
+    assert warnings == []
+    assert rows[0]["daily_return"] == pytest.approx(0.4995)
+    assert (date(2026, 5, 18), date(2026, 5, 20)) in client.range_calls
+    assert (date(2026, 5, 19), date(2026, 5, 20)) not in client.range_calls
+
+
 def test_fund_history_gap_still_warns_for_real_business_day_gap() -> None:
     warnings = fund_service._history_internal_gap_warnings(
         [
@@ -331,6 +475,29 @@ def test_refresh_funds_snapshot_uses_tefasfon_source(monkeypatch, tmp_path) -> N
     assert stored[0]["aum"] == 1_000_000
     assert stored[0]["investor_count"] == 123
     assert stored[0]["tefas_open"] is True
+    reference = get_instrument(tmp_path, "fund", "TLY")
+    assert reference is not None
+    assert reference["name"] == "TERA PORTFOY TEST FONU"
+    assert reference["metadata"]["founder_company"] == "TERA PORTFOY YONETIMI A.S."
+
+
+def test_kap_stock_name_prefers_reference_data(tmp_path) -> None:
+    upsert_instrument(
+        tmp_path,
+        kind="stock",
+        symbol="TERA",
+        name="TERA YATIRIM MENKUL DEĞERLER A.Ş.",
+        source="kap",
+        source_id="member-1",
+    )
+    cache_dir = tmp_path / "kap_cache"
+    cache_dir.mkdir()
+    (cache_dir / "TERA.json").write_text(
+        json.dumps({"company_title": "MEDITERA TIBBİ MALZEME SANAYİ VE TİCARET A.Ş."}),
+        encoding="utf-8",
+    )
+
+    assert fund_service._kap_stock_name_from_cache(tmp_path, "TERA") == "TERA YATIRIM MENKUL DEĞERLER A.Ş."
 
 
 def test_refresh_funds_snapshot_filters_tefas_closed_rows(monkeypatch, tmp_path) -> None:
@@ -753,8 +920,181 @@ def test_get_fund_performance_payload_defaults_to_full_history(monkeypatch, tmp_
     assert calls[0][1] == date(2020, 1, 1)
     assert [point["date"] for point in payload["points"]] == ["2020-01-02", today.isoformat()]
     assert payload["source_metadata"]["requested_start_date"] == "2020-01-01"
+    assert payload["source_metadata"]["full_history_requested"] is True
     assert cached_payload["source_metadata"]["cache_hit"] is True
     assert len(calls) == 1
+
+
+def test_get_fund_performance_payload_refreshes_only_missing_recent_tail(monkeypatch, tmp_path) -> None:
+    fund_service.reset_fund_caches_for_tests()
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> "FixedDate":
+            return cls(2026, 5, 21)
+
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {
+                "fund_code": "TLY",
+                "date": "2026-05-20",
+                "price": 5516.308655,
+                "daily_return": 0.50,
+                "source": "tefasfon_funds",
+            }
+        ],
+        source="tefasfon_funds",
+    )
+    history_path = fund_service._history_path(tmp_path, "TLY")
+    history_path.parent.mkdir(parents=True)
+    history_path.write_text(
+        json.dumps(
+            {
+                "source_metadata": {
+                    "requested_start_date": "2026-01-01",
+                    "date_max": "2026-05-20",
+                    "parse_status": "ok",
+                },
+                "as_of": "2026-05-20",
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    class FakeTefasFonClient:
+        def fetch_history(self, fund_code, start_date, end_date):
+            calls.append((fund_code, start_date, end_date))
+            return [
+                {
+                    "fund_code": fund_code,
+                    "date": "2026-05-21",
+                    "price": 5518.513245,
+                    "daily_return": 0.04,
+                    "source": "tefasfon_funds",
+                }
+            ]
+
+    monkeypatch.setattr(fund_service, "date", FixedDate)
+    monkeypatch.setattr(fund_service, "FUNDS_FULL_HISTORY_START_DATE", "2026-01-01")
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+
+    payload = fund_service.get_fund_performance_payload(tmp_path, "TLY")
+    dates = [point["date"] for point in payload["points"]]
+    cached_metadata = json.loads(history_path.read_text(encoding="utf-8"))["source_metadata"]
+
+    assert calls == [("TLY", date(2026, 5, 21), date(2026, 5, 21))]
+    assert dates == ["2026-05-20", "2026-05-21"]
+    assert payload["points"][-1]["daily_return"] == 0.04
+    assert payload["source_metadata"]["backfill_used"] is True
+    assert payload["source_metadata"]["full_history_requested"] is True
+    assert cached_metadata["requested_start_date"] == "2026-01-01"
+    assert cached_metadata["date_max"] == "2026-05-20"
+
+    second_payload = fund_service.get_fund_performance_payload(tmp_path, "TLY")
+
+    assert len(calls) == 1
+    assert second_payload["source_metadata"]["cache_hit"] is True
+
+
+def test_get_fund_performance_payload_fast_bootstraps_long_partial_range(monkeypatch, tmp_path) -> None:
+    fund_service.reset_fund_caches_for_tests()
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> "FixedDate":
+            return cls(2026, 5, 21)
+
+    history_calls = []
+    snapshot_calls = []
+
+    def fake_fintables_history(fund_code, start_date, end_date):
+        rows = []
+        current = start_date
+        price = 1.0
+        while current <= end_date:
+            if current.weekday() < 5:
+                rows.append({
+                    "fund_code": fund_code,
+                    "date": current.isoformat(),
+                    "price": price,
+                    "source": "fintables_udf_history",
+                })
+                price += 0.01
+            current += timedelta(days=1)
+        return rows
+
+    class FakeTefasFonClient:
+        def fetch_history(self, fund_code, start_date, end_date):
+            history_calls.append((fund_code, start_date, end_date))
+            raise AssertionError("long partial ranges should use fast bootstrap")
+
+        def fetch_daily_funds_snapshot(self, as_of):
+            snapshot_calls.append(as_of.isoformat())
+            if as_of.isoformat() == "2026-04-30":
+                return [
+                    {
+                        "fonKodu": "KHA",
+                        "tarih": "2026-04-30",
+                        "fiyat": 2.0,
+                        "portfoyBuyukluk": 1_000_000_000,
+                        "kisiSayisi": 10_000,
+                        "source": "tefasfon_funds",
+                    },
+                    {
+                        "fonKodu": "DGR",
+                        "tarih": "2026-04-30",
+                        "fiyat": 1.0,
+                        "portfoyBuyukluk": 2_000_000_000,
+                        "kisiSayisi": 20_000,
+                        "source": "tefasfon_funds",
+                    },
+                ]
+            if as_of.isoformat() == "2026-05-21":
+                return [
+                    {
+                        "fonKodu": "KHA",
+                        "tarih": "2026-05-21",
+                        "fiyat": 2.2,
+                        "portfoyBuyukluk": 1_250_000_000,
+                        "kisiSayisi": 11_000,
+                        "source": "tefasfon_funds",
+                    }
+                ]
+            return []
+
+    monkeypatch.setattr(fund_service, "date", FixedDate)
+    monkeypatch.setattr(fund_service, "fetch_fintables_udf_history", fake_fintables_history)
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+
+    payload = fund_service.get_fund_performance_payload(
+        tmp_path,
+        "KHA",
+        start_date=date(2025, 10, 21),
+        end_date=date(2026, 5, 21),
+    )
+    by_date = {point["date"]: point for point in payload["points"]}
+
+    assert history_calls == []
+    assert "2026-04-30" in snapshot_calls
+    assert "2026-05-21" in snapshot_calls
+    assert by_date["2026-04-30"]["aum"] == 1_000_000_000
+    assert by_date["2026-05-21"]["investor_count"] == 11_000
+    assert fund_service.read_fund_price_points(tmp_path, "DGR")[0]["investor_count"] == 20_000
+    assert payload["source_metadata"]["full_history_requested"] is False
+    assert payload["source_metadata"]["cached_fallback_points_present"] is True
+
+    snapshot_calls.clear()
+    second_payload = fund_service.get_fund_performance_payload(
+        tmp_path,
+        "KHA",
+        start_date=date(2025, 10, 21),
+        end_date=date(2026, 5, 21),
+    )
+
+    assert snapshot_calls == []
+    assert second_payload["source_metadata"]["full_history_requested"] is False
 
 
 def test_get_fund_performance_payload_backfills_missing_overview_metrics(monkeypatch, tmp_path) -> None:
@@ -850,6 +1190,80 @@ def test_get_fund_performance_payload_backfills_missing_overview_metrics(monkeyp
     assert len(calls) == 7
     assert cached_payload["source_metadata"]["cache_hit"] is True
     assert cached_payload["source_metadata"]["overview_metric_backfill"]["attempted"] is False
+
+
+def test_get_fund_performance_payload_backfills_partial_range_overview_metrics(monkeypatch, tmp_path) -> None:
+    fund_service.reset_fund_caches_for_tests()
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> "FixedDate":
+            return cls(2026, 5, 21)
+
+    current = date(2025, 10, 21)
+    price_only_points = []
+    price = 1.0
+    while current <= date(2026, 5, 21):
+        if current.weekday() < 5:
+            price_only_points.append({
+                "fund_code": "PBR",
+                "date": current.isoformat(),
+                "price": price,
+                "source": "fintables_udf_history",
+            })
+            price += 0.01
+        current += timedelta(days=1)
+    fund_service.upsert_fund_price_points(tmp_path, price_only_points, source="fintables_udf_history")
+
+    snapshot_by_date = {
+        "2025-11-28": (100_000_000.0, 1_000),
+        "2025-12-31": (200_000_000.0, 2_000),
+        "2026-01-30": (300_000_000.0, 3_000),
+        "2026-02-27": (400_000_000.0, 4_000),
+        "2026-03-31": (500_000_000.0, 5_000),
+        "2026-04-30": (600_000_000.0, 6_000),
+        "2026-05-21": (700_000_000.0, 7_000),
+    }
+    calls = []
+
+    class FakeTefasFonClient:
+        def fetch_history(self, fund_code, start_date, end_date):
+            raise AssertionError("price coverage is already cached")
+
+        def fetch_daily_funds_snapshot(self, as_of):
+            calls.append(as_of.isoformat())
+            values = snapshot_by_date.get(as_of.isoformat())
+            if values is None:
+                return []
+            aum, investors = values
+            return [
+                {
+                    "fonKodu": "PBR",
+                    "tarih": as_of.isoformat(),
+                    "fiyat": 1.0,
+                    "portfoyBuyukluk": aum,
+                    "kisiSayisi": investors,
+                    "source": "tefasfon_funds",
+                }
+            ]
+
+    monkeypatch.setattr(fund_service, "date", FixedDate)
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+
+    payload = fund_service.get_fund_performance_payload(
+        tmp_path,
+        "PBR",
+        start_date=date(2025, 10, 21),
+        end_date=date(2026, 5, 21),
+    )
+    by_date = {point["date"]: point for point in payload["points"]}
+
+    assert "2026-02-27" in calls
+    assert "2026-03-31" in calls
+    assert by_date["2026-02-27"]["aum"] == 400_000_000.0
+    assert by_date["2026-03-31"]["investor_count"] == 5_000
+    assert payload["source_metadata"]["overview_metric_backfill"]["attempted"] is True
+    assert payload["source_metadata"]["full_history_requested"] is False
 
 
 def test_overview_metric_backfill_negative_cache_skips_repeat(monkeypatch, tmp_path) -> None:

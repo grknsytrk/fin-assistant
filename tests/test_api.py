@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -33,6 +33,8 @@ def _reset_flow_state() -> None:
     api_module._MARKET_INDEX_INTRADAY_CACHE.clear()
     api_module._MARKET_INDEX_RETURN_CACHE.clear()
     api_module._ISYATIRIM_BASIC_SUMMARY_CACHE.clear()
+    api_module._GEFAS_GYF_QUOTE_CACHE.clear()
+    api_module._FUND_SNAPSHOT_ROW_MAP_CACHE.clear()
     fund_service_module.reset_fund_caches_for_tests()
     kap_service_module._BIST_UNIVERSE_CACHE.clear()
     kap_vyk_client.reset_caches_for_tests()
@@ -86,12 +88,53 @@ def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     assert payload["source"] == "tefasfon_funds"
 
 
+def test_api_funds_search_keeps_full_universe(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_kwargs: Dict[str, Any] = {}
+
+    def fake_get_funds_payload(processed_dir: Any, **kwargs: Any) -> Dict[str, Any]:
+        seen_kwargs.update(kwargs)
+        return {
+            "status": "ok",
+            "rows": [
+                {"fund_code": "LOW", "name": "Kucuk Fon", "aum": 100_000_000},
+                {"fund_code": "BIG", "name": "Buyuk Fon", "aum": 500_000_000},
+            ],
+            "count": 2,
+            "total_count": 2,
+            "source": "tefasfon_funds",
+            "as_of": "2026-05-20",
+            "fetched_at": "2026-05-20T09:00:00+00:00",
+            "stale": False,
+            "degraded": False,
+            "warnings": [],
+            "source_metadata": {"source": "tefasfon_funds", "parse_status": "ok"},
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_funds_payload", fake_get_funds_payload)
+    client = TestClient(app)
+
+    response = client.get("/funds/search", params={"q": "fon", "limit": 1})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert seen_kwargs["min_aum"] is None
+
+
 def _patch_holdings_cache_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     monkeypatch.setattr(
         fund_service_module,
         "_holdings_path",
         lambda _processed_dir, fund_code: tmp_path / f"{fund_code}.json",
     )
+    monkeypatch.setattr(
+        fund_service_module,
+        "_holdings_attachment_text_path",
+        lambda _processed_dir, disclosure_index, obj_id: tmp_path / f"attachment_{disclosure_index}_{obj_id}.json",
+    )
+    monkeypatch.setattr(api_module, "_fetch_market_price_map", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(api_module, "_fetch_infoyatirim_stock_page_quote", lambda _symbol: {})
+    monkeypatch.setattr(api_module, "_fetch_gefas_gyf_quote", lambda _symbol: None)
 
 
 def test_api_fund_holdings_unavailable_when_kap_fund_not_found(
@@ -219,13 +262,14 @@ def test_api_fund_holdings_reuses_monthly_report_cache(
             "stale": False,
             "parse_status": "ok",
             "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
-            "latest_report": {"report_date": "2026-04-30", "source_url": "https://www.kap.org.tr/tr/Bildirim/1601574"},
-            "previous_report": {"report_date": "2026-03-31", "source_url": "https://www.kap.org.tr/tr/Bildirim/1583104"},
+            "latest_report": {"disclosure_index": 1601574, "report_date": "2026-04-30", "source_url": "https://www.kap.org.tr/tr/Bildirim/1601574"},
+            "previous_report": {"disclosure_index": 1583104, "report_date": "2026-03-31", "source_url": "https://www.kap.org.tr/tr/Bildirim/1583104"},
+            "disclosure_check": {"checked_at": "2026-05-19T00:00:00+00:00", "ttl_seconds": 21600},
             "warnings": [],
         },
     }
     (tmp_path / "TLY.json").write_text(json.dumps(cache_payload), encoding="utf-8")
-    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 19))
+    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 19, tzinfo=timezone.utc))
     monkeypatch.setattr(
         fund_service_module,
         "refresh_fund_holdings",
@@ -240,6 +284,441 @@ def test_api_fund_holdings_reuses_monthly_report_cache(
     assert payload["positions"][0]["asset_code"] == "DSTKF"
     assert payload["source_metadata"]["cache_hit"] is True
     assert payload["source_metadata"]["cache_policy"] == "monthly_report"
+
+
+def test_fund_holdings_disclosure_check_skips_pdf_when_report_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    positions = [
+        {
+            "fund_code": "TLY",
+            "asset_code": "DSTKF",
+            "asset_name": "DESTEK FİNANS FAKTORİNG A.Ş.",
+            "asset_type": "local_equity",
+            "weight": 23.63,
+            "previous_weight": 20.43,
+            "weight_change": 3.2,
+            "change_status": "increased",
+            "report_date": "2026-04-30",
+            "previous_report_date": "2026-03-31",
+            "source_report_url": "https://www.kap.org.tr/tr/Bildirim/1601574",
+            "source_type": "kap_pdf",
+            "parse_confidence": 0.82,
+        }
+    ]
+    cache_payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": positions,
+        "source": "kap_portfolio_allocation_report",
+        "message": None,
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-05-01T00:00:00+00:00",
+            "as_of": "2026-04-30",
+            "parse_status": "ok",
+            "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
+            "latest_report": {"disclosure_index": 1601574, "report_date": "2026-04-30"},
+            "previous_report": {"disclosure_index": 1583104, "report_date": "2026-03-31"},
+            "disclosure_check": {"checked_at": "2026-05-01T00:00:00+00:00", "ttl_seconds": 21600},
+            "positions_hash": fund_service_module._holdings_positions_hash(positions),
+            "warnings": [],
+        },
+    }
+    (tmp_path / "TLY.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 20, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_search_fund_metadata",
+        lambda _fund_code: {"fund_code": "TLY", "fund_oid": "fund-oid", "fund_name": "TLY"},
+    )
+    monkeypatch.setattr(fund_service_module, "_kap_portfolio_subject_oid", lambda _fund_oid: "subject-oid")
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_list_portfolio_disclosures",
+        lambda _fund_oid, _subject_oid: [
+            {"disclosureBasic": {"disclosureIndex": 1601574, "publishDate": "06.05.2026 09:00:00"}},
+            {"disclosureBasic": {"disclosureIndex": 1583104, "publishDate": "05.04.2026 09:00:00"}},
+        ],
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_fetch_report_detail",
+        lambda _disclosure_index: pytest.fail("unchanged disclosure should not fetch attachment detail"),
+    )
+
+    payload = fund_service_module.get_fund_holdings_payload(tmp_path, "TLY")
+
+    assert payload["positions"][0]["asset_code"] == "DSTKF"
+    assert payload["source_metadata"]["cache_hit"] is True
+    assert payload["source_metadata"]["static_cache_hit"] is True
+    assert payload["source_metadata"]["disclosure_check"]["latest_disclosure_index"] == 1601574
+
+
+def test_fund_holdings_parser_version_reuses_cached_attachment_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    (tmp_path / "TLY.json").write_text(
+        json.dumps(
+            {
+                "fund_code": "TLY",
+                "status": "ok",
+                "positions": [],
+                "source": "kap_portfolio_allocation_report",
+                "message": None,
+                "source_metadata": {
+                    "fetched_at": "2026-05-01T00:00:00+00:00",
+                    "parse_status": "ok",
+                    "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION - 1,
+                    "latest_report": {"disclosure_index": 1601574, "report_date": "2026-04-30"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    text_cache_path = tmp_path / "attachment_text.json"
+    text_cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": fund_service_module.KAP_HOLDINGS_ATTACHMENT_TEXT_CACHE_VERSION,
+                "disclosure_index": 1601574,
+                "obj_id": "pdf-obj",
+                "file_name": "TLY_2026.04.pdf",
+                "fetched_at": "2026-05-06T09:00:00+00:00",
+                "text": """
+III-FON PORTFÖY DEĞERİ TABLOSU
+Hisse Türk
+AKBNK AKBANK T.A.Ş. 18.653.248,00 69,718033 30/04/26 73,200000 1.365.417.753,60 4,66 3,67TL 80100511 3,67TRAAKBNK91N6
+""",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 20, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_search_fund_metadata",
+        lambda _fund_code: {"fund_code": "TLY", "fund_oid": "fund-oid", "fund_name": "TLY"},
+    )
+    monkeypatch.setattr(fund_service_module, "_kap_portfolio_subject_oid", lambda _fund_oid: "subject-oid")
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_list_portfolio_disclosures",
+        lambda _fund_oid, _subject_oid: [
+            {"disclosureBasic": {"disclosureIndex": 1601574, "publishDate": "06.05.2026 09:00:00"}},
+        ],
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_fetch_report_detail",
+        lambda _disclosure_index: {
+            "disclosureBasic": {"disclosureIndex": 1601574, "year": 2026, "donem": 4},
+            "attachments": [{"fileExtension": "pdf", "objId": "pdf-obj", "fileName": "TLY_2026.04.pdf"}],
+        },
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "_holdings_attachment_text_path",
+        lambda _processed_dir, _disclosure_index, _obj_id: text_cache_path,
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_download_attachment",
+        lambda _obj_id: pytest.fail("cached attachment text should avoid PDF download"),
+    )
+
+    payload = fund_service_module.get_fund_holdings_payload(tmp_path, "TLY")
+
+    assert payload["source_metadata"]["latest_report"]["attachment_text_cache_hit"] is True
+    assert payload["positions"][0]["asset_code"] == "AKBNK"
+    assert payload["source_metadata"]["parser_version"] == fund_service_module.KAP_HOLDINGS_PARSE_VERSION
+
+
+def test_api_fund_holdings_enriches_daily_market_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    cache_payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {
+                "fund_code": "TLY",
+                "asset_code": "DSTKF",
+                "asset_name": "DESTEK FİNANS FAKTORİNG A.Ş.",
+                "asset_type": "local_equity",
+                "weight": 20.0,
+                "previous_weight": 18.0,
+                "weight_change": 2.0,
+                "change_status": "increased",
+                "amount": None,
+                "market_value": None,
+                "price": None,
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": "https://www.kap.org.tr/tr/Bildirim/1601574",
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            },
+            {
+                "fund_code": "TLY",
+                "asset_code": "PKZ",
+                "asset_name": "PUSULA PORTFÖY KUZEY HİSSE SENEDİ SERBEST FON",
+                "asset_type": "fund",
+                "weight": 10.0,
+                "previous_weight": 8.0,
+                "weight_change": 2.0,
+                "change_status": "increased",
+                "amount": None,
+                "market_value": None,
+                "price": None,
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": "https://www.kap.org.tr/tr/Bildirim/1601574",
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            },
+            {
+                "fund_code": "TLY",
+                "asset_code": "MISS",
+                "asset_name": "Eksik Hisse",
+                "asset_type": "local_equity",
+                "weight": 5.0,
+                "previous_weight": 4.0,
+                "weight_change": 1.0,
+                "change_status": "increased",
+                "amount": None,
+                "market_value": None,
+                "price": None,
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": None,
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            },
+            {
+                "fund_code": "TLY",
+                "asset_code": "OLD",
+                "asset_name": "Çıkan Hisse",
+                "asset_type": "local_equity",
+                "weight": 0.0,
+                "previous_weight": 2.0,
+                "weight_change": -2.0,
+                "change_status": "removed",
+                "amount": None,
+                "market_value": None,
+                "price": None,
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": None,
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            },
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "message": None,
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-05-01T00:00:00+00:00",
+            "as_of": "2026-04-30",
+            "cache_hit": False,
+            "stale": False,
+            "parse_status": "ok",
+            "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
+            "disclosure_check": {"checked_at": "2026-05-20T11:00:00+00:00", "ttl_seconds": 21600},
+            "warnings": [],
+        },
+    }
+    (tmp_path / "TLY.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 20, 12, tzinfo=timezone.utc))
+
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_market_price_map",
+        lambda symbols, **_kwargs: {
+            "DSTKF": {"price": 40.0, "currency": "TRY", "change_pct": 2.5, "as_of": "2026-05-20T10:00:00+00:00"},
+            "OLD": {"price": 9.0, "currency": "TRY", "change_pct": 10.0, "as_of": "2026-05-20T10:00:00+00:00"},
+        },
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "load_funds_snapshot",
+        lambda _processed_dir: {
+            "rows": [
+                {"fund_code": "TLY", "as_of": "2026-05-20", "aum": 100_000_000.0},
+                {"fund_code": "PKZ", "as_of": "2026-05-20", "price": 12.34, "daily_return": 1.2},
+            ]
+        },
+    )
+    client = TestClient(app)
+
+    response = client.get("/funds/TLY/holdings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    positions = {item["asset_code"]: item for item in payload["positions"]}
+    assert positions["DSTKF"]["price"] == 40.0
+    assert positions["DSTKF"]["return_pct"] == 2.5
+    assert positions["DSTKF"]["estimated_exposure_value"] == 20_000_000.0
+    assert positions["DSTKF"]["estimated_pnl_value"] == 500_000.0
+    assert positions["DSTKF"]["estimated_fund_return_contribution_pct"] == 0.5
+    assert positions["PKZ"]["price"] == 12.34
+    assert positions["PKZ"]["return_pct"] == 1.2
+    assert positions["PKZ"]["estimated_pnl_value"] == 120_000.0
+    assert positions["OLD"]["estimated_fund_return_contribution_pct"] is None
+    assert payload["portfolio_effect"]["estimated_return_pct"] == pytest.approx(0.62)
+    assert payload["portfolio_effect"]["estimated_pnl_value"] == 620_000.0
+    assert payload["portfolio_effect"]["priced_weight"] == 30.0
+    assert payload["portfolio_effect"]["missing_weight"] == 5.0
+
+
+def test_api_fund_holdings_enriches_tpkgy_from_gefas(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    cache_payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {
+                "fund_code": "TLY",
+                "asset_code": "TPKGYF",
+                "asset_name": "TERA PORTFÖY KONUT ALFA KATILIM GAYRİMENKUL YATIRIM FONU",
+                "asset_type": "fund",
+                "weight": 10.0,
+                "previous_weight": 8.0,
+                "weight_change": 2.0,
+                "change_status": "increased",
+                "amount": None,
+                "market_value": None,
+                "price": None,
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": None,
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            }
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "message": None,
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-05-01T00:00:00+00:00",
+            "as_of": "2026-04-30",
+            "stale": False,
+            "parse_status": "ok",
+            "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
+            "disclosure_check": {"checked_at": "2026-05-20T11:00:00+00:00", "ttl_seconds": 21600},
+            "warnings": [],
+        },
+    }
+    (tmp_path / "TLY.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 20, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(
+        fund_service_module,
+        "load_funds_snapshot",
+        lambda _processed_dir: {"rows": [{"fund_code": "TLY", "as_of": "2026-05-20", "aum": 100_000_000.0}]},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_gefas_gyf_quote",
+        lambda symbol: {
+            "price": 8043.164427,
+            "currency": "TRY",
+            "change_pct": 0.21,
+            "as_of": "2026-05-18",
+            "source": "gefas_gyf",
+        }
+        if api_module._gefas_gyf_config(symbol)
+        else None,
+    )
+    client = TestClient(app)
+
+    response = client.get("/funds/TLY/holdings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    position = payload["positions"][0]
+    assert position["price"] == 8043.164427
+    assert position["return_pct"] == 0.21
+    assert position["return_source"] == "gefas_gyf"
+    assert position["return_as_of"] == "2026-05-18"
+    assert position["estimated_exposure_value"] == 10_000_000.0
+    assert position["estimated_pnl_value"] == 21_000.0
+    assert position["estimated_fund_return_contribution_pct"] == pytest.approx(0.021)
+    assert payload["portfolio_effect"]["estimated_return_pct"] == pytest.approx(0.021)
+    assert payload["portfolio_effect"]["estimated_pnl_value"] == 21_000.0
+    assert payload["portfolio_effect"]["priced_weight"] == 10.0
+    assert payload["portfolio_effect"]["missing_weight"] == 0.0
+    assert payload["source_metadata"]["daily_market_enrichment"]["gefas_gyf_quote_count"] == 1
+
+
+def test_api_fund_holdings_does_not_cache_final_live_quote_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    cache_payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {
+                "fund_code": "TLY",
+                "asset_code": "DSTKF",
+                "asset_name": "DESTEK FİNANS FAKTORİNG A.Ş.",
+                "asset_type": "local_equity",
+                "weight": 20.0,
+                "previous_weight": 18.0,
+                "weight_change": 2.0,
+                "change_status": "increased",
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": "https://www.kap.org.tr/tr/Bildirim/1601574",
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            }
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "message": None,
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-05-01T00:00:00+00:00",
+            "as_of": "2026-04-30",
+            "parse_status": "ok",
+            "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
+            "disclosure_check": {"checked_at": "2026-05-20T11:00:00+00:00", "ttl_seconds": 21600},
+            "warnings": [],
+        },
+    }
+    (tmp_path / "TLY.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 20, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(
+        fund_service_module,
+        "load_funds_snapshot",
+        lambda _processed_dir: {"rows": [{"fund_code": "TLY", "as_of": "2026-05-20", "aum": 100_000_000.0}]},
+    )
+    calls = {"count": 0}
+
+    def fake_price_map(_symbols: List[str], **_kwargs: Any) -> Dict[str, Dict[str, Any]]:
+        calls["count"] += 1
+        price = 40.0 + calls["count"]
+        return {"DSTKF": {"price": price, "currency": "TRY", "change_pct": 1.0, "as_of": "2026-05-20T10:00:00+00:00"}}
+
+    monkeypatch.setattr(api_module, "_fetch_market_price_map", fake_price_map)
+    client = TestClient(app)
+
+    first = client.get("/funds/TLY/holdings").json()
+    second = client.get("/funds/TLY/holdings").json()
+
+    assert first["positions"][0]["price"] == 41.0
+    assert second["positions"][0]["price"] == 42.0
+    assert calls["count"] == 2
 
 
 def test_kap_holdings_parser_keeps_only_equities_and_funds() -> None:

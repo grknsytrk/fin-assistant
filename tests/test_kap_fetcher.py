@@ -287,6 +287,61 @@ def test_fetch_snapshot_uses_ticker_alias_cache_when_live_list_is_empty(
     assert payload["quarters"][0]["quarter"] == "2026Q1"
 
 
+def test_resolve_member_prefers_ticker_title_hint_for_ambiguous_tera(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_http_get_json(url: str, _cfg_obj: object) -> list[dict[str, str]]:
+        assert url.endswith("/TERA")
+        return [
+            {
+                "companyCode": "5364",
+                "mkkMemberOid": "oid-medtr",
+                "title": "MEDİTERA TIBBİ MALZEME SANAYİ VE TİCARET A.Ş.",
+                "permaLink": "5364-meditera-tibbi-malzeme-sanayi-ve-ticaret-a-s",
+            },
+            {
+                "companyCode": "2464",
+                "mkkMemberOid": "oid-tera",
+                "title": "TERA YATIRIM MENKUL DEĞERLER A.Ş.",
+                "permaLink": "2464-tera-yatirim-menkul-degerler-a-s",
+            },
+        ]
+
+    monkeypatch.setattr(kap_fetcher, "_http_get_json", fake_http_get_json)
+
+    member = kap_fetcher._resolve_member("TERA", _cfg())
+
+    assert member is not None
+    assert member["mkk_member_oid"] == "oid-tera"
+    assert member["title"] == "TERA YATIRIM MENKUL DEĞERLER A.Ş."
+
+
+def test_read_first_cache_ignores_mismatched_tera_cache(tmp_path) -> None:
+    cache_dir = tmp_path / "kap_cache"
+    cache_dir.mkdir()
+    wrong_cache = {
+        "ok": True,
+        "schema_version": KAP_CACHE_SCHEMA_VERSION,
+        "company": "MEDTR",
+        "stock_code": "MEDTR",
+        "company_title": "MEDİTERA TIBBİ MALZEME SANAYİ VE TİCARET A.Ş.",
+        "fetched_at": "2026-05-20T00:00:00+00:00",
+        "quarters": [{"quarter": "2026Q1", "year": 2026, "period": 1, "stock_code": "MEDTR"}],
+    }
+    (cache_dir / "TERA.json").write_text(json.dumps(wrong_cache), encoding="utf-8")
+
+    cache_path, cached = kap_fetcher._read_first_cache(tmp_path, "TERA")
+
+    assert cache_path.name == "TERA.json"
+    assert cached is None
+
+
+def test_normalize_disclosure_stock_code_prefers_requested_ticker() -> None:
+    assert kap_fetcher._normalize_disclosure_stock_code("TERA, TRA", "TERA") == "TERA"
+    assert kap_fetcher._normalize_disclosure_stock_code("ABC, XYZ", "XYZ") == "XYZ"
+    assert kap_fetcher._normalize_disclosure_stock_code("ABC, XYZ", "DEF") == "ABC"
+
+
 def test_fetch_snapshot_can_serve_complete_cache_without_live_request(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

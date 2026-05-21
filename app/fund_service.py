@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import io
 import json
 import os
@@ -17,6 +18,13 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, urlencode
 
 import httpx
+
+from app.reference_data import (
+    get_instrument,
+    get_instrument_name,
+    get_instrument_names,
+    upsert_instruments,
+)
 
 FINTABLES_USER_AGENT = os.getenv(
     "RAGFIN_FINTABLES_USER_AGENT",
@@ -74,9 +82,13 @@ TEFAS_OPEN_ONLY = os.getenv("RAGFIN_TEFAS_OPEN_ONLY", "1").strip().lower() not i
     "off",
 }
 FUNDS_SNAPSHOT_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_TTL_SECONDS", str(24 * 60 * 60)))
+FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS", "300"))
+FUNDS_DAILY_SNAPSHOT_CACHE_VERSION = 2
 FUNDS_HISTORY_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HISTORY_TTL_SECONDS", str(24 * 60 * 60)))
 FUNDS_ALLOCATION_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_ALLOCATION_TTL_SECONDS", str(24 * 60 * 60)))
 FUNDS_HOLDINGS_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_TTL_SECONDS", str(7 * 24 * 60 * 60)))
+FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS", str(6 * 60 * 60)))
+FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS", str(30 * 60)))
 FUNDS_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_FUNDS_HISTORY_CHUNK_DAYS", "60"))
 FUNDS_WEB_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_FUNDS_WEB_HISTORY_CHUNK_DAYS", "30"))
 FUNDS_WEB_HISTORY_SLEEP_SECONDS = float(os.getenv("RAGFIN_FUNDS_WEB_HISTORY_SLEEP_SECONDS", "0.35"))
@@ -86,7 +98,9 @@ FUNDS_AUTO_FETCH_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_AUTO_FETCH_LOOKBACK
 FUNDS_AUTO_FETCH_NEGATIVE_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_AUTO_FETCH_NEGATIVE_TTL_SECONDS", "60"))
 FUNDS_OVERVIEW_METRIC_MONTHS = int(os.getenv("RAGFIN_FUNDS_OVERVIEW_METRIC_MONTHS", "6"))
 FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS", "10"))
+FUNDS_FAST_LONG_RANGE_DAYS = int(os.getenv("RAGFIN_FUNDS_FAST_LONG_RANGE_DAYS", "120"))
 FUNDS_FULL_HISTORY_START_DATE = os.getenv("RAGFIN_FUNDS_FULL_HISTORY_START_DATE", "2000-01-01").strip() or "2000-01-01"
+FUNDS_LIST_MIN_AUM = float(os.getenv("RAGFIN_FUNDS_LIST_MIN_AUM", "300000000"))
 FUND_PRICES_DB_FILENAME = os.getenv("RAGFIN_FUND_PRICES_DB_FILENAME", "fund_prices.sqlite3")
 KAP_BASE_URL = os.getenv("RAGFIN_KAP_BASE_URL", "https://www.kap.org.tr").rstrip("/")
 KAP_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_KAP_TIMEOUT_SECONDS", "20"))
@@ -95,8 +109,10 @@ KAP_PORTFOLIO_ALLOCATION_SUBJECT_OID = os.getenv(
     "8aca490d502e34b801502e380044002b",
 ).strip()
 KAP_HOLDINGS_LOOKBACK_DAYS = int(os.getenv("RAGFIN_KAP_HOLDINGS_LOOKBACK_DAYS", "365"))
+KAP_HOLDINGS_ATTACHMENT_TEXT_CACHE_VERSION = 1
 
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
+_SNAPSHOT_REFRESH_LOCK = threading.Lock()
 _AUTO_FETCH_LOCK = threading.Lock()
 _AUTO_FETCH_IN_FLIGHT: Dict[str, threading.Event] = {}
 _AUTO_FETCH_NEGATIVE_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -228,6 +244,14 @@ def _fund_cache_dir(processed_dir: Path) -> Path:
     return processed_dir / "funds_cache"
 
 
+def _fund_daily_snapshot_dir(processed_dir: Path) -> Path:
+    return _fund_cache_dir(processed_dir) / "daily_snapshots"
+
+
+def _fund_daily_snapshot_path(processed_dir: Path, as_of: date) -> Path:
+    return _fund_daily_snapshot_dir(processed_dir) / f"{as_of.isoformat()}.json"
+
+
 def _snapshot_path(processed_dir: Path) -> Path:
     return _fund_cache_dir(processed_dir) / "funds_latest.json"
 
@@ -259,6 +283,16 @@ def _holdings_dir(processed_dir: Path) -> Path:
 
 def _holdings_path(processed_dir: Path, fund_code: str) -> Path:
     return _holdings_dir(processed_dir) / f"{normalize_fund_code(fund_code)}.json"
+
+
+def _holdings_attachment_text_dir(processed_dir: Path) -> Path:
+    return _holdings_dir(processed_dir) / "attachment_text"
+
+
+def _holdings_attachment_text_path(processed_dir: Path, disclosure_index: Any, obj_id: Any) -> Path:
+    index_text = re.sub(r"[^A-Za-z0-9_-]+", "_", str(disclosure_index or "unknown").strip() or "unknown")
+    obj_text = re.sub(r"[^A-Za-z0-9_-]+", "_", str(obj_id or "unknown").strip() or "unknown")
+    return _holdings_attachment_text_dir(processed_dir) / f"{index_text}_{obj_text}.json"
 
 
 def _fund_prices_db_path(processed_dir: Path) -> Path:
@@ -362,6 +396,58 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     tmp.replace(path)
     _MEMORY_CACHE.clear()
+
+
+def _daily_snapshot_cache_is_fresh(payload: Dict[str, Any], as_of: date) -> bool:
+    metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+    cache_version = _coerce_int(payload.get("cache_version") or metadata.get("cache_version"))
+    if cache_version != FUNDS_DAILY_SNAPSHOT_CACHE_VERSION:
+        return False
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        return False
+    target_date = _latest_fund_snapshot_target_date()
+    if as_of < target_date:
+        return True
+    fetched_at = payload.get("fetched_at") or (payload.get("source_metadata") or {}).get("fetched_at")
+    age = _cache_age_seconds(fetched_at)
+    return age is not None and age <= max(1, FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS)
+
+
+def _cached_daily_funds_snapshot(
+    processed_dir: Path,
+    client: "TefasFonClient",
+    as_of: date,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    path = _fund_daily_snapshot_path(processed_dir, as_of)
+    cached = _read_json(path) or {}
+    if cached and _daily_snapshot_cache_is_fresh(cached, as_of):
+        rows = [row for row in list(cached.get("rows") or []) if isinstance(row, dict)]
+        return rows, True
+
+    fetched_at = _utc_now_iso()
+    rows = client.fetch_daily_funds_snapshot(as_of)
+    payload = {
+        "status": "ok" if rows else "empty",
+        "cache_version": FUNDS_DAILY_SNAPSHOT_CACHE_VERSION,
+        "as_of": as_of.isoformat(),
+        "fetched_at": fetched_at,
+        "source": TEFASFON_FUNDS_SOURCE,
+        "rows": rows,
+        "source_metadata": {
+            "source": TEFASFON_FUNDS_SOURCE,
+            "as_of": as_of.isoformat(),
+            "fetched_at": fetched_at,
+            "cache_policy": "daily_snapshot",
+            "cache_version": FUNDS_DAILY_SNAPSHOT_CACHE_VERSION,
+            "row_count": len(rows),
+        },
+    }
+    _write_json(path, payload)
+    if rows:
+        upsert_fund_price_points(processed_dir, rows, source=TEFASFON_FUNDS_SOURCE, fetched_at=fetched_at)
+        _upsert_fund_reference_data(processed_dir, rows)
+    return rows, False
 
 
 def _parse_iso_datetime(raw: Any) -> Optional[datetime]:
@@ -552,6 +638,27 @@ def _is_target_fund_row(row: Dict[str, Any]) -> bool:
 
 def _filter_target_fund_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict) and _is_target_fund_row(row) and _is_tefas_open_row(row)]
+
+
+def _fund_row_aum(row: Dict[str, Any]) -> Optional[float]:
+    return _coerce_float(
+        _first_present(
+            row,
+            "aum",
+            "portfoyBuyukluk",
+            "portBuyukluk",
+            "sonPortfoyDegeri",
+            "PORTFOYBUYUKLUK",
+            "PORTFOY_BUYUKLUK",
+        )
+    )
+
+
+def _meets_min_aum(row: Dict[str, Any], min_aum: Optional[float]) -> bool:
+    if min_aum is None or min_aum <= 0:
+        return True
+    aum = _fund_row_aum(row)
+    return aum is not None and aum >= min_aum
 
 
 def _infer_fund_type_from_name(name: Any) -> Optional[str]:
@@ -967,6 +1074,46 @@ def _normalize_history_row(row: Dict[str, Any], fallback_code: str | None = None
         "source_url": _first_text(row, "source_url", "SOURCE_URL"),
         "raw": row,
     }
+
+
+def _upsert_fund_reference_data(
+    processed_dir: Path,
+    rows: Iterable[Dict[str, Any]],
+) -> Dict[str, Any]:
+    records: List[Dict[str, Any]] = []
+    for row in rows:
+        point = _normalize_history_row(row) or {
+            "fund_code": normalize_fund_code(_first_text(row, "fund_code", "fonKodu", "FONKODU")),
+            "name": _first_text(row, "name", "fonUnvan", "FONUNVAN"),
+            "date": _fund_date(_first_present(row, "date", "as_of", "tarih", "TARIH")),
+            "fund_type": _first_text(row, "fund_type", "fonTurAciklama", "FON_TURU"),
+            "founder_company": _first_text(row, "founder_company", "KURUCU", "kurucuUnvan"),
+            "manager_company": _first_text(row, "manager_company", "YONETICI", "yoneticiUnvan"),
+            "risk_value": _coerce_int(_first_present(row, "risk_value", "riskDegeri", "RISKDEGERI")),
+            "tefas_open": _tefas_open_status(row),
+            "source": _first_text(row, "source", "SOURCE"),
+        }
+        if not point.get("fund_code"):
+            continue
+        records.append(
+            {
+                "kind": "fund",
+                "symbol": point["fund_code"],
+                "name": point.get("name"),
+                "short_name": point["fund_code"],
+                "source": point.get("source") or TEFASFON_FUNDS_SOURCE,
+                "as_of": point.get("date"),
+                "active": point.get("tefas_open") is not False,
+                "metadata": {
+                    "fund_type": point.get("fund_type"),
+                    "founder_company": point.get("founder_company"),
+                    "manager_company": point.get("manager_company"),
+                    "risk_value": point.get("risk_value"),
+                    "tefas_open": point.get("tefas_open"),
+                },
+            }
+        )
+    return upsert_instruments(processed_dir, records)
 
 
 _FUND_PRICE_SOURCE_PRIORITY = {
@@ -1499,6 +1646,13 @@ def _is_turkey_market_business_day(day: date) -> bool:
     return day.weekday() < 5 and day not in _TURKEY_MARKET_FULL_DAY_HOLIDAYS
 
 
+def _previous_turkey_market_business_day(day: date) -> date:
+    current = day - timedelta(days=1)
+    while not _is_turkey_market_business_day(current):
+        current -= timedelta(days=1)
+    return current
+
+
 def _business_days_between(start: date, end: date) -> int:
     if start > end:
         return 0
@@ -1509,6 +1663,15 @@ def _business_days_between(start: date, end: date) -> int:
             days += 1
         current += timedelta(days=1)
     return days
+
+
+def _latest_fund_snapshot_target_date(today: Optional[date] = None) -> date:
+    current = today or date.today()
+    if _is_turkey_market_business_day(current):
+        return current
+    while not _is_turkey_market_business_day(current):
+        current -= timedelta(days=1)
+    return current
 
 
 def _history_coverage_info(points: List[Dict[str, Any]], end_date: date, threshold_days: int = 3) -> Dict[str, Any]:
@@ -2380,9 +2543,7 @@ class TefasFonClient:
             except TefasUpstreamError as exc:
                 warnings.append(f"tefasfon_returns failed: {exc}")
             try:
-                previous_business_day = target_date - timedelta(days=1)
-                while previous_business_day.weekday() >= 5:
-                    previous_business_day -= timedelta(days=1)
+                previous_business_day = _previous_turkey_market_business_day(target_date)
                 daily_return_rows = self.fetch_returns(start_date=previous_business_day, end_date=target_date)
                 weekly_return_rows = self.fetch_returns(start_date=target_date - timedelta(days=7), end_date=target_date)
                 fund_rows = _merge_tefasfon_range_returns(
@@ -2618,14 +2779,34 @@ def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
             _MEMORY_CACHE[cache_key] = {"mtime": stat.st_mtime, "payload": payload}
     fetched_at = payload.get("fetched_at")
     age = _cache_age_seconds(fetched_at)
-    stale = bool(payload.get("stale")) or age is None or age > FUNDS_SNAPSHOT_TTL_SECONDS
     meta = dict(payload.get("source_metadata") or {})
+    target_date = _latest_fund_snapshot_target_date()
+    snapshot_as_of = _fund_date(payload.get("as_of") or meta.get("as_of"))
+    snapshot_lag_days: Optional[int] = None
+    if snapshot_as_of:
+        try:
+            snapshot_lag_days = max(0, (target_date - date.fromisoformat(snapshot_as_of)).days)
+        except ValueError:
+            snapshot_lag_days = None
+    is_behind_target = snapshot_lag_days is not None and snapshot_lag_days > 0
+    recently_checked_current_day = (
+        is_behind_target
+        and age is not None
+        and age <= max(0, FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS)
+    )
+    ttl_stale = age is None or age > FUNDS_SNAPSHOT_TTL_SECONDS
+    stale = bool(payload.get("stale")) or ttl_stale or (is_behind_target and not recently_checked_current_day)
     public_source = _public_price_source(str(payload.get("source") or meta.get("source") or TEFASFON_FUNDS_SOURCE))
     meta["source"] = public_source
     if public_source == "legacy_cache":
         meta["source_url"] = None
     meta["cache_hit"] = bool(stat)
     meta["stale"] = stale
+    meta["snapshot_target_date"] = target_date.isoformat()
+    meta["snapshot_as_of_lag_days"] = snapshot_lag_days
+    meta["snapshot_intraday_check_ttl_seconds"] = FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS
+    if is_behind_target:
+        meta["awaiting_current_snapshot"] = recently_checked_current_day
     meta["tefas_open_only"] = TEFAS_OPEN_ONLY
     payload = dict(payload)
     payload["source"] = public_source
@@ -2847,6 +3028,7 @@ def refresh_funds_snapshot(processed_dir: Path, *, lookback_days: int = 10) -> D
         source=TEFASFON_FUNDS_SOURCE,
         fetched_at=str(snapshot.get("fetched_at") or _utc_now_iso()),
     )
+    snapshot["source_metadata"]["reference_data"] = _upsert_fund_reference_data(processed_dir, snapshot["rows"])
     _write_json(_snapshot_path(processed_dir), snapshot)
     return snapshot
 
@@ -2947,6 +3129,7 @@ def collect_daily_fund_prices(
     snapshot["source_metadata"]["source_policy"] = FUND_HISTORY_SOURCE_POLICY
     snapshot["source_metadata"]["fallback_used"] = fallback_attempted
     if snapshot_rows:
+        snapshot["source_metadata"]["reference_data"] = _upsert_fund_reference_data(processed_dir, snapshot_rows)
         _write_json(_snapshot_path(processed_dir), snapshot)
 
     skipped_warnings = [
@@ -3052,6 +3235,33 @@ def _sort_rows(rows: List[Dict[str, Any]], sort: str, order: str) -> List[Dict[s
     return ordered
 
 
+def _refresh_funds_snapshot_if_stale(processed_dir: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    if not snapshot.get("stale"):
+        return snapshot
+    source = _public_price_source(str(snapshot.get("source") or (snapshot.get("source_metadata") or {}).get("source") or ""))
+    if source != TEFASFON_FUNDS_SOURCE:
+        return snapshot
+    acquired = _SNAPSHOT_REFRESH_LOCK.acquire(blocking=False)
+    if not acquired:
+        return snapshot
+    try:
+        refresh_funds_snapshot(processed_dir, lookback_days=10)
+        return load_funds_snapshot(processed_dir)
+    except Exception as exc:
+        payload = dict(snapshot)
+        warnings = list(payload.get("warnings") or [])
+        warnings.append(f"fund snapshot auto-refresh failed: {exc}")
+        meta = dict(payload.get("source_metadata") or {})
+        meta["auto_refresh_failed"] = True
+        meta["auto_refresh_error"] = str(exc)
+        meta["warnings"] = list(meta.get("warnings") or []) + [f"fund snapshot auto-refresh failed: {exc}"]
+        payload["warnings"] = warnings
+        payload["source_metadata"] = meta
+        return payload
+    finally:
+        _SNAPSHOT_REFRESH_LOCK.release()
+
+
 def get_funds_payload(
     processed_dir: Path,
     *,
@@ -3062,17 +3272,23 @@ def get_funds_payload(
     risk: Optional[str] = None,
     sort: str = "fund_code",
     order: str = "asc",
+    min_aum: Optional[float] = FUNDS_LIST_MIN_AUM,
+    auto_refresh: bool = False,
 ) -> Dict[str, Any]:
     snapshot = load_funds_snapshot(processed_dir)
+    if auto_refresh:
+        snapshot = _refresh_funds_snapshot_if_stale(processed_dir, snapshot)
     rows = [
         row
         for row in list(snapshot.get("rows") or [])
         if isinstance(row, dict)
-        and _is_target_fund_row(row)
         and _is_tefas_open_row(row)
+        and _meets_min_aum(row, min_aum)
         and _row_matches(row, q=q, fund_type=fund_type, founder=founder, manager=manager, risk=risk)
     ]
     rows = _sort_rows(rows, sort, order)
+    meta = dict(snapshot.get("source_metadata") or {})
+    meta["list_min_aum"] = min_aum
     return {
         "status": snapshot.get("status") or ("ok" if rows else "empty"),
         "rows": rows,
@@ -3085,7 +3301,7 @@ def get_funds_payload(
         "stale": bool(snapshot.get("stale")),
         "degraded": bool(snapshot.get("degraded")),
         "warnings": list(snapshot.get("warnings") or []),
-        "source_metadata": snapshot.get("source_metadata") or {},
+        "source_metadata": meta,
     }
 
 
@@ -3094,8 +3310,10 @@ def get_fund_categories_payload(processed_dir: Path) -> Dict[str, Any]:
     rows = [
         row
         for row in list(snapshot.get("rows") or [])
-        if isinstance(row, dict) and _is_target_fund_row(row) and _is_tefas_open_row(row)
+        if isinstance(row, dict) and _is_tefas_open_row(row) and _meets_min_aum(row, FUNDS_LIST_MIN_AUM)
     ]
+    meta = dict(snapshot.get("source_metadata") or {})
+    meta["list_min_aum"] = FUNDS_LIST_MIN_AUM
 
     def unique(key: str) -> List[str]:
         values = sorted({str(row.get(key)).strip() for row in rows if row.get(key)})
@@ -3108,7 +3326,7 @@ def get_fund_categories_payload(processed_dir: Path) -> Dict[str, Any]:
         "founder_companies": unique("founder_company"),
         "manager_companies": unique("manager_company"),
         "risk_values": risk_values,
-        "source_metadata": snapshot.get("source_metadata") or {},
+        "source_metadata": meta,
     }
 
 
@@ -3118,7 +3336,6 @@ def _find_fund_row(processed_dir: Path, fund_code: str) -> Optional[Dict[str, An
     for row in list(snapshot.get("rows") or []):
         if (
             isinstance(row, dict)
-            and _is_target_fund_row(row)
             and _is_tefas_open_row(row)
             and normalize_fund_code(str(row.get("fund_code") or "")) == normalized
         ):
@@ -3279,6 +3496,7 @@ def _fund_performance_payload_from_points(
     fallback_used: bool = False,
     fallback_reason: Optional[str] = None,
     overview_metric_backfill: Optional[Dict[str, Any]] = None,
+    full_history_requested: bool = False,
 ) -> Dict[str, Any]:
     ordered = _valid_performance_points(points, normalized_code)
     latest_point_date = ordered[-1]["date"] if ordered else None
@@ -3325,6 +3543,7 @@ def _fund_performance_payload_from_points(
         "date_min": date_min,
         "date_max": date_max,
         "backfill_used": backfill_used,
+        "full_history_requested": bool(full_history_requested),
         "latest_point_date": coverage.get("latest_point_date"),
         "coverage_gap_days": coverage.get("coverage_gap_days"),
         "coverage_gap_business_days": coverage.get("coverage_gap_business_days"),
@@ -3386,6 +3605,35 @@ def _has_requested_price_coverage(
         if gap_days > 3 and _business_days_between(latest + timedelta(days=1), end_date) > 3:
             return False
     return True
+
+
+def _latest_fund_point_date(points: List[Dict[str, Any]]) -> Optional[date]:
+    latest: Optional[date] = None
+    for point in points:
+        raw_date = point.get("date") if isinstance(point, dict) else None
+        if not isinstance(raw_date, str):
+            continue
+        try:
+            point_date = date.fromisoformat(raw_date)
+        except ValueError:
+            continue
+        if latest is None or point_date > latest:
+            latest = point_date
+    return latest
+
+
+def _recent_tail_refresh_target(end_date: date) -> date:
+    return min(end_date, _latest_fund_snapshot_target_date())
+
+
+def _needs_recent_tail_refresh(points: List[Dict[str, Any]], *, end_date: date) -> bool:
+    latest = _latest_fund_point_date(points)
+    if latest is None:
+        return False
+    target_date = _recent_tail_refresh_target(end_date)
+    if latest >= target_date:
+        return False
+    return _business_days_between(latest + timedelta(days=1), target_date) > 0
 
 
 def _history_cache_covers_requested_span(
@@ -3487,9 +3735,15 @@ def _has_overview_metrics(point: Optional[Dict[str, Any]]) -> bool:
     return aum is not None and aum > 0 and investor_count is not None
 
 
-def _missing_overview_metric_targets(points: List[Dict[str, Any]], *, end_date: date) -> List[Dict[str, Any]]:
+def _missing_overview_metric_targets(
+    points: List[Dict[str, Any]],
+    *,
+    end_date: date,
+    targets: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     missing: List[Dict[str, Any]] = []
-    for target in _overview_metric_targets(end_date):
+    selected_targets = _overview_metric_targets(end_date) if targets is None else targets
+    for target in selected_targets:
         point = _latest_point_for_month(
             points,
             month=str(target["month"]),
@@ -3505,6 +3759,7 @@ def _fetch_fund_overview_metric_rows(
     targets: List[Dict[str, Any]],
     *,
     client: TefasFonClient,
+    processed_dir: Optional[Path] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[str]]:
     normalized = normalize_fund_code(fund_code)
     rows: List[Dict[str, Any]] = []
@@ -3522,7 +3777,10 @@ def _fetch_fund_overview_metric_rows(
                 current -= timedelta(days=1)
                 continue
             try:
-                snapshot_rows = client.fetch_daily_funds_snapshot(current)
+                if processed_dir is not None:
+                    snapshot_rows, _cache_hit = _cached_daily_funds_snapshot(processed_dir, client, current)
+                else:
+                    snapshot_rows = client.fetch_daily_funds_snapshot(current)
             except TefasUpstreamError as exc:
                 warnings.append(f"tefasfon_funds overview metric snapshot failed for {current.isoformat()}: {exc}")
                 break
@@ -3593,6 +3851,8 @@ def _auto_refresh_fund_performance(
     *,
     start_date: date,
     end_date: date,
+    write_history_cache: bool = True,
+    prefer_fast_long_range: bool = False,
 ) -> List[str]:
     normalized = normalize_fund_code(fund_code)
     key = _auto_fetch_key(processed_dir, normalized, start_date, end_date)
@@ -3623,6 +3883,8 @@ def _auto_refresh_fund_performance(
             normalized,
             start_date=start_date,
             end_date=end_date,
+            write_history_cache=write_history_cache,
+            prefer_fast_long_range=prefer_fast_long_range,
         )
         if not payload.get("points"):
             error = "fund history returned no valid points"
@@ -3647,9 +3909,10 @@ def _auto_refresh_fund_overview_metrics(
     *,
     points: List[Dict[str, Any]],
     end_date: date,
+    targets: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     normalized = normalize_fund_code(fund_code)
-    missing_targets = _missing_overview_metric_targets(points, end_date=end_date)
+    missing_targets = _missing_overview_metric_targets(points, end_date=end_date, targets=targets)
     metadata: Dict[str, Any] = {
         "attempted": False,
         "missing_months": [str(target["month"]) for target in missing_targets],
@@ -3706,6 +3969,7 @@ def _auto_refresh_fund_overview_metrics(
             normalized,
             missing_targets,
             client=client,
+            processed_dir=processed_dir,
         )
         storage_result: Dict[str, Any] = {
             "upserted_count": 0,
@@ -3755,12 +4019,61 @@ def _auto_refresh_fund_overview_metrics(
             event.set()
 
 
+def _long_range_metric_targets(start_date: date, end_date: date) -> List[Dict[str, Any]]:
+    return [
+        target
+        for target in _overview_metric_targets(end_date)
+        if target["target_date"] >= start_date and target["month_start"] <= end_date
+    ]
+
+
+def _fetch_fast_long_fund_history(
+    processed_dir: Path,
+    fund_code: str,
+    *,
+    start_date: date,
+    end_date: date,
+    client: TefasFonClient,
+) -> Tuple[List[Dict[str, Any]], List[str], bool, Optional[str]]:
+    normalized = normalize_fund_code(fund_code)
+    points: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    fallback_used = False
+    fallback_reason: Optional[str] = None
+
+    try:
+        price_points = fetch_fintables_udf_history(normalized, start_date, end_date)
+        if price_points:
+            fallback_used = True
+            fallback_reason = "fast_long_range_price_bootstrap"
+            points.extend(price_points)
+    except FintablesUpstreamError as exc:
+        warnings.append(f"fintables_udf_history fast bootstrap failed: {exc}")
+
+    metric_targets = _long_range_metric_targets(start_date, end_date)
+    if metric_targets:
+        metric_rows, _fetched_months, metric_warnings = _fetch_fund_overview_metric_rows(
+            normalized,
+            metric_targets,
+            client=client,
+            processed_dir=processed_dir,
+        )
+        points.extend(metric_rows)
+        warnings.extend(metric_warnings)
+
+    if not points:
+        warnings.append("fast long range bootstrap returned no points")
+    return points, warnings, fallback_used, fallback_reason
+
+
 def refresh_fund_performance(
     processed_dir: Path,
     fund_code: str,
     *,
     start_date: date,
     end_date: date,
+    write_history_cache: bool = True,
+    prefer_fast_long_range: bool = False,
 ) -> Dict[str, Any]:
     normalized = normalize_fund_code(fund_code)
     warnings: List[str] = []
@@ -3769,16 +4082,29 @@ def refresh_fund_performance(
     fallback_used = False
     fallback_reason: Optional[str] = None
     tefas_failure_reason: Optional[str] = None
-    try:
-        points = TefasFonClient().fetch_history(normalized, start_date, end_date)
+    client = TefasFonClient()
+    if prefer_fast_long_range and (end_date - start_date).days > FUNDS_FAST_LONG_RANGE_DAYS:
+        points, fast_warnings, fallback_used, fallback_reason = _fetch_fast_long_fund_history(
+            processed_dir,
+            normalized,
+            start_date=start_date,
+            end_date=end_date,
+            client=client,
+        )
+        warnings.extend(fast_warnings)
         if not _valid_performance_points(points, normalized):
-            tefas_failure_reason = "tefasfon_funds returned no valid points"
+            points = []
+    else:
+        try:
+            points = client.fetch_history(normalized, start_date, end_date)
+            if not _valid_performance_points(points, normalized):
+                tefas_failure_reason = "tefasfon_funds returned no valid points"
+                warnings.append(tefas_failure_reason)
+                points = []
+        except TefasUpstreamError as exc:
+            tefas_failure_reason = f"tefasfon_funds failed: {exc}"
             warnings.append(tefas_failure_reason)
             points = []
-    except TefasUpstreamError as exc:
-        tefas_failure_reason = f"tefasfon_funds failed: {exc}"
-        warnings.append(tefas_failure_reason)
-        points = []
 
     if not points:
         fallback_used = True
@@ -3823,7 +4149,8 @@ def refresh_fund_performance(
         fallback_used=fallback_used,
         fallback_reason=fallback_reason,
     )
-    _write_json(_history_path(processed_dir, normalized), payload)
+    if write_history_cache:
+        _write_json(_history_path(processed_dir, normalized), payload)
     return payload
 
 
@@ -3875,6 +4202,7 @@ def get_fund_performance_payload(
             normalized,
             start_date=effective_start,
             end_date=effective_end,
+            prefer_fast_long_range=not full_history_requested,
         )
         points = _read_daily_fund_price_points(
             processed_dir,
@@ -3882,15 +4210,39 @@ def get_fund_performance_payload(
             start_date=query_start,
             end_date=query_end,
         )
+    elif _needs_recent_tail_refresh(points, end_date=effective_end):
+        latest_point_date = _latest_fund_point_date(points)
+        if latest_point_date is not None:
+            auto_fetch_attempted = True
+            tail_start = latest_point_date + timedelta(days=1)
+            auto_warnings = _auto_refresh_fund_performance(
+                processed_dir,
+                normalized,
+                start_date=tail_start,
+                end_date=_recent_tail_refresh_target(effective_end),
+                write_history_cache=False,
+            )
+            points = _read_daily_fund_price_points(
+                processed_dir,
+                normalized,
+                start_date=query_start,
+                end_date=query_end,
+            )
 
     overview_metric_backfill: Optional[Dict[str, Any]] = None
     overview_metric_backfill_attempted = False
-    if full_history_requested and points:
+    if points and not (auto_fetch_attempted and not full_history_requested):
+        overview_targets = (
+            None
+            if full_history_requested
+            else _long_range_metric_targets(effective_start, effective_end)
+        )
         overview_metric_backfill = _auto_refresh_fund_overview_metrics(
             processed_dir,
             normalized,
             points=points,
             end_date=effective_end,
+            targets=overview_targets,
         )
         overview_metric_backfill_attempted = bool(overview_metric_backfill.get("attempted"))
         if overview_metric_backfill_attempted:
@@ -3934,6 +4286,7 @@ def get_fund_performance_payload(
                 "date_min": None,
                 "date_max": None,
                 "backfill_used": auto_fetch_attempted,
+                "full_history_requested": full_history_requested,
                 "requested_start_date": effective_start.isoformat(),
                 "requested_end_date": effective_end.isoformat(),
                 "auto_fetch_attempted": auto_fetch_attempted,
@@ -3966,6 +4319,7 @@ def get_fund_performance_payload(
             else None
         ),
         overview_metric_backfill=overview_metric_backfill,
+        full_history_requested=full_history_requested,
     )
 
 
@@ -4530,6 +4884,163 @@ def _kap_report_date(detail: Dict[str, Any]) -> Optional[str]:
     return _month_end_iso(year, month)
 
 
+def _holdings_report_index(report: Any) -> Optional[int]:
+    if not isinstance(report, dict):
+        return None
+    try:
+        value = int(report.get("disclosure_index") or report.get("disclosureIndex") or 0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _holdings_positions_hash(positions: Iterable[Dict[str, Any]]) -> str:
+    static_keys = (
+        "fund_code",
+        "asset_code",
+        "asset_name",
+        "asset_type",
+        "weight",
+        "previous_weight",
+        "weight_change",
+        "change_status",
+        "amount",
+        "market_value",
+        "report_date",
+        "previous_report_date",
+        "source_report_url",
+        "source_type",
+        "parse_confidence",
+    )
+    materialized: List[Dict[str, Any]] = []
+    for position in positions:
+        if not isinstance(position, dict):
+            continue
+        materialized.append({key: position.get(key) for key in static_keys})
+    materialized.sort(key=lambda row: (str(row.get("asset_code") or ""), str(row.get("asset_name") or "")))
+    encoded = _stable_json_dumps(materialized).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _holdings_meta_with_runtime_cache_flags(
+    meta: Dict[str, Any],
+    *,
+    cache_hit: bool,
+    stale: bool,
+    static_cache_hit: bool,
+) -> Dict[str, Any]:
+    result = dict(meta)
+    result["cache_hit"] = cache_hit
+    result["stale"] = stale
+    result["static_cache_hit"] = static_cache_hit
+    result["cache_policy"] = "monthly_report"
+    return result
+
+
+def _holdings_disclosure_check_due(cached_meta: Dict[str, Any]) -> bool:
+    check = cached_meta.get("disclosure_check")
+    if not isinstance(check, dict):
+        return True
+    age = _cache_age_seconds(check.get("checked_at"))
+    return age is None or age > FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS
+
+
+def _holdings_disclosure_check_meta(disclosures: List[Dict[str, Any]]) -> Dict[str, Any]:
+    latest_index = _kap_disclosure_index(disclosures[0]) if disclosures else None
+    previous_index = _kap_disclosure_index(disclosures[1]) if len(disclosures) > 1 else None
+    return {
+        "checked_at": _utc_now_iso(),
+        "ttl_seconds": FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS,
+        "latest_disclosure_index": latest_index,
+        "previous_disclosure_index": previous_index,
+        "report_count": len(disclosures),
+    }
+
+
+def _cached_holdings_matches_disclosures(cached: Optional[Dict[str, Any]], disclosures: List[Dict[str, Any]]) -> bool:
+    if not isinstance(cached, dict) or not list(cached.get("positions") or []):
+        return False
+    meta = cached.get("source_metadata") if isinstance(cached.get("source_metadata"), dict) else {}
+    if _coerce_int(meta.get("parser_version")) != KAP_HOLDINGS_PARSE_VERSION:
+        return False
+
+    latest_index = _kap_disclosure_index(disclosures[0]) if disclosures else None
+    previous_index = _kap_disclosure_index(disclosures[1]) if len(disclosures) > 1 else None
+    cached_latest = _holdings_report_index(meta.get("latest_report"))
+    cached_previous = _holdings_report_index(meta.get("previous_report"))
+    if latest_index and latest_index != cached_latest:
+        return False
+    if previous_index and previous_index != cached_previous:
+        return False
+
+    actual_hash = _holdings_positions_hash(list(cached.get("positions") or []))
+    stored_hash = str(meta.get("positions_hash") or "").strip()
+    return not stored_hash or stored_hash == actual_hash
+
+
+def _cached_holdings_with_disclosure_check(
+    processed_dir: Path,
+    fund_code: str,
+    cached: Dict[str, Any],
+    disclosures: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    payload = dict(cached)
+    positions = list(payload.get("positions") or [])
+    meta = dict(payload.get("source_metadata") or {})
+    meta["parser_version"] = KAP_HOLDINGS_PARSE_VERSION
+    meta["positions_hash"] = _holdings_positions_hash(positions)
+    meta["disclosure_check"] = _holdings_disclosure_check_meta(disclosures)
+    meta["last_static_cache_validated_at"] = _utc_now_iso()
+    payload["source_metadata"] = _holdings_meta_with_runtime_cache_flags(
+        meta,
+        cache_hit=True,
+        stale=False,
+        static_cache_hit=True,
+    )
+    _write_json(_holdings_path(processed_dir, fund_code), payload)
+    return payload
+
+
+def _kap_attachment_text_from_cache(
+    processed_dir: Path,
+    disclosure_index: Any,
+    attachment: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    obj_id = str(attachment.get("objId") or "").strip()
+    cache_path = _holdings_attachment_text_path(processed_dir, disclosure_index, obj_id)
+    cached = _read_json(cache_path)
+    if (
+        cached
+        and _coerce_int(cached.get("schema_version")) == KAP_HOLDINGS_ATTACHMENT_TEXT_CACHE_VERSION
+        and str(cached.get("obj_id") or "").strip() == obj_id
+        and isinstance(cached.get("text"), str)
+    ):
+        return str(cached.get("text") or ""), {
+            "attachment_obj_id": obj_id,
+            "attachment_text_cache_hit": True,
+            "attachment_text_cache_path": str(cache_path),
+        }
+
+    data = _kap_download_attachment(obj_id)
+    text = _extract_kap_pdf_text(data)
+    _write_json(
+        cache_path,
+        {
+            "schema_version": KAP_HOLDINGS_ATTACHMENT_TEXT_CACHE_VERSION,
+            "disclosure_index": disclosure_index,
+            "obj_id": obj_id,
+            "file_name": attachment.get("fileName"),
+            "fetched_at": _utc_now_iso(),
+            "text": text,
+        },
+    )
+    return text, {
+        "attachment_obj_id": obj_id,
+        "attachment_text_cache_hit": False,
+        "attachment_text_cache_path": str(cache_path),
+    }
+
+
 def _kap_source_url(disclosure_index: Any) -> Optional[str]:
     try:
         idx = int(disclosure_index or 0)
@@ -4572,6 +5083,9 @@ def _kap_stock_name_from_cache(processed_dir: Path, code: str) -> Optional[str]:
     symbol = normalize_fund_code(code).replace(".", "")
     if not symbol:
         return None
+    resolved = get_instrument_name(processed_dir, "stock", symbol)
+    if resolved:
+        return resolved
     payload = _read_json(processed_dir / "kap_cache" / f"{symbol}.json")
     if not payload:
         return None
@@ -4583,18 +5097,18 @@ def _kap_stock_name_from_cache(processed_dir: Path, code: str) -> Optional[str]:
 
 
 def _kap_fund_name_map(processed_dir: Path) -> Dict[str, str]:
+    result: Dict[str, str] = get_instrument_names(processed_dir, "fund")
     payload = _read_json(_snapshot_path(processed_dir))
     rows = payload.get("rows") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
-        return {}
-    result: Dict[str, str] = {}
+        return result
     for row in rows:
         if not isinstance(row, dict):
             continue
         code = normalize_fund_code(row.get("fund_code")).replace(".", "")
         name = str(row.get("name") or "").strip()
         if code and name:
-            result[code] = name
+            result.setdefault(code, name)
     return result
 
 
@@ -4934,7 +5448,16 @@ def _normalize_holding_positions_for_response(
         row["asset_code"] = code
         if _kap_is_stock_symbol(code):
             row["asset_type"] = "local_equity"
-            row["asset_name"] = _kap_stock_name_from_cache(processed_dir, code) or str(row.get("asset_name") or code).strip() or code
+            instrument = get_instrument(processed_dir, "stock", code)
+            row["asset_name"] = (
+                str((instrument or {}).get("name") or "").strip()
+                or _kap_stock_name_from_cache(processed_dir, code)
+                or str(row.get("asset_name") or code).strip()
+                or code
+            )
+            if instrument and instrument.get("logo_url"):
+                row["logo_url"] = instrument.get("logo_url")
+                row["logo_source"] = instrument.get("logo_source")
         else:
             row_type = str(row.get("asset_type") or "").strip().lower()
             name_norm = _normalize_match_text(row.get("asset_name") or "")
@@ -4942,7 +5465,13 @@ def _normalize_holding_positions_for_response(
             if not _kap_looks_like_fund_symbol(code) or not (row_type == "fund" or looks_like_named_fund or fund_names.get(code)):
                 continue
             row["asset_type"] = "fund"
-            row["asset_name"] = fund_names.get(code) or str(row.get("asset_name") or code).strip() or code
+            instrument = get_instrument(processed_dir, "fund", code)
+            row["asset_name"] = (
+                str((instrument or {}).get("name") or "").strip()
+                or fund_names.get(code)
+                or str(row.get("asset_name") or code).strip()
+                or code
+            )
         normalized_rows.append(row)
     return normalized_rows
 
@@ -5001,6 +5530,7 @@ def _merge_holding_positions(
 
 
 def _kap_report_positions(
+    processed_dir: Path,
     detail: Dict[str, Any],
     *,
     fund_code: str,
@@ -5028,8 +5558,8 @@ def _kap_report_positions(
     if not pdf_attachment:
         metadata["warning"] = "KAP report has no PDF attachment"
         return [], metadata
-    data = _kap_download_attachment(str(pdf_attachment.get("objId") or ""))
-    text = _extract_kap_pdf_text(data)
+    text, attachment_cache_meta = _kap_attachment_text_from_cache(processed_dir, disclosure_index, pdf_attachment)
+    metadata.update(attachment_cache_meta)
     positions = _parse_kap_holdings_pdf_text(
         text,
         fund_code=fund_code,
@@ -5062,6 +5592,8 @@ def _unavailable_holdings_payload(
             "as_of": None,
             "cache_hit": cache_hit,
             "stale": True,
+            "static_cache_hit": False,
+            "cache_policy": "monthly_report",
             "parse_status": "unavailable",
             "parser_version": KAP_HOLDINGS_PARSE_VERSION,
             "warnings": list(warnings or [message]),
@@ -5079,10 +5611,25 @@ def _parse_iso_date(value: Any) -> Optional[date]:
         return None
 
 
-def _holdings_cache_is_stale(cached_meta: Dict[str, Any]) -> bool:
+def _holdings_cache_is_stale(cached: Dict[str, Any]) -> bool:
+    cached_meta = cached.get("source_metadata", {}) if isinstance(cached.get("source_metadata"), dict) else {}
     cached_parser_version = _coerce_int(cached_meta.get("parser_version"))
     if cached_parser_version != KAP_HOLDINGS_PARSE_VERSION:
         return True
+
+    positions = list(cached.get("positions") or [])
+    stored_hash = str(cached_meta.get("positions_hash") or "").strip()
+    if stored_hash and stored_hash != _holdings_positions_hash(positions):
+        return True
+
+    parse_status = str(cached_meta.get("parse_status") or cached.get("status") or "").strip().lower()
+    if parse_status in {"unavailable", "partial"} or str(cached.get("status") or "").strip().lower() in {"unavailable", "partial"}:
+        age = _cache_age_seconds(cached_meta.get("fetched_at"))
+        if age is None:
+            return True
+        if age <= FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS:
+            return False
+        return parse_status != "ok" and not positions
 
     latest_report = cached_meta.get("latest_report")
     latest_report_date = None
@@ -5104,24 +5651,40 @@ def _holdings_cache_is_stale(cached_meta: Dict[str, Any]) -> bool:
     return age is None or age > FUNDS_HOLDINGS_TTL_SECONDS
 
 
-def refresh_fund_holdings(processed_dir: Path, fund_code: str) -> Dict[str, Any]:
+def refresh_fund_holdings(
+    processed_dir: Path,
+    fund_code: str,
+    *,
+    cached_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     normalized = normalize_fund_code(fund_code)
     metadata = _kap_search_fund_metadata(normalized)
     if not metadata:
-        return _unavailable_holdings_payload(
+        payload = _unavailable_holdings_payload(
             normalized,
             message="KAP fon kaydı bulunamadı.",
             warnings=[f"KAP fund search returned no exact match for {normalized}"],
         )
+        payload["source_metadata"]["positions_hash"] = _holdings_positions_hash(payload.get("positions") or [])
+        _write_json(_holdings_path(processed_dir, normalized), payload)
+        return payload
     fund_oid = str(metadata.get("fund_oid") or "").strip()
     subject_oid = _kap_portfolio_subject_oid(fund_oid)
     disclosures = _kap_list_portfolio_disclosures(fund_oid, subject_oid)
     if not disclosures:
-        return _unavailable_holdings_payload(
+        payload = _unavailable_holdings_payload(
             normalized,
             message="KAP portföy dağılım bildirimi bulunamadı.",
             warnings=[f"KAP portfolio allocation disclosures not found for {normalized}"],
         )
+        payload["source_metadata"]["fund_oid"] = fund_oid
+        payload["source_metadata"]["subject_oid"] = subject_oid
+        payload["source_metadata"]["disclosure_check"] = _holdings_disclosure_check_meta([])
+        _write_json(_holdings_path(processed_dir, normalized), payload)
+        return payload
+
+    if _cached_holdings_matches_disclosures(cached_payload, disclosures):
+        return _cached_holdings_with_disclosure_check(processed_dir, normalized, dict(cached_payload or {}), disclosures)
 
     warnings: List[str] = []
     report_payloads: List[Tuple[List[Dict[str, Any]], Dict[str, Any]]] = []
@@ -5133,7 +5696,7 @@ def refresh_fund_holdings(processed_dir: Path, fund_code: str) -> Dict[str, Any]
         if not detail:
             warnings.append(f"KAP disclosure detail unavailable: {disclosure_index}")
             continue
-        positions, report_meta = _kap_report_positions(detail, fund_code=normalized)
+        positions, report_meta = _kap_report_positions(processed_dir, detail, fund_code=normalized)
         if report_meta.get("warning"):
             warnings.append(str(report_meta["warning"]))
         report_payloads.append((positions, report_meta))
@@ -5154,6 +5717,8 @@ def refresh_fund_holdings(processed_dir: Path, fund_code: str) -> Dict[str, Any]
         payload["source_metadata"]["subject_oid"] = subject_oid
         payload["source_metadata"]["latest_report"] = latest_meta or None
         payload["source_metadata"]["previous_report"] = previous_meta or None
+        payload["source_metadata"]["disclosure_check"] = _holdings_disclosure_check_meta(disclosures)
+        payload["source_metadata"]["positions_hash"] = _holdings_positions_hash(payload.get("positions") or [])
         _write_json(_holdings_path(processed_dir, normalized), payload)
         return payload
 
@@ -5180,6 +5745,8 @@ def refresh_fund_holdings(processed_dir: Path, fund_code: str) -> Dict[str, Any]
             "as_of": latest_meta.get("report_date"),
             "cache_hit": False,
             "stale": False,
+            "static_cache_hit": False,
+            "cache_policy": "monthly_report",
             "parse_status": parse_status,
             "parser_version": KAP_HOLDINGS_PARSE_VERSION,
             "fund_oid": fund_oid,
@@ -5187,6 +5754,8 @@ def refresh_fund_holdings(processed_dir: Path, fund_code: str) -> Dict[str, Any]
             "fund_name": metadata.get("fund_name"),
             "latest_report": latest_meta or None,
             "previous_report": previous_meta or None,
+            "disclosure_check": _holdings_disclosure_check_meta(disclosures),
+            "positions_hash": _holdings_positions_hash(positions),
             "warnings": warnings,
         },
     }
@@ -5200,17 +5769,24 @@ def get_fund_holdings_payload(processed_dir: Path, fund_code: str) -> Dict[str, 
     cached = _read_json(path)
     if cached:
         cached_meta = cached.get("source_metadata", {}) if isinstance(cached.get("source_metadata"), dict) else {}
-        stale = _holdings_cache_is_stale(cached_meta)
-        if not stale:
+        stale = _holdings_cache_is_stale(cached)
+        parse_status = str(cached_meta.get("parse_status") or cached.get("status") or "").strip().lower()
+        negative_cache_fresh = parse_status in {"unavailable", "partial"} and not stale and not list(cached.get("positions") or [])
+        if not stale and (negative_cache_fresh or not _holdings_disclosure_check_due(cached_meta)):
             payload = dict(cached)
             meta = dict(cached_meta)
-            meta["cache_hit"] = True
-            meta["stale"] = False
-            meta["cache_policy"] = "monthly_report"
+            if payload.get("positions"):
+                meta["positions_hash"] = _holdings_positions_hash(list(payload.get("positions") or []))
+            meta = _holdings_meta_with_runtime_cache_flags(
+                meta,
+                cache_hit=True,
+                stale=False,
+                static_cache_hit=True,
+            )
             payload["source_metadata"] = meta
             return payload
     try:
-        return refresh_fund_holdings(processed_dir, normalized)
+        return refresh_fund_holdings(processed_dir, normalized, cached_payload=cached)
     except Exception as exc:
         if cached:
             payload = dict(cached)

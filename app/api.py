@@ -53,6 +53,12 @@ from src.ratio_engine import (
     run_cross_company_comparison,
 )
 from src.retrieve import RetrievedChunk, Retriever, RetrieverV2, RetrieverV3, RetrieverV5Hybrid, RetrieverV6Cross
+from app.reference_data import (
+    get_instrument,
+    get_instrument_name,
+    sync_reference_data_from_caches,
+    upsert_instrument,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = load_config(ROOT / "config.yaml")
@@ -113,6 +119,10 @@ async def _stop_fund_price_collector() -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    try:
+        await asyncio.to_thread(sync_reference_data_from_caches, CONFIG.paths.processed_dir)
+    except Exception:
+        LOGGER.debug("reference data bootstrap failed", exc_info=True)
     await _start_fund_price_collector()
     try:
         yield
@@ -401,6 +411,47 @@ def _load_cached_kap_market_metadata(cache_dir: Path, symbol: str) -> Dict[str, 
         "company_title": company_title or None,
         "company": company_code or symbol,
     }
+
+
+def _stock_reference_record_from_kap_payload(symbol: str, payload: Dict[str, Any], *, source: str) -> Dict[str, Any]:
+    normalized = str(symbol or "").strip().upper()
+    stock_code = str(payload.get("stock_code") or payload.get("company") or normalized).strip().upper()
+    title = str(payload.get("company_title") or payload.get("title") or payload.get("companyName") or "").strip()
+    member_oid = str(payload.get("member_oid") or payload.get("mkk_member_oid") or "").strip()
+    return {
+        "kind": "stock",
+        "symbol": stock_code or normalized,
+        "name": title or None,
+        "short_name": stock_code or normalized,
+        "source": source,
+        "source_id": member_oid or None,
+        "logo_url": f"https://www.kap.org.tr/tr/api/member/logo/{member_oid}" if member_oid else None,
+        "logo_source": "kap" if member_oid else None,
+        "as_of": str(payload.get("fetched_at") or "").strip() or None,
+        "aliases": [normalized] if normalized and normalized != stock_code else [],
+        "metadata": {
+            "latest_quarter": _latest_quarter_label(
+                [
+                    str(row.get("quarter") or "").strip().upper()
+                    for row in (payload.get("quarters") or [])
+                    if isinstance(row, dict)
+                ]
+            ),
+            "source_url": payload.get("source_url"),
+        },
+    }
+
+
+def _upsert_stock_reference_from_kap_payload(symbol: str, payload: Dict[str, Any], *, source: str = "kap") -> None:
+    if not isinstance(payload, dict) or not payload.get("ok", True):
+        return
+    record = _stock_reference_record_from_kap_payload(symbol, payload, source=source)
+    if not record.get("symbol"):
+        return
+    try:
+        upsert_instrument(CONFIG.paths.processed_dir, **record)
+    except Exception:
+        LOGGER.debug("stock reference upsert failed for %s", symbol, exc_info=True)
 
 
 def _positive_float(raw: Any) -> Optional[float]:
@@ -1075,6 +1126,7 @@ def funds(
         risk=risk,
         sort=sort,
         order=order,
+        auto_refresh=True,
     )
 
 
@@ -1082,7 +1134,14 @@ def funds(
 def funds_search(q: str = Query("", min_length=0), limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
     from app.fund_service import get_funds_payload
 
-    payload = get_funds_payload(CONFIG.paths.processed_dir, q=q, sort="fund_code", order="asc")
+    payload = get_funds_payload(
+        CONFIG.paths.processed_dir,
+        q=q,
+        sort="fund_code",
+        order="asc",
+        min_aum=None,
+        auto_refresh=True,
+    )
     payload["rows"] = list(payload.get("rows") or [])[:limit]
     payload["count"] = len(payload["rows"])
     return payload
@@ -1130,7 +1189,358 @@ def fund_yield_summary(fund_code: str) -> Dict[str, Any]:
 def fund_holdings(fund_code: str) -> Dict[str, Any]:
     from app.fund_service import get_fund_holdings_payload
 
-    return get_fund_holdings_payload(CONFIG.paths.processed_dir, fund_code)
+    payload = get_fund_holdings_payload(CONFIG.paths.processed_dir, fund_code)
+    return _enrich_fund_holdings_with_daily_market_data(payload, fund_code)
+
+
+def _api_number(raw: Any) -> Optional[float]:
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+        return value if math.isfinite(value) else None
+    try:
+        return _parse_tr_decimal(raw)
+    except Exception:
+        return None
+
+
+def _fund_snapshot_row_map() -> Dict[str, Dict[str, Any]]:
+    rows, _meta = _fund_snapshot_row_map_with_meta()
+    return rows
+
+
+_FUND_SNAPSHOT_ROW_MAP_CACHE: Dict[str, Any] = {}
+
+
+def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    from app.fund_service import load_funds_snapshot, normalize_fund_code
+
+    snapshot_path = CONFIG.paths.processed_dir / "funds_cache" / "funds_latest.json"
+    stat = snapshot_path.stat() if snapshot_path.exists() else None
+    cache_key = str(snapshot_path)
+    cached = _FUND_SNAPSHOT_ROW_MAP_CACHE.get(cache_key)
+    if cached and stat and cached.get("mtime") == stat.st_mtime:
+        return dict(cached.get("rows") or {}), {
+            "cache_hit": True,
+            "row_count": cached.get("row_count", 0),
+            "as_of": cached.get("as_of"),
+        }
+
+    try:
+        snapshot = load_funds_snapshot(CONFIG.paths.processed_dir)
+    except Exception:
+        return {}, {"cache_hit": False, "row_count": 0, "error": "snapshot_unavailable"}
+    rows: Dict[str, Dict[str, Any]] = {}
+    for row in list(snapshot.get("rows") or []):
+        if not isinstance(row, dict):
+            continue
+        code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        if code:
+            rows[code] = row
+    if stat:
+        _FUND_SNAPSHOT_ROW_MAP_CACHE[cache_key] = {
+            "mtime": stat.st_mtime,
+            "rows": rows,
+            "row_count": len(rows),
+            "as_of": snapshot.get("as_of"),
+        }
+    return dict(rows), {"cache_hit": False, "row_count": len(rows), "as_of": snapshot.get("as_of")}
+
+
+def _holding_code(position: Dict[str, Any]) -> str:
+    from app.fund_service import normalize_fund_code
+
+    return normalize_fund_code(str(position.get("asset_code") or position.get("asset_name") or "")).replace(".", "")
+
+
+def _holding_type(position: Dict[str, Any]) -> str:
+    return str(position.get("asset_type") or "").strip().lower()
+
+
+_GEFAS_GYF_ALIAS_MAP: Dict[str, Dict[str, str]] = {
+    "TPKGY": {
+        "isin": "TRYTALP00036",
+        "gefas_code": "TPKGY.F1",
+        "label": "TERA PORTFÖY KONUT ALFA KATILIM GAYRİMENKUL YATIRIM FONU",
+    },
+    "TPKGYF": {
+        "isin": "TRYTALP00036",
+        "gefas_code": "TPKGY.F1",
+        "label": "TERA PORTFÖY KONUT ALFA KATILIM GAYRİMENKUL YATIRIM FONU",
+    },
+    "TPKGYF1": {
+        "isin": "TRYTALP00036",
+        "gefas_code": "TPKGY.F1",
+        "label": "TERA PORTFÖY KONUT ALFA KATILIM GAYRİMENKUL YATIRIM FONU",
+    },
+}
+_GEFAS_GYF_QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
+_GEFAS_GYF_QUOTE_CACHE_TTL = 24 * 60 * 60
+
+
+def _gefas_gyf_config(symbol: str) -> Optional[Dict[str, str]]:
+    normalized = str(symbol or "").strip().upper().replace(".", "")
+    return _GEFAS_GYF_ALIAS_MAP.get(normalized)
+
+
+def _gefas_chart_date(raw: Any) -> Optional[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _fetch_gefas_gyf_chart(isin: str, metric: int) -> Dict[str, Any]:
+    import urllib.error
+    import urllib.request
+
+    normalized_isin = str(isin or "").strip().upper()
+    if not normalized_isin:
+        return {}
+    url = f"https://gefas.gov.tr/gyf/detay/grafik/{normalized_isin}/0/0/{metric}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": "https://gefas.gov.tr/tr/gyf/detay",
+            "User-Agent": "Mozilla/5.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, Exception):
+        return {}
+
+
+def _fetch_gefas_gyf_quote(symbol: str) -> Optional[Dict[str, Any]]:
+    config = _gefas_gyf_config(symbol)
+    if not config:
+        return None
+    cache_key = config["isin"]
+    now = time.time()
+    cached = _GEFAS_GYF_QUOTE_CACHE.get(cache_key)
+    if cached and now - cached.get("_ts", 0) < _GEFAS_GYF_QUOTE_CACHE_TTL:
+        data = dict(cached.get("data") or {})
+        if data:
+            data["_cache_hit"] = True
+        return data
+
+    price_chart = _fetch_gefas_gyf_chart(config["isin"], 0)
+    return_chart = _fetch_gefas_gyf_chart(config["isin"], 2)
+    prices = list(price_chart.get("datas") or [])
+    price_labels = list(price_chart.get("labels") or [])
+    returns = list(return_chart.get("datas") or [])
+    return_labels = list(return_chart.get("labels") or [])
+    price = _api_number(prices[-1]) if prices else None
+    return_pct = _api_number(returns[-1]) if returns else None
+    as_of = _gefas_chart_date(price_labels[-1] if price_labels else None) or _gefas_chart_date(return_labels[-1] if return_labels else None)
+    if price is None and return_pct is None:
+        _GEFAS_GYF_QUOTE_CACHE[cache_key] = {"_ts": now, "data": {}}
+        return {}
+
+    data = {
+        "price": price,
+        "currency": "TRY",
+        "change_pct": return_pct,
+        "as_of": as_of,
+        "source": "gefas_gyf",
+        "source_url": f"https://gefas.gov.tr/tr/gyf/detay/{config['gefas_code']}",
+        "isin": config["isin"],
+        "gefas_code": config["gefas_code"],
+        "label": config.get("label"),
+    }
+    _GEFAS_GYF_QUOTE_CACHE[cache_key] = {"_ts": now, "data": data}
+    result = dict(data)
+    result["_cache_hit"] = False
+    return result
+
+
+def _quote_map_for_holding_stocks(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    unique_symbols: List[str] = []
+    seen_symbols: set[str] = set()
+    for symbol in symbols:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized or normalized in seen_symbols:
+            continue
+        seen_symbols.add(normalized)
+        unique_symbols.append(normalized)
+    if not unique_symbols:
+        return {}
+    fetched_quotes = _fetch_market_price_map(unique_symbols, index_name="XUTUM")
+    quotes = {symbol: fetched_quotes.get(symbol, {}) for symbol in unique_symbols if fetched_quotes.get(symbol)}
+    missing_symbols = [
+        symbol
+        for symbol in unique_symbols
+        if _api_number((quotes.get(symbol) or {}).get("price")) is None
+        or _api_number((quotes.get(symbol) or {}).get("change_pct")) is None
+    ]
+    for symbol in missing_symbols[:_INFOYATIRIM_STOCK_PAGE_FALLBACK_LIMIT]:
+        fallback = _fetch_infoyatirim_stock_page_quote(symbol)
+        if fallback:
+            quotes[symbol] = _merge_market_price_fallback(quotes.get(symbol, {}), fallback)
+    return quotes
+
+
+def _position_daily_market_fields(
+    position: Dict[str, Any],
+    *,
+    stock_quotes: Dict[str, Dict[str, Any]],
+    gefas_quotes: Dict[str, Dict[str, Any]],
+    fund_rows: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    code = _holding_code(position)
+    asset_type = _holding_type(position)
+    if asset_type == "local_equity":
+        quote = stock_quotes.get(code) or {}
+        return {
+            "price": _api_number(quote.get("price")),
+            "price_currency": quote.get("currency") or "TRY",
+            "return_pct": _api_number(quote.get("change_pct")),
+            "return_source": "infoyatirim_live_quote" if quote else None,
+            "return_as_of": quote.get("as_of"),
+        }
+    if asset_type == "fund":
+        row = fund_rows.get(code) or {}
+        quote = stock_quotes.get(code) or {}
+        if quote and _api_number(quote.get("change_pct")) is not None:
+            return {
+                "price": _api_number(quote.get("price")),
+                "price_currency": quote.get("currency") or "TRY",
+                "return_pct": _api_number(quote.get("change_pct")),
+                "return_source": "infoyatirim_live_quote",
+                "return_as_of": quote.get("as_of"),
+            }
+        gefas_quote = gefas_quotes.get(code) or {}
+        if gefas_quote and (_api_number(gefas_quote.get("price")) is not None or _api_number(gefas_quote.get("change_pct")) is not None):
+            return {
+                "price": _api_number(gefas_quote.get("price")),
+                "price_currency": gefas_quote.get("currency") or "TRY",
+                "return_pct": _api_number(gefas_quote.get("change_pct")),
+                "return_source": "gefas_gyf",
+                "return_as_of": gefas_quote.get("as_of"),
+            }
+        return {
+            "price": _api_number(row.get("price")),
+            "price_currency": row.get("currency") or "TRY",
+            "return_pct": _api_number(row.get("daily_return")),
+            "return_source": "tefasfon_funds" if row else None,
+            "return_as_of": row.get("as_of"),
+        }
+    return {
+        "price": _api_number(position.get("price")),
+        "price_currency": None,
+        "return_pct": None,
+        "return_source": None,
+        "return_as_of": None,
+    }
+
+
+def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_code: str) -> Dict[str, Any]:
+    from app.fund_service import normalize_fund_code
+
+    normalized_fund = normalize_fund_code(fund_code)
+    positions = [dict(position) for position in list(payload.get("positions") or []) if isinstance(position, dict)]
+    fund_rows, fund_rows_meta = _fund_snapshot_row_map_with_meta()
+    fund_row = fund_rows.get(normalized_fund) or {}
+    fund_aum = _api_number(fund_row.get("aum"))
+    stock_symbols = [
+        _holding_code(position)
+        for position in positions
+        if _holding_code(position)
+        and (
+            _holding_type(position) == "local_equity"
+            or (
+                _holding_type(position) == "fund"
+                and _holding_code(position) not in fund_rows
+                and not _gefas_gyf_config(_holding_code(position))
+            )
+        )
+    ]
+    stock_quotes = _quote_map_for_holding_stocks(stock_symbols)
+    gefas_quotes: Dict[str, Dict[str, Any]] = {}
+    gefas_quote_cache_hits = 0
+    for position in positions:
+        code = _holding_code(position)
+        if _holding_type(position) != "fund" or not _gefas_gyf_config(code):
+            continue
+        quote = _fetch_gefas_gyf_quote(code)
+        if quote:
+            if quote.get("_cache_hit"):
+                gefas_quote_cache_hits += 1
+            gefas_quotes[code] = quote
+
+    enriched_positions: List[Dict[str, Any]] = []
+    estimated_return_pct = 0.0
+    estimated_pnl_value = 0.0
+    has_pnl = False
+    priced_weight = 0.0
+    missing_weight = 0.0
+
+    for position in positions:
+        row = dict(position)
+        daily_fields = _position_daily_market_fields(row, stock_quotes=stock_quotes, gefas_quotes=gefas_quotes, fund_rows=fund_rows)
+        row.update(daily_fields)
+
+        weight = _api_number(row.get("weight"))
+        return_pct = _api_number(row.get("return_pct"))
+        exposure_value = (fund_aum * weight / 100.0) if fund_aum is not None and weight is not None and weight > 0 else None
+        contribution_pct = (weight * return_pct / 100.0) if weight is not None and weight > 0 and return_pct is not None else None
+        pnl_value = (exposure_value * return_pct / 100.0) if exposure_value is not None and return_pct is not None else None
+
+        row["estimated_exposure_value"] = round(exposure_value, 2) if exposure_value is not None else None
+        row["estimated_pnl_value"] = round(pnl_value, 2) if pnl_value is not None else None
+        row["estimated_fund_return_contribution_pct"] = round(contribution_pct, 6) if contribution_pct is not None else None
+
+        if weight is not None and weight > 0:
+            if return_pct is not None:
+                priced_weight += weight
+                estimated_return_pct += contribution_pct or 0.0
+                if pnl_value is not None:
+                    estimated_pnl_value += pnl_value
+                    has_pnl = True
+            else:
+                missing_weight += weight
+        enriched_positions.append(row)
+
+    enriched_payload = dict(payload)
+    enriched_payload["positions"] = enriched_positions
+    enriched_payload["portfolio_effect"] = {
+        "period": "daily",
+        "estimated_return_pct": round(estimated_return_pct, 6),
+        "estimated_pnl_value": round(estimated_pnl_value, 2) if has_pnl else None,
+        "priced_weight": round(priced_weight, 6),
+        "missing_weight": round(missing_weight, 6),
+        "aum": fund_aum,
+        "as_of": fund_row.get("as_of") or (payload.get("source_metadata") or {}).get("as_of"),
+    }
+    metadata = dict(enriched_payload.get("source_metadata") or {})
+    metadata["daily_market_enrichment"] = {
+        "period": "daily",
+        "stock_quote_count": len(stock_quotes),
+        "fund_snapshot_count": len(fund_rows),
+        "gefas_gyf_quote_count": len(gefas_quotes),
+        "gefas_gyf_quote_cache_hits": gefas_quote_cache_hits,
+        "daily_reference_cache_hit": bool(fund_rows_meta.get("cache_hit")),
+        "daily_reference_row_count": fund_rows_meta.get("row_count"),
+        "priced_weight": round(priced_weight, 6),
+        "missing_weight": round(missing_weight, 6),
+    }
+    metadata["market_enrichment"] = {
+        "stock_quote_live": True,
+        "stock_quote_count": len(stock_quotes),
+        "fund_daily_reference": "tefas_snapshot",
+        "fund_daily_reference_cache_hit": bool(fund_rows_meta.get("cache_hit")),
+        "gefas_gyf_cache_ttl_seconds": _GEFAS_GYF_QUOTE_CACHE_TTL,
+    }
+    enriched_payload["source_metadata"] = metadata
+    return enriched_payload
 
 
 @app.get("/funds/{fund_code}/allocations")
@@ -2752,7 +3162,7 @@ def kap_companies() -> Dict[str, Any]:
         if not normalized:
             continue
         cached_meta = _load_cached_kap_market_metadata(cache_dir, normalized)
-        title = str(cached_meta.get("company_title") or "").strip()
+        title = str(get_instrument_name(CONFIG.paths.processed_dir, "stock", normalized) or cached_meta.get("company_title") or "").strip()
         company_code = str(cached_meta.get("company") or normalized).strip().upper()
         aliases = [normalized]
         if company_code and company_code != normalized:
@@ -2790,6 +3200,7 @@ def kap_snapshot(
         max_quarters=max_quarters,
         use_cache_when_complete=not refresh,
     )
+    _upsert_stock_reference_from_kap_payload(company, raw, source="kap")
     normalized = normalize_snapshot_for_frontend(raw)
 
     price_payload = _fetch_kap_price_payload(normalized.get("stock_code") or company)
@@ -3969,7 +4380,8 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
         quote = price_map.get(symbol, {})
         intraday = _fetch_stock_card_intraday(symbol, force_refresh=force_refresh)
         cached_meta = _load_cached_kap_market_metadata(cache_dir, symbol)
-        company_name = str(cached_meta.get("company_title") or "").strip() or symbol
+        instrument = get_instrument(CONFIG.paths.processed_dir, "stock", symbol)
+        company_name = str((instrument or {}).get("name") or cached_meta.get("company_title") or "").strip() or symbol
         basic_summary = basic_summary_map.get(symbol)
         market_cap = _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary)
         multiples = _fetch_isyatirim_multiples(symbol)
@@ -4005,7 +4417,8 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
             "as_of": quote.get("as_of") or intraday.get("as_of"),
             "line_points": intraday.get("line_points") or [],
             "error": None if price is not None or intraday.get("line_points") else intraday.get("error"),
-            **_empty_logo_payload(),
+            "logo_url": (instrument or {}).get("logo_url"),
+            "logo_source": (instrument or {}).get("logo_source"),
             **_returns_from_bases(current_for_returns, return_bases),
         }
         items.append(item)

@@ -73,6 +73,12 @@ COMPANY_QUERY_ALIASES: Dict[str, List[str]] = {
     "YKBNK": ["YKBNK", "YAPI KREDI"],
 }
 
+COMPANY_MEMBER_TITLE_HINTS: Dict[str, Tuple[str, ...]] = {
+    # KAP member/filter/TERA returns MEDİTERA first because "tera" is a substring.
+    # The ticker TERA is Tera Yatırım Menkul Değerler A.Ş.; prefer that exact issuer.
+    "TERA": ("TERA YATIRIM MENKUL",),
+}
+
 KAP_MEMBER_FALLBACKS: Dict[str, Dict[str, str]] = {
     "AGESA": {
         "company_code": "AGESA",
@@ -312,9 +318,33 @@ def _read_first_cache(processed_dir: Path, company: str) -> Tuple[Path, Optional
     for key in cache_keys:
         path = _cache_file_for_company(processed_dir, key)
         cached = _read_cache(path)
-        if cached:
+        if cached and _cache_matches_requested_company(cached, company):
             return path, cached
     return primary_path, None
+
+
+def _cache_matches_requested_company(payload: Dict[str, Any], company: str) -> bool:
+    company_key = str(company or "").strip().upper()
+    if not company_key or not isinstance(payload, dict):
+        return False
+    acceptable = set(_company_cache_keys(company_key))
+    acceptable.add(company_key)
+
+    identifiers = [
+        str(payload.get("company") or "").strip().upper(),
+        str(payload.get("stock_code") or "").strip().upper(),
+    ]
+    for quarter in payload.get("quarters") or []:
+        if isinstance(quarter, dict):
+            identifiers.append(str(quarter.get("stock_code") or "").strip().upper())
+    if any(identifier in acceptable for identifier in identifiers if identifier):
+        return True
+
+    hints = COMPANY_MEMBER_TITLE_HINTS.get(company_key)
+    if hints:
+        title_norm = _normalize(payload.get("company_title") or "")
+        return any(_normalize(hint) in title_norm for hint in hints)
+    return not any(identifiers)
 
 
 def _cached_period_count(payload: Optional[Dict[str, Any]]) -> int:
@@ -632,6 +662,21 @@ def _member_filter_url(query: str) -> str:
     return f"{KAP_BASE_URL}/{MEMBER_FILTER_ENDPOINT}/{urllib.parse.quote(query)}"
 
 
+def _select_member_filter_row(company_key: str, rows: List[Any]) -> Optional[Dict[str, Any]]:
+    materialized = [dict(row or {}) for row in rows if isinstance(row, dict)]
+    if not materialized:
+        return None
+    hints = COMPANY_MEMBER_TITLE_HINTS.get(company_key)
+    if hints:
+        normalized_hints = [_normalize(hint) for hint in hints if _normalize(hint)]
+        for row in materialized:
+            title_norm = _normalize(row.get("title") or "")
+            permalink_norm = _normalize(str(row.get("permaLink") or "").replace("-", " "))
+            if any(hint in title_norm or hint in permalink_norm for hint in normalized_hints):
+                return row
+    return materialized[0]
+
+
 def _resolve_member(company: str, cfg: KapConfig) -> Optional[Dict[str, Any]]:
     company_key = str(company or "").strip().upper()
     if not company_key:
@@ -656,7 +701,9 @@ def _resolve_member(company: str, cfg: KapConfig) -> Optional[Dict[str, Any]]:
             continue
         if not isinstance(rows, list) or not rows:
             continue
-        row = dict(rows[0] or {})
+        row = _select_member_filter_row(company_key, rows)
+        if not row:
+            continue
         mkk_oid = str(row.get("mkkMemberOid", "")).strip()
         if not mkk_oid:
             continue
@@ -2793,6 +2840,17 @@ def _quarter_label(year: int, period: int) -> str:
     return f"{int(year)}Q{int(period)}"
 
 
+def _normalize_disclosure_stock_code(raw: Any, requested_company: str) -> str:
+    text = str(raw or "").strip().upper()
+    requested = str(requested_company or "").strip().upper()
+    if not text:
+        return requested
+    tokens = [token.strip().upper() for token in re.split(r"[,;/\s]+", text) if token.strip()]
+    if requested and requested in tokens:
+        return requested
+    return tokens[0] if tokens else text
+
+
 def fetch_kap_company_snapshot(
     *,
     company: str,
@@ -2942,7 +3000,10 @@ def fetch_kap_company_snapshot(
                     "disclosure_index": disclosure_index,
                     "publish_date": str(basic.get("publishDate", "")).strip(),
                     "title": str(basic.get("title", "") or item.get("title", "")).strip(),
-                    "stock_code": str(basic.get("stockCode", "") or item.get("stock_code", "")).strip().upper(),
+                    "stock_code": _normalize_disclosure_stock_code(
+                        basic.get("stockCode", "") or item.get("stock_code", ""),
+                        company_norm,
+                    ),
                     "pdf_url": f"{KAP_BASE_URL}/{PDF_ENDPOINT}/{disclosure_index}",
                     "unit_raw": str(unit_info.get("raw", "")),
                     "currency": str(unit_info.get("currency", "TL")).upper(),
