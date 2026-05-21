@@ -16,8 +16,8 @@ import './SymbolLogo.css';
 
 export type { SymbolLogoKind };
 
-const LOGO_SUCCESS_CACHE_KEY = 'ragfin.logo.success.v2';
-const LOGO_FAILED_CACHE_KEY = 'ragfin.logo.failed.v2';
+const LOGO_SUCCESS_CACHE_KEY = 'ragfin.logo.success.v4';
+const LOGO_FAILED_CACHE_KEY = 'ragfin.logo.failed.v4';
 const LOGO_SUCCESS_TTL_MS = 24 * 60 * 60 * 1000;
 const LOGO_FAILED_TTL_MS = 60 * 60 * 1000;
 const logoSuccessMemory = new Map<string, { url: string; ts: number }>();
@@ -148,8 +148,7 @@ function markLogoFailed(key: string, url: string): void {
 
 function cacheAwareCandidates(key: string, candidates: string[]): string[] {
     const success = cachedSuccessUrl(key, candidates);
-    const remaining = candidates.filter((item) => item !== success && !isFailedLogoUrl(item));
-    if (success) return [success, ...remaining];
+    const remaining = candidates.filter((item) => item === success || !isFailedLogoUrl(item));
     if (remaining.length > 0) return remaining;
     // All candidates are currently marked as failed; fall back to the original list so
     // a transient network failure doesn't permanently lock the symbol to its monogram.
@@ -176,11 +175,17 @@ function buildCandidates({
     }
 
     if (kind === 'stock') {
-        candidates.push(...explicitLogoUrlsForSymbol(normalized));
         candidates.push(...fintablesLogoUrlsForSymbol(normalized));
+        candidates.push(...explicitLogoUrlsForSymbol(normalized));
 
-        if (logoUrl) {
-            candidates.push(logoUrl);
+        const mappedTradingViewUrl = tradingViewLogoUrl(normalized, { force: true, requireMappedSlug: true });
+        if (mappedTradingViewUrl) {
+            candidates.push(mappedTradingViewUrl);
+        }
+
+        const tradingViewUrl = tradingViewLogoUrl(normalized, { force: true });
+        if (tradingViewUrl) {
+            candidates.push(tradingViewUrl);
         }
 
         const domains = stockLogoDevDomains(normalized, name);
@@ -191,9 +196,8 @@ function buildCandidates({
             }
         }
 
-        const tradingViewUrl = tradingViewLogoUrl(normalized);
-        if (tradingViewUrl) {
-            candidates.push(tradingViewUrl);
+        if (logoUrl) {
+            candidates.push(logoUrl);
         }
     } else {
         const tradingViewUrl = tradingViewLogoUrl(normalized, { force: true, requireMappedSlug: true });

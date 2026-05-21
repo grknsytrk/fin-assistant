@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, BarChart3, BookOpen, ChevronRight, FileText, Info, MessageSquare, Star } from 'lucide-react';
 import './StockDetailPage.css';
 import { apiClient } from '../api/client';
@@ -6,6 +6,7 @@ import type { KapSnapshotResponse, KapQuarter } from '../api/types';
 import { prepareOrderedQuarters } from '../utils/chartBuilders';
 import SymbolLogo from '../components/SymbolLogo';
 import MarketsNavigation, { type MarketsNavigationSection } from '../components/MarketsNavigation';
+import { useWatchlist } from '../hooks/useWatchlist';
 import type { StockTab } from '../routing/routes';
 
 import StockOverview from './stock/sections/StockOverview';
@@ -115,6 +116,8 @@ export default function StockDetailPage({
     const [error, setError] = useState<string | null>(null);
     const [navCollapsed, setNavCollapsed] = useState(false);
     const [priceData, setPriceData] = useState<StockPriceData | null>(null);
+    const watchlist = useWatchlist();
+    const normalizedTicker = ticker.trim().toUpperCase();
 
     useEffect(() => {
         setSelectedTab(activeTab);
@@ -195,6 +198,15 @@ export default function StockDetailPage({
     const displayCurrency = priceData?.currency || valuation?.price_currency;
     const displayAsOf = priceData?.as_of || valuation?.price_as_of || snapshot?.fetched_at;
     const displayChangePct = priceData?.ok ? priceData.change_pct : null;
+    const isStarred = watchlist.hasItem('stock', normalizedTicker);
+    const toggleStarredStock = useCallback(() => {
+        if (!normalizedTicker) return;
+        watchlist.toggleItem({
+            kind: 'stock',
+            symbol: normalizedTicker,
+            label: snapshot?.company_title || normalizedTicker,
+        });
+    }, [normalizedTicker, snapshot?.company_title, watchlist]);
 
     return (
         <div className={`mn-layout stock-detail-shell${navCollapsed ? ' mn-nav-collapsed' : ''}`}>
@@ -227,7 +239,7 @@ export default function StockDetailPage({
                                     kind="stock"
                                     size="xs"
                                 />
-                                {ticker.toUpperCase()}
+                                {normalizedTicker}
                             </span>
                         </div>
 
@@ -242,12 +254,14 @@ export default function StockDetailPage({
                                 />
                                 <div className="stock-market-copy">
                                     <div className="stock-market-code-row">
-                                        <h1>{ticker.toUpperCase()}</h1>
+                                        <h1>{normalizedTicker}</h1>
                                         <button
                                             type="button"
-                                            className="stock-icon-action"
-                                            aria-label={`${ticker} favori`}
-                                            title="Favoriye ekle"
+                                            className={`stock-icon-action${isStarred ? ' active' : ''}`}
+                                            onClick={toggleStarredStock}
+                                            aria-pressed={isStarred}
+                                            aria-label={isStarred ? `${normalizedTicker} izleme listesinden çıkar` : `${normalizedTicker} izleme listesine ekle`}
+                                            title={isStarred ? 'İzleme listesinden çıkar' : 'İzleme listesine ekle'}
                                         >
                                             <Star size={19} aria-hidden="true" />
                                         </button>

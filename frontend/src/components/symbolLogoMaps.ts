@@ -46,6 +46,7 @@ export const STOCK_LOGO_DOMAIN_MAP: Record<string, string | string[]> = {
     GRTHO: 'grainturk.com',
     GSRAY: 'sportif.galatasaray.org',
     GUBRF: 'gubretas.com.tr',
+    GUNDG: 'gundogdugida.com.tr',
     HALKB: 'halkbank.com.tr',
     HEKTS: 'hektas.com.tr',
     ISCTR: 'isbank.com.tr',
@@ -62,6 +63,7 @@ export const STOCK_LOGO_DOMAIN_MAP: Record<string, string | string[]> = {
     MGROS: 'migros.ch',
     MIATK: 'miateknoloji.com',
     MPARK: ['mlpcare.com', 'investor.mlpcare.com'],
+    ODINE: 'odine.com',
     OBAMS: 'obamakarna.com.tr',
     OTKAR: 'otokar.com.tr',
     OYAKC: 'oyakcimento.com',
@@ -264,14 +266,19 @@ export const TRADINGVIEW_SYMBOL_SLUG_MAP: Record<string, string> = {
     BIMAS: 'bim',
     ENKAI: 'enka-insaat',
     EREGL: 'eregli-demir',
-    EBEBK: 'ebebek-magazacilik--600.png',
+    EBEBK: 'ebebek-magazacilik--big',
     ECOGR: 'ecogreen-enerji-as--600.png',
     EGEGY: 'egeyapi-avrupa-gmyo--600.png',
+    GUNDG: 'gundogdu-gida--big',
     KCHOL: 'koc',
-    PGSUS: 'pegasus',
+    KTLEV: 'katilimevim-tas-fin--big',
+    ODINE: 'odine-teknoloji--big',
+    PASEU: 'pasifik-eurasia-lojistik--big',
+    PGSUS: 'pegasus--big',
     TAVHL: 'tav-havalimanlari',
     THYAO: 'turkish-airlines',
     TUPRS: 'tupras',
+    YKBNK: 'yapi-ve-kredi--big',
 };
 
 const rawLogoDevToken = (import.meta.env.VITE_LOGO_DEV_TOKEN as string | undefined)?.trim();
@@ -288,6 +295,8 @@ const SYMBOL_LOGO_ALIAS_MAP: Record<string, string> = {
     TEHOL: 'TERA',
 };
 const EXPLICIT_SYMBOL_LOGO_URL_MAP: Record<string, string[]> = {
+    EBEBK: ['https://s3-symbol-logo.tradingview.com/ebebek-magazacilik--big.svg'],
+    GUNDG: ['https://s3-symbol-logo.tradingview.com/gundogdu-gida--big.svg'],
     TRHOL: ['https://s3-symbol-logo.tradingview.com/dagi-yatirim-holding--big.svg'],
     TEHOL: [
         `${FINTABLES_LOGO_BASE_URL}/tera_icon.png`,

@@ -5,6 +5,7 @@ import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
 import type {
     CommodityQuote,
     FxQuote,
+    FundDetail,
     MarketStockIndex,
     MarketStockRow,
     MarketStocksResponse,
@@ -12,6 +13,7 @@ import type {
     MarketWatchGlobalResponse,
     MarketWatchItem,
 } from '../api/types';
+import { normalizeWatchlistSymbol, useWatchlist, watchlistItemKey, type WatchlistItem } from '../hooks/useWatchlist';
 import './MarketWatchRail.css';
 
 type RailTab = 'global' | 'commodities' | 'fx' | 'xutum' | 'xu100' | 'xu030';
@@ -47,6 +49,7 @@ interface RailRow {
 interface MarketWatchRailProps {
     xu100Rows: MarketUniverseRow[];
     onSelectTicker: (ticker: string) => void;
+    onSelectFund: (fundCode: string) => void;
 }
 
 const RAIL_TABS: Array<{ id: RailTab; label: string }> = [
@@ -141,6 +144,29 @@ function fromStockRow(row: MarketUniverseRow | MarketStockRow): RailRow {
     };
 }
 
+function fromFundDetail(row: FundDetail): RailRow {
+    return {
+        symbol: row.fund_code,
+        label: row.name || 'Fon',
+        kind: 'fund',
+        price: row.price,
+        changePct: row.daily_return,
+        currency: row.currency,
+        clickable: true,
+    };
+}
+
+function fallbackWatchlistRow(item: WatchlistItem): RailRow {
+    return {
+        symbol: item.symbol,
+        label: item.label || (item.kind === 'fund' ? 'Fon' : item.symbol),
+        kind: item.kind,
+        price: null,
+        changePct: null,
+        clickable: true,
+    };
+}
+
 function FlashRailRow({
     row,
     onClick,
@@ -194,7 +220,7 @@ function FlashRailRow({
     return <div className={className}>{children}</div>;
 }
 
-export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWatchRailProps) {
+export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFund }: MarketWatchRailProps) {
     const [isCollapsed, setIsCollapsed] = useState(false);
     const [activeTool, setActiveTool] = useState<'markets' | 'watchlist' | 'news' | 'history' | 'portfolio'>('markets');
     const [activeTab, setActiveTab] = useState<RailTab>('global');
@@ -212,93 +238,113 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
     const [errors, setErrors] = useState<Partial<Record<RailTab, string | null>>>({});
     const inFlightRef = useRef<Partial<Record<RailTab, boolean>>>({});
 
-    // İzleme listesi state
     const [watchlistSearch, setWatchlistSearch] = useState('');
-    const [watchlistSymbols, setWatchlistSymbols] = useState<string[]>(() => {
-        try {
-            const saved = localStorage.getItem('mwr_watchlist');
-            return saved ? JSON.parse(saved) : [];
-        } catch { return []; }
-    });
+    const watchlist = useWatchlist();
+    const watchlistItems = watchlist.items;
+    const [watchlistFundRows, setWatchlistFundRows] = useState<Record<string, FundDetail | null>>({});
+
+    const savedStockSymbols = useMemo(() => {
+        return new Set(
+            watchlistItems
+                .filter((item) => item.kind === 'stock')
+                .map((item) => normalizeWatchlistSymbol(item.symbol)),
+        );
+    }, [watchlistItems]);
+
+    const watchlistFundCodes = useMemo(() => {
+        return watchlistItems
+            .filter((item) => item.kind === 'fund')
+            .map((item) => normalizeWatchlistSymbol(item.symbol));
+    }, [watchlistItems]);
+
+    useEffect(() => {
+        const missingCodes = watchlistFundCodes.filter((code) => !(code in watchlistFundRows));
+        if (!missingCodes.length) return;
+
+        let cancelled = false;
+        Promise.all(
+            missingCodes.map((code) =>
+                apiClient
+                    .fundDetail(code)
+                    .then((detail) => [code, detail] as const)
+                    .catch(() => [code, null] as const),
+            ),
+        ).then((entries) => {
+            if (cancelled) return;
+            setWatchlistFundRows((current) => {
+                const next = { ...current };
+                for (const [code, detail] of entries) {
+                    next[code] = detail;
+                }
+                return next;
+            });
+        });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [watchlistFundCodes, watchlistFundRows]);
 
     // İzleme listesi: arama sonuçları
     const watchlistCandidates = useMemo(() => {
         const term = watchlistSearch.trim().toLowerCase();
         return (xu100Rows || [])
-            .filter((row) => !watchlistSymbols.includes(row.company))
+            .filter((row) => !savedStockSymbols.has(normalizeWatchlistSymbol(row.company)))
             .filter((row) => {
                 if (!term) return true;
                 return row.company.toLowerCase().includes(term);
             })
             .slice(0, 20);
-    }, [xu100Rows, watchlistSearch, watchlistSymbols]);
+    }, [savedStockSymbols, xu100Rows, watchlistSearch]);
 
-    // İzleme listesindeki hisselerin satırları
-    const watchlistRows = useMemo(() => {
-        if (!watchlistSymbols.length) return [];
-        return watchlistSymbols
-            .map((sym) => (xu100Rows || []).find((r) => r.company === sym))
-            .filter(Boolean) as typeof xu100Rows;
-    }, [xu100Rows, watchlistSymbols]);
+    const stockRowsBySymbol = useMemo(() => {
+        const rows = new Map<string, MarketUniverseRow>();
+        for (const row of xu100Rows || []) {
+            rows.set(normalizeWatchlistSymbol(row.company), row);
+        }
+        return rows;
+    }, [xu100Rows]);
 
     const handleAddToWatchlist = (symbol: string) => {
-        setWatchlistSymbols((prev) => {
-            if (prev.includes(symbol)) return prev;
-            const next = [...prev, symbol];
-            localStorage.setItem('mwr_watchlist', JSON.stringify(next));
-            return next;
-        });
+        watchlist.addItem({ kind: 'stock', symbol });
     };
 
-    const handleRemoveFromWatchlist = (symbol: string) => {
-        setWatchlistSymbols((prev) => {
-            const next = prev.filter((s) => s !== symbol);
-            localStorage.setItem('mwr_watchlist', JSON.stringify(next));
-            return next;
-        });
+    const handleRemoveFromWatchlist = (item: WatchlistItem) => {
+        watchlist.removeItem(item.kind, item.symbol);
     };
 
-    // İzleme listesi düzenleme modu ve Drag-Drop
     const [watchlistEditMode, setWatchlistEditMode] = useState(false);
-    const [draggedSymbol, setDraggedSymbol] = useState<string | null>(null);
+    const [draggedWatchlistKey, setDraggedWatchlistKey] = useState<string | null>(null);
 
-    const handleDragStart = (e: React.DragEvent<HTMLDivElement>, symbol: string) => {
-        setDraggedSymbol(symbol);
+    const handleDragStart = (e: React.DragEvent<HTMLDivElement>, item: WatchlistItem) => {
+        setDraggedWatchlistKey(watchlistItemKey(item));
         e.dataTransfer.effectAllowed = 'move';
-        // Şeffaf bir drag imajı için
         const el = e.currentTarget;
         setTimeout(() => el.classList.add('is-dragging'), 0);
     };
 
-    const handleDragEnter = (e: React.DragEvent<HTMLDivElement>, targetSymbol: string) => {
+    const handleDragEnter = (e: React.DragEvent<HTMLDivElement>, targetItem: WatchlistItem) => {
         e.preventDefault();
-        if (draggedSymbol && draggedSymbol !== targetSymbol) {
-            setWatchlistSymbols((prev) => {
-                const dragIndex = prev.indexOf(draggedSymbol);
-                const dropIndex = prev.indexOf(targetSymbol);
-                if (dragIndex < 0 || dropIndex < 0 || dragIndex === dropIndex) return prev;
+        const targetKey = watchlistItemKey(targetItem);
+        if (!draggedWatchlistKey || draggedWatchlistKey === targetKey) return;
 
-                const next = [...prev];
-                next.splice(dragIndex, 1);
-                next.splice(dropIndex, 0, draggedSymbol);
-                return next;
-            });
-        }
+        const dragIndex = watchlistItems.findIndex((item) => watchlistItemKey(item) === draggedWatchlistKey);
+        const dropIndex = watchlistItems.findIndex((item) => watchlistItemKey(item) === targetKey);
+        if (dragIndex < 0 || dropIndex < 0 || dragIndex === dropIndex) return;
+
+        const next = [...watchlistItems];
+        const [draggedItem] = next.splice(dragIndex, 1);
+        next.splice(dropIndex, 0, draggedItem);
+        watchlist.replaceItems(next);
     };
 
     const handleDragEnd = (e: React.DragEvent<HTMLDivElement>) => {
-        setDraggedSymbol(null);
+        setDraggedWatchlistKey(null);
         e.currentTarget.classList.remove('is-dragging');
-        // Sürükleme bittiğinde son hali kaydet
-        setWatchlistSymbols((prev) => {
-            localStorage.setItem('mwr_watchlist', JSON.stringify(prev));
-            return prev;
-        });
     };
 
     const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
         e.preventDefault();
-        // İşlemler artık DragEnter anında gerçek zamanlı yapıldığı için burada bir şeye gerek yok
     };
 
     // İzleme listesi sıralaması
@@ -323,23 +369,31 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
     };
 
     const sortedWatchlistRailRows = useMemo<RailRow[]>(() => {
-        const railRows: RailRow[] = watchlistRows.map((row) => ({
-            symbol: row.company,
-            label: row.company,
-            kind: 'stock' as SymbolLogoKind,
-            logoUrl: row.logo_url,
-            price: row.price,
-            changePct: row.change_pct,
-            currency: row.price_currency,
-            clickable: true,
-        }));
+        const railRows: RailRow[] = watchlistItems.map((item) => {
+            const normalizedSymbol = normalizeWatchlistSymbol(item.symbol);
+            if (item.kind === 'stock') {
+                const stockRow = stockRowsBySymbol.get(normalizedSymbol);
+                return stockRow ? fromStockRow(stockRow) : fallbackWatchlistRow(item);
+            }
+
+            const fundRow = watchlistFundRows[normalizedSymbol];
+            return fundRow ? fromFundDetail(fundRow) : fallbackWatchlistRow(item);
+        });
 
         if (!watchlistSort.key || !watchlistSort.direction) {
             return railRows;
         }
 
         return [...railRows].sort((a, b) => compareRailRows(a, b, watchlistSort.key as RailSortKey, watchlistSort.direction as RailSortDirection));
-    }, [watchlistRows, watchlistSort.key, watchlistSort.direction]);
+    }, [stockRowsBySymbol, watchlistFundRows, watchlistItems, watchlistSort.key, watchlistSort.direction]);
+
+    const watchlistRowsByKey = useMemo(() => {
+        const rows = new Map<string, RailRow>();
+        for (const row of sortedWatchlistRailRows) {
+            rows.set(`${row.kind}:${normalizeWatchlistSymbol(row.symbol)}`, row);
+        }
+        return rows;
+    }, [sortedWatchlistRailRows]);
 
     const setTabLoading = (tab: RailTab, value: boolean) => {
         setLoading((previous) => ({ ...previous, [tab]: value }));
@@ -585,7 +639,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
                         <h2 className="mwr-panel-title">
                             {activeTool === 'watchlist' ? 'İzleme listesi' : 'Piyasalar'}
                         </h2>
-                        {activeTool === 'watchlist' && watchlistSymbols.length > 0 && (
+                        {activeTool === 'watchlist' && watchlistItems.length > 0 && (
                             <button
                                 type="button"
                                 className={`mwr-watchlist-edit-btn${watchlistEditMode ? ' is-active' : ''}`}
@@ -668,19 +722,18 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
                                     )}
                                 </div>
                             </>
-                        ) : watchlistRows.length > 0 ? (
+                        ) : watchlistItems.length > 0 ? (
                             watchlistEditMode ? (
                                 <div className="mwr-watchlist-edit-list">
-                                    {watchlistSymbols.map((sym) => {
-                                        const row = watchlistRows.find((r) => r.company === sym);
-                                        if (!row) return null;
+                                    {watchlistItems.map((item) => {
+                                        const row = watchlistRowsByKey.get(watchlistItemKey(item)) || fallbackWatchlistRow(item);
                                         return (
                                             <div
-                                                key={sym}
+                                                key={watchlistItemKey(item)}
                                                 className="mwr-watchlist-edit-row"
                                                 draggable
-                                                onDragStart={(e) => handleDragStart(e, sym)}
-                                                onDragEnter={(e) => handleDragEnter(e, sym)}
+                                                onDragStart={(e) => handleDragStart(e, item)}
+                                                onDragEnter={(e) => handleDragEnter(e, item)}
                                                 onDragOver={(e) => e.preventDefault()}
                                                 onDragEnd={handleDragEnd}
                                                 onDrop={handleDrop}
@@ -689,21 +742,21 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
                                                     <GripVertical size={16} />
                                                 </div>
                                                 <SymbolLogo
-                                                    symbol={row.company}
-                                                    name={row.company}
-                                                    kind="stock"
-                                                    logoUrl={row.logo_url}
+                                                    symbol={row.symbol}
+                                                    name={row.label}
+                                                    kind={row.kind}
+                                                    logoUrl={row.logoUrl}
                                                     size="sm"
                                                     className="mwr-watchlist-logo"
                                                 />
                                                 <span className="mwr-watchlist-edit-name">
-                                                    <strong>{row.company}</strong>
+                                                    <strong>{row.symbol}</strong>
                                                 </span>
                                                 <button
                                                     type="button"
                                                     className="mwr-watchlist-delete-btn"
-                                                    onClick={() => handleRemoveFromWatchlist(sym)}
-                                                    aria-label={`${sym} sil`}
+                                                    onClick={() => handleRemoveFromWatchlist(item)}
+                                                    aria-label={`${row.symbol} sil`}
                                                     title="Sil"
                                                 >
                                                     <Trash2 size={16} aria-hidden="true" />
@@ -740,9 +793,12 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker }: MarketWat
                                     <div className="mwr-list">
                                         {sortedWatchlistRailRows.map((row) => (
                                             <FlashRailRow
-                                                key={`wl-${row.symbol}`}
+                                                key={`wl-${row.kind}-${row.symbol}`}
                                                 row={row}
-                                                onClick={() => onSelectTicker(row.symbol)}
+                                                onClick={() => {
+                                                    if (row.kind === 'fund') onSelectFund(row.symbol);
+                                                    else onSelectTicker(row.symbol);
+                                                }}
                                             >
                                                 <span className="mwr-symbol-cell">
                                                     <SymbolLogo

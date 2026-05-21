@@ -160,6 +160,15 @@
     color: #ffd400;
 }
 
+.stock-icon-action.active {
+    color: #ffd400;
+    background: color-mix(in srgb, #ffd400 14%, var(--surface-color));
+}
+
+.stock-icon-action.active svg {
+    fill: currentColor;
+}
+
 .stock-market-quote {
     display: flex;
     flex-direction: column;
