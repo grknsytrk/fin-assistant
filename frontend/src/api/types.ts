@@ -208,6 +208,9 @@ export interface FundSourceMetadata {
   date_min?: string | null;
   date_max?: string | null;
   backfill_used?: boolean;
+  full_history_requested?: boolean;
+  requested_start_date?: string | null;
+  requested_end_date?: string | null;
   fallback_used?: boolean;
   cached_fallback_points_present?: boolean;
   cached_fallback_point_count?: number | null;
@@ -305,11 +308,30 @@ export interface FundPortfolioPosition {
   amount: number | null;
   market_value: number | null;
   price?: number | null;
+  price_currency?: string | null;
+  logo_url?: string | null;
+  logo_source?: string | null;
+  return_pct?: number | null;
+  return_source?: string | null;
+  return_as_of?: string | null;
+  estimated_exposure_value?: number | null;
+  estimated_pnl_value?: number | null;
+  estimated_fund_return_contribution_pct?: number | null;
   report_date: string | null;
   previous_report_date?: string | null;
   source_report_url: string | null;
   source_type: string | null;
   parse_confidence: number | null;
+}
+
+export interface FundPortfolioEffect {
+  period: 'daily' | string;
+  estimated_return_pct: number | null;
+  estimated_pnl_value: number | null;
+  priced_weight: number | null;
+  missing_weight: number | null;
+  aum: number | null;
+  as_of: string | null;
 }
 
 export interface FundsResponse {
@@ -408,6 +430,7 @@ export interface FundHoldingsResponse {
   fund_code: string;
   status: 'unavailable' | 'not_parsed' | 'ok' | string;
   positions: FundPortfolioPosition[];
+  portfolio_effect?: FundPortfolioEffect | null;
   source: string;
   message?: string;
   source_metadata: FundSourceMetadata;

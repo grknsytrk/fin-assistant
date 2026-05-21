@@ -45,7 +45,9 @@ const SERVER_ERROR_MESSAGE = 'Islem su an tamamlanamiyor. Lutfen daha sonra tekr
 const REQUEST_TIMEOUT_MS = 15000;
 const OVERVIEW_COMMENTARY_TIMEOUT_MS = Number(import.meta.env.VITE_KAP_OVERVIEW_COMMENTARY_TIMEOUT_MS || 300000);
 const TIMEOUT_MESSAGE = 'Istek suresi asildi. Lutfen tekrar deneyin.';
-const fundHoldingsMemoryCache = new Map<string, FundHoldingsResponse>();
+const FUND_HOLDINGS_MEMORY_CACHE_TTL_MS = 15_000;
+const fundHoldingsMemoryCache = new Map<string, { payload: FundHoldingsResponse; fetchedAt: number }>();
+const fundHoldingsInFlight = new Map<string, Promise<FundHoldingsResponse>>();
 
 type FetchApiOptions = RequestInit & {
     timeoutMs?: number;
@@ -325,8 +327,15 @@ export const apiClient = {
             timeoutMs: 30000,
             exposeErrorDetail: true,
         }),
-    fundPerformance: (fundCode: string) =>
-        fetchApi<FundPerformanceResponse>(`/funds/${encodeURIComponent(fundCode)}/performance`),
+    fundPerformance: (fundCode: string, options?: { startDate?: string; endDate?: string }) => {
+        const params = new URLSearchParams();
+        if (options?.startDate) params.append('start_date', options.startDate);
+        if (options?.endDate) params.append('end_date', options.endDate);
+        const query = params.toString();
+        return fetchApi<FundPerformanceResponse>(
+            `/funds/${encodeURIComponent(fundCode)}/performance${query ? `?${query}` : ''}`,
+        );
+    },
     refreshFundPerformance: (fundCode: string, startDate: string, endDate?: string) => {
         const params = new URLSearchParams({ start_date: startDate });
         if (endDate) params.append('end_date', endDate);
@@ -362,13 +371,27 @@ export const apiClient = {
             },
         );
     },
-    fundHoldings: async (fundCode: string) => {
+    fundHoldings: async (fundCode: string, options?: { force?: boolean }) => {
         const normalizedCode = fundCode.trim().toUpperCase();
+        const now = Date.now();
         const cached = fundHoldingsMemoryCache.get(normalizedCode);
-        if (cached) return cached;
-        const payload = await fetchApi<FundHoldingsResponse>(`/funds/${encodeURIComponent(normalizedCode)}/holdings`);
-        fundHoldingsMemoryCache.set(normalizedCode, payload);
-        return payload;
+        if (!options?.force && cached && now - cached.fetchedAt < FUND_HOLDINGS_MEMORY_CACHE_TTL_MS) {
+            return cached.payload;
+        }
+        const existingRequest = fundHoldingsInFlight.get(normalizedCode);
+        if (existingRequest) return existingRequest;
+        const request = fetchApi<FundHoldingsResponse>(`/funds/${encodeURIComponent(normalizedCode)}/holdings`)
+            .then((payload) => {
+                fundHoldingsMemoryCache.set(normalizedCode, { payload, fetchedAt: Date.now() });
+                return payload;
+            })
+            .finally(() => {
+                if (fundHoldingsInFlight.get(normalizedCode) === request) {
+                    fundHoldingsInFlight.delete(normalizedCode);
+                }
+            });
+        fundHoldingsInFlight.set(normalizedCode, request);
+        return request;
     },
 
     ask: (request: AskRequest) =>

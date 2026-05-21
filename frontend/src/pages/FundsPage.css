@@ -461,37 +461,32 @@
     line-height: 1.35;
 }
 
-.fund-icon-action,
-.fund-compare-action {
+.fund-icon-action {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    width: 42px;
     height: 36px;
+    padding: 0;
     border: 0;
+    border-radius: 999px;
     background: color-mix(in srgb, var(--surface-color) 86%, #1f1f1f);
     color: var(--text-primary);
     cursor: pointer;
 }
 
-.fund-icon-action {
-    width: 42px;
-    border-radius: 999px;
+.fund-icon-action:hover,
+.fund-icon-action:focus-visible {
+    color: #ffd400;
 }
 
-.fund-icon-action.active,
-.fund-compare-action.active {
+.fund-icon-action.active {
     color: #ffd400;
+    background: color-mix(in srgb, #ffd400 14%, var(--surface-color));
 }
 
 .fund-icon-action.active svg {
     fill: currentColor;
-}
-
-.fund-compare-action {
-    gap: 0.45rem;
-    padding: 0 1.05rem;
-    border-radius: 999px;
-    font-weight: 850;
 }
 
 .fund-market-quote {
@@ -643,7 +638,7 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
     gap: 0.9rem;
-    align-items: stretch;
+    align-items: start;
 }
 
 .fund-overview-metrics-row {
@@ -2123,6 +2118,72 @@
     font-size: 0.82rem;
 }
 
+.fund-holdings-effect-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0;
+    padding: 0.18rem 0;
+    border-top: 1px solid color-mix(in srgb, var(--surface-border) 72%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 54%, transparent);
+    background:
+        linear-gradient(90deg, rgb(255 255 255 / 0.025), transparent 44%),
+        color-mix(in srgb, var(--bg-color) 82%, var(--surface-color));
+}
+
+.fund-holdings-effect-card {
+    position: relative;
+    display: grid;
+    gap: 0.22rem;
+    min-width: 0;
+    padding: 0.78rem 1rem;
+    border: 0;
+    background: transparent;
+}
+
+.fund-holdings-effect-card:not(:first-child)::before {
+    position: absolute;
+    top: 0.72rem;
+    bottom: 0.72rem;
+    left: 0;
+    width: 1px;
+    background: color-mix(in srgb, var(--surface-border) 62%, transparent);
+    content: "";
+}
+
+.fund-holdings-effect-card span,
+.fund-holdings-effect-card small {
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.fund-holdings-effect-card strong {
+    overflow: hidden;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 1.02rem;
+    font-weight: 900;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fund-holdings-effect-card strong.funds-up {
+    color: var(--success-color);
+}
+
+.fund-holdings-effect-card strong.funds-down {
+    color: var(--danger-color);
+}
+
+.fund-holdings-effect-card strong.funds-flat {
+    color: var(--text-secondary);
+}
+
 .fund-holdings-snapshot {
     display: grid;
     gap: 0.75rem;
@@ -2306,8 +2367,32 @@
 .fund-holdings-rank-symbol {
     display: inline-flex;
     align-items: center;
+    justify-content: flex-start;
     gap: 0.48rem;
     min-width: 0;
+    width: 100%;
+}
+
+.fund-holdings-rank-symbol-link {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+    text-align: left;
+}
+
+.fund-holdings-rank-symbol-link:hover strong,
+.fund-holdings-rank-symbol-link:focus-visible strong {
+    color: var(--accent-color);
+}
+
+.fund-holdings-rank-symbol-link:focus-visible {
+    border-radius: 6px;
+    outline: 1px solid color-mix(in srgb, var(--accent-color) 66%, transparent);
+    outline-offset: 4px;
 }
 
 .fund-holdings-rank-symbol strong {
@@ -2328,9 +2413,12 @@
 }
 
 .fund-holdings-rank-bars {
+    position: relative;
     display: grid;
     gap: 0.2rem;
     min-width: 0;
+    border-radius: 6px;
+    outline: none;
 }
 
 .fund-holdings-rank-bars i {
@@ -2341,6 +2429,43 @@
     height: 0.36rem;
     overflow: hidden;
     border-radius: 999px;
+}
+
+.fund-holdings-rank-bars::after {
+    position: absolute;
+    bottom: calc(100% + 0.42rem);
+    left: 0;
+    z-index: 3;
+    max-width: min(22rem, calc(100vw - 3rem));
+    padding: 0.34rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 68%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--bg-color) 88%, var(--surface-color));
+    box-shadow: 0 12px 28px rgb(0 0 0 / 0.28);
+    color: var(--text-primary);
+    content: attr(data-tooltip);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 800;
+    line-height: 1;
+    opacity: 0;
+    overflow: hidden;
+    pointer-events: none;
+    text-overflow: ellipsis;
+    transform: translateY(0.18rem);
+    transition: opacity 120ms ease, transform 120ms ease;
+    white-space: nowrap;
+}
+
+.fund-holdings-rank-bars:hover::after,
+.fund-holdings-rank-bars:focus-visible::after {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.fund-holdings-rank-bars:hover i,
+.fund-holdings-rank-bars:focus-visible i {
+    filter: brightness(1.12);
 }
 
 .fund-holdings-rank-bar-current {
@@ -2428,30 +2553,39 @@
 
 .fund-holdings-table th,
 .fund-holdings-table td {
+    overflow: hidden;
     vertical-align: middle;
+    text-overflow: ellipsis;
 }
 
 .fund-holdings-table {
-    min-width: 1060px;
+    min-width: 1320px;
     table-layout: fixed;
 }
 
 .fund-holdings-col-asset {
-    width: 34%;
+    width: 27%;
 }
 
-.fund-holdings-col-price,
+.fund-holdings-col-price {
+    width: 10%;
+}
+
 .fund-holdings-col-return {
-    width: 8%;
+    width: 9%;
+}
+
+.fund-holdings-col-pnl {
+    width: 13%;
 }
 
 .fund-holdings-col-weight,
 .fund-holdings-col-previous {
-    width: 11%;
+    width: 10%;
 }
 
 .fund-holdings-col-change {
-    width: 14%;
+    width: 13%;
 }
 
 .fund-holdings-col-history {
@@ -2474,6 +2608,91 @@
 
 .fund-holding-weight-previous {
     color: var(--text-muted);
+}
+
+.fund-holding-price,
+.fund-holding-return,
+.fund-holding-weight-current,
+.fund-holding-weight-previous,
+.fund-holdings-table td.funds-up,
+.fund-holdings-table td.funds-down,
+.fund-holdings-table td.funds-flat {
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.fund-holding-price {
+    color: var(--text-primary);
+}
+
+.fund-live-flash-up,
+.fund-live-flash-down {
+    position: relative;
+    isolation: isolate;
+}
+
+.fund-live-flash-up::before,
+.fund-live-flash-down::before {
+    content: "";
+    position: absolute;
+    inset: 0.45rem 0.35rem;
+    z-index: -1;
+    border-radius: 7px;
+    pointer-events: none;
+}
+
+.fund-live-flash-up::before {
+    animation: fund-holding-flash-up 0.9s ease-out;
+}
+
+.fund-live-flash-down::before {
+    animation: fund-holding-flash-down 0.9s ease-out;
+}
+
+@keyframes fund-holding-flash-up {
+    0% {
+        background: color-mix(in srgb, var(--positive-color) 28%, transparent);
+        box-shadow: inset 2px 0 0 color-mix(in srgb, var(--positive-color) 80%, transparent);
+    }
+    100% {
+        background: transparent;
+        box-shadow: inset 2px 0 0 transparent;
+    }
+}
+
+@keyframes fund-holding-flash-down {
+    0% {
+        background: color-mix(in srgb, var(--negative-color) 25%, transparent);
+        box-shadow: inset 2px 0 0 color-mix(in srgb, var(--negative-color) 78%, transparent);
+    }
+    100% {
+        background: transparent;
+        box-shadow: inset 2px 0 0 transparent;
+    }
+}
+
+.fund-holding-return {
+    padding-left: 1rem;
+}
+
+.fund-holding-effect {
+    display: inline-grid;
+    gap: 0.12rem;
+    justify-items: end;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.fund-holding-effect strong {
+    font-size: 0.82rem;
+}
+
+.fund-holding-effect small {
+    color: currentColor;
+    font-size: 0.68rem;
+    opacity: 0.86;
 }
 
 .fund-holdings-table .fund-holdings-group-row td {
@@ -2503,9 +2722,33 @@
 .fund-holding-asset {
     display: flex;
     align-items: center;
+    justify-content: flex-start;
     gap: 0.65rem;
     min-width: 0;
     max-width: 100%;
+    width: 100%;
+}
+
+.fund-holding-asset-link {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+    text-align: left;
+}
+
+.fund-holding-asset-link:hover strong,
+.fund-holding-asset-link:focus-visible strong {
+    color: var(--accent-color);
+}
+
+.fund-holding-asset-link:focus-visible {
+    border-radius: 8px;
+    outline: 1px solid color-mix(in srgb, var(--accent-color) 66%, transparent);
+    outline-offset: 5px;
 }
 
 .fund-holding-asset span {
@@ -2782,6 +3025,7 @@
         width: 104px;
     }
 
+    .fund-holdings-effect-summary,
     .fund-holdings-highlight-grid,
     .fund-holdings-rank-head,
     .fund-holdings-rank-row {
@@ -2790,6 +3034,14 @@
 
     .fund-holdings-rank-head {
         display: none;
+    }
+
+    .fund-holdings-effect-card:not(:first-child)::before {
+        top: 0;
+        right: 0;
+        bottom: auto;
+        width: auto;
+        height: 1px;
     }
 
     .fund-holdings-rank-current {

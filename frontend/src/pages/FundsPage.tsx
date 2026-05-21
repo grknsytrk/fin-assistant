@@ -10,11 +10,11 @@ import {
     type CSSProperties,
     type Dispatch,
     type PointerEvent as ReactPointerEvent,
+    type ReactNode,
     type RefObject,
     type SetStateAction,
 } from 'react';
 import {
-    ArrowLeft,
     ArrowUpDown,
     BarChart3,
     BriefcaseBusiness,
@@ -26,7 +26,6 @@ import {
     LogIn,
     LogOut,
     RefreshCw,
-    Scale,
     Search,
     ShieldAlert,
     SlidersHorizontal,
@@ -56,6 +55,7 @@ import type {
 import MarketsNavigation, { type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo from '../components/SymbolLogo';
 import { STOCK_LOGO_DOMAIN_MAP } from '../components/symbolLogoMaps';
+import { useWatchlist } from '../hooks/useWatchlist';
 import type { FundTab } from '../routing/routes';
 import './FundsPage.css';
 
@@ -100,6 +100,10 @@ const FUND_TABS: Array<{ key: FundTab; label: string; icon: typeof BarChart3 }> 
 
 type FundHistorySubtab = 'prices' | 'allocation';
 
+const FUND_HOLDINGS_LIVE_REFRESH_MS = 3000;
+const FUND_HOLDINGS_LIVE_FLASH_MS = 900;
+const FUND_INITIAL_PERFORMANCE_MONTHS = 7;
+
 const FUND_HISTORY_TABS: Array<{ key: FundHistorySubtab; label: string; icon: typeof LineChart }> = [
     { key: 'prices', label: 'Fiyat / Yatırımcı', icon: LineChart },
     { key: 'allocation', label: 'Fon Dağılımı', icon: BriefcaseBusiness },
@@ -108,12 +112,21 @@ const FUND_HISTORY_TABS: Array<{ key: FundHistorySubtab; label: string; icon: ty
 type FundHoldingAssetCategory = 'local_equity' | 'fund';
 type FundHoldingCategoryFilter = 'all' | FundHoldingAssetCategory;
 type FundHoldingChangeFilter = 'all' | 'increased' | 'decreased' | 'new' | 'removed';
-type FundHoldingSortKey = 'asset' | 'price' | 'weight' | 'previous_weight' | 'weight_change';
+type FundHoldingSortKey =
+    | 'asset'
+    | 'price'
+    | 'return_pct'
+    | 'estimated_pnl_value'
+    | 'weight'
+    | 'previous_weight'
+    | 'weight_change';
 type FundHoldingSortDirection = 'asc' | 'desc';
 
 const FUND_HOLDING_SORT_COLUMNS: Array<{ key: FundHoldingSortKey; label: string }> = [
     { key: 'asset', label: 'Varlık' },
     { key: 'price', label: 'Fiyat' },
+    { key: 'return_pct', label: 'Getiri %' },
+    { key: 'estimated_pnl_value', label: 'K/Z' },
     { key: 'weight', label: 'Ağırlık %' },
     { key: 'previous_weight', label: 'Önceki Ay %' },
     { key: 'weight_change', label: 'Fark' },
@@ -276,8 +289,36 @@ function formatCompactCurrency(value: number | null | undefined): string {
     return formatCurrency(value);
 }
 
+function formatSignedCompactCurrency(value: number | null | undefined): string {
+    if (value == null || !Number.isFinite(value)) return '-';
+    if (value > 0) return `+${formatCompactCurrency(value)}`;
+    if (value < 0) return `-${formatCompactCurrency(Math.abs(value))}`;
+    return formatCompactCurrency(value);
+}
+
 function formatQuotePrice(value: number | null | undefined): string {
     if (value == null || !Number.isFinite(value)) return '-';
+    return value.toLocaleString('tr-TR', {
+        minimumFractionDigits: 4,
+        maximumFractionDigits: 6,
+    });
+}
+
+function formatHoldingPrice(value: number | null | undefined): string {
+    if (value == null || !Number.isFinite(value)) return '-';
+    const abs = Math.abs(value);
+    if (abs >= 100) {
+        return value.toLocaleString('tr-TR', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
+    }
+    if (abs >= 10) {
+        return value.toLocaleString('tr-TR', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 4,
+        });
+    }
     return value.toLocaleString('tr-TR', {
         minimumFractionDigits: 4,
         maximumFractionDigits: 6,
@@ -533,6 +574,10 @@ function hasUsableRangeCoverage(points: FundPricePoint[], startIso: string, endI
     return Number.isFinite(latestTs) && Number.isFinite(endTs) && latestTs >= endTs - 10 * 24 * 60 * 60 * 1000;
 }
 
+function hasFullHistoryPerformance(performance: FundPerformanceResponse | null): boolean {
+    return performance?.source_metadata?.full_history_requested === true;
+}
+
 function formatChartDate(value: string | null | undefined, range: FundChartRange): string {
     if (!value) return '-';
     const date = new Date(value);
@@ -635,6 +680,23 @@ function monthlyEndPointsFromFundPoints(points: FundPricePoint[]): Array<[string
     return [...monthEndPoints.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
+function monthlyMetricPointsFromFundPoints(
+    points: FundPricePoint[],
+    valueForPoint: (point: FundPricePoint) => number | null | undefined,
+): Map<string, FundPricePoint> {
+    const monthEndPoints = new Map<string, FundPricePoint>();
+    for (const point of points) {
+        const value = valueForPoint(point);
+        if (value == null || !Number.isFinite(value)) continue;
+        const key = monthKey(point.date);
+        const current = monthEndPoints.get(key);
+        if (!current || point.date > current.date) {
+            monthEndPoints.set(key, point);
+        }
+    }
+    return monthEndPoints;
+}
+
 function estimateCashFlow(current: FundPricePoint, previous: FundPricePoint): number | null {
     const currentAum = Number(current.aum);
     const previousAum = Number(previous.aum);
@@ -650,9 +712,12 @@ function estimateCashFlow(current: FundPricePoint, previous: FundPricePoint): nu
 function overviewMetricsFromPoints(points: FundPricePoint[]): FundOverviewMetricSeries {
     const ordered = monthlyEndPointsFromFundPoints(points);
     const visible = ordered.slice(-6);
+    const aumPointsByMonth = monthlyMetricPointsFromFundPoints(points, (point) => point.aum);
+    const investorPointsByMonth = monthlyMetricPointsFromFundPoints(points, (point) => point.investor_count);
     const cashFlowByMonth = new Map<string, number | null>();
-    for (let index = 1; index < ordered.length; index += 1) {
-        cashFlowByMonth.set(ordered[index][0], estimateCashFlow(ordered[index][1], ordered[index - 1][1]));
+    const aumOrdered = [...aumPointsByMonth.entries()].sort(([a], [b]) => a.localeCompare(b));
+    for (let index = 1; index < aumOrdered.length; index += 1) {
+        cashFlowByMonth.set(aumOrdered[index][0], estimateCashFlow(aumOrdered[index][1], aumOrdered[index - 1][1]));
     }
     const metricPoint = (month: string, value: number | null): FundOverviewMetricPoint => ({
         month,
@@ -664,8 +729,8 @@ function overviewMetricsFromPoints(points: FundPricePoint[]): FundOverviewMetric
     );
 
     return {
-        aum: visible.map(([month, point]) => metricPoint(month, numericOrNull(point.aum))),
-        investors: visible.map(([month, point]) => metricPoint(month, numericOrNull(point.investor_count))),
+        aum: visible.map(([month]) => metricPoint(month, numericOrNull(aumPointsByMonth.get(month)?.aum))),
+        investors: visible.map(([month]) => metricPoint(month, numericOrNull(investorPointsByMonth.get(month)?.investor_count))),
         cashFlow: visible.map(([month]) => metricPoint(month, cashFlowByMonth.get(month) ?? null)),
     };
 }
@@ -2232,6 +2297,42 @@ function FundOverviewHoldingsSection({
     );
 }
 
+function liveFlashNumber(value: number | null | undefined): number | null {
+    return value != null && Number.isFinite(value) ? value : null;
+}
+
+function FundLiveValueCell({
+    value,
+    className,
+    children,
+}: {
+    value: number | null | undefined;
+    className?: string;
+    children: ReactNode;
+}) {
+    const previousValueRef = useRef<number | null | undefined>(undefined);
+    const [flashClass, setFlashClass] = useState('');
+
+    useEffect(() => {
+        const currentValue = liveFlashNumber(value);
+        const previousValue = previousValueRef.current;
+        if (previousValue !== undefined && previousValue != null && currentValue != null && currentValue !== previousValue) {
+            setFlashClass(currentValue > previousValue ? 'fund-live-flash-up' : 'fund-live-flash-down');
+            const timer = window.setTimeout(() => setFlashClass(''), FUND_HOLDINGS_LIVE_FLASH_MS);
+            previousValueRef.current = currentValue;
+            return () => window.clearTimeout(timer);
+        }
+        previousValueRef.current = currentValue;
+        return undefined;
+    }, [value]);
+
+    return (
+        <td className={[className, flashClass].filter(Boolean).join(' ')}>
+            {children}
+        </td>
+    );
+}
+
 type FundHoldingsPanelProps = {
     holdings: FundHoldingsResponse | null;
     loading: boolean;
@@ -2240,6 +2341,7 @@ type FundHoldingsPanelProps = {
     changeFilter: FundHoldingChangeFilter;
     onCategoryFilterChange: (filter: FundHoldingCategoryFilter) => void;
     onChangeFilterChange: (filter: FundHoldingChangeFilter) => void;
+    onOpenTicker?: (ticker: string) => void;
 };
 
 function FundHoldingsPanel({
@@ -2250,6 +2352,7 @@ function FundHoldingsPanel({
     changeFilter,
     onCategoryFilterChange,
     onChangeFilterChange,
+    onOpenTicker,
 }: FundHoldingsPanelProps) {
     const positions = holdings?.positions || [];
     const [holdingSort, setHoldingSort] = useState<{ key: FundHoldingSortKey; direction: FundHoldingSortDirection }>({
@@ -2330,6 +2433,7 @@ function FundHoldingsPanel({
     const latestReport = latestHoldingReportMeta(holdings);
     const previousReport = previousHoldingReportMeta(holdings);
     const asOf = latestReport?.report_date || holdings?.source_metadata?.as_of || displayablePositions.find((position) => position.report_date)?.report_date || null;
+    const portfolioEffect = holdings?.portfolio_effect || null;
     const currentMonthLabel = formatMonthLegendLabel(asOf, 'GÜNCEL');
     const previousMonthLabel = formatMonthLegendLabel(
         previousReport?.report_date || displayablePositions.find((position) => position.previous_report_date)?.previous_report_date,
@@ -2357,6 +2461,29 @@ function FundHoldingsPanel({
                 <>
                     {hasPartialWarning && (
                         <div className="fund-holdings-warning">KAP raporu kısmi parse edildi; bazı satırlar eksik olabilir.</div>
+                    )}
+                    {portfolioEffect && (
+                        <div className="fund-holdings-effect-summary" aria-label="KAP ağırlıklarıyla günlük tahmin">
+                            <div className="fund-holdings-effect-card">
+                                <span>Tahmini günlük fon getirisi</span>
+                                <strong className={pctClass(portfolioEffect.estimated_return_pct)}>
+                                    {formatPct(portfolioEffect.estimated_return_pct)}
+                                </strong>
+                                <small>KAP ağırlıklarıyla</small>
+                            </div>
+                            <div className="fund-holdings-effect-card">
+                                <span>Tahmini günlük K/Z</span>
+                                <strong className={pctClass(portfolioEffect.estimated_pnl_value)}>
+                                    {formatSignedCompactCurrency(portfolioEffect.estimated_pnl_value)}
+                                </strong>
+                                <small>{portfolioEffect.as_of ? formatDate(portfolioEffect.as_of) : 'Günlük'}</small>
+                            </div>
+                            <div className="fund-holdings-effect-card">
+                                <span>Fiyatlanan ağırlık</span>
+                                <strong>{formatAllocationWeight(portfolioEffect.priced_weight)}</strong>
+                                <small>Eksik {formatAllocationWeight(portfolioEffect.missing_weight)}</small>
+                            </div>
+                        </div>
                     )}
                     <div className="fund-holdings-filters" aria-label="Varlık tipi filtresi">
                         {FUND_HOLDING_CATEGORY_FILTERS.map((item) => (
@@ -2395,6 +2522,8 @@ function FundHoldingsPanel({
                                 const symbol = position.asset_code || position.asset_name;
                                 const category = holdingAssetCategory(position) || 'local_equity';
                                 const logoKind = category === 'fund' ? 'fund' : 'stock';
+                                const stockTicker = category === 'local_equity' ? normalizeCompareSymbol(position.asset_code) : '';
+                                const canOpenStock = Boolean(onOpenTicker && stockTicker);
                                 const weight = Number(position.weight) || 0;
                                 const previousWeight = Number(position.previous_weight) || 0;
                                 const widthPct = maxRankingWeight > 0 && weight > 0 ? Math.max(3, (weight / maxRankingWeight) * 100) : 0;
@@ -2402,29 +2531,50 @@ function FundHoldingsPanel({
                                 const previousRank = previousRankByKey.get(holdingPositionKey(position));
                                 const rankDelta = previousRank == null ? null : previousRank - (index + 1);
                                 const rankTrend = rankDelta == null ? '' : rankDelta > 0 ? '▲' : rankDelta < 0 ? '▼' : '—';
+                                const barTooltip = `${currentMonthLabel}: ${formatAllocationWeight(position.weight)} · ${previousMonthLabel}: ${formatAllocationWeight(position.previous_weight)}`;
                                 const status = holdingChangeStatus(position);
                                 const statusIcon = status === 'new'
                                     ? <LogIn size={13} aria-label="Fona girdi" />
                                     : status === 'removed'
                                         ? <LogOut size={13} aria-label="Fondan çıktı" />
                                         : null;
+                                const rankSymbolContent = (
+                                    <>
+                                        <SymbolLogo
+                                            symbol={symbol}
+                                            name={position.asset_name}
+                                            kind={logoKind}
+                                            logoUrl={category === 'local_equity' ? position.logo_url : null}
+                                            size="sm"
+                                        />
+                                        <strong>{position.asset_code || '-'}</strong>
+                                    </>
+                                );
                                 return (
                                     <div className={`fund-holdings-rank-row${status === 'removed' ? ' is-removed' : ''}`} key={`rank-${holdingPositionKey(position)}`}>
                                         <span className="fund-holdings-rank-index">{index + 1}.</span>
                                         <span className={`fund-holdings-rank-flow${statusIcon ? ' is-active' : ''}`}>
                                             {statusIcon}
                                         </span>
-                                        <div className="fund-holdings-rank-symbol">
-                                            <SymbolLogo
-                                                symbol={symbol}
-                                                name={position.asset_name}
-                                                kind={logoKind}
-                                                size="sm"
-                                            />
-                                            <strong>{position.asset_code || '-'}</strong>
-                                        </div>
+                                        {canOpenStock ? (
+                                            <button
+                                                type="button"
+                                                className="fund-holdings-rank-symbol fund-holdings-rank-symbol-link"
+                                                onClick={() => onOpenTicker?.(stockTicker)}
+                                                aria-label={`${stockTicker} hisse sayfasını aç`}
+                                            >
+                                                {rankSymbolContent}
+                                            </button>
+                                        ) : (
+                                            <div className="fund-holdings-rank-symbol">{rankSymbolContent}</div>
+                                        )}
                                         <div className="fund-holdings-rank-current">
-                                            <div className="fund-holdings-rank-bars">
+                                            <div
+                                                className="fund-holdings-rank-bars"
+                                                data-tooltip={barTooltip}
+                                                aria-label={barTooltip}
+                                                tabIndex={0}
+                                            >
                                                 <i
                                                     className="fund-holdings-rank-bar-current"
                                                     style={{ '--holding-weight-width': `${widthPct}%` } as CSSProperties}
@@ -2457,6 +2607,7 @@ function FundHoldingsPanel({
                                 <col className="fund-holdings-col-asset" />
                                 <col className="fund-holdings-col-price" />
                                 <col className="fund-holdings-col-return" />
+                                <col className="fund-holdings-col-pnl" />
                                 <col className="fund-holdings-col-weight" />
                                 <col className="fund-holdings-col-previous" />
                                 <col className="fund-holdings-col-change" />
@@ -2476,7 +2627,18 @@ function FundHoldingsPanel({
                                         sortDirection={holdingSort.direction}
                                         onSort={handleHoldingSort}
                                     />
-                                    <th>Getiri %</th>
+                                    <FundHoldingsSortHeader
+                                        columnKey="return_pct"
+                                        sortKey={holdingSort.key}
+                                        sortDirection={holdingSort.direction}
+                                        onSort={handleHoldingSort}
+                                    />
+                                    <FundHoldingsSortHeader
+                                        columnKey="estimated_pnl_value"
+                                        sortKey={holdingSort.key}
+                                        sortDirection={holdingSort.direction}
+                                        onSort={handleHoldingSort}
+                                    />
                                     <FundHoldingsSortHeader
                                         columnKey="weight"
                                         sortKey={holdingSort.key}
@@ -2502,7 +2664,7 @@ function FundHoldingsPanel({
                                 {groupedPositions.map((group) => (
                                     <Fragment key={group.key}>
                                         <tr className="fund-holdings-group-row">
-                                            <td colSpan={7}>
+                                            <td colSpan={8}>
                                                 <div className="fund-holdings-group-label">
                                                     <span>{group.label}</span>
                                                     <strong>{group.positions.length}</strong>
@@ -2513,26 +2675,57 @@ function FundHoldingsPanel({
                                             const symbol = position.asset_code || position.asset_name;
                                             const category = holdingAssetCategory(position) || group.key;
                                             const logoKind = category === 'fund' ? 'fund' : 'stock';
+                                            const stockTicker = category === 'local_equity' ? normalizeCompareSymbol(position.asset_code) : '';
+                                            const canOpenStock = Boolean(onOpenTicker && stockTicker);
                                             const rowKey = `${position.asset_code || position.asset_name}-${position.report_date || ''}-${position.change_status || ''}`;
+                                            const assetContent = (
+                                                <>
+                                                    <SymbolLogo
+                                                        symbol={symbol}
+                                                        name={position.asset_name}
+                                                        kind={logoKind}
+                                                        logoUrl={category === 'local_equity' ? position.logo_url : null}
+                                                        size="sm"
+                                                    />
+                                                    <span>
+                                                        <strong title={position.asset_code || undefined}>{position.asset_code || '-'}</strong>
+                                                        <small title={position.asset_name}>{position.asset_name}</small>
+                                                        <em>{holdingCategoryLabel(position)}</em>
+                                                    </span>
+                                                </>
+                                            );
                                             return (
                                                 <tr key={rowKey}>
                                                     <td>
-                                                        <div className="fund-holding-asset">
-                                                            <SymbolLogo
-                                                                symbol={symbol}
-                                                                name={position.asset_name}
-                                                                kind={logoKind}
-                                                                size="sm"
-                                                            />
-                                                            <span>
-                                                                <strong title={position.asset_code || undefined}>{position.asset_code || '-'}</strong>
-                                                                <small title={position.asset_name}>{position.asset_name}</small>
-                                                                <em>{holdingCategoryLabel(position)}</em>
-                                                            </span>
-                                                        </div>
+                                                        {canOpenStock ? (
+                                                            <button
+                                                                type="button"
+                                                                className="fund-holding-asset fund-holding-asset-link"
+                                                                onClick={() => onOpenTicker?.(stockTicker)}
+                                                                aria-label={`${stockTicker} hisse sayfasını aç`}
+                                                            >
+                                                                {assetContent}
+                                                            </button>
+                                                        ) : (
+                                                            <div className="fund-holding-asset">{assetContent}</div>
+                                                        )}
                                                     </td>
-                                                    <td>{formatQuotePrice(position.price)}</td>
-                                                    <td>-</td>
+                                                    <FundLiveValueCell value={position.price} className="fund-holding-price">
+                                                        {formatHoldingPrice(position.price)}
+                                                    </FundLiveValueCell>
+                                                    <FundLiveValueCell value={position.return_pct} className={`fund-holding-return ${pctClass(position.return_pct)}`}>
+                                                        {formatPct(position.return_pct)}
+                                                    </FundLiveValueCell>
+                                                    <FundLiveValueCell value={position.estimated_pnl_value} className={pctClass(position.estimated_pnl_value)}>
+                                                        <span className="fund-holding-effect">
+                                                            <strong>{formatSignedCompactCurrency(position.estimated_pnl_value)}</strong>
+                                                            <small>
+                                                                {position.estimated_fund_return_contribution_pct == null
+                                                                    ? '-'
+                                                                    : `${formatPct(position.estimated_fund_return_contribution_pct)} katkı`}
+                                                            </small>
+                                                        </span>
+                                                    </FundLiveValueCell>
                                                     <td className="fund-holding-weight-current">{formatAllocationWeight(position.weight)}</td>
                                                     <td className="fund-holding-weight-previous">{formatAllocationWeight(position.previous_weight)}</td>
                                                     <td className={pctClass(position.weight_change)}>{formatWeightDelta(position.weight_change)}</td>
@@ -3179,17 +3372,22 @@ function FundHistoryTable({ points }: { points: FundPricePoint[] }) {
         })
         .sort((a, b) => b.date.localeCompare(a.date));
     const investorDeltas = new Map<string, number>();
+    const cashFlowDeltas = new Map<string, number | null>();
     let previousInvestorCount: number | null = null;
+    let previousPoint: FundPricePoint | null = null;
 
-    rows.slice().reverse().forEach((point) => {
+    orderedPoints.forEach((point) => {
         const currentInvestorCount = point.investor_count;
-        if (typeof currentInvestorCount !== 'number' || !Number.isFinite(currentInvestorCount)) {
-            return;
+        if (typeof currentInvestorCount === 'number' && Number.isFinite(currentInvestorCount)) {
+            if (previousInvestorCount != null) {
+                investorDeltas.set(point.date, currentInvestorCount - previousInvestorCount);
+            }
+            previousInvestorCount = currentInvestorCount;
         }
-        if (previousInvestorCount != null) {
-            investorDeltas.set(point.date, currentInvestorCount - previousInvestorCount);
+        if (previousPoint) {
+            cashFlowDeltas.set(point.date, estimateCashFlow(point, previousPoint));
         }
-        previousInvestorCount = currentInvestorCount;
+        previousPoint = point;
     });
 
     return (
@@ -3201,18 +3399,21 @@ function FundHistoryTable({ points }: { points: FundPricePoint[] }) {
                         <th>Fiyat</th>
                         <th>Günlük getiri</th>
                         <th>Portföy</th>
+                        <th>Net nakit giriş/çıkış</th>
                         <th>Yatırımcı</th>
                     </tr>
                 </thead>
                 <tbody>
                     {rows.map((point) => {
                         const investorDelta = investorDeltas.get(point.date);
+                        const cashFlowDelta = cashFlowDeltas.get(point.date);
                         return (
                             <tr key={point.date}>
                                 <td>{formatDate(point.date)}</td>
                                 <td>{formatCurrency(point.price, 'TRY')}</td>
                                 <td className={pctClass(point.daily_return)}>{formatPct(point.daily_return)}</td>
                                 <td>{formatCompactCurrency(point.aum)}</td>
+                                <td className={pctClass(cashFlowDelta)}>{formatSignedCompactCurrency(cashFlowDelta)}</td>
                                 <td>
                                     <span className="fund-investor-cell">
                                         <span>{point.investor_count?.toLocaleString('tr-TR') || '-'}</span>
@@ -3242,8 +3443,7 @@ export default function FundsPage({
     onOpenTicker,
 }: FundsPageProps) {
     const [navCollapsed, setNavCollapsed] = useState(false);
-    const [starredFundCodes, setStarredFundCodes] = useState<Set<string>>(() => new Set());
-    const [compareFundCodes, setCompareFundCodes] = useState<Set<string>>(() => new Set());
+    const watchlist = useWatchlist();
     const [funds, setFunds] = useState<FundsResponse | null>(null);
     const [categories, setCategories] = useState<FundCategoriesResponse | null>(null);
     const [detail, setDetail] = useState<FundDetail | null>(null);
@@ -3285,13 +3485,13 @@ export default function FundsPage({
     const autoRefreshAttemptedRef = useRef(false);
     const allocationRefreshAttemptedRef = useRef(new Set<string>());
     const comparisonPanelRef = useRef<HTMLDivElement | null>(null);
-    const [comparisonSearchOpenSignal, setComparisonSearchOpenSignal] = useState(0);
     const [comparisonHistory, setComparisonHistory] = useState<MarketComparisonHistoryResponse | null>(null);
     const [comparisonHistoryLoading, setComparisonHistoryLoading] = useState(false);
     const [comparisonHistoryError, setComparisonHistoryError] = useState<string | null>(null);
     const [holdingCategoryFilter, setHoldingCategoryFilter] = useState<FundHoldingCategoryFilter>('all');
     const [holdingChangeFilter, setHoldingChangeFilter] = useState<FundHoldingChangeFilter>('all');
     const holdingsFetchAttemptedRef = useRef(new Set<string>());
+    const holdingsRefreshInFlightRef = useRef(false);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -3314,6 +3514,32 @@ export default function FundsPage({
             setRefreshError(err instanceof Error ? err.message : 'Fon listesi yenilenemedi.');
         } finally {
             if (mountedRef.current) setRefreshing(false);
+        }
+    }, []);
+
+    const loadHoldings = useCallback(async (
+        normalizedCode: string,
+        options: { silent?: boolean; force?: boolean } = {},
+    ) => {
+        if (!normalizedCode || holdingsRefreshInFlightRef.current) return;
+        const silent = Boolean(options.silent);
+        holdingsRefreshInFlightRef.current = true;
+        holdingsFetchAttemptedRef.current.add(normalizedCode);
+        if (!silent) setHoldingsLoading(true);
+        setHoldingsError(null);
+        try {
+            const payload = await apiClient.fundHoldings(normalizedCode, { force: options.force });
+            if (!mountedRef.current || activeFundCodeRef.current !== normalizedCode) return;
+            setHoldings(payload);
+        } catch (err) {
+            if (!mountedRef.current || activeFundCodeRef.current !== normalizedCode) return;
+            if (!silent) setHoldings(null);
+            setHoldingsError(err instanceof Error ? err.message : 'KAP fon içeriği alınamadı.');
+        } finally {
+            holdingsRefreshInFlightRef.current = false;
+            if (mountedRef.current && activeFundCodeRef.current === normalizedCode && !silent) {
+                setHoldingsLoading(false);
+            }
         }
     }, []);
 
@@ -3400,7 +3626,7 @@ export default function FundsPage({
         setPerformanceLoading(true);
         setPerformanceError(null);
         apiClient
-            .fundPerformance(normalizedCode)
+            .fundPerformance(normalizedCode, { startDate: isoDateMonthsAgo(FUND_INITIAL_PERFORMANCE_MONTHS) })
             .then((payload) => {
                 if (!alive) return;
                 setPerformance(payload);
@@ -3501,28 +3727,27 @@ export default function FundsPage({
         if (holdings?.fund_code === normalizedCode || holdingsFetchAttemptedRef.current.has(normalizedCode)) {
             return;
         }
-        let alive = true;
-        holdingsFetchAttemptedRef.current.add(normalizedCode);
-        setHoldingsLoading(true);
-        setHoldingsError(null);
-        apiClient
-            .fundHoldings(normalizedCode)
-            .then((payload) => {
-                if (!alive) return;
-                setHoldings(payload);
-            })
-            .catch((err) => {
-                if (!alive) return;
-                setHoldings(null);
-                setHoldingsError(err instanceof Error ? err.message : 'KAP fon içeriği alınamadı.');
-            })
-            .finally(() => {
-                if (alive) setHoldingsLoading(false);
-            });
-        return () => {
-            alive = false;
+        void loadHoldings(normalizedCode);
+    }, [fundCode, activeTab, holdings?.fund_code, loadHoldings]);
+
+    useEffect(() => {
+        if (!fundCode) return;
+        if (activeTab !== 'overview' && activeTab !== 'allocation') return;
+        const normalizedCode = fundCode.trim().toUpperCase();
+        const refreshVisibleHoldings = () => {
+            if (document.visibilityState !== 'visible') return;
+            void loadHoldings(normalizedCode, { silent: true, force: true });
         };
-    }, [fundCode, activeTab, holdings?.fund_code]);
+        refreshVisibleHoldings();
+        const intervalId = window.setInterval(refreshVisibleHoldings, FUND_HOLDINGS_LIVE_REFRESH_MS);
+        window.addEventListener('focus', refreshVisibleHoldings);
+        document.addEventListener('visibilitychange', refreshVisibleHoldings);
+        return () => {
+            window.clearInterval(intervalId);
+            window.removeEventListener('focus', refreshVisibleHoldings);
+            document.removeEventListener('visibilitychange', refreshVisibleHoldings);
+        };
+    }, [fundCode, activeTab, loadHoldings]);
 
     const filteredFunds = useMemo(() => {
         const rows = [...(funds?.rows || [])];
@@ -3573,7 +3798,7 @@ export default function FundsPage({
         selectedFund,
         baseReturns: detailPeriodReturns,
         funds: funds?.rows || [],
-        openSearchSignal: comparisonSearchOpenSignal,
+        openSearchSignal: 0,
     });
     const comparisonChartStartDate = chartPoints[0]?.date || null;
     const comparisonChartEndDate = chartPoints[chartPoints.length - 1]?.date || null;
@@ -3656,33 +3881,15 @@ export default function FundsPage({
         setSortOrder('asc');
     }, [sortKey]);
     const selectedFundCode = selectedFund?.fund_code || fundCode?.trim().toUpperCase() || '';
-    const isStarred = selectedFundCode ? starredFundCodes.has(selectedFundCode) : false;
-    const isCompared = selectedFundCode ? compareFundCodes.has(selectedFundCode) : false;
+    const isStarred = selectedFundCode ? watchlist.hasItem('fund', selectedFundCode) : false;
     const toggleStarredFund = useCallback(() => {
         if (!selectedFundCode) return;
-        setStarredFundCodes((current) => {
-            const next = new Set(current);
-            if (next.has(selectedFundCode)) {
-                next.delete(selectedFundCode);
-            } else {
-                next.add(selectedFundCode);
-            }
-            return next;
+        watchlist.toggleItem({
+            kind: 'fund',
+            symbol: selectedFundCode,
+            label: selectedFund?.name || selectedFundCode,
         });
-    }, [selectedFundCode]);
-    const openComparisonSearch = useCallback(() => {
-        if (!selectedFundCode) return;
-        setCompareFundCodes((current) => {
-            const next = new Set(current);
-            next.add(selectedFundCode);
-            return next;
-        });
-        onTabChange('overview');
-        setComparisonSearchOpenSignal((value) => value + 1);
-        window.setTimeout(() => {
-            comparisonPanelRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        }, 80);
-    }, [onTabChange, selectedFundCode]);
+    }, [selectedFund?.name, selectedFundCode, watchlist]);
 
     const loadAllocationHistory = useCallback(() => {
         if (!fundCode) return;
@@ -3743,7 +3950,7 @@ export default function FundsPage({
         if (range === 'all') {
             setChartRange(range);
             setChartRangeError(null);
-            if (performancePoints.length >= 2) return;
+            if (hasFullHistoryPerformance(performance) && performancePoints.length >= 2) return;
             setPendingChartRange(range);
             setPerformanceError(null);
             setPerformanceLoading(true);
@@ -3791,7 +3998,7 @@ export default function FundsPage({
                 setPendingChartRange(null);
                 setPerformanceLoading(false);
             });
-    }, [chartEndDate, customEndDate, customStartDate, fundCode, performance?.as_of, performancePoints, selectedFund?.as_of]);
+    }, [chartEndDate, customEndDate, customStartDate, fundCode, performance, performancePoints, selectedFund?.as_of]);
 
     const handleChartRangeSelect = useCallback((range: FundChartRange) => {
         refreshChartRange(range);
@@ -3938,15 +4145,15 @@ export default function FundsPage({
                                 <>
                                     <header className="fund-market-shell">
                                         <div className="fund-market-breadcrumb" aria-label="Fon konumu">
-                                            <button type="button" className="fund-breadcrumb-back" onClick={onBack}>
-                                                <ArrowLeft size={15} aria-hidden="true" />
-                                                Fonlar
-                                            </button>
-                                            <ChevronRight size={14} aria-hidden="true" />
-                                            <span className="fund-breadcrumb-group">
+                                            <button
+                                                type="button"
+                                                className="fund-breadcrumb-back fund-breadcrumb-group"
+                                                onClick={onBack}
+                                                aria-label="Yatırım fonları listesine dön"
+                                            >
                                                 <Database size={17} aria-hidden="true" />
                                                 Yatırım Fonları
-                                            </span>
+                                            </button>
                                             <ChevronRight size={14} aria-hidden="true" />
                                             <span className="fund-breadcrumb-code">
                                                 <SymbolLogo
@@ -3976,18 +4183,10 @@ export default function FundsPage({
                                                             className={`fund-icon-action${isStarred ? ' active' : ''}`}
                                                             onClick={toggleStarredFund}
                                                             aria-pressed={isStarred}
-                                                            title={isStarred ? 'Favoriden çıkar' : 'Favoriye ekle'}
+                                                            aria-label={isStarred ? `${selectedFund.fund_code} izleme listesinden çıkar` : `${selectedFund.fund_code} izleme listesine ekle`}
+                                                            title={isStarred ? 'İzleme listesinden çıkar' : 'İzleme listesine ekle'}
                                                         >
                                                             <Star size={19} aria-hidden="true" />
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            className={`fund-compare-action${isCompared ? ' active' : ''}`}
-                                                            onClick={openComparisonSearch}
-                                                            aria-pressed={isCompared}
-                                                        >
-                                                            <Scale size={15} aria-hidden="true" />
-                                                            Karşılaştır
                                                         </button>
                                                     </div>
                                                     <p>{selectedFund.name}</p>
@@ -4136,6 +4335,7 @@ export default function FundsPage({
                                                     changeFilter={holdingChangeFilter}
                                                     onCategoryFilterChange={setHoldingCategoryFilter}
                                                     onChangeFilterChange={setHoldingChangeFilter}
+                                                    onOpenTicker={onOpenTicker}
                                                 />
                                             </div>
                                         </div>
