@@ -639,10 +639,18 @@
 }
 
 .stock-card-identity {
+    flex: 1 1 auto;
     display: flex;
     align-items: center;
     gap: 0.65rem;
     min-width: 0;
+    max-width: 100%;
+}
+
+.stock-card-identity > div {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .markets-workspace-with-rail .stock-card-identity {
@@ -676,16 +684,17 @@
     display: block;
     margin-top: 0.18rem;
     color: var(--text-secondary);
-    font-size: 0.72rem;
+    font-size: 0.66rem;
+    line-height: 1.15;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 190px;
+    max-width: none;
 }
 
 .markets-workspace-with-rail .stock-card-identity span {
-    max-width: 132px;
-    font-size: 0.66rem;
+    max-width: none;
+    font-size: clamp(0.56rem, 0.82vw, 0.62rem);
 }
 
 .stock-card-price-row {

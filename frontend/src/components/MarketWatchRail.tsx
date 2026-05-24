@@ -811,7 +811,6 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
                                                     />
                                                     <span className="mwr-symbol-copy">
                                                         <strong>{row.symbol}</strong>
-                                                        <small>{row.label}</small>
                                                     </span>
                                                 </span>
                                                 <span className="mwr-price">{formatRailPrice(row.price)}</span>
@@ -905,7 +904,6 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
                                             />
                                             <span className="mwr-symbol-copy">
                                                 <strong>{row.symbol}</strong>
-                                                <small>{row.label}</small>
                                             </span>
                                         </span>
                                         <span className="mwr-price">{formatRailPrice(row.price)}</span>

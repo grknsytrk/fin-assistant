@@ -240,7 +240,7 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.06rem;
+    justify-content: center;
 }
 
 .mwr-symbol-copy strong {

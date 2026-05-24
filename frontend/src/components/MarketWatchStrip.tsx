@@ -69,7 +69,7 @@ function formatPrice(item: MarketWatchItem): string {
 function formatPct(changePct: number | null): string {
     if (changePct == null) return 'Veri bekleniyor';
     const sign = changePct > 0 ? '+' : '';
-    return `% ${sign}${changePct.toLocaleString('tr-TR', {
+    return `%${sign}${changePct.toLocaleString('tr-TR', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     })}`;
@@ -208,7 +208,7 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
             <section className="mw-strip mw-strip-compact" aria-label="Kompakt piyasa bandı">
                 {isInitialLoading && (
                     <div className="mw-compact-skeleton-grid">
-                        {[...Array(4)].map((_, i) => (
+                        {[...Array(PRIMARY_SYMBOLS.length)].map((_, i) => (
                             <div key={i} className="mw-compact-skeleton-card">
                                 <div className="mw-compact-skeleton-head">
                                     <div className="mw-compact-skeleton-logo mw-compact-skeleton-pulse" />

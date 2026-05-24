@@ -148,7 +148,7 @@ function formatMaybeCurrency(value: number | null, currency?: string | null): st
 function formatTablePct(value: number | null): string {
     if (value == null) return 'N/A';
     const sign = value > 0 ? '+' : '';
-    return `% ${sign}${value.toLocaleString('tr-TR', {
+    return `%${sign}${value.toLocaleString('tr-TR', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     })}`;
@@ -189,7 +189,7 @@ function formatCardCurrency(value: number | null | undefined, currency?: string 
 function formatCardPct(value: number | null | undefined): string {
     if (value == null) return '% -';
     const sign = value > 0 ? '+' : '';
-    return `% ${sign}${value.toLocaleString('tr-TR', {
+    return `%${sign}${value.toLocaleString('tr-TR', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     })}`;
