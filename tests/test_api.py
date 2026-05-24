@@ -27,6 +27,7 @@ def _reset_flow_state() -> None:
     api_module._INFOYATIRIM_STOCK_PAGE_CACHE.clear()
     api_module._STOCK_RETURN_BASE_CACHE.clear()
     api_module._MARKET_STOCK_CARD_CHART_CACHE.clear()
+    api_module._STOCK_CARD_VALUATION_CACHE.clear()
     api_module._MARKET_INDICES_CACHE.clear()
     api_module._MARKET_INDEX_DETAIL_CACHE.clear()
     api_module._MARKET_INDEX_QUOTE_CACHE.clear()
@@ -2292,6 +2293,7 @@ def test_market_stock_cards_returns_quotes_and_line_points(monkeypatch: pytest.M
             "fd_favok": 11.37 if symbol == "BIMAS" else 5.97,
         },
     )
+    monkeypatch.setattr(api_module, "_stock_card_financial_snapshot_from_cache", lambda _symbol: {})
     monkeypatch.setattr(
         api_module,
         "_stock_card_financial_ratios_from_cache",
@@ -2338,6 +2340,7 @@ def test_market_stock_cards_returns_quotes_and_line_points(monkeypatch: pytest.M
         "_kap_logo_payload_for_symbol",
         lambda symbol: pytest.fail(f"stock cards should not resolve logos over KAP: {symbol}"),
     )
+    monkeypatch.setattr(api_module, "get_instrument", lambda *_args, **_kwargs: None)
 
     client = TestClient(app)
     response = client.get("/market/stocks/cards?symbols=BIMAS,THYAO&refresh=true")
@@ -2396,6 +2399,7 @@ def test_market_stock_cards_falls_back_to_infoyatirim_multiples_when_missing_or_
         return {"ok": True, "fk": 24.47, "pd_dd": 2.75, "fd_favok": 11.37}
 
     monkeypatch.setattr(api_module, "_fetch_isyatirim_multiples", fake_multiples)
+    monkeypatch.setattr(api_module, "_stock_card_financial_snapshot_from_cache", lambda _symbol: {})
     monkeypatch.setattr(api_module, "_stock_card_financial_ratios_from_cache", lambda _symbol: {"net_borc_favok": None})
     monkeypatch.setattr(api_module, "_fetch_stock_return_bases_bulk", lambda _symbols: {})
     monkeypatch.setattr(
@@ -2439,6 +2443,65 @@ def test_market_stock_cards_falls_back_to_infoyatirim_multiples_when_missing_or_
     assert items["BIMAS"]["pd_dd"] == 2.75
     assert items["BIMAS"]["fd_favok"] == 11.37
     assert fallback_calls == ["KCHOL"]
+
+
+def test_market_stock_card_valuation_prefers_kap_snapshot_and_reprices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_stock_card_financial_snapshot_from_cache",
+        lambda _symbol: {
+            "latest_quarter": "2026Q1",
+            "ttm_net_kar": 10.0,
+            "ozkaynaklar": 20.0,
+            "ttm_favok": 5.0,
+            "net_borc": 2.0,
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_isyatirim_multiples",
+        lambda symbol: pytest.fail(f"external multiples should not be fetched for complete KAP snapshot: {symbol}"),
+    )
+    monkeypatch.setattr(api_module, "_stock_card_financial_ratios_from_cache", lambda _symbol: {"net_borc_favok": 0.4})
+
+    first = api_module._resolve_market_card_valuation("BIMAS", market_cap=100.0)
+    second = api_module._resolve_market_card_valuation("BIMAS", market_cap=120.0)
+
+    assert first["fk"] == 10.0
+    assert first["pd_dd"] == 5.0
+    assert first["fd_favok"] == 20.4
+    assert first["net_borc_favok"] == 0.4
+    assert first["valuation_source"] == "kap_computed"
+    assert second["fk"] == 12.0
+    assert second["pd_dd"] == 6.0
+    assert second["fd_favok"] == 24.4
+    assert second["cache_hit"] is True
+
+
+def test_market_stock_card_valuation_caches_provider_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: List[str] = []
+
+    monkeypatch.setattr(api_module, "_stock_card_financial_snapshot_from_cache", lambda _symbol: {})
+    monkeypatch.setattr(api_module, "_stock_card_financial_ratios_from_cache", lambda _symbol: {"net_borc_favok": None})
+
+    def fake_multiples(symbol: str) -> Dict[str, Any]:
+        calls.append(symbol)
+        return {"ok": True, "source": "isyatirim_company_card", "fk": 11.0, "pd_dd": 2.0, "fd_favok": 8.0}
+
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_multiples", fake_multiples)
+    monkeypatch.setattr(api_module, "_fetch_infoyatirim_stock_page_quote", lambda symbol: pytest.fail(symbol))
+
+    first = api_module._resolve_market_card_valuation("BIMAS", market_cap=100.0)
+    second = api_module._resolve_market_card_valuation("BIMAS", market_cap=120.0)
+
+    assert first["fk"] == 11.0
+    assert second["fk"] == 11.0
+    assert second["cache_hit"] is True
+    assert calls == ["BIMAS"]
 
 
 def test_market_stock_cards_rejects_more_than_twelve_symbols() -> None:

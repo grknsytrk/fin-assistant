@@ -3369,6 +3369,8 @@ _MARKET_STOCK_CARD_CHART_CACHE: Dict[str, Any] = {}
 _MARKET_STOCK_CARD_CHART_CACHE_TTL = 45
 _MARKET_STOCK_CARD_LIMIT = 12
 _MARKET_STOCK_CARD_PREVIOUS_SESSION_LOOKBACK_DAYS = 10
+_STOCK_CARD_VALUATION_CACHE: Dict[str, Any] = {}
+_STOCK_CARD_VALUATION_CACHE_TTL = int(os.getenv("RAGFIN_STOCK_CARD_VALUATION_CACHE_TTL_SECONDS", str(6 * 60 * 60)))
 _TURKEY_TIMEZONE = timezone(timedelta(hours=3))
 _MARKET_STOCK_CARD_CHART_RANGES: Dict[str, Dict[str, Any]] = {
     "1d": {"interval": "5m", "range": "1d", "ttl": 30},
@@ -4305,6 +4307,23 @@ def _is_missing_market_ratio(value: Any) -> bool:
     return ratio is None or abs(ratio) <= 1e-12
 
 
+def _as_finite_float(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return None
+    return numeric
+
+
+def _round_market_ratio(numerator: Any, denominator: Any) -> Optional[float]:
+    top = _as_finite_float(numerator)
+    bottom = _as_finite_float(denominator)
+    if top is None or bottom is None or abs(bottom) <= 1e-12:
+        return None
+    return round(top / bottom, 2)
+
+
 def _resolve_market_card_multiples(symbol: str, multiples_payload: Dict[str, Any]) -> Dict[str, Optional[float]]:
     fk = _parse_tr_decimal(multiples_payload.get("fk")) if multiples_payload.get("ok") else None
     pd_dd = _parse_tr_decimal(multiples_payload.get("pd_dd")) if multiples_payload.get("ok") else None
@@ -4335,30 +4354,147 @@ def _resolve_market_card_multiples(symbol: str, multiples_payload: Dict[str, Any
     return {"fk": fk, "pd_dd": pd_dd, "fd_favok": fd_favok}
 
 
-def _stock_card_financial_ratios_from_cache(symbol: str) -> Dict[str, Optional[float]]:
+def _stock_card_financial_snapshot_from_cache(symbol: str) -> Dict[str, Any]:
     cache_path = CONFIG.paths.processed_dir / "kap_cache" / f"{str(symbol or '').strip().upper()}.json"
     try:
         with cache_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except Exception:
-        return {"net_borc_favok": None}
+        return {}
 
     quarters_raw = payload.get("quarters")
     quarters = [q for q in quarters_raw if isinstance(q, dict)] if isinstance(quarters_raw, list) else []
     if not quarters:
-        return {"net_borc_favok": None}
+        return {}
 
     quarters_sorted = sorted(quarters, key=_quarter_sort_key)
     latest = quarters_sorted[-1]
+    ttm_net_kar = _build_ttm_sum(quarters_sorted, "net_kar") if len(quarters_sorted) >= 4 else None
+    ttm_favok = _build_ttm_sum(quarters_sorted, "favok") if len(quarters_sorted) >= 4 else None
+    ozkaynaklar = _extract_quarter_metric(latest, "ozkaynaklar", priority=["metrics", "metrics_ytd"])
     net_borc = _extract_quarter_metric(latest, "net_borc", priority=["metrics", "metrics_ytd"])
-    ttm_favok = _build_ttm_sum(quarters_sorted, "favok")
-    net_borc_favok = None
-    try:
-        if net_borc is not None and ttm_favok is not None and float(ttm_favok) != 0:
-            net_borc_favok = round(float(net_borc) / float(ttm_favok), 2)
-    except (TypeError, ValueError, ZeroDivisionError):
-        net_borc_favok = None
+    latest_quarter = str(latest.get("quarter") or "").strip().upper() or None
+    return {
+        "symbol": str(payload.get("company") or payload.get("stock_code") or symbol or "").strip().upper(),
+        "latest_quarter": latest_quarter,
+        "quarter_count": len(quarters_sorted),
+        "ttm_net_kar": ttm_net_kar,
+        "ttm_favok": ttm_favok,
+        "ozkaynaklar": ozkaynaklar,
+        "net_borc": net_borc,
+        "source": "kap_cache",
+        "as_of": payload.get("fetched_at"),
+    }
+
+
+def _stock_card_financial_ratios_from_snapshot(snapshot: Dict[str, Any], *, market_cap: Any) -> Dict[str, Any]:
+    market_cap_value = _positive_float(market_cap)
+    ttm_net_kar = _as_finite_float(snapshot.get("ttm_net_kar"))
+    ttm_favok = _as_finite_float(snapshot.get("ttm_favok"))
+    ozkaynaklar = _as_finite_float(snapshot.get("ozkaynaklar"))
+    net_borc = _as_finite_float(snapshot.get("net_borc"))
+    enterprise_value = (
+        market_cap_value + net_borc
+        if market_cap_value is not None and net_borc is not None
+        else None
+    )
+
+    return {
+        "fk": _round_market_ratio(market_cap_value, ttm_net_kar),
+        "pd_dd": _round_market_ratio(market_cap_value, ozkaynaklar),
+        "fd_favok": _round_market_ratio(enterprise_value, ttm_favok),
+        "net_borc_favok": _round_market_ratio(net_borc, ttm_favok),
+        "enterprise_value": enterprise_value,
+    }
+
+
+def _stock_card_financial_ratios_from_cache(symbol: str) -> Dict[str, Optional[float]]:
+    snapshot = _stock_card_financial_snapshot_from_cache(symbol)
+    ratios = _stock_card_financial_ratios_from_snapshot(snapshot, market_cap=None)
+    net_borc_favok = ratios.get("net_borc_favok")
+    if net_borc_favok is None and snapshot:
+        try:
+            net_borc = _as_finite_float(snapshot.get("net_borc"))
+            ttm_favok = _as_finite_float(snapshot.get("ttm_favok"))
+            if net_borc is not None and ttm_favok is not None and abs(ttm_favok) > 1e-12:
+                net_borc_favok = round(net_borc / ttm_favok, 2)
+        except (TypeError, ValueError, ZeroDivisionError):
+            net_borc_favok = None
     return {"net_borc_favok": net_borc_favok}
+
+
+def _resolve_market_card_valuation_from_cached_data(
+    cached: Dict[str, Any],
+    *,
+    market_cap: Any,
+) -> Dict[str, Any]:
+    snapshot = cached.get("financial_snapshot") if isinstance(cached.get("financial_snapshot"), dict) else {}
+    computed = _stock_card_financial_ratios_from_snapshot(snapshot, market_cap=market_cap)
+    provider = cached.get("provider_ratios") if isinstance(cached.get("provider_ratios"), dict) else {}
+
+    values: Dict[str, Optional[float]] = {}
+    sources: Dict[str, str] = {}
+    for key in ("fk", "pd_dd", "fd_favok"):
+        computed_value = computed.get(key)
+        if not _is_missing_market_ratio(computed_value):
+            values[key] = computed_value
+            sources[key] = "kap_computed"
+            continue
+        provider_value = provider.get(key)
+        values[key] = provider_value
+        if not _is_missing_market_ratio(provider_value):
+            sources[key] = str(cached.get("provider_source") or "external_ratio_provider")
+
+    net_borc_favok = computed.get("net_borc_favok")
+    if _is_missing_market_ratio(net_borc_favok):
+        fallback_ratios = cached.get("fallback_financial_ratios")
+        if isinstance(fallback_ratios, dict):
+            net_borc_favok = fallback_ratios.get("net_borc_favok")
+
+    return {
+        **values,
+        "net_borc_favok": net_borc_favok,
+        "valuation_source": "kap_computed" if sources and set(sources.values()) == {"kap_computed"} else "mixed",
+        "valuation_sources": sources,
+        "valuation_as_of": cached.get("as_of"),
+        "valuation_financial_period": snapshot.get("latest_quarter"),
+        "enterprise_value": computed.get("enterprise_value"),
+        "cache_hit": bool(cached.get("_cache_hit")),
+    }
+
+
+def _resolve_market_card_valuation(symbol: str, *, market_cap: Any) -> Dict[str, Any]:
+    ticker = str(symbol or "").strip().upper()
+    now = time.time()
+    cached = _STOCK_CARD_VALUATION_CACHE.get(ticker)
+    if cached and now - cached.get("_ts", 0) < _STOCK_CARD_VALUATION_CACHE_TTL:
+        return _resolve_market_card_valuation_from_cached_data(
+            {**cached, "_cache_hit": True},
+            market_cap=market_cap,
+        )
+
+    snapshot = _stock_card_financial_snapshot_from_cache(ticker)
+    computed = _stock_card_financial_ratios_from_snapshot(snapshot, market_cap=market_cap)
+    needs_provider = any(_is_missing_market_ratio(computed.get(key)) for key in ("fk", "pd_dd", "fd_favok"))
+
+    provider_payload: Dict[str, Any] = {}
+    provider_ratios: Dict[str, Optional[float]] = {}
+    if needs_provider:
+        provider_payload = _fetch_isyatirim_multiples(ticker)
+        provider_ratios = _resolve_market_card_multiples(ticker, provider_payload)
+
+    cache_ratios = _stock_card_financial_ratios_from_cache(ticker)
+    cached_payload = {
+        "_ts": now,
+        "financial_snapshot": snapshot,
+        "provider_ratios": provider_ratios,
+        "provider_source": provider_payload.get("source") if provider_payload.get("ok") else None,
+        "provider_as_of": provider_payload.get("fetched_at"),
+        "fallback_financial_ratios": cache_ratios,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+    _STOCK_CARD_VALUATION_CACHE[ticker] = cached_payload
+    return _resolve_market_card_valuation_from_cached_data(cached_payload, market_cap=market_cap)
 
 
 def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) -> Dict[str, Any]:
@@ -4384,9 +4520,7 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
         company_name = str((instrument or {}).get("name") or cached_meta.get("company_title") or "").strip() or symbol
         basic_summary = basic_summary_map.get(symbol)
         market_cap = _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary)
-        multiples = _fetch_isyatirim_multiples(symbol)
-        resolved_multiples = _resolve_market_card_multiples(symbol, multiples)
-        cache_ratios = _stock_card_financial_ratios_from_cache(symbol)
+        valuation = _resolve_market_card_valuation(symbol, market_cap=market_cap)
         return_bases = return_base_map.get(symbol, {})
 
         price = _first_not_none(quote.get("price"), intraday.get("price"))
@@ -4409,10 +4543,15 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
             "high": intraday.get("high"),
             "low": intraday.get("low"),
             "previous_close": intraday.get("prev_close"),
-            "fk": resolved_multiples.get("fk"),
-            "pd_dd": resolved_multiples.get("pd_dd"),
-            "fd_favok": resolved_multiples.get("fd_favok"),
-            "net_borc_favok": cache_ratios.get("net_borc_favok"),
+            "fk": valuation.get("fk"),
+            "pd_dd": valuation.get("pd_dd"),
+            "fd_favok": valuation.get("fd_favok"),
+            "net_borc_favok": valuation.get("net_borc_favok"),
+            "valuation_source": valuation.get("valuation_source"),
+            "valuation_sources": valuation.get("valuation_sources"),
+            "valuation_as_of": valuation.get("valuation_as_of"),
+            "valuation_financial_period": valuation.get("valuation_financial_period"),
+            "valuation_cache_hit": valuation.get("cache_hit"),
             "market_state": quote.get("market_state") or intraday.get("market_state") or "",
             "as_of": quote.get("as_of") or intraday.get("as_of"),
             "line_points": intraday.get("line_points") or [],
