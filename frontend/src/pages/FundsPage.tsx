@@ -1127,10 +1127,28 @@ function FundPerformanceChart({
     onCustomEndDateChange: (value: string) => void;
 }) {
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+    const [hoverPointer, setHoverPointer] = useState<{ x: number; y: number } | null>(null);
+    const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
     const width = 860;
     const height = 430;
     const padding = { top: 34, right: 24, bottom: 50, left: 74 };
     const validPoints = points.filter((point) => Number.isFinite(Number(point.price)) && Number(point.price) > 0);
+    const pointWindowKey = `${fundCode}:${selectedRange}:${validPoints.length}:${validPoints[0]?.date || ''}:${validPoints[validPoints.length - 1]?.date || ''}`;
+    useEffect(() => {
+        setHoverIndex(null);
+        setHoverPointer(null);
+        setMeasureAnchorIndex(null);
+    }, [pointWindowKey]);
+    const chartPointerFromEvent = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return null;
+        const x = ((event.clientX - rect.left) / rect.width) * width;
+        const y = ((event.clientY - rect.top) / rect.height) * height;
+        return {
+            x: Math.min(Math.max(x, 0), width),
+            y: Math.min(Math.max(y, 0), height),
+        };
+    };
     const rangeReturn = validPoints.length >= 2
         ? returnBetween(Number(validPoints[validPoints.length - 1].price), Number(validPoints[0].price))
         : null;
@@ -1311,13 +1329,13 @@ function FundPerformanceChart({
         const yTicks = Array.from({ length: 5 }, (_, index) => maxValue - (span * index) / 4);
         const zeroY = yFor(0);
         const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
-            const rect = event.currentTarget.getBoundingClientRect();
-            if (rect.width <= 0) return;
-            const x = ((event.clientX - rect.left) / rect.width) * width;
+            const pointer = chartPointerFromEvent(event);
+            if (!pointer) return;
+            setHoverPointer(pointer);
             let closestIndex = 0;
             let minDiff = Infinity;
             for (let index = 0; index < validPoints.length; index += 1) {
-                const diff = Math.abs(xForDate(validPoints[index].date) - x);
+                const diff = Math.abs(xForDate(validPoints[index].date) - pointer.x);
                 if (diff < minDiff) {
                     minDiff = diff;
                     closestIndex = index;
@@ -1339,13 +1357,17 @@ function FundPerformanceChart({
         const tooltipWidth = 172;
         const tooltipHeight = Math.max(48, 24 + tooltipRows.length * 15);
         const tooltipGap = 12;
-        const tooltipShouldFlip = hoverX != null && hoverX + tooltipGap + tooltipWidth > width - padding.right;
-        const tooltipX = hoverX == null
+        const tooltipAnchorX = hoverPointer?.x ?? hoverX;
+        const tooltipAnchorY = hoverPointer?.y ?? padding.top;
+        const tooltipShouldFlip = tooltipAnchorX != null && tooltipAnchorX + tooltipGap + tooltipWidth > width - 8;
+        const tooltipX = tooltipAnchorX == null
             ? 0
             : tooltipShouldFlip
-                ? Math.max(8, hoverX - tooltipGap - tooltipWidth)
-                : Math.min(hoverX + tooltipGap, width - tooltipWidth - 8);
-        const tooltipY = padding.top + 8;
+                ? Math.max(8, tooltipAnchorX - tooltipGap - tooltipWidth)
+                : Math.min(tooltipAnchorX + tooltipGap, width - tooltipWidth - 8);
+        const tooltipY = tooltipAnchorY - tooltipGap - tooltipHeight >= padding.top
+            ? tooltipAnchorY - tooltipGap - tooltipHeight
+            : Math.min(tooltipAnchorY + tooltipGap, height - tooltipHeight - 8);
 
         return (
             <section className="fund-chart-panel">
@@ -1359,7 +1381,11 @@ function FundPerformanceChart({
                     role="img"
                     aria-label={`${fundCode} karşılaştırmalı getiri grafiği`}
                     onPointerMove={handlePointerMove}
-                    onPointerLeave={() => setHoverIndex(null)}
+                    onPointerLeave={() => {
+                        setHoverIndex(null);
+                        setHoverPointer(null);
+                        setMeasureAnchorIndex(null);
+                    }}
                 >
                     <defs>
                         <clipPath id={`${gradientId}-compare-clip`}>
@@ -1448,7 +1474,7 @@ function FundPerformanceChart({
                                     strokeWidth="1.6"
                                 />
                             ))}
-                            <g transform={`translate(${tooltipX}, ${tooltipY})`}>
+                            <g className="fund-chart-tooltip" style={{ transform: `translate(${tooltipX}px, ${tooltipY}px)` }}>
                                 <rect width={tooltipWidth} height={tooltipHeight} rx="6" className="fund-chart-tooltip-bg" />
                                 <text x="8" y="17" className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
                                 {tooltipRows.map(({ series, point }, index) => (
@@ -1494,10 +1520,7 @@ function FundPerformanceChart({
     const areaData = `${pathData} L ${xFor(validPoints.length - 1)} ${height - padding.bottom} L ${padding.left} ${height - padding.bottom} Z`;
     const yTicks = [0, 0.5, 1].map((ratio) => maxValue - ratio * span);
 
-    const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        if (rect.width <= 0) return;
-        const x = ((event.clientX - rect.left) / rect.width) * width;
+    const closestPriceIndexForX = (x: number) => {
         let closestIndex = 0;
         let minDiff = Infinity;
         for (let index = 0; index < validPoints.length; index += 1) {
@@ -1507,21 +1530,94 @@ function FundPerformanceChart({
                 closestIndex = index;
             }
         }
+        return closestIndex;
+    };
+    const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const pointer = chartPointerFromEvent(event);
+        if (!pointer) return;
+        setHoverPointer(pointer);
+        setHoverIndex(closestPriceIndexForX(pointer.x));
+    };
+    const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+        event.preventDefault();
+        const pointer = chartPointerFromEvent(event);
+        if (!pointer) return;
+        const closestIndex = closestPriceIndexForX(pointer.x);
+        setHoverPointer(pointer);
         setHoverIndex(closestIndex);
+        setMeasureAnchorIndex(closestIndex);
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+    };
+    const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+        setMeasureAnchorIndex(null);
+        try {
+            if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+        } catch {
+            // Ignore release errors when the browser has already cancelled capture.
+        }
     };
     const hoverPoint = hoverIndex == null ? null : validPoints[Math.max(0, Math.min(validPoints.length - 1, hoverIndex))];
-    const hoverX = hoverPoint ? xFor(validPoints.indexOf(hoverPoint)) : null;
+    const hoverPointIndex = hoverPoint ? validPoints.indexOf(hoverPoint) : null;
+    const hoverX = hoverPointIndex == null ? null : xFor(hoverPointIndex);
     const hoverY = hoverPoint ? yFor(Number(hoverPoint.price)) : null;
+    const measureAnchorPoint = measureAnchorIndex == null
+        ? null
+        : validPoints[Math.max(0, Math.min(validPoints.length - 1, measureAnchorIndex))];
+    const measureEndPoint = measureAnchorPoint && hoverPoint && hoverPointIndex != null && hoverPointIndex !== measureAnchorIndex
+        ? hoverPoint
+        : null;
+    const measureAnchorX = measureAnchorPoint && measureAnchorIndex != null ? xFor(measureAnchorIndex) : null;
+    const measureAnchorY = measureAnchorPoint ? yFor(Number(measureAnchorPoint.price)) : null;
+    const measureEndX = measureEndPoint && hoverPointIndex != null ? xFor(hoverPointIndex) : null;
+    const measureEndY = measureEndPoint ? yFor(Number(measureEndPoint.price)) : null;
+    const measureStartPrice = measureAnchorPoint ? Number(measureAnchorPoint.price) : null;
+    const measureEndPrice = measureEndPoint ? Number(measureEndPoint.price) : null;
+    const measureDelta = measureStartPrice != null && measureEndPrice != null ? measureEndPrice - measureStartPrice : null;
+    const measureReturn = returnBetween(measureEndPrice, measureStartPrice);
+    const measureLineY = measureAnchorY != null && measureEndY != null
+        ? Math.max(padding.top + 12, Math.min(measureAnchorY, measureEndY) - 18)
+        : null;
+    const measureTooltipWidth = 180;
+    const measureTooltipHeight = 70;
+    const measureTooltipGap = 14;
+    const measureAnchorXForTooltip = hoverPointer?.x ?? measureEndX;
+    const measureAnchorYForTooltip = hoverPointer?.y ?? measureEndY;
+    const measureTooltipShouldFlip = measureAnchorXForTooltip != null
+        && measureAnchorXForTooltip + measureTooltipGap + measureTooltipWidth > width - 8;
+    const measureTooltipX = measureAnchorXForTooltip == null
+        ? 0
+        : measureTooltipShouldFlip
+            ? Math.max(8, measureAnchorXForTooltip - measureTooltipGap - measureTooltipWidth)
+            : Math.min(measureAnchorXForTooltip + measureTooltipGap, width - measureTooltipWidth - 8);
+    const measureTooltipY = measureAnchorYForTooltip == null
+        ? 0
+        : measureAnchorYForTooltip - measureTooltipGap - measureTooltipHeight >= padding.top
+            ? measureAnchorYForTooltip - measureTooltipGap - measureTooltipHeight
+            : Math.min(measureAnchorYForTooltip + measureTooltipGap, height - measureTooltipHeight - 8);
+    const measureDeltaText = measureDelta == null
+        ? '-'
+        : `${measureDelta > 0 ? '+' : measureDelta < 0 ? '-' : ''}${formatCurrency(Math.abs(measureDelta), 'TRY')}`;
+    const measureClass = measureReturn == null ? '' : measureReturn >= 0 ? 'is-positive' : 'is-negative';
+    const measureLeftX = measureAnchorX != null && measureEndX != null ? Math.min(measureAnchorX, measureEndX) : null;
+    const measureRightX = measureAnchorX != null && measureEndX != null ? Math.max(measureAnchorX, measureEndX) : null;
     const tooltipWidth = 152;
     const tooltipHeight = 58;
     const tooltipGap = 12;
-    const tooltipShouldFlip = hoverX != null && hoverX + tooltipGap + tooltipWidth > width - padding.right;
-    const tooltipX = hoverX == null
+    const tooltipAnchorX = hoverPointer?.x ?? hoverX;
+    const tooltipAnchorY = hoverPointer?.y ?? hoverY;
+    const tooltipShouldFlip = tooltipAnchorX != null && tooltipAnchorX + tooltipGap + tooltipWidth > width - 8;
+    const tooltipX = tooltipAnchorX == null
         ? 0
         : tooltipShouldFlip
-            ? Math.max(8, hoverX - tooltipGap - tooltipWidth)
-            : Math.min(hoverX + tooltipGap, width - tooltipWidth - 8);
-    const tooltipY = hoverY == null ? 0 : Math.min(Math.max(hoverY - tooltipHeight / 2, padding.top), height - tooltipHeight - 8);
+            ? Math.max(8, tooltipAnchorX - tooltipGap - tooltipWidth)
+            : Math.min(tooltipAnchorX + tooltipGap, width - tooltipWidth - 8);
+    const tooltipY = tooltipAnchorY == null
+        ? 0
+        : tooltipAnchorY - tooltipGap - tooltipHeight >= padding.top
+            ? tooltipAnchorY - tooltipGap - tooltipHeight
+            : Math.min(tooltipAnchorY + tooltipGap, height - tooltipHeight - 8);
 
     return (
         <section className="fund-chart-panel">
@@ -1535,7 +1631,14 @@ function FundPerformanceChart({
                 role="img"
                 aria-label={`${fundCode} fiyat grafiği`}
                 onPointerMove={handlePointerMove}
-                onPointerLeave={() => setHoverIndex(null)}
+                onPointerDown={handlePointerDown}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={handlePointerUp}
+                onPointerLeave={() => {
+                    setHoverIndex(null);
+                    setHoverPointer(null);
+                    setMeasureAnchorIndex(null);
+                }}
             >
                 <defs>
                     <linearGradient id={gradientId} x1="0%" y1="0%" x2="0%" y2="100%">
@@ -1579,11 +1682,67 @@ function FundPerformanceChart({
                     r="4"
                     fill={color}
                 />
-                {hoverPoint && hoverX != null && hoverY != null && (
+                {measureAnchorPoint
+                    && measureEndPoint
+                    && measureAnchorX != null
+                    && measureAnchorY != null
+                    && measureEndX != null
+                    && measureEndY != null
+                    && measureLeftX != null
+                    && measureRightX != null
+                    && measureLineY != null
+                    && measureReturn != null
+                    && measureDelta != null && (
+                    <g className="fund-chart-measure">
+                        <line
+                            x1={measureAnchorX}
+                            y1={measureAnchorY}
+                            x2={measureEndX}
+                            y2={measureEndY}
+                            className="fund-chart-measure-path"
+                        />
+                        <line
+                            x1={measureLeftX}
+                            y1={measureLineY}
+                            x2={measureRightX}
+                            y2={measureLineY}
+                            className="fund-chart-measure-line"
+                        />
+                        <line
+                            x1={measureAnchorX}
+                            y1={measureLineY - 5}
+                            x2={measureAnchorX}
+                            y2={measureLineY + 5}
+                            className="fund-chart-measure-line"
+                        />
+                        <line
+                            x1={measureEndX}
+                            y1={measureLineY - 5}
+                            x2={measureEndX}
+                            y2={measureLineY + 5}
+                            className="fund-chart-measure-line"
+                        />
+                        <circle cx={measureAnchorX} cy={measureAnchorY} r="4.2" className="fund-chart-measure-point" fill={color} />
+                        <circle cx={measureEndX} cy={measureEndY} r="4.2" className="fund-chart-measure-point" fill={color} />
+                        <g className="fund-chart-measure-tooltip" style={{ transform: `translate(${measureTooltipX}px, ${measureTooltipY}px)` }}>
+                            <rect width={measureTooltipWidth} height={measureTooltipHeight} rx="7" className="fund-chart-measure-tooltip-bg" />
+                            <text x="10" y="18" className="fund-chart-measure-muted">
+                                {formatChartDate(measureAnchorPoint.date, selectedRange)} - {formatChartDate(measureEndPoint.date, selectedRange)}
+                            </text>
+                            <text x="10" y="42" className={`fund-chart-measure-value ${measureClass}`}>
+                                {formatPct(measureReturn)}
+                            </text>
+                            <text x="10" y="60" className="fund-chart-measure-muted">
+                                {measureDeltaText}
+                            </text>
+                        </g>
+                    </g>
+                )}
+                {measureAnchorIndex == null && hoverPoint && hoverX != null && hoverY != null && (
                     <g>
                         <line x1={hoverX} x2={hoverX} y1={padding.top} y2={height - padding.bottom} className="fund-chart-hoverline" />
                         <circle className="fund-chart-hover-point" cx={hoverX} cy={hoverY} r="3.6" fill={color} stroke="#0a0c0f" strokeWidth="1.6" />
-                        <g transform={`translate(${tooltipX}, ${tooltipY})`}>
+                        <g className="fund-chart-tooltip" style={{ transform: `translate(${tooltipX}px, ${tooltipY}px)` }}>
                             <rect width={tooltipWidth} height={tooltipHeight} rx="6" className="fund-chart-tooltip-bg" />
                             <text x="10" y="20" className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
                             <text x="10" y="43" className="fund-chart-tooltip-value">{formatCurrency(hoverPoint.price, 'TRY')}</text>
@@ -1615,6 +1774,10 @@ function FundAllocationSummary({
     const [activeIndex, setActiveIndex] = useState<number | null>(null);
     const positiveAllocations = allocations.filter((item) => Number(item.weight) > 0).slice(0, FUND_DONUT_COLORS.length);
     const positiveTotal = positiveAllocations.reduce((sum, item) => sum + Number(item.weight || 0), 0);
+    const netTotal = allocations.reduce((sum, item) => {
+        const weight = Number(item.weight);
+        return Number.isFinite(weight) ? sum + weight : sum;
+    }, 0);
     let cursor = 0;
     const segments = positiveTotal > 0
         ? positiveAllocations.map((item, index) => {
@@ -1670,7 +1833,7 @@ function FundAllocationSummary({
                         </svg>
                         <div className="fund-allocation-donut-center">
                             <span>{activeSegment ? activeSegment.item.label : 'Toplam'}</span>
-                            <strong>{activeSegment ? formatAllocationWeight(activeSegment.item.weight) : formatAllocationWeight(positiveTotal)}</strong>
+                            <strong>{activeSegment ? formatAllocationWeight(activeSegment.item.weight) : formatAllocationWeight(netTotal)}</strong>
                         </div>
                         {activeSegment && (
                             <div
@@ -3078,7 +3241,7 @@ function FundComparisonControls({
 
     return (
         <div className={`fund-comparison-controls${className ? ` ${className}` : ''}`}>
-            <div className="fund-comparison-search-wrap">
+            <div className={`fund-comparison-search-wrap${surfaceOpen ? ' is-open' : ''}`}>
                 {surfaceOpen ? (
                     <div className="fund-comparison-search-active">
                         <Search size={15} aria-hidden="true" />
@@ -3448,6 +3611,7 @@ export default function FundsPage({
     const [categories, setCategories] = useState<FundCategoriesResponse | null>(null);
     const [detail, setDetail] = useState<FundDetail | null>(null);
     const [performance, setPerformance] = useState<FundPerformanceResponse | null>(null);
+    const [heatmapPerformance, setHeatmapPerformance] = useState<FundPerformanceResponse | null>(null);
     const [yieldSummary, setYieldSummary] = useState<FundYieldSummaryResponse | null>(null);
     const [allocations, setAllocations] = useState<FundAllocationsResponse | null>(null);
     const [allocationHistory, setAllocationHistory] = useState<FundAllocationsHistoryResponse | null>(null);
@@ -3485,6 +3649,7 @@ export default function FundsPage({
     const autoRefreshAttemptedRef = useRef(false);
     const allocationRefreshAttemptedRef = useRef(new Set<string>());
     const comparisonPanelRef = useRef<HTMLDivElement | null>(null);
+    const heatmapFetchKeyRef = useRef<string | null>(null);
     const [comparisonHistory, setComparisonHistory] = useState<MarketComparisonHistoryResponse | null>(null);
     const [comparisonHistoryLoading, setComparisonHistoryLoading] = useState(false);
     const [comparisonHistoryError, setComparisonHistoryError] = useState<string | null>(null);
@@ -3607,6 +3772,8 @@ export default function FundsPage({
         setHistorySubtab('prices');
         setCustomStartDate(isoDateMonthsAgo(6));
         setCustomEndDate(new Date().toISOString().slice(0, 10));
+        setHeatmapPerformance(null);
+        heatmapFetchKeyRef.current = null;
         setHoldings(null);
         setHoldingsError(null);
         setHoldingsLoading(false);
@@ -3618,6 +3785,8 @@ export default function FundsPage({
     useEffect(() => {
         if (!fundCode) {
             setPerformance(null);
+            setHeatmapPerformance(null);
+            heatmapFetchKeyRef.current = null;
             setPerformanceError(null);
             return;
         }
@@ -3643,6 +3812,36 @@ export default function FundsPage({
             alive = false;
         };
     }, [fundCode]);
+
+    useEffect(() => {
+        if (!fundCode) {
+            setHeatmapPerformance(null);
+            heatmapFetchKeyRef.current = null;
+            return;
+        }
+        if (hasFullHistoryPerformance(performance)) {
+            setHeatmapPerformance(performance);
+            return;
+        }
+        if (!performance) return;
+        const normalizedCode = fundCode.trim().toUpperCase();
+        if (!normalizedCode || heatmapFetchKeyRef.current === normalizedCode) return;
+        heatmapFetchKeyRef.current = normalizedCode;
+        let alive = true;
+        apiClient
+            .fundPerformance(normalizedCode)
+            .then((payload) => {
+                if (!alive) return;
+                setHeatmapPerformance(payload);
+            })
+            .catch(() => {
+                if (!alive) return;
+                heatmapFetchKeyRef.current = null;
+            });
+        return () => {
+            alive = false;
+        };
+    }, [fundCode, performance]);
 
     useEffect(() => {
         if (!fundCode) {
@@ -3767,6 +3966,13 @@ export default function FundsPage({
 
     const selectedFund = detail || filteredFunds.find((row) => row.fund_code === fundCode) || null;
     const performancePoints = useMemo(() => sortFundPoints(performance?.points), [performance]);
+    const heatmapSourcePerformance = hasFullHistoryPerformance(performance)
+        ? performance
+        : (hasFullHistoryPerformance(heatmapPerformance) ? heatmapPerformance : performance);
+    const heatmapPerformancePoints = useMemo(
+        () => sortFundPoints(heatmapSourcePerformance?.points),
+        [heatmapSourcePerformance],
+    );
     const chartEndDate = chartRange === 'custom'
         ? (customEndDate || selectedFund?.as_of || new Date().toISOString().slice(0, 10))
         : (selectedFund?.as_of || performance?.as_of || new Date().toISOString().slice(0, 10));
@@ -3774,7 +3980,7 @@ export default function FundsPage({
         () => filterPointsForRange(performancePoints, chartRange, chartEndDate, customStartDate, customEndDate),
         [performancePoints, chartRange, chartEndDate, customStartDate, customEndDate],
     );
-    const monthlyReturns = useMemo(() => monthlyReturnsFromPoints(performancePoints), [performancePoints]);
+    const monthlyReturns = useMemo(() => monthlyReturnsFromPoints(heatmapPerformancePoints), [heatmapPerformancePoints]);
     const overviewMetricSeries = useMemo(() => overviewMetricsFromPoints(performancePoints), [performancePoints]);
     const allocationRows = useMemo(
         () => [...(allocations?.allocations || [])]

@@ -948,6 +948,9 @@
     aspect-ratio: 860 / 430;
     border-radius: 8px;
     background: color-mix(in srgb, var(--bg-color) 84%, var(--surface-color));
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
 }
 
 .fund-chart-reveal {
@@ -1019,6 +1022,10 @@
     font-size: 11px;
 }
 
+.fund-chart-tooltip {
+    will-change: transform;
+}
+
 .fund-chart-tooltip-bg {
     fill: color-mix(in srgb, var(--bg-color) 94%, black);
     stroke: color-mix(in srgb, var(--accent-color) 22%, transparent);
@@ -1034,6 +1041,60 @@
     font-family: var(--font-mono);
     font-size: 13px;
     font-weight: 800;
+}
+
+.fund-chart-measure {
+    pointer-events: none;
+}
+
+.fund-chart-measure-path {
+    stroke: color-mix(in srgb, var(--accent-color) 56%, var(--text-primary));
+    stroke-width: 1.4;
+    stroke-dasharray: 4 5;
+    vector-effect: non-scaling-stroke;
+}
+
+.fund-chart-measure-line {
+    stroke: color-mix(in srgb, var(--text-primary) 52%, transparent);
+    stroke-width: 1.1;
+    stroke-dasharray: 3 4;
+    vector-effect: non-scaling-stroke;
+}
+
+.fund-chart-measure-point {
+    stroke: color-mix(in srgb, var(--bg-color) 86%, black);
+    stroke-width: 1.9;
+}
+
+.fund-chart-measure-tooltip {
+    will-change: transform;
+}
+
+.fund-chart-measure-tooltip-bg {
+    fill: color-mix(in srgb, var(--bg-color) 96%, black);
+    stroke: color-mix(in srgb, var(--accent-color) 42%, transparent);
+}
+
+.fund-chart-measure-muted {
+    fill: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 800;
+}
+
+.fund-chart-measure-value {
+    fill: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 17px;
+    font-weight: 900;
+}
+
+.fund-chart-measure-value.is-positive {
+    fill: var(--success-color);
+}
+
+.fund-chart-measure-value.is-negative {
+    fill: var(--danger-color);
 }
 
 .fund-chart-loading-label {
@@ -1744,6 +1805,10 @@
     flex: 0 0 auto;
 }
 
+.fund-comparison-search-wrap.is-open {
+    width: min(300px, calc(100vw - 2rem));
+}
+
 .fund-comparison-search-button,
 .fund-comparison-search-active,
 .fund-comparison-chips button {
@@ -1773,7 +1838,7 @@
     display: inline-grid;
     grid-template-columns: 16px minmax(0, 1fr) 28px;
     align-items: center;
-    width: 238px;
+    width: 100%;
     padding: 0 0.25rem 0 0.6rem;
     border: 1px solid color-mix(in srgb, var(--accent-color) 72%, transparent);
     background: color-mix(in srgb, var(--bg-color) 88%, var(--surface-color));
@@ -1795,17 +1860,24 @@
 }
 
 .fund-comparison-search-active button {
-    display: inline-grid;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     justify-self: end;
     width: 26px;
     height: 26px;
     flex: 0 0 auto;
+    padding: 0;
     border: 0;
     border-radius: 6px;
     background: transparent;
     color: var(--text-secondary);
     cursor: pointer;
-    place-items: center;
+    line-height: 1;
+}
+
+.fund-comparison-search-active button svg {
+    display: block;
 }
 
 .fund-comparison-search-active button:hover,
@@ -1819,7 +1891,7 @@
     bottom: calc(100% + 8px);
     left: 0;
     z-index: 8;
-    width: min(300px, calc(100vw - 2rem));
+    width: 100%;
     max-height: 320px;
     overflow-y: auto;
     padding: 0.35rem;
