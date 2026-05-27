@@ -9,6 +9,7 @@ export const ROUTE_PATHS = {
     marketsIndices: '/markets/indices',
     marketsIndicesDetail: '/markets/indices/:indexCode',
     funds: '/funds',
+    fundComparison: '/funds/compare',
     fundDetail: '/funds/:fundCode/:tab',
     fundDetailNoTab: '/funds/:fundCode',
     stocks: '/stocks',
@@ -16,7 +17,40 @@ export const ROUTE_PATHS = {
     stockDetailNoTab: '/stocks/:ticker',
 } as const;
 
-export const MARKET_INDEX_CODES: readonly MarketStockIndex[] = ['XUTUM', 'XU100', 'XU030'] as const;
+export const MARKET_STOCK_INDEX_CODES: readonly MarketStockIndex[] = ['XUTUM', 'XU100', 'XU030'] as const;
+export const MARKET_SECTOR_INDEX_CODES = [
+    'XUSIN',
+    'XUHIZ',
+    'XUMAL',
+    'XUTEK',
+    'XBANK',
+    'XAKUR',
+    'XBLSM',
+    'XELKT',
+    'XFINK',
+    'XGMYO',
+    'XGIDA',
+    'XHOLD',
+    'XILTM',
+    'XINSA',
+    'XKAGT',
+    'XKMYA',
+    'XMADN',
+    'XMANA',
+    'XMESY',
+    'XSGRT',
+    'XSPOR',
+    'XTAST',
+    'XTCRT',
+    'XTEKS',
+    'XTRZM',
+    'XULAS',
+    'XYORT',
+] as const;
+export const MARKET_INDEX_CODES: readonly MarketIndexCode[] = [
+    ...MARKET_STOCK_INDEX_CODES,
+    ...MARKET_SECTOR_INDEX_CODES,
+] as const;
 export const STOCK_TABS = ['overview', 'financials', 'kap', 'ask'] as const;
 export const FUND_TABS = ['overview', 'allocation', 'history'] as const;
 export const STOCK_RETURN_MODES = ['absolute', 'relative_xu100', 'relative_xu030'] as const;
@@ -46,13 +80,29 @@ export function normalizeFundCode(raw: string | null | undefined): string {
 
 export function isValidMarketIndexCode(raw: string | null | undefined): raw is MarketIndexCode {
     const normalized = String(raw ?? '').trim().toUpperCase();
-    return MARKET_INDEX_CODES.includes(normalized as MarketStockIndex);
+    return MARKET_INDEX_CODES.includes(normalized as MarketIndexCode);
+}
+
+export function isValidMarketStockIndex(raw: string | null | undefined): raw is MarketStockIndex {
+    const normalized = String(raw ?? '').trim().toUpperCase();
+    return MARKET_STOCK_INDEX_CODES.includes(normalized as MarketStockIndex);
+}
+
+export function normalizeMarketStockIndex(
+    raw: string | null | undefined,
+    fallback: MarketStockIndex = DEFAULT_MARKET_INDEX,
+): MarketStockIndex {
+    const normalized = String(raw ?? '').trim().toUpperCase();
+    if (isValidMarketStockIndex(normalized)) {
+        return normalized;
+    }
+    return fallback;
 }
 
 export function normalizeMarketIndexCode(
     raw: string | null | undefined,
-    fallback: MarketStockIndex = DEFAULT_MARKET_INDEX,
-): MarketStockIndex {
+    fallback: MarketIndexCode = DEFAULT_MARKET_INDEX,
+): MarketIndexCode {
     const normalized = String(raw ?? '').trim().toUpperCase();
     if (isValidMarketIndexCode(normalized)) {
         return normalized;
@@ -146,7 +196,7 @@ export function toMarketsOverview(): string {
 }
 
 export function toMarketsStocks(indexCode: string | null | undefined = DEFAULT_MARKET_INDEX): string {
-    return `${ROUTE_PATHS.marketsStocks}/${normalizeMarketIndexCode(indexCode)}`;
+    return `${ROUTE_PATHS.marketsStocks}/${normalizeMarketStockIndex(indexCode)}`;
 }
 
 export function toMarketsIndices(): string {
@@ -159,6 +209,10 @@ export function toMarketsIndexDetail(indexCode: string | null | undefined): stri
 
 export function toFunds(): string {
     return ROUTE_PATHS.funds;
+}
+
+export function toFundComparison(): string {
+    return ROUTE_PATHS.fundComparison;
 }
 
 export function toFundDetail(

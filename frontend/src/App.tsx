@@ -1,10 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { Sun, Moon } from 'lucide-react';
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
-import MarketPage from './pages/MarketPage';
-import MarketsView from './pages/MarketsView';
-import StockDetailPage from './pages/StockDetailPage';
-import FundsPage from './pages/FundsPage';
 import GlobalTickerSearch from './components/GlobalTickerSearch';
 import type { MarketsNavigationSection } from './components/MarketsNavigation';
 import {
@@ -16,11 +12,13 @@ import {
   canonicalizeStocksReturnModeSearch,
   legacySearchToCanonical,
   normalizeMarketIndexCode,
+  normalizeMarketStockIndex,
   normalizeFundCode,
   normalizeFundTab,
   normalizeStockReturnMode,
   normalizeStockTab,
   normalizeTicker,
+  toFundComparison,
   toFundDetail,
   toFunds,
   toMarketsIndexDetail,
@@ -31,6 +29,11 @@ import {
   toStockDetail,
 } from './routing/routes';
 import './index.css';
+
+const MarketPage = lazy(() => import('./pages/MarketPage'));
+const MarketsView = lazy(() => import('./pages/MarketsView'));
+const StockDetailPage = lazy(() => import('./pages/StockDetailPage'));
+const FundsPage = lazy(() => import('./pages/FundsPage'));
 
 function LandingRoute() {
   const location = useLocation();
@@ -74,6 +77,7 @@ function MarketsOverviewRoute() {
       routeStockIndex={DEFAULT_MARKET_INDEX}
       routeSelectedIndex={null}
       onNavigateSection={handleSectionNavigate}
+      onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onNavigateStockIndex={(nextIndex) => navigate(toMarketsStocks(nextIndex))}
       onNavigateIndexDetail={(nextIndex) => {
         if (!nextIndex) {
@@ -93,7 +97,7 @@ function MarketsStocksRoute() {
   const location = useLocation();
   const params = useParams<{ indexCode: string }>();
   const rawIndexCode = String(params.indexCode || '');
-  const normalizedIndexCode = normalizeMarketIndexCode(rawIndexCode);
+  const normalizedIndexCode = normalizeMarketStockIndex(rawIndexCode);
   const { mode: returnMode, canonicalSearch } = canonicalizeStocksReturnModeSearch(location.search);
   const currentSearch = location.search.startsWith('?') ? location.search.slice(1) : location.search;
   const needsCanonicalIndex = !rawIndexCode || rawIndexCode.trim().toUpperCase() !== normalizedIndexCode;
@@ -133,6 +137,7 @@ function MarketsStocksRoute() {
       routeReturnMode={returnMode}
       routeSelectedIndex={null}
       onNavigateSection={handleSectionNavigate}
+      onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onNavigateStockIndex={(nextIndex) => navigate(stocksPathWithMode(nextIndex))}
       onNavigateReturnMode={(nextMode) => {
         const normalizedMode = normalizeStockReturnMode(nextMode, DEFAULT_STOCK_RETURN_MODE);
@@ -174,6 +179,7 @@ function MarketsIndicesListRoute() {
         }
         navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
       }}
+      onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onNavigateStockIndex={(nextIndex) => navigate(toMarketsStocks(nextIndex))}
       onNavigateIndexDetail={(nextIndex) => {
         if (!nextIndex) {
@@ -218,6 +224,7 @@ function MarketsIndicesDetailRoute() {
         }
         navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
       }}
+      onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onNavigateStockIndex={(nextIndex) => navigate(toMarketsStocks(nextIndex))}
       onNavigateIndexDetail={(nextIndex) => {
         if (!nextIndex) {
@@ -282,6 +289,7 @@ function StockDetailRoute() {
       onTabChange={(nextTab) => navigate(toStockDetail(normalizedTicker, nextTab))}
       onBack={() => navigate(toMarketsStocks(DEFAULT_MARKET_INDEX))}
       onNavigateSection={handleSectionNavigate}
+      onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
       onOpenFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
     />
@@ -313,6 +321,39 @@ function FundsListRoute() {
       onTabChange={() => undefined}
       onBack={() => navigate(toFunds())}
       onNavigateSection={handleSectionNavigate}
+      onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
+      onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+    />
+  );
+}
+
+function FundsComparisonRoute() {
+  const navigate = useNavigate();
+
+  const handleSectionNavigate = (section: MarketsNavigationSection) => {
+    if (section === 'markets') {
+      navigate(toMarketsOverview());
+      return;
+    }
+    if (section === 'stocks') {
+      navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
+      return;
+    }
+    if (section === 'indices') {
+      navigate(toMarketsIndices());
+      return;
+    }
+    navigate(toFunds());
+  };
+
+  return (
+    <FundsPage
+      view="compare"
+      onOpenFund={(nextFundCode, nextTab = DEFAULT_FUND_TAB) => navigate(toFundDetail(nextFundCode, nextTab))}
+      onTabChange={() => undefined}
+      onBack={() => navigate(toFunds())}
+      onNavigateSection={handleSectionNavigate}
+      onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
     />
   );
@@ -366,6 +407,7 @@ function FundDetailRoute() {
       onTabChange={(nextTab) => navigate(toFundDetail(normalizedFundCode, nextTab))}
       onBack={() => navigate(toFunds())}
       onNavigateSection={handleSectionNavigate}
+      onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
     />
   );
@@ -452,26 +494,29 @@ function App() {
       )}
 
       <main className="app-main-full">
-        <Routes>
-          <Route path={ROUTE_PATHS.landing} element={<LandingRoute />} />
+        <Suspense fallback={<div className="app-route-loading">Yükleniyor...</div>}>
+          <Routes>
+            <Route path={ROUTE_PATHS.landing} element={<LandingRoute />} />
 
-          <Route path={ROUTE_PATHS.markets} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
-          <Route path={ROUTE_PATHS.marketsOverview} element={<MarketsOverviewRoute />} />
-          <Route path={ROUTE_PATHS.marketsStocks} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
-          <Route path={ROUTE_PATHS.marketsStocksIndex} element={<MarketsStocksRoute />} />
-          <Route path={ROUTE_PATHS.marketsIndices} element={<MarketsIndicesListRoute />} />
-          <Route path={ROUTE_PATHS.marketsIndicesDetail} element={<MarketsIndicesDetailRoute />} />
+            <Route path={ROUTE_PATHS.markets} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
+            <Route path={ROUTE_PATHS.marketsOverview} element={<MarketsOverviewRoute />} />
+            <Route path={ROUTE_PATHS.marketsStocks} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
+            <Route path={ROUTE_PATHS.marketsStocksIndex} element={<MarketsStocksRoute />} />
+            <Route path={ROUTE_PATHS.marketsIndices} element={<MarketsIndicesListRoute />} />
+            <Route path={ROUTE_PATHS.marketsIndicesDetail} element={<MarketsIndicesDetailRoute />} />
 
-          <Route path={ROUTE_PATHS.funds} element={<FundsListRoute />} />
-          <Route path={ROUTE_PATHS.fundDetailNoTab} element={<FundCodeDefaultTabRedirect />} />
-          <Route path={ROUTE_PATHS.fundDetail} element={<FundDetailRoute />} />
+            <Route path={ROUTE_PATHS.funds} element={<FundsListRoute />} />
+            <Route path={ROUTE_PATHS.fundComparison} element={<FundsComparisonRoute />} />
+            <Route path={ROUTE_PATHS.fundDetailNoTab} element={<FundCodeDefaultTabRedirect />} />
+            <Route path={ROUTE_PATHS.fundDetail} element={<FundDetailRoute />} />
 
-          <Route path={ROUTE_PATHS.stocks} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
-          <Route path={ROUTE_PATHS.stockDetailNoTab} element={<StockTickerDefaultTabRedirect />} />
-          <Route path={ROUTE_PATHS.stockDetail} element={<StockDetailRoute />} />
+            <Route path={ROUTE_PATHS.stocks} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
+            <Route path={ROUTE_PATHS.stockDetailNoTab} element={<StockTickerDefaultTabRedirect />} />
+            <Route path={ROUTE_PATHS.stockDetail} element={<StockDetailRoute />} />
 
-          <Route path="*" element={<Navigate to={ROUTE_PATHS.landing} replace />} />
-        </Routes>
+            <Route path="*" element={<Navigate to={ROUTE_PATHS.landing} replace />} />
+          </Routes>
+        </Suspense>
       </main>
     </div>
   );

@@ -94,7 +94,7 @@ Konfigurasyon:
 
 1. KAP / index universe
    - Kod: `app.kap_service.get_bist_index_universe`
-   - Kullanim: `XUTUM`, `XU100`, `XU030` sembol listesi.
+   - Kullanim: `XUTUM`, `XU100`, `XU030` ve desteklenen BIST sektor endeksi sembol listeleri.
 
 ### Hisse fiyatlari
 

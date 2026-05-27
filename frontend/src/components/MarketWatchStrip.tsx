@@ -145,27 +145,32 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
     const [error, setError] = useState<string | null>(null);
     const inFlightRef = useRef(false);
 
-    const loadWatch = useCallback(async (options?: { refresh?: boolean }) => {
+    const loadWatch = useCallback(async (options?: { refresh?: boolean; silent?: boolean }) => {
         if (inFlightRef.current) return;
         inFlightRef.current = true;
-        setLoading(true);
-        setError(null);
+        const silent = Boolean(options?.silent);
+        if (!silent) {
+            setLoading(true);
+            setError(null);
+        }
         try {
             const response = await apiClient.marketWatch({ refresh: options?.refresh });
             setPayload(response);
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'Borsa izleme verisi alınamadı.';
-            setError(msg);
+            if (!silent) setError(msg);
         } finally {
             inFlightRef.current = false;
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     }, []);
 
     useEffect(() => {
         void loadWatch();
         const timer = window.setInterval(() => {
-            void loadWatch();
+            if (document.visibilityState === 'visible') {
+                void loadWatch({ silent: true });
+            }
         }, 3000);
         return () => {
             window.clearInterval(timer);

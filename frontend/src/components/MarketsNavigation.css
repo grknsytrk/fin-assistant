@@ -199,6 +199,12 @@
     padding: 0 0.5rem;
 }
 
+.mn-menu-subtree {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
 .mn-divider {
     height: 1px;
     background-color: rgba(255, 255, 255, 0.06);
@@ -239,6 +245,10 @@
     color: #fff;
 }
 
+.mn-menu-subtree.is-open > .mn-menu-item .mn-chevron {
+    transform: rotate(90deg);
+}
+
 .mn-item-main {
     display: flex;
     align-items: center;
@@ -274,6 +284,46 @@
 .mn-chevron,
 .mn-external-icon {
     color: #4b5563;
+    transition: transform 0.16s ease, color 0.16s ease;
+}
+
+.mn-submenu {
+    display: grid;
+    gap: 0.1rem;
+    margin: 0.12rem 0 0.25rem 1.55rem;
+    padding-left: 0.55rem;
+    border-left: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.mn-submenu-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 0.46rem 0.5rem;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: #94a3b8;
+    font: inherit;
+    font-size: 0.88rem;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    transition: color 0.16s ease;
+}
+
+.mn-submenu-item:hover,
+.mn-submenu-item:focus-visible {
+    background: transparent;
+    color: #fff;
+    outline: none;
+}
+
+.mn-submenu-item.active {
+    color: #fff;
+    font-weight: 800;
+    letter-spacing: 0.01em;
 }
 
 .mn-badge {
@@ -564,4 +614,45 @@
     font-size: 0.9rem;
     color: #475569;
     margin: 0;
+}
+
+@media (max-width: 760px) {
+    .mn-sidebar {
+        width: 60px;
+    }
+
+    .mn-menu-group {
+        padding: 0 0.35rem;
+    }
+
+    .mn-menu-item {
+        justify-content: center;
+        padding: 0.7rem 0;
+    }
+
+    .mn-item-main {
+        justify-content: center;
+    }
+
+    .mn-header {
+        justify-content: center;
+        padding: 0.95rem 0.5rem 0.85rem;
+    }
+
+    .mn-logo {
+        justify-content: center;
+        width: 40px;
+        height: 36px;
+    }
+
+    .mn-sidebar-search,
+    .mn-logo-text,
+    .mn-sidebar-toggle,
+    .mn-text,
+    .mn-chevron,
+    .mn-external-icon,
+    .mn-submenu,
+    .mn-auth-actions {
+        display: none;
+    }
 }

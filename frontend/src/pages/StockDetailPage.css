@@ -13,6 +13,12 @@
     --mn-sidebar-width: 60px;
 }
 
+@media (max-width: 760px) {
+    .stock-detail-shell {
+        --mn-sidebar-width: 60px;
+    }
+}
+
 .stock-workspace {
     display: flex;
     flex: 1;

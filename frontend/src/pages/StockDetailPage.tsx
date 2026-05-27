@@ -5,7 +5,7 @@ import { apiClient } from '../api/client';
 import type { KapSnapshotResponse, KapQuarter } from '../api/types';
 import { prepareOrderedQuarters } from '../utils/chartBuilders';
 import SymbolLogo from '../components/SymbolLogo';
-import MarketsNavigation, { type MarketsNavigationSection } from '../components/MarketsNavigation';
+import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import { useWatchlist } from '../hooks/useWatchlist';
 import type { StockTab } from '../routing/routes';
 
@@ -20,6 +20,7 @@ interface StockDetailPageProps {
     onTabChange?: (tab: StockTab) => void;
     onBack: () => void;
     onNavigateSection: (section: MarketsNavigationSection) => void;
+    onNavigateFundSection?: (section: MarketsNavigationFundSection) => void;
     onOpenTicker: (ticker: string) => void;
     onOpenFund: (fundCode: string) => void;
 }
@@ -44,6 +45,7 @@ const STOCK_DETAIL_TABS: Array<{ key: StockTab; label: string; icon: typeof Info
     { key: 'kap', label: 'KAP Bildirimleri', icon: BookOpen },
     { key: 'ask', label: 'RAG Asistanı', icon: MessageSquare },
 ];
+const FULL_KAP_QUARTER_COUNT = 20;
 
 function formatAsOf(value?: string | null): string {
     if (!value) return 'Veri güncelleniyor';
@@ -106,6 +108,7 @@ export default function StockDetailPage({
     onTabChange,
     onBack,
     onNavigateSection,
+    onNavigateFundSection,
     onOpenTicker,
     onOpenFund,
 }: StockDetailPageProps) {
@@ -113,6 +116,7 @@ export default function StockDetailPage({
     const [snapshot, setSnapshot] = useState<KapSnapshotResponse | null>(null);
     const [quarters, setQuarters] = useState<KapQuarter[]>([]);
     const [loading, setLoading] = useState(false);
+    const [snapshotQuarterDepth, setSnapshotQuarterDepth] = useState(0);
     const [error, setError] = useState<string | null>(null);
     const [navCollapsed, setNavCollapsed] = useState(false);
     const [priceData, setPriceData] = useState<StockPriceData | null>(null);
@@ -132,13 +136,20 @@ export default function StockDetailPage({
         let mounted = true;
         setSnapshot(null);
         setQuarters([]);
+        setSnapshotQuarterDepth(0);
         setError(null);
         setLoading(true);
-        apiClient.kapSnapshot(ticker, false, 20)
+        // Genel Bakış tab'ında 5/10/15/20 çeyrek seçenekleri var; ilk istekte
+        // de tam 20 çeyrek çekiyoruz ki 15c/20c butonları boş görünmesin. KAP
+        // cache'i taze ise tek istekte gelir, soğuk ise tek seferde uzun ama
+        // sonraki tab geçişlerinde yeniden istek atılmaz.
+        const initialQuarterCount = FULL_KAP_QUARTER_COUNT;
+        apiClient.kapSnapshot(ticker, false, initialQuarterCount)
             .then(data => {
                 if (mounted) {
                     setSnapshot(data);
                     setQuarters(prepareOrderedQuarters(data));
+                    setSnapshotQuarterDepth(initialQuarterCount);
                     if (!data.ok && data.error) setError(data.error);
                 }
             })
@@ -151,6 +162,25 @@ export default function StockDetailPage({
         
         return () => { mounted = false; };
     }, [ticker]);
+
+    useEffect(() => {
+        if (selectedTab !== 'financials' && selectedTab !== 'kap') return;
+        if (!snapshot) return;
+        if (snapshotQuarterDepth >= FULL_KAP_QUARTER_COUNT) return;
+        let mounted = true;
+        apiClient.kapSnapshot(ticker, false, FULL_KAP_QUARTER_COUNT)
+            .then(data => {
+                if (!mounted) return;
+                setSnapshot(data);
+                setQuarters(prepareOrderedQuarters(data));
+                setSnapshotQuarterDepth(FULL_KAP_QUARTER_COUNT);
+                if (!data.ok && data.error) setError(data.error);
+            })
+            .catch(() => {
+                // İlk özet snapshot ekranda kalır; derin veri yüklenemese de fiyat akışı bloklanmaz.
+            });
+        return () => { mounted = false; };
+    }, [selectedTab, snapshot, snapshotQuarterDepth, ticker]);
 
     useEffect(() => {
         let cancelled = false;
@@ -215,6 +245,7 @@ export default function StockDetailPage({
                 activeSection="stocks"
                 onCollapsedChange={setNavCollapsed}
                 onSectionChange={onNavigateSection}
+                onFundSectionChange={onNavigateFundSection}
                 onSelectTicker={onOpenTicker}
                 onSelectFund={onOpenFund}
             />
@@ -266,11 +297,13 @@ export default function StockDetailPage({
                                             <Star size={19} aria-hidden="true" />
                                         </button>
                                     </div>
-                                    <p>{snapshot?.company_title || 'Şirket bilgisi yükleniyor...'}</p>
+                                    <p>{snapshot?.company_title || (snapshot?.error ? ticker : 'Şirket bilgisi yükleniyor...')}</p>
                                     <small>
-                                        {snapshot?.latest_quarter
-                                            ? `Son dönem · ${snapshot.latest_quarter}`
-                                            : 'KAP finansal verileri yükleniyor'}
+                                        {snapshot?.error
+                                            ? snapshot.error
+                                            : snapshot?.latest_quarter
+                                                ? `Son dönem · ${snapshot.latest_quarter}`
+                                                : 'KAP finansal verileri yükleniyor'}
                                     </small>
                                 </div>
                             </div>

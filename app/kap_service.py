@@ -9,7 +9,7 @@ import urllib.request
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from src.config import KapConfig
 from src.kap_fetcher import fetch_kap_company_snapshot
@@ -44,7 +44,37 @@ BIST30_SYMBOLS: List[str] = [
 
 BIST_INDEX_REPORT_URL = "https://www.borsaistanbul.com/datum/hisse_endeks_ds.csv"
 BIST_INDEX_CACHE_TTL = 6 * 60 * 60
-BIST_INDEX_ORDER: List[str] = ["XUTUM", "XU100", "XU030"]
+BIST_STOCK_INDEX_ORDER: List[str] = ["XUTUM", "XU100", "XU030"]
+BIST_SECTOR_INDEX_ORDER: List[str] = [
+    "XUSIN",
+    "XUHIZ",
+    "XUMAL",
+    "XUTEK",
+    "XBANK",
+    "XAKUR",
+    "XBLSM",
+    "XELKT",
+    "XFINK",
+    "XGMYO",
+    "XGIDA",
+    "XHOLD",
+    "XILTM",
+    "XINSA",
+    "XKAGT",
+    "XKMYA",
+    "XMADN",
+    "XMANA",
+    "XMESY",
+    "XSGRT",
+    "XSPOR",
+    "XTAST",
+    "XTCRT",
+    "XTEKS",
+    "XTRZM",
+    "XULAS",
+    "XYORT",
+]
+BIST_INDEX_ORDER: List[str] = BIST_STOCK_INDEX_ORDER + BIST_SECTOR_INDEX_ORDER
 
 # Official Borsa Istanbul XUTUM snapshot from hisse_endeks_ds.csv, dated
 # 2026-04-29. Used only when the live official CSV cannot be read.
@@ -127,6 +157,7 @@ _BIST_FALLBACK_SYMBOLS: Dict[str, List[str]] = {
     "XUTUM": BIST_ALL_SYMBOLS_FALLBACK,
     "XU100": BIST100_SYMBOLS,
     "XU030": BIST30_SYMBOLS,
+    **{code: [] for code in BIST_SECTOR_INDEX_ORDER},
 }
 _BIST_UNIVERSE_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -200,6 +231,20 @@ def get_bist_index_universe(index_code: str = "XUTUM", *, force_refresh: bool = 
         data["symbols"] = list(data.get("symbols") or [])
         data["cache_hit"] = True
         return data
+    redis_key = f"kap:bist-index-universe:{normalized}"
+    if not force_refresh:
+        try:
+            from app.cache import get_cache
+
+            redis_cached = get_cache().get(redis_key)
+        except Exception:
+            redis_cached = None
+        if isinstance(redis_cached, dict):
+            data = dict(redis_cached)
+            data["symbols"] = list(data.get("symbols") or [])
+            data["cache_hit"] = True
+            _BIST_UNIVERSE_CACHE[normalized] = {"_ts": now, "data": data}
+            return data
 
     try:
         request = urllib.request.Request(
@@ -215,6 +260,12 @@ def get_bist_index_universe(index_code: str = "XUTUM", *, force_refresh: bool = 
     except Exception:
         fallback = _fallback_bist_universe(normalized)
         _BIST_UNIVERSE_CACHE[normalized] = {"_ts": now, "data": fallback}
+        try:
+            from app.cache import get_cache
+
+            get_cache().set(redis_key, fallback, ttl_seconds=BIST_INDEX_CACHE_TTL)
+        except Exception:
+            pass
         return dict(fallback)
 
     fetched_at = datetime.now(timezone.utc).isoformat()
@@ -237,6 +288,12 @@ def get_bist_index_universe(index_code: str = "XUTUM", *, force_refresh: bool = 
             "fallback_used": fallback_used,
         }
         _BIST_UNIVERSE_CACHE[code] = {"_ts": now, "data": data}
+        try:
+            from app.cache import get_cache
+
+            get_cache().set(f"kap:bist-index-universe:{code}", data, ttl_seconds=BIST_INDEX_CACHE_TTL)
+        except Exception:
+            pass
 
     result = dict(_BIST_UNIVERSE_CACHE[normalized]["data"])
     result["symbols"] = list(result.get("symbols") or [])
@@ -624,11 +681,61 @@ def _build_analysis_state(
         overrides[prev_year_same_period_key]["metrics_quarterly"] = dict(latest.get("metrics_quarterly_comparative") or {})
 
     prev_year_end_key = (latest_year - 1, 4)
-    if any(_period_key(row) == prev_year_end_key for row in ordered):
-        overrides.setdefault(prev_year_end_key, {})
-        overrides[prev_year_end_key]["metrics"] = dict(latest.get("metrics_comparative") or {})
+    prev_year_end_row = next((row for row in ordered if _period_key(row) == prev_year_end_key), None)
+    if prev_year_end_row is not None:
+        comparative_metrics = dict(latest.get("metrics_comparative") or {})
+        # KAP HTML parse'ı bazı raporlarda comparative sütununu yanlış birim
+        # (bin TL yerine TL) ya da yanlış satır olarak yakalayabiliyor. Eğer
+        # comparative değer ham (filed) sayıya göre büyüklük mertebesinde
+        # uyumsuzsa o anahtarı override'a almıyoruz; ham veri kullanılır.
+        sanitized = _sanitize_comparative_against_filed(
+            comparative_metrics,
+            filed_metrics=dict(prev_year_end_row.get("metrics") or {}),
+            keys=_POINT_IN_TIME_RESTATEMENT_KEYS,
+        )
+        if sanitized:
+            overrides.setdefault(prev_year_end_key, {})
+            overrides[prev_year_end_key]["metrics"] = sanitized
 
     return multiplier_map, source_map, overrides
+
+
+def _sanitize_comparative_against_filed(
+    comparative_metrics: Dict[str, Any],
+    *,
+    filed_metrics: Dict[str, Any],
+    keys: Iterable[str],
+    max_ratio: float = 8.0,
+) -> Dict[str, Any]:
+    """Filter out comparative values whose magnitude diverges suspiciously from
+    the originally filed point-in-time metric. Bilanço (balance sheet) kalemleri
+    iki ardışık çeyrek arasında 8 katından fazla değişmez; öyle bir farkı
+    gördüğümüzde HTML parse hatası kabul edip override'ı düşürüyoruz. Diğer
+    anahtarlar olduğu gibi korunur."""
+
+    cleaned: Dict[str, Any] = {}
+    for key, value in comparative_metrics.items():
+        try:
+            comparative_value = float(value) if value is not None else None
+        except (TypeError, ValueError):
+            comparative_value = None
+        filed_raw = filed_metrics.get(key)
+        try:
+            filed_value = float(filed_raw) if filed_raw is not None else None
+        except (TypeError, ValueError):
+            filed_value = None
+        if (
+            key in keys
+            and comparative_value is not None
+            and filed_value is not None
+            and filed_value != 0
+        ):
+            ratio = abs(filed_value) / max(1.0, abs(comparative_value))
+            if ratio > max_ratio or (1.0 / max(1e-9, ratio)) > max_ratio:
+                # Suspicious magnitude mismatch; keep filed value by skipping override.
+                continue
+        cleaned[key] = value
+    return cleaned
 
 
 def normalize_snapshot_for_frontend(raw: Dict[str, Any]) -> Dict[str, Any]:

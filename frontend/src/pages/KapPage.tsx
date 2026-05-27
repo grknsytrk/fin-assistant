@@ -578,6 +578,46 @@ function _buildRatioSeries(
         .filter((row): row is SeriesPoint => row !== null);
 }
 
+
+function _buildAnnualizedRoeSeries(
+    quarters: KapQuarter[],
+    numeratorKey: string,
+    denominatorKey: string,
+    suffix = '%',
+): SeriesPoint[] {
+    const TTM_LOOKBACK = 4;
+    return quarters
+        .map((q, idx) => {
+            let ttmFlow = 0;
+            for (let lookback = 0; lookback < TTM_LOOKBACK; lookback += 1) {
+                const cursor = idx - lookback;
+                if (cursor < 0) return null;
+                const flow = _resolveMetricValue(quarters, cursor, numeratorKey, true);
+                if (flow === null) return null;
+                ttmFlow += flow;
+            }
+
+            const denominatorEnd = _resolveMetricValue(quarters, idx, denominatorKey, false);
+            if (denominatorEnd === null || denominatorEnd === 0) return null;
+            const denominatorPrev = idx > 0
+                ? _resolveMetricValue(quarters, idx - 1, denominatorKey, false)
+                : null;
+            const averageDenominator = denominatorPrev !== null && denominatorPrev !== 0
+                ? (denominatorEnd + denominatorPrev) / 2
+                : denominatorEnd;
+            if (!averageDenominator) return null;
+
+            const value = (ttmFlow / averageDenominator) * 100;
+            return {
+                key: `${q.quarter}-${numeratorKey}-${denominatorKey}-ttm`,
+                label: _periodLabel(q.year, q.period, q.quarter),
+                value,
+                display: _formatRatio(value, suffix),
+            };
+        })
+        .filter((row): row is SeriesPoint => row !== null);
+}
+
 function _calcPctChange(current: number | null, base: number | null): number | null {
     if (current === null || base === null || base === 0) {
         return null;
@@ -1105,7 +1145,7 @@ export default function KapPage() {
                     favokMarji: _buildRatioSeries(orderedQuarters, 'favok', 'satis_gelirleri', true, true, 100, '%'),
                     netKarMarji: _buildRatioSeries(orderedQuarters, 'net_kar', 'satis_gelirleri', true, true, 100, '%'),
                     cariOran: _buildRatioSeries(orderedQuarters, 'donen_varliklar', 'kisa_vadeli_yukumlulukler', false, false, 1, 'x'),
-                    roe: _buildRatioSeries(orderedQuarters, 'net_kar', 'ozkaynaklar', true, false, 100, '%'),
+                    roe: _buildAnnualizedRoeSeries(orderedQuarters, 'net_kar', 'ozkaynaklar', '%'),
                 }
                 : null,
         [orderedQuarters],

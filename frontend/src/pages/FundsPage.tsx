@@ -25,6 +25,7 @@ import {
     LineChart,
     LogIn,
     LogOut,
+    Plus,
     RefreshCw,
     Search,
     ShieldAlert,
@@ -40,6 +41,7 @@ import type {
     FundAllocationsResponse,
     FundCategoriesResponse,
     FundDetail,
+    FundHoldingsLiveResponse,
     FundHoldingsResponse,
     FundPerformanceResponse,
     FundPortfolioPosition,
@@ -52,7 +54,7 @@ import type {
     MarketIndexListRow,
     MarketStockRow,
 } from '../api/types';
-import MarketsNavigation, { type MarketsNavigationSection } from '../components/MarketsNavigation';
+import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo from '../components/SymbolLogo';
 import { STOCK_LOGO_DOMAIN_MAP } from '../components/symbolLogoMaps';
 import { useWatchlist } from '../hooks/useWatchlist';
@@ -71,12 +73,14 @@ type FundSortKey =
     | 'as_of';
 
 type FundsPageProps = {
+    view?: 'list' | 'compare';
     fundCode?: string | null;
     activeTab?: FundTab;
     onOpenFund: (fundCode: string, tab?: FundTab) => void;
     onTabChange: (tab: FundTab) => void;
     onBack: () => void;
     onNavigateSection: (section: MarketsNavigationSection) => void;
+    onNavigateFundSection?: (section: MarketsNavigationFundSection) => void;
     onOpenTicker?: (ticker: string) => void;
 };
 
@@ -151,7 +155,7 @@ const FUND_HOLDING_CHANGE_FILTERS: Array<{ key: FundHoldingChangeFilter; label: 
     { key: 'removed', label: 'Çıkarılan' },
 ];
 
-type FundChartRange = 'all' | '1w' | '1m' | '3m' | '6m' | 'ytd' | '1y' | '5y' | 'custom';
+type FundChartRange = 'all' | '1w' | '1m' | '3m' | '6m' | 'ytd' | '1y' | '3y' | '5y' | 'custom';
 
 const DETAIL_RETURN_PERIODS = [
     { key: '1w', label: '1H' },
@@ -541,6 +545,7 @@ function rangeStartDate(range: FundChartRange, endDateIso: string, customStartDa
         start.setMonth(0, 1);
     }
     if (range === '1y') start.setFullYear(start.getFullYear() - 1);
+    if (range === '3y') start.setFullYear(start.getFullYear() - 3);
     if (range === '5y') start.setFullYear(start.getFullYear() - 5);
     if (range === 'custom') return customStartDate || isoDateMonthsAgo(6);
     return start.toISOString().slice(0, 10);
@@ -942,6 +947,50 @@ function filterFundHoldings(
 
 function holdingPositionKey(position: FundPortfolioPosition): string {
     return normalizeCompareSymbol(position.asset_code || position.asset_name);
+}
+
+function mergeFundHoldingsLivePayload(
+    current: FundHoldingsResponse,
+    live: FundHoldingsLiveResponse,
+): FundHoldingsResponse {
+    const liveByCode = new Map(
+        (live.positions || [])
+            .map((position) => [normalizeCompareSymbol(position.asset_code), position] as const)
+            .filter(([key]) => Boolean(key)),
+    );
+    const positions = current.positions.map((position) => {
+        const livePosition = liveByCode.get(holdingPositionKey(position));
+        if (!livePosition) return position;
+        return {
+            ...position,
+            price: livePosition.price,
+            price_currency: livePosition.price_currency,
+            return_pct: livePosition.return_pct,
+            return_source: livePosition.return_source,
+            return_as_of: livePosition.return_as_of,
+            estimated_exposure_value: livePosition.estimated_exposure_value,
+            estimated_pnl_value: livePosition.estimated_pnl_value,
+            estimated_fund_return_contribution_pct: livePosition.estimated_fund_return_contribution_pct,
+        };
+    });
+    const currentMeta = current.source_metadata as unknown as Record<string, unknown>;
+    const liveMeta = live.source_metadata as unknown as Record<string, unknown>;
+    return {
+        ...current,
+        status: live.status || current.status,
+        positions,
+        portfolio_effect: live.portfolio_effect ?? current.portfolio_effect,
+        source_metadata: {
+            ...(current.source_metadata || {}),
+            live_market_enrichment: live.source_metadata,
+            daily_market_enrichment:
+                liveMeta.daily_market_enrichment
+                ?? currentMeta.daily_market_enrichment,
+            market_enrichment:
+                liveMeta.market_enrichment
+                ?? currentMeta.market_enrichment,
+        } as FundHoldingsResponse['source_metadata'],
+    };
 }
 
 type FundHoldingsReportMeta = {
@@ -2989,6 +3038,955 @@ function FundMonthlyHeatmap({ monthlyReturns }: { monthlyReturns: MonthlyReturn[
     );
 }
 
+type FundCompareRange = '1w' | '1m' | '3m' | 'ytd' | '6m' | '1y' | '3y' | '5y' | 'all';
+
+const FUND_COMPARE_MAX_FUNDS = 4;
+const FUND_COMPARE_COLORS = ['#1f6bff', '#f59e0b', '#22c55e', '#a855f7'];
+const FUND_COMPARE_RANGES: Array<{ key: FundCompareRange; label: string }> = [
+    { key: '1w', label: '1 Hafta' },
+    { key: '1m', label: '1 Ay' },
+    { key: '3m', label: '3 Ay' },
+    { key: 'ytd', label: String(new Date().getFullYear()) },
+    { key: '6m', label: '6 Ay' },
+    { key: '1y', label: '1 Yıl' },
+    { key: '3y', label: '3 Yıl' },
+    { key: '5y', label: '5 Yıl' },
+    { key: 'all', label: 'Tüm' },
+];
+
+type FundCompareDataset = {
+    detail: FundDetail | null;
+    performance: FundPerformanceResponse | null;
+    allocations: FundAllocationsResponse | null;
+    holdings: FundHoldingsResponse | null;
+    loading: boolean;
+    error: string | null;
+};
+
+type FundCompareCell = {
+    primary: string;
+    secondary?: string;
+    className?: string;
+};
+
+type FundCompareTableRow = {
+    label: string;
+    values: FundCompareCell[];
+};
+
+function finiteNumber(value: number | null | undefined): number | null {
+    return value == null || !Number.isFinite(value) ? null : value;
+}
+
+function formatPlainPct(value: number | null | undefined): string {
+    if (value == null || !Number.isFinite(value)) return '-';
+    return `% ${value.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function fundCompareRangeStart(range: FundCompareRange, endIso: string): string {
+    if (range === 'all') return '1900-01-01';
+    return rangeStartDate(range, endIso, '');
+}
+
+function comparisonCell(primary: string | number | null | undefined, secondary?: string | null, className?: string): FundCompareCell {
+    return {
+        primary: primary == null || primary === '' ? '-' : String(primary),
+        secondary: secondary || undefined,
+        className,
+    };
+}
+
+function fundUmbrellaLabel(value: string | null | undefined): string {
+    const text = String(value || '').trim();
+    if (!text) return '-';
+    return text
+        .replace(/\s*Şemsiye\s+Fonu\s*$/i, '')
+        .replace(/\s*Fonu\s*$/i, '')
+        .trim() || text;
+}
+
+function nearestPointOnOrAfter(points: FundPricePoint[], startIso: string): FundPricePoint | null {
+    return points.find((point) => point.date >= startIso) || null;
+}
+
+function returnForRange(points: FundPricePoint[], range: FundCompareRange, endIso: string): number | null {
+    const ordered = sortFundPoints(points);
+    if (ordered.length < 2) return null;
+    const latest = ordered[ordered.length - 1];
+    const startIso = fundCompareRangeStart(range, endIso);
+    const base = range === 'all' ? ordered[0] : nearestPointOnOrAfter(ordered, startIso);
+    return returnBetween(finiteNumber(latest.price), finiteNumber(base?.price));
+}
+
+function summaryReturnForCompareRange(
+    returns: FundSummary['period_returns'] | null | undefined,
+    range: FundCompareRange,
+): number | null {
+    if (!returns) return null;
+    if (range === '1w') return finiteNumber(returns['1w']);
+    if (range === '1m') return finiteNumber(returns['1m']);
+    if (range === '3m') return finiteNumber(returns['3m']);
+    if (range === '6m') return finiteNumber(returns['6m']);
+    if (range === 'ytd') return finiteNumber(returns.ytd);
+    if (range === '1y') return finiteNumber(returns['1y']);
+    return null;
+}
+
+function cagrForRange(points: FundPricePoint[], years: number, endIso: string): number | null {
+    const ordered = sortFundPoints(points);
+    if (ordered.length < 2) return null;
+    const latest = ordered[ordered.length - 1];
+    const base = nearestPointOnOrAfter(ordered, rangeStartDate(years === 3 ? '3y' : '5y', endIso, ''));
+    const latestPrice = finiteNumber(latest.price);
+    const basePrice = finiteNumber(base?.price);
+    if (latestPrice == null || basePrice == null || basePrice <= 0 || latestPrice <= 0) return null;
+    const baseTs = new Date(base?.date || '').getTime();
+    const latestTs = new Date(latest.date).getTime();
+    const actualYears = (latestTs - baseTs) / (365.25 * 24 * 60 * 60 * 1000);
+    if (!Number.isFinite(actualYears) || actualYears < years * 0.78) return null;
+    return (Math.pow(latestPrice / basePrice, 1 / actualYears) - 1) * 100;
+}
+
+function cashFlowForRange(points: FundPricePoint[], range: FundCompareRange, endIso: string): number | null {
+    const ordered = sortFundPoints(points).filter((point) => finiteNumber(point.aum) != null && finiteNumber(point.price) != null);
+    if (ordered.length < 2) return null;
+    const latest = ordered[ordered.length - 1];
+    const base = nearestPointOnOrAfter(ordered, fundCompareRangeStart(range, endIso));
+    const latestAum = finiteNumber(latest.aum);
+    const latestPrice = finiteNumber(latest.price);
+    const baseAum = finiteNumber(base?.aum);
+    const basePrice = finiteNumber(base?.price);
+    if (latestAum == null || latestPrice == null || baseAum == null || basePrice == null || basePrice <= 0) return null;
+    return latestAum - baseAum * (latestPrice / basePrice);
+}
+
+function topAllocations(payload: FundAllocationsResponse | null): FundAllocation[] {
+    return [...(payload?.allocations || [])]
+        .filter((item) => finiteNumber(item.weight) != null)
+        .sort((a, b) => Math.abs(Number(b.weight || 0)) - Math.abs(Number(a.weight || 0)))
+        .slice(0, 5);
+}
+
+function topHoldingPositions(payload: FundHoldingsResponse | null): FundPortfolioPosition[] {
+    return [...(payload?.positions || [])]
+        .filter((position) => finiteNumber(position.weight) != null && Number(position.weight) > 0)
+        .sort((a, b) => Number(b.weight || 0) - Number(a.weight || 0))
+        .slice(0, 5);
+}
+
+function topHoldingSectors(payload: FundHoldingsResponse | null): Array<{ label: string; weight: number }> {
+    const weights = new Map<string, number>();
+    for (const position of payload?.positions || []) {
+        if (position.asset_type !== 'local_equity' || !position.sector_label) continue;
+        const weight = finiteNumber(position.weight);
+        if (weight == null || weight <= 0) continue;
+        weights.set(position.sector_label, (weights.get(position.sector_label) || 0) + weight);
+    }
+    return [...weights.entries()]
+        .map(([label, weight]) => ({ label, weight }))
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, 5);
+}
+
+function fundMarketShare(row: FundDetail | FundSummary | null, allFunds: FundSummary[]): number | null {
+    const aum = finiteNumber(row?.aum);
+    if (aum == null || aum <= 0 || !row?.fund_type) return null;
+    const total = allFunds.reduce((sum, item) => {
+        if (item.fund_type !== row.fund_type) return sum;
+        const value = finiteNumber(item.aum);
+        return value == null || value <= 0 ? sum : sum + value;
+    }, 0);
+    return total > 0 ? (aum / total) * 100 : null;
+}
+
+function FundCompareLineChart({
+    selectedFunds,
+    datasets,
+    range,
+}: {
+    selectedFunds: FundSummary[];
+    datasets: Record<string, FundCompareDataset>;
+    range: FundCompareRange;
+}) {
+    const width = 1180;
+    const height = 420;
+    const padding = { top: 30, right: 78, bottom: 52, left: 22 };
+    const chartEndIso = selectedFunds.find((fund) => fund.as_of)?.as_of || new Date().toISOString().slice(0, 10);
+    const chartStartIso = fundCompareRangeStart(range, chartEndIso);
+    const plotWidth = width - padding.left - padding.right;
+    const plotHeight = height - padding.top - padding.bottom;
+    const rawSeries = selectedFunds.map((fund, index) => {
+        const points = sortFundPoints(datasets[fund.fund_code]?.performance?.points)
+            .filter((point) => range === 'all' || point.date >= chartStartIso);
+        const base = points.find((point) => Number(point.price) > 0);
+        return {
+            fund,
+            color: FUND_COMPARE_COLORS[index % FUND_COMPARE_COLORS.length],
+            points: base?.price
+                ? points.map((point) => ({
+                    date: point.date,
+                    value: ((Number(point.price) / Number(base.price)) - 1) * 100,
+                }))
+                : [],
+        };
+    }).filter((series) => series.points.length >= 2);
+    const allValues = rawSeries.flatMap((series) => series.points.map((point) => point.value));
+    const seriesKey = `${range}-${rawSeries.map((series) => series.fund.fund_code).join('-')}`;
+    const [hoverIso, setHoverIso] = useState<string | null>(null);
+    const [hoverPointer, setHoverPointer] = useState<{ x: number; y: number } | null>(null);
+    useEffect(() => {
+        setHoverIso(null);
+        setHoverPointer(null);
+    }, [seriesKey]);
+    if (!rawSeries.length || !allValues.length) {
+        return <div className="fund-compare-chart-empty">Grafik için yeterli performans verisi yok.</div>;
+    }
+    const dates = Array.from(new Set(rawSeries.flatMap((series) => series.points.map((point) => point.date)))).sort();
+    const startTs = chartDateMs(dates[0]);
+    const endTs = Math.max(startTs + 1, chartDateMs(dates[dates.length - 1]));
+    const rawMin = Math.min(0, ...allValues);
+    const rawMax = Math.max(0, ...allValues);
+    const rawSpan = Math.max(1, rawMax - rawMin);
+    const minValue = rawMin - rawSpan * 0.08;
+    const maxValue = rawMax + rawSpan * 0.08;
+    const span = Math.max(1, maxValue - minValue);
+    const xForDate = (date: string) => padding.left + ((chartDateMs(date) - startTs) / (endTs - startTs)) * plotWidth;
+    const yFor = (value: number) => padding.top + ((maxValue - value) / span) * plotHeight;
+    const yTicks = Array.from({ length: 5 }, (_, index) => maxValue - (span * index) / 4);
+    const tickDates = Array.from(new Set([
+        dates[0],
+        dates[Math.floor((dates.length - 1) * 0.25)],
+        dates[Math.floor((dates.length - 1) * 0.5)],
+        dates[Math.floor((dates.length - 1) * 0.75)],
+        dates[dates.length - 1],
+    ].filter(Boolean)));
+
+    const clipId = `fund-compare-clip-${seriesKey}`;
+
+    const pointerFromEvent = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return null;
+        const x = ((event.clientX - rect.left) / rect.width) * width;
+        const y = ((event.clientY - rect.top) / rect.height) * height;
+        return {
+            x: Math.min(Math.max(x, 0), width),
+            y: Math.min(Math.max(y, 0), height),
+        };
+    };
+
+    const closestDateForX = (x: number): string | null => {
+        if (!dates.length) return null;
+        const ratio = endTs === startTs ? 0 : (x - padding.left) / Math.max(1, plotWidth);
+        const targetTs = startTs + Math.min(Math.max(ratio, 0), 1) * (endTs - startTs);
+        let best = dates[0];
+        let bestDiff = Math.abs(chartDateMs(dates[0]) - targetTs);
+        for (let i = 1; i < dates.length; i += 1) {
+            const diff = Math.abs(chartDateMs(dates[i]) - targetTs);
+            if (diff < bestDiff) {
+                best = dates[i];
+                bestDiff = diff;
+            }
+        }
+        return best;
+    };
+
+    const hoverPoint = hoverIso
+        ? rawSeries
+            .map((series) => nearestChartPoint(series.points, hoverIso))
+            .find((point) => point != null) ?? null
+        : null;
+    const tooltipRows = hoverPoint
+        ? rawSeries
+            .map((series) => {
+                const point = nearestChartPoint(series.points, hoverPoint.date);
+                return point ? { series, point } : null;
+            })
+            .filter((item): item is { series: typeof rawSeries[number]; point: { date: string; value: number } } => Boolean(item))
+        : [];
+
+    const tooltipDate = tooltipRows.length ? tooltipRows[0].point.date : null;
+    const tooltipX0 = tooltipDate ? xForDate(tooltipDate) : null;
+    const tooltipWidth = 196;
+    const tooltipHeight = Math.max(54, 28 + tooltipRows.length * 18);
+    const tooltipGap = 14;
+    const tooltipAnchorX = hoverPointer?.x ?? tooltipX0;
+    const tooltipAnchorY = hoverPointer?.y ?? padding.top;
+    const tooltipShouldFlip = tooltipAnchorX != null && tooltipAnchorX + tooltipGap + tooltipWidth > width - 8;
+    const tooltipX = tooltipAnchorX == null
+        ? 0
+        : tooltipShouldFlip
+            ? Math.max(8, tooltipAnchorX - tooltipGap - tooltipWidth)
+            : Math.min(tooltipAnchorX + tooltipGap, width - tooltipWidth - 8);
+    const tooltipY = tooltipAnchorY - tooltipGap - tooltipHeight >= padding.top
+        ? tooltipAnchorY - tooltipGap - tooltipHeight
+        : Math.min(tooltipAnchorY + tooltipGap, height - tooltipHeight - 8);
+
+    const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const pointer = pointerFromEvent(event);
+        if (!pointer) return;
+        setHoverPointer(pointer);
+        setHoverIso(closestDateForX(pointer.x));
+    };
+    const handlePointerLeave = () => {
+        setHoverIso(null);
+        setHoverPointer(null);
+    };
+
+    return (
+        <div className="fund-compare-chart-shell">
+            <svg
+                key={seriesKey}
+                className="fund-compare-line-chart"
+                viewBox={`0 0 ${width} ${height}`}
+                role="img"
+                aria-label="Fon karşılaştırma getiri grafiği"
+                onPointerMove={handlePointerMove}
+                onPointerLeave={handlePointerLeave}
+            >
+                <defs>
+                    <clipPath id={clipId}>
+                        <rect x={padding.left} y={0} width={plotWidth} height={height} className="fund-chart-reveal" />
+                    </clipPath>
+                </defs>
+                {yTicks.map((tick) => {
+                    const y = yFor(tick);
+                    return (
+                        <g key={tick}>
+                            <line x1={padding.left} x2={width - padding.right} y1={y} y2={y} className="fund-chart-gridline" />
+                            <text x={width - padding.right + 10} y={y + 4} className="fund-chart-axis">
+                                {formatPct(tick).replace('+', '')}
+                            </text>
+                        </g>
+                    );
+                })}
+                <line x1={padding.left} x2={width - padding.right} y1={yFor(0)} y2={yFor(0)} className="fund-comparison-zero" />
+                {tickDates.map((date, index) => (
+                    <text
+                        key={`${date}-${index}`}
+                        x={xForDate(date)}
+                        y={height - 12}
+                        className="fund-chart-axis"
+                        textAnchor={index === 0 ? 'start' : index === tickDates.length - 1 ? 'end' : 'middle'}
+                    >
+                        {formatChartDate(date, range)}
+                    </text>
+                ))}
+                <g clipPath={`url(#${clipId})`}>
+                    {rawSeries.map((series) => {
+                        const pathData = series.points
+                            .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xForDate(point.date)} ${yFor(point.value)}`)
+                            .join(' ');
+                        return (
+                            <path
+                                key={series.fund.fund_code}
+                                d={pathData}
+                                fill="none"
+                                stroke={series.color}
+                                strokeWidth="2.8"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                className="fund-chart-line"
+                            />
+                        );
+                    })}
+                </g>
+                {rawSeries.map((series) => {
+                    const last = series.points[series.points.length - 1];
+                    return (
+                        <g key={`${series.fund.fund_code}-endpoint`} className="fund-chart-endpoint">
+                            <circle cx={xForDate(last.date)} cy={yFor(last.value)} r="3.8" fill={series.color} />
+                            <g transform={`translate(${Math.min(width - padding.right + 8, xForDate(last.date) + 8)}, ${yFor(last.value) - 11})`}>
+                                <rect width="58" height="22" rx="4" fill={series.color} />
+                                <text x="29" y="15" textAnchor="middle" className="fund-compare-end-label">{formatPct(last.value).replace('% ', '')}</text>
+                            </g>
+                        </g>
+                    );
+                })}
+                {tooltipRows.length > 0 && tooltipX0 != null && (
+                    <g>
+                        <line
+                            x1={tooltipX0}
+                            x2={tooltipX0}
+                            y1={padding.top}
+                            y2={height - padding.bottom}
+                            className="fund-chart-hoverline"
+                        />
+                        {tooltipRows.map(({ series, point }) => (
+                            <circle
+                                key={`${series.fund.fund_code}-hover`}
+                                className="fund-chart-hover-point"
+                                cx={xForDate(point.date)}
+                                cy={yFor(point.value)}
+                                r="4.2"
+                                fill={series.color}
+                                stroke="#0a0c0f"
+                                strokeWidth="1.6"
+                            />
+                        ))}
+                        <g
+                            className="fund-chart-tooltip"
+                            style={{ transform: `translate(${tooltipX}px, ${tooltipY}px)` }}
+                        >
+                            <rect width={tooltipWidth} height={tooltipHeight} rx="6" className="fund-chart-tooltip-bg" />
+                            <text x="10" y="18" className="fund-chart-tooltip-muted">{formatDate(tooltipDate || '')}</text>
+                            {tooltipRows.map(({ series, point }, idx) => (
+                                <g key={series.fund.fund_code} transform={`translate(10, ${36 + idx * 18})`}>
+                                    <circle cx="4" cy="-4" r="4" fill={series.color} />
+                                    <text x="14" y="0" className="fund-chart-tooltip-value">
+                                        {series.fund.fund_code}
+                                    </text>
+                                    <text x={tooltipWidth - 18} y="0" textAnchor="end" className="fund-chart-tooltip-value">
+                                        {formatPct(point.value)}
+                                    </text>
+                                </g>
+                            ))}
+                        </g>
+                    </g>
+                )}
+            </svg>
+        </div>
+    );
+}
+
+function FundCompareTable({
+    title,
+    selectedFunds,
+    rows,
+}: {
+    title: string;
+    selectedFunds: FundSummary[];
+    rows: FundCompareTableRow[];
+}) {
+    return (
+        <section className="fund-compare-section">
+            <h2>{title}</h2>
+            <div className="fund-compare-table-wrap">
+                <table className="fund-compare-table">
+                    <thead>
+                        <tr>
+                            <th />
+                            {selectedFunds.map((fund) => (
+                                <th key={fund.fund_code}>
+                                    <span>{fund.name}</span>
+                                    <strong>{fund.fund_code}</strong>
+                                </th>
+                            ))}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((row) => (
+                            <tr key={row.label}>
+                                <td>{row.label}</td>
+                                {row.values.map((cell, index) => (
+                                    <td key={`${row.label}-${selectedFunds[index]?.fund_code || index}`} className={cell.className}>
+                                        <strong>{cell.primary}</strong>
+                                        {cell.secondary && <span>{cell.secondary}</span>}
+                                    </td>
+                                ))}
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    );
+}
+
+function FundComparisonPage({
+    funds,
+    loading,
+    error,
+    onOpenFund,
+}: {
+    funds: FundsResponse | null;
+    loading: boolean;
+    error: string | null;
+    onOpenFund: (fundCode: string, tab?: FundTab) => void;
+}) {
+    const rows = funds?.rows || [];
+    const [selectedCodes, setSelectedCodes] = useState<string[]>([]);
+    const [range, setRange] = useState<FundCompareRange>('6m');
+    const [datasets, setDatasets] = useState<Record<string, FundCompareDataset>>({});
+    const [picker, setPicker] = useState<{ mode: 'add' } | { mode: 'swap'; index: number } | null>(null);
+    const [query, setQuery] = useState('');
+    const [searchRows, setSearchRows] = useState<FundSummary[]>([]);
+    const [searchLoading, setSearchLoading] = useState(false);
+    const inputRef = useRef<HTMLInputElement | null>(null);
+    const swapPopoverRef = useRef<HTMLDivElement | null>(null);
+
+    const searchOpen = picker !== null;
+    const isSwapping = (index: number) => picker?.mode === 'swap' && picker.index === index;
+
+    useEffect(() => {
+        if (!selectedCodes.length) {
+            setDatasets({});
+            return;
+        }
+        let alive = true;
+        // Pick the start date for the chosen range so the backend returns enough history,
+        // mirroring how the fund detail chart fetches its performance per range.
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const performanceStartDate = range === 'all'
+            ? undefined
+            : rangeStartDate(range, todayIso, '');
+        setDatasets((current) => {
+            const next: Record<string, FundCompareDataset> = {};
+            for (const code of selectedCodes) {
+                next[code] = current[code] || { detail: null, performance: null, allocations: null, holdings: null, loading: true, error: null };
+                next[code] = { ...next[code], loading: true, error: null };
+            }
+            return next;
+        });
+        Promise.all(selectedCodes.map(async (code) => {
+            const [detailResult, performanceResult, allocationsResult, holdingsResult] = await Promise.allSettled([
+                apiClient.fundDetail(code),
+                apiClient.fundPerformance(code, performanceStartDate ? { startDate: performanceStartDate } : undefined),
+                apiClient.fundAllocations(code),
+                apiClient.fundHoldings(code),
+            ]);
+            const firstError = [detailResult, performanceResult, allocationsResult, holdingsResult]
+                .find((result) => result.status === 'rejected') as PromiseRejectedResult | undefined;
+            return {
+                code,
+                dataset: {
+                    detail: detailResult.status === 'fulfilled' ? detailResult.value : null,
+                    performance: performanceResult.status === 'fulfilled' ? performanceResult.value : null,
+                    allocations: allocationsResult.status === 'fulfilled' ? allocationsResult.value : null,
+                    holdings: holdingsResult.status === 'fulfilled' ? holdingsResult.value : null,
+                    loading: false,
+                    error: firstError?.reason instanceof Error ? firstError.reason.message : null,
+                } satisfies FundCompareDataset,
+            };
+        })).then((results) => {
+            if (!alive) return;
+            setDatasets(() => {
+                const next: Record<string, FundCompareDataset> = {};
+                for (const result of results) {
+                    next[result.code] = result.dataset;
+                }
+                return next;
+            });
+        });
+        return () => {
+            alive = false;
+        };
+    }, [selectedCodes, range]);
+
+    useEffect(() => {
+        const trimmed = query.trim();
+        if (!searchOpen || !trimmed) {
+            setSearchRows([]);
+            setSearchLoading(false);
+            return;
+        }
+        let alive = true;
+        setSearchLoading(true);
+        const timer = window.setTimeout(() => {
+            apiClient
+                .fundSearch(trimmed, 12)
+                .then((payload) => {
+                    if (alive) setSearchRows(payload.rows || []);
+                })
+                .catch(() => {
+                    if (alive) setSearchRows([]);
+                })
+                .finally(() => {
+                    if (alive) setSearchLoading(false);
+                });
+        }, 160);
+        return () => {
+            alive = false;
+            window.clearTimeout(timer);
+        };
+    }, [query, searchOpen]);
+
+    const selectedFunds = useMemo(() => selectedCodes
+        .map((code) => datasets[code]?.detail || rows.find((row) => row.fund_code === code) || searchRows.find((row) => row.fund_code === code) || null)
+        .filter((row): row is FundSummary => Boolean(row)), [datasets, rows, searchRows, selectedCodes]);
+
+    const searchResults = useMemo(() => {
+        const selectedSet = new Set(selectedCodes);
+        const merged = new Map<string, FundSummary>();
+        for (const row of rows) merged.set(row.fund_code, row);
+        for (const row of searchRows) merged.set(row.fund_code, row);
+        const normalizedQuery = normalizeCompareSearch(query);
+        const compactQuery = compactCompareSearch(query);
+        if (!normalizedQuery) return [];
+        return [...merged.values()]
+            .filter((row) => !selectedSet.has(row.fund_code))
+            .filter((row) => {
+                const parts = [row.fund_code, row.name, row.fund_type || '', row.founder_company || ''];
+                const normalizedParts = parts.map(normalizeCompareSearch);
+                const compactParts = parts.map(compactCompareSearch);
+                return normalizedParts.some((part) => part.includes(normalizedQuery))
+                    || compactParts.some((part) => part.includes(compactQuery));
+            })
+            .slice(0, 8);
+    }, [query, rows, searchRows, selectedCodes]);
+
+    const addFund = useCallback((fund: FundSummary) => {
+        setSelectedCodes((current) => {
+            if (current.length >= FUND_COMPARE_MAX_FUNDS) return current;
+            if (current.includes(fund.fund_code)) return current;
+            return [...current, fund.fund_code];
+        });
+        setPicker(null);
+        setQuery('');
+    }, []);
+
+    const swapFundAt = useCallback((index: number, fund: FundSummary) => {
+        setSelectedCodes((current) => {
+            if (index < 0 || index >= current.length) return current;
+            // If the picked fund is already in another slot, ignore the swap silently.
+            if (current.some((code, position) => code === fund.fund_code && position !== index)) {
+                return current;
+            }
+            if (current[index] === fund.fund_code) return current;
+            const next = current.slice();
+            next[index] = fund.fund_code;
+            return next;
+        });
+        setPicker(null);
+        setQuery('');
+    }, []);
+
+    const removeFund = useCallback((fundCodeToRemove: string) => {
+        setSelectedCodes((current) => current.filter((code) => code !== fundCodeToRemove));
+    }, []);
+
+    const openAddPicker = useCallback(() => {
+        if (selectedCodes.length >= FUND_COMPARE_MAX_FUNDS) return;
+        setPicker({ mode: 'add' });
+        setQuery('');
+        window.setTimeout(() => {
+            inputRef.current?.focus();
+            inputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 0);
+    }, [selectedCodes.length]);
+
+    const openSwapPicker = useCallback((index: number) => {
+        setPicker({ mode: 'swap', index });
+        setQuery('');
+        window.setTimeout(() => {
+            inputRef.current?.focus();
+            inputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 0);
+    }, []);
+
+    const closePicker = useCallback(() => {
+        setPicker(null);
+        setQuery('');
+    }, []);
+
+    // Close swap popover when clicking outside.
+    useEffect(() => {
+        if (picker?.mode !== 'swap') return;
+        const handleDocumentClick = (event: MouseEvent) => {
+            const target = event.target as Node | null;
+            if (target && swapPopoverRef.current && swapPopoverRef.current.contains(target)) return;
+            setPicker(null);
+            setQuery('');
+        };
+        document.addEventListener('mousedown', handleDocumentClick);
+        return () => document.removeEventListener('mousedown', handleDocumentClick);
+    }, [picker]);
+
+    const tableEndIso = selectedFunds.find((fund) => fund.as_of)?.as_of || new Date().toISOString().slice(0, 10);
+    const valueForFund = (fund: FundSummary, picker: (dataset: FundCompareDataset | undefined, fund: FundSummary) => FundCompareCell) =>
+        picker(datasets[fund.fund_code], fund);
+
+    const basicRows: FundCompareTableRow[] = [
+        {
+            label: 'Fon Fiyatı',
+            values: selectedFunds.map((fund) => valueForFund(fund, (dataset, item) => comparisonCell(formatQuotePrice(dataset?.detail?.price ?? item.price), formatDate(dataset?.detail?.as_of || item.as_of)))),
+        },
+        { label: 'Kurucu', values: selectedFunds.map((fund) => comparisonCell((datasets[fund.fund_code]?.detail || fund).founder_company)) },
+        { label: 'Şemsiye', values: selectedFunds.map((fund) => comparisonCell(fundUmbrellaLabel((datasets[fund.fund_code]?.detail || fund).fund_type))) },
+        { label: 'TEFAS', values: selectedFunds.map(() => comparisonCell('Açık')) },
+    ];
+    const metricRows: FundCompareTableRow[] = [
+        { label: 'Fon Toplam Değer', values: selectedFunds.map((fund) => comparisonCell(formatCompactCurrency((datasets[fund.fund_code]?.detail || fund).aum))) },
+        { label: 'Yatırımcı Sayısı', values: selectedFunds.map((fund) => comparisonCell(formatWholeNumber((datasets[fund.fund_code]?.detail || fund).investor_count))) },
+        { label: 'Risk Değeri', values: selectedFunds.map((fund) => {
+            const value = (datasets[fund.fund_code]?.detail || fund).risk_value;
+            return comparisonCell(value == null ? '-' : `${value} / 7`);
+        }) },
+        { label: 'Yönetim Ücreti', values: selectedFunds.map((fund) => comparisonCell(formatPlainPct(datasets[fund.fund_code]?.detail?.management_fee))) },
+        { label: 'Stopaj Oranı', values: selectedFunds.map((fund) => comparisonCell(datasets[fund.fund_code]?.detail?.tax_info || '-')) },
+        { label: 'Pazar Payı', values: selectedFunds.map((fund) => comparisonCell(formatPlainPct(fundMarketShare(datasets[fund.fund_code]?.detail || fund, rows)))) },
+    ];
+    const allocationRowsForTable: FundCompareTableRow[] = Array.from({ length: 5 }, (_, index) => ({
+        label: `${index + 1}. Varlık`,
+        values: selectedFunds.map((fund) => {
+            const allocation = topAllocations(datasets[fund.fund_code]?.allocations || null)[index];
+            return comparisonCell(allocation?.label, allocation ? `(${formatPlainPct(allocation.weight)})` : undefined);
+        }),
+    }));
+    const positionRows: FundCompareTableRow[] = Array.from({ length: 5 }, (_, index) => ({
+        label: `${index + 1}. Hisse`,
+        values: selectedFunds.map((fund) => {
+            const position = topHoldingPositions(datasets[fund.fund_code]?.holdings || null)[index];
+            return comparisonCell(position?.asset_code || position?.asset_name, position ? formatPlainPct(position.weight) : undefined);
+        }),
+    }));
+    const sectorRows: FundCompareTableRow[] = Array.from({ length: 5 }, (_, index) => ({
+        label: `${index + 1}. Sektör`,
+        values: selectedFunds.map((fund) => {
+            const sector = topHoldingSectors(datasets[fund.fund_code]?.holdings || null)[index];
+            return comparisonCell(sector?.label, sector ? formatPlainPct(sector.weight) : undefined);
+        }),
+    }));
+    const volumeRows: FundCompareTableRow[] = [
+        { label: 'Toplam Adet', values: selectedFunds.map(() => comparisonCell('-')) },
+        { label: 'Aktif Adet', values: selectedFunds.map((fund) => {
+            const dataset = datasets[fund.fund_code];
+            const sortedPoints = sortFundPoints(dataset?.performance?.points);
+            const latestPoint = sortedPoints[sortedPoints.length - 1];
+            return comparisonCell(formatCompactOverviewNumber(dataset?.detail?.share_count ?? fund.share_count ?? latestPoint?.share_count));
+        }) },
+        { label: 'Doluluk Oranı', values: selectedFunds.map(() => comparisonCell('-')) },
+    ];
+    const returnRows: FundCompareTableRow[] = [
+        ['1 Hafta', '1w'],
+        ['1 Ay', '1m'],
+        ['3 Ay', '3m'],
+        ['6 Ay', '6m'],
+        ['Yılbaşından Bugüne', 'ytd'],
+        ['1 Yıl', '1y'],
+        ['3 Yıl', '3y'],
+        ['5 Yıl', '5y'],
+    ].map(([label, key]) => ({
+        label,
+        values: selectedFunds.map((fund) => {
+            const detail = datasets[fund.fund_code]?.detail || fund;
+            const summaryValue = summaryReturnForCompareRange(detail.period_returns, key as FundCompareRange);
+            const calculated = returnForRange(datasets[fund.fund_code]?.performance?.points || [], key as FundCompareRange, tableEndIso);
+            const value = finiteNumber(summaryValue) ?? calculated;
+            return comparisonCell(formatPct(value), undefined, pctClass(value));
+        }),
+    }));
+    returnRows.push(
+        {
+            label: 'CAGR (3 Yıl)',
+            values: selectedFunds.map((fund) => {
+                const value = cagrForRange(datasets[fund.fund_code]?.performance?.points || [], 3, tableEndIso);
+                return comparisonCell(formatPct(value), undefined, pctClass(value));
+            }),
+        },
+        {
+            label: 'CAGR (5 Yıl)',
+            values: selectedFunds.map((fund) => {
+                const value = cagrForRange(datasets[fund.fund_code]?.performance?.points || [], 5, tableEndIso);
+                return comparisonCell(formatPct(value), undefined, pctClass(value));
+            }),
+        },
+    );
+    const cashFlowRows: FundCompareTableRow[] = [
+        ['1 Hafta', '1w'],
+        ['1 Ay', '1m'],
+        ['3 Ay', '3m'],
+        ['6 Ay', '6m'],
+        ['Yılbaşından Bugüne', 'ytd'],
+        ['1 Yıl', '1y'],
+    ].map(([label, key]) => ({
+        label,
+        values: selectedFunds.map((fund) => {
+            const value = cashFlowForRange(datasets[fund.fund_code]?.performance?.points || [], key as FundCompareRange, tableEndIso);
+            return comparisonCell(formatSignedCompactCurrency(value), undefined, pctClass(value));
+        }),
+    }));
+    const datasetErrors = selectedFunds
+        .map((fund) => datasets[fund.fund_code]?.error)
+        .filter((item): item is string => Boolean(item));
+    const anyDatasetLoading = selectedFunds.some((fund) => datasets[fund.fund_code]?.loading);
+
+    return (
+        <div className={`fund-compare-page ${searchOpen ? 'is-picker-open' : ''}`}>
+            <header className="fund-compare-hero">
+                <div className="fund-market-breadcrumb" aria-label="Fon karşılaştırma konumu">
+                    <span className="fund-breadcrumb-group">
+                        <Database size={17} aria-hidden="true" />
+                        Fonlar
+                    </span>
+                    <ChevronRight size={14} aria-hidden="true" />
+                    <span className="fund-breadcrumb-code">Fon Karşılaştırma</span>
+                </div>
+                <div className="fund-compare-title">
+                    <h1>Fon Karşılaştırma</h1>
+                    <p>Tüm yatırım fonlarını performans, risk, portföy ve varlık dağılımı gibi kriterlere göre karşılaştırabilirsiniz.</p>
+                </div>
+            </header>
+
+            <section className="fund-compare-chart-panel">
+                <div className="fund-compare-range-tabs" aria-label="Karşılaştırma dönemi">
+                    {FUND_COMPARE_RANGES.map((item) => (
+                        <button
+                            key={item.key}
+                            type="button"
+                            className={range === item.key ? 'active' : undefined}
+                            onClick={() => setRange(item.key)}
+                            aria-pressed={range === item.key}
+                        >
+                            {item.label}
+                        </button>
+                    ))}
+                </div>
+                {loading && !selectedFunds.length ? (
+                    <div className="fund-compare-chart-empty">Fon listesi yükleniyor...</div>
+                ) : error ? (
+                    <div className="fund-compare-chart-empty funds-state-error">{error}</div>
+                ) : selectedFunds.length === 0 ? (
+                    <div className="fund-compare-chart-empty">
+                        Karşılaştırmak için en az bir fon ekleyin.
+                    </div>
+                ) : anyDatasetLoading ? (
+                    <div className="fund-compare-chart-empty">Fon karşılaştırma verileri yükleniyor...</div>
+                ) : (
+                    <FundCompareLineChart selectedFunds={selectedFunds} datasets={datasets} range={range} />
+                )}
+                {datasetErrors[0] && <div className="fund-chart-error">{datasetErrors[0]}</div>}
+                <div className="fund-compare-selector-row">
+                    {selectedFunds.map((fund, index) => {
+                        const swapping = isSwapping(index);
+                        const swapResultsToShow = searchResults.filter((row) => row.fund_code !== fund.fund_code);
+                        return (
+                            <div
+                                key={fund.fund_code}
+                                className={`fund-compare-card ${swapping ? 'is-swapping' : ''}`}
+                                ref={swapping ? swapPopoverRef : undefined}
+                            >
+                                <span><i style={{ background: FUND_COMPARE_COLORS[index % FUND_COMPARE_COLORS.length] }} /> {index + 1}. Fon</span>
+                                <button type="button" className="fund-compare-remove" onClick={() => removeFund(fund.fund_code)} aria-label={`${fund.fund_code} fonunu çıkar`}>
+                                    <X size={14} aria-hidden="true" />
+                                </button>
+                                <div className="fund-compare-card-main">
+                                    <button
+                                        type="button"
+                                        className="fund-compare-card-fund"
+                                        onClick={() => onOpenFund(fund.fund_code, 'overview')}
+                                        aria-label={`${fund.fund_code} fonunu aç`}
+                                    >
+                                        <SymbolLogo symbol={fund.fund_code} name={fund.founder_company || fund.manager_company || fund.name} kind="fund" size="sm" />
+                                        <strong>{fund.fund_code}</strong>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`fund-compare-card-swap ${swapping ? 'is-active' : ''}`}
+                                        onClick={() => (swapping ? closePicker() : openSwapPicker(index))}
+                                        aria-haspopup="dialog"
+                                        aria-expanded={swapping}
+                                        aria-label={`${fund.fund_code} fonunu değiştir`}
+                                    >
+                                        <ChevronDown size={16} aria-hidden="true" />
+                                    </button>
+                                </div>
+                                {swapping && (
+                                    <div className="fund-compare-card-popover" role="dialog" aria-label={`${index + 1}. fonu değiştir`}>
+                                        <div className="fund-compare-search">
+                                            <Search size={16} aria-hidden="true" />
+                                            <input
+                                                ref={inputRef}
+                                                value={query}
+                                                onChange={(event) => setQuery(event.target.value)}
+                                                onKeyDown={(event) => {
+                                                    if (event.key === 'Escape') {
+                                                        closePicker();
+                                                    }
+                                                    if (event.key === 'Enter' && swapResultsToShow[0]) {
+                                                        swapFundAt(index, swapResultsToShow[0]);
+                                                    }
+                                                }}
+                                                placeholder="Fon ara"
+                                                aria-label={`${index + 1}. fonu değiştir`}
+                                            />
+                                            <button type="button" onClick={closePicker} aria-label="Aramayı kapat">
+                                                <X size={15} aria-hidden="true" />
+                                            </button>
+                                        </div>
+                                        <div className="fund-compare-search-results fund-compare-search-results-inline">
+                                            {query.trim() ? (
+                                                swapResultsToShow.length ? swapResultsToShow.map((row) => (
+                                                    <button key={row.fund_code} type="button" onClick={() => swapFundAt(index, row)}>
+                                                        <SymbolLogo symbol={row.fund_code} name={row.founder_company || row.manager_company || row.name} kind="fund" size="sm" />
+                                                        <strong>{row.fund_code}</strong>
+                                                        <span>{row.name}</span>
+                                                    </button>
+                                                )) : (
+                                                    <div>{searchLoading ? 'Aranıyor...' : 'Fon bulunamadı.'}</div>
+                                                )
+                                            ) : (
+                                                <div>Fon kodu veya adı yazın.</div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                    <div className={`fund-compare-add ${picker?.mode === 'add' ? 'is-open' : ''}`}>
+                        {picker?.mode === 'add' ? (
+                            <div className="fund-compare-search">
+                                <Search size={16} aria-hidden="true" />
+                                <input
+                                    ref={inputRef}
+                                    value={query}
+                                    onChange={(event) => setQuery(event.target.value)}
+                                    onKeyDown={(event) => {
+                                        if (event.key === 'Escape') {
+                                            closePicker();
+                                        }
+                                        if (event.key === 'Enter' && searchResults[0]) {
+                                            addFund(searchResults[0]);
+                                        }
+                                    }}
+                                    placeholder="Fon ara"
+                                    aria-label="Karşılaştırmaya fon ekle"
+                                />
+                                <button type="button" onClick={closePicker} aria-label="Aramayı kapat">
+                                    <X size={15} aria-hidden="true" />
+                                </button>
+                                <div className="fund-compare-search-results">
+                                    {query.trim() ? (
+                                        searchResults.length ? searchResults.map((fund) => (
+                                            <button key={fund.fund_code} type="button" onClick={() => addFund(fund)}>
+                                                <SymbolLogo symbol={fund.fund_code} name={fund.founder_company || fund.manager_company || fund.name} kind="fund" size="sm" />
+                                                <strong>{fund.fund_code}</strong>
+                                                <span>{fund.name}</span>
+                                            </button>
+                                        )) : (
+                                            <div>{searchLoading ? 'Aranıyor...' : 'Fon bulunamadı.'}</div>
+                                        )
+                                    ) : (
+                                        <div>Fon kodu veya adı yazın.</div>
+                                    )}
+                                </div>
+                            </div>
+                        ) : (
+                            <button type="button" onClick={openAddPicker} disabled={selectedCodes.length >= FUND_COMPARE_MAX_FUNDS}>
+                                <Plus size={18} aria-hidden="true" />
+                                Yeni Fon Ekle
+                            </button>
+                        )}
+                    </div>
+                </div>
+            </section>
+
+            {selectedFunds.length > 0 && (
+                <div className="fund-compare-sections">
+                    <FundCompareTable title="Temel Bilgiler" selectedFunds={selectedFunds} rows={basicRows} />
+                    <FundCompareTable title="Metrikler" selectedFunds={selectedFunds} rows={metricRows} />
+                    <FundCompareTable title="Varlık Dağılımı" selectedFunds={selectedFunds} rows={allocationRowsForTable} />
+                    <FundCompareTable title="En Büyük Pozisyonlar" selectedFunds={selectedFunds} rows={positionRows} />
+                    <FundCompareTable title="Sektör Bilgileri" selectedFunds={selectedFunds} rows={sectorRows} />
+                    <FundCompareTable title="Hacim Bilgileri" selectedFunds={selectedFunds} rows={volumeRows} />
+                    <FundCompareTable title="Getiri Analizi" selectedFunds={selectedFunds} rows={returnRows} />
+                    <FundCompareTable title="Nakit Giriş Çıkış" selectedFunds={selectedFunds} rows={cashFlowRows} />
+                </div>
+            )}
+        </div>
+    );
+}
+
 function useFundComparisonState({
     selectedFund,
     baseReturns,
@@ -3597,12 +4595,14 @@ function FundHistoryTable({ points }: { points: FundPricePoint[] }) {
 }
 
 export default function FundsPage({
+    view = 'list',
     fundCode,
     activeTab = 'overview',
     onOpenFund,
     onTabChange,
     onBack,
     onNavigateSection,
+    onNavigateFundSection,
     onOpenTicker,
 }: FundsPageProps) {
     const [navCollapsed, setNavCollapsed] = useState(false);
@@ -3645,6 +4645,7 @@ export default function FundsPage({
     const debouncedSearchTerm = useDebouncedValue(searchTerm, 160);
     const deferredSearchTerm = useDeferredValue(debouncedSearchTerm);
     const mountedRef = useRef(false);
+    const holdingsRef = useRef<FundHoldingsResponse | null>(null);
     const activeFundCodeRef = useRef('');
     const autoRefreshAttemptedRef = useRef(false);
     const allocationRefreshAttemptedRef = useRef(new Set<string>());
@@ -3657,6 +4658,7 @@ export default function FundsPage({
     const [holdingChangeFilter, setHoldingChangeFilter] = useState<FundHoldingChangeFilter>('all');
     const holdingsFetchAttemptedRef = useRef(new Set<string>());
     const holdingsRefreshInFlightRef = useRef(false);
+    const holdingsLiveInFlightRef = useRef(false);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -3664,6 +4666,10 @@ export default function FundsPage({
             mountedRef.current = false;
         };
     }, []);
+
+    useEffect(() => {
+        holdingsRef.current = holdings;
+    }, [holdings]);
 
     const refreshSnapshot = useCallback(async () => {
         setRefreshing(true);
@@ -3705,6 +4711,23 @@ export default function FundsPage({
             if (mountedRef.current && activeFundCodeRef.current === normalizedCode && !silent) {
                 setHoldingsLoading(false);
             }
+        }
+    }, []);
+
+    const loadHoldingsLive = useCallback(async (normalizedCode: string) => {
+        if (!normalizedCode || holdingsLiveInFlightRef.current) return;
+        holdingsLiveInFlightRef.current = true;
+        try {
+            const payload = await apiClient.fundHoldingsLive(normalizedCode);
+            if (!mountedRef.current || activeFundCodeRef.current !== normalizedCode) return;
+            setHoldings((current) => {
+                if (!current || current.fund_code !== normalizedCode) return current;
+                return mergeFundHoldingsLivePayload(current, payload);
+            });
+        } catch {
+            // Live fiyat/KZ güncellemesi statik KAP tablosunu düşürmemeli.
+        } finally {
+            holdingsLiveInFlightRef.current = false;
         }
     }, []);
 
@@ -3935,7 +4958,8 @@ export default function FundsPage({
         const normalizedCode = fundCode.trim().toUpperCase();
         const refreshVisibleHoldings = () => {
             if (document.visibilityState !== 'visible') return;
-            void loadHoldings(normalizedCode, { silent: true, force: true });
+            if (!holdingsRef.current || holdingsRef.current.fund_code !== normalizedCode) return;
+            void loadHoldingsLive(normalizedCode);
         };
         refreshVisibleHoldings();
         const intervalId = window.setInterval(refreshVisibleHoldings, FUND_HOLDINGS_LIVE_REFRESH_MS);
@@ -3946,7 +4970,7 @@ export default function FundsPage({
             window.removeEventListener('focus', refreshVisibleHoldings);
             document.removeEventListener('visibilitychange', refreshVisibleHoldings);
         };
-    }, [fundCode, activeTab, loadHoldings]);
+    }, [fundCode, activeTab, loadHoldingsLive]);
 
     const filteredFunds = useMemo(() => {
         const rows = [...(funds?.rows || [])];
@@ -4225,14 +5249,23 @@ export default function FundsPage({
             <MarketsNavigation
                 collapsed={navCollapsed}
                 activeSection="funds"
+                activeFundSection={view === 'compare' ? 'compare' : 'investment'}
                 onCollapsedChange={setNavCollapsed}
                 onSectionChange={onNavigateSection}
+                onFundSectionChange={onNavigateFundSection}
                 onSelectTicker={onOpenTicker}
                 onSelectFund={(nextFundCode) => onOpenFund(nextFundCode, 'overview')}
             />
             <div className="funds-workspace">
                 <div className="funds-page">
-                    {!fundCode ? (
+                    {view === 'compare' ? (
+                        <FundComparisonPage
+                            funds={funds}
+                            loading={loading}
+                            error={error}
+                            onOpenFund={onOpenFund}
+                        />
+                    ) : !fundCode ? (
                         <>
                             <header className="funds-header">
                                 <div>

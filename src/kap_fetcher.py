@@ -23,9 +23,28 @@ ATTACHMENT_DETAIL_ENDPOINT = "notification/attachment-detail"
 PDF_ENDPOINT = "BildirimPdf"
 DISCLOSURE_MEMBERS_BY_CRITERIA_ENDPOINT = "disclosure/members/byCriteria"
 FILE_DOWNLOAD_ENDPOINT = "file/download"
-KAP_CACHE_SCHEMA_VERSION = 11
+KAP_CACHE_SCHEMA_VERSION = 13
 KAP_LIVE_DISCLOSURE_CHECK_TTL_HOURS = 24.0
 KAP_INSURANCE_PREMIUM_CHECK_TTL_HOURS = 24.0
+
+# BIST'te kayıtlı ticari banka tickerleri. KAP banka raporlarında bilanço
+# kalemleri için solo + konsolide sütunları yan yana basıldığından, bu
+# tickerlarda konsolide sütunu önceliklendiriyoruz.
+_KAP_BANK_TICKER_HINTS = frozenset(
+    {
+        "AKBNK",
+        "ALBRK",
+        "GARAN",
+        "HALKB",
+        "ICBCT",
+        "ISCTR",
+        "QNBFB",
+        "SKBNK",
+        "TSKB",
+        "VAKBN",
+        "YKBNK",
+    }
+)
 KAP_INSURANCE_PREMIUM_CACHE_VERSION = 8
 KAP_INSURANCE_PREMIUM_DISCLOSURE_LOOKBACK_DAYS = 1095
 KAP_INSURANCE_PREMIUM_MAX_DISCLOSURES = 36
@@ -62,8 +81,8 @@ COMPANY_QUERY_ALIASES: Dict[str, List[str]] = {
     "ISCTR": ["ISCTR", "IS BANKASI", "ISBANK"],
     "KCHOL": ["KCHOL", "KOC HOLDING", "KOCHOL"],
     "KOCHOL": ["KCHOL", "KOC HOLDING", "KOCHOL"],
-    "KOZAL": ["TRALT", "KOZAL", "KOZA ALTIN"],
-    "TRALT": ["TRALT", "KOZAL", "KOZA ALTIN"],
+    "KOZAL": ["KOZAL", "TRALT", "KOZA ALTIN", "TURK ALTIN ISLETMELERI"],
+    "TRALT": ["TRALT", "KOZAL", "TURK ALTIN ISLETMELERI", "KOZA ALTIN"],
     "PETKM": ["PETKM", "PETKIM"],
     "SAHOL": ["SAHOL", "SABANCI"],
     "SISE": ["SISE", "SISECAM"],
@@ -77,6 +96,39 @@ COMPANY_MEMBER_TITLE_HINTS: Dict[str, Tuple[str, ...]] = {
     # KAP member/filter/TERA returns MEDİTERA first because "tera" is a substring.
     # The ticker TERA is Tera Yatırım Menkul Değerler A.Ş.; prefer that exact issuer.
     "TERA": ("TERA YATIRIM MENKUL",),
+    # KAP `member/filter/GARAN` (or GARANTI) returns several Garanti-affiliated
+    # companies. For the BIST stock GARAN we want Türkiye Garanti Bankası A.Ş.,
+    # not Garanti Emeklilik / Garanti Faktoring / Garanti Yatırım Ortaklığı.
+    "GARAN": ("GARANTI BANKASI", "TURKIYE GARANTI BANKASI"),
+    # Same disambiguation for other BIST-30 issuers whose KAP filter results
+    # include affiliates with similar names. Each hint matches a single canonical
+    # KAP issuer title (Turkish characters normalised).
+    "AKBNK": ("AKBANK",),
+    "ISCTR": ("TURKIYE IS BANKASI",),
+    "YKBNK": ("YAPI VE KREDI BANKASI",),
+    "HALKB": ("TURKIYE HALK BANKASI",),
+    "VAKBN": ("TURKIYE VAKIFLAR BANKASI",),
+    "AKSEN": ("AKSA ENERJI URETIM",),
+    "ENKAI": ("ENKA INSAAT",),
+    "EREGL": ("EREGLI DEMIR",),
+    "FROTO": ("FORD OTOMOTIV",),
+    "GUBRF": ("GUBRE FABRIKALARI",),
+    "KCHOL": ("KOC HOLDING",),
+    "KOZAL": ("TURK ALTIN ISLETMELERI", "KOZA ALTIN ISLETMELERI"),
+    "KOZAA": ("KOZA ANADOLU METAL",),
+    "KRDMD": ("KARDEMIR",),
+    "MGROS": ("MIGROS TICARET",),
+    "PETKM": ("PETKIM PETROKIMYA",),
+    "SAHOL": ("HACI OMER SABANCI", "SABANCI HOLDING"),
+    "SASA": ("SASA POLYESTER",),
+    "SISE": ("TURKIYE SISE VE CAM",),
+    "TCELL": ("TURKCELL ILETISIM",),
+    "THYAO": ("TURK HAVA YOLLARI",),
+    "TOASO": ("TOFAS",),
+    "TTKOM": ("TURK TELEKOMUNIKASYON",),
+    "TUPRS": ("TURKIYE PETROL RAFINERILERI", "TUPRAS",),
+    "ULKER": ("ULKER BISKUVI",),
+    "TKFEN": ("TEKFEN HOLDING",),
 }
 
 KAP_MEMBER_FALLBACKS: Dict[str, Dict[str, str]] = {
@@ -681,7 +733,15 @@ def _resolve_member(company: str, cfg: KapConfig) -> Optional[Dict[str, Any]]:
     company_key = str(company or "").strip().upper()
     if not company_key:
         return None
+    cached = _resolve_member_from_cache(company_key)
+    if cached is not None:
+        return _empty_member_to_none(cached)
+    resolved = _resolve_member_uncached(company_key, cfg)
+    _store_resolved_member(company_key, resolved)
+    return resolved
 
+
+def _resolve_member_uncached(company_key: str, cfg: KapConfig) -> Optional[Dict[str, Any]]:
     candidate_queries = COMPANY_QUERY_ALIASES.get(company_key, [])
     if company_key not in candidate_queries:
         candidate_queries.append(company_key)
@@ -707,6 +767,20 @@ def _resolve_member(company: str, cfg: KapConfig) -> Optional[Dict[str, Any]]:
         mkk_oid = str(row.get("mkkMemberOid", "")).strip()
         if not mkk_oid:
             continue
+        company_code = str(row.get("companyCode", "")).strip().upper()
+        # KAP'ta KOZAL/KOZAA gibi BIST kodları yok; yan kuruluşlara (TRALT)
+        # eşleşmesini engelliyoruz. Eşleşme yalnızca orijinal kod, tanınan
+        # alias listesindeki kodlardan biri ya da KAP'ın numeric/empty
+        # kodu olduğunda kabul edilir.
+        looks_like_bist_ticker = bool(company_code) and company_code.isalpha() and 3 <= len(company_code) <= 6
+        if looks_like_bist_ticker and company_code != company_key:
+            allowed_codes = {alias.upper() for alias in candidate_queries if alias}
+            fallback_meta = KAP_MEMBER_FALLBACKS.get(company_key) or {}
+            fallback_code = str(fallback_meta.get("company_code", "")).strip().upper()
+            if fallback_code:
+                allowed_codes.add(fallback_code)
+            if company_code not in allowed_codes:
+                continue
         return {
             "company_code": str(row.get("companyCode", "")).strip(),
             "mkk_member_oid": mkk_oid,
@@ -716,6 +790,152 @@ def _resolve_member(company: str, cfg: KapConfig) -> Optional[Dict[str, Any]]:
         }
     fallback = KAP_MEMBER_FALLBACKS.get(company_key)
     return dict(fallback) if fallback else None
+
+
+# ---------------------------------------------------------------------------
+# Member resolution cache (process-local + optional Redis backend)
+# ---------------------------------------------------------------------------
+
+# KAP'ın üye filtresi rate-limited; aynı ticker için defalarca arama atmak hem
+# yavaş, hem 429'a neden oluyor. Bu yüzden başarılı/başarısız sonucu kısa
+# süreli cache'e alıyoruz. ``app.cache`` katmanı default in-memory; Redis varsa
+# tüm worker'lar arası paylaşıma açılır.
+_RESOLVED_MEMBER_TTL_SECONDS = 24 * 60 * 60  # 24 saat
+
+
+def _resolved_member_cache_key(company_key: str) -> str:
+    return f"kap:resolve-member:{company_key}"
+
+
+def _empty_member_to_none(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not payload or not payload.get("mkk_member_oid"):
+        return None
+    return dict(payload)
+
+
+def _resolve_member_from_cache(company_key: str) -> Optional[Dict[str, Any]]:
+    try:
+        from app.cache import get_cache  # local import to avoid heavy deps at module import time
+    except Exception:
+        return None
+    try:
+        cached = get_cache().get(_resolved_member_cache_key(company_key))
+    except Exception:
+        return None
+    if cached is None:
+        return None
+    if isinstance(cached, dict):
+        return cached
+    return None
+
+
+def _store_resolved_member(company_key: str, resolved: Optional[Dict[str, Any]]) -> None:
+    try:
+        from app.cache import get_cache
+    except Exception:
+        return
+    payload: Dict[str, Any] = dict(resolved) if isinstance(resolved, dict) else {}
+    # KAP'ta hiç bulunmayan ticker'ları (KOZAL, KOZAA gibi delisting'ler) negatif
+    # cache'e alıyoruz; aksi halde her snapshot çağrısı KAP'ı yine yokluyor.
+    try:
+        get_cache().set(
+            _resolved_member_cache_key(company_key),
+            payload,
+            ttl_seconds=_RESOLVED_MEMBER_TTL_SECONDS,
+        )
+    except Exception:
+        return
+
+
+def _disclosure_text(row: Dict[str, Any]) -> str:
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in (
+            "title",
+            "summary",
+            "subject",
+            "description",
+            "financialStatementType",
+            "financialStatementNature",
+            "financialTableNature",
+        )
+    )
+    return _normalize(text.replace("-", " "))
+
+
+def _disclosure_consolidation_score(row: Dict[str, Any]) -> int:
+    text = _disclosure_text(row)
+    if not text:
+        return 1
+    if (
+        "konsolide olmayan" in text
+        or "konsolide degil" in text
+        or "solo" in text
+        or "unconsolidated" in text
+        or "non consolidated" in text
+    ):
+        return 0
+    if "konsolide" in text or "consolidated" in text:
+        return 2
+    return 1
+
+
+def _disclosure_source_order(row: Dict[str, Any]) -> int:
+    try:
+        return int(row.get("_source_order", 1_000_000))
+    except (TypeError, ValueError):
+        return 1_000_000
+
+
+def _disclosure_index(row: Dict[str, Any]) -> int:
+    try:
+        return int(row.get("disclosure_index") or row.get("disclosureIndex") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _disclosure_selection_key(row: Dict[str, Any]) -> Tuple[int, int, int]:
+    return (
+        _disclosure_consolidation_score(row),
+        -_disclosure_source_order(row),
+        _disclosure_index(row),
+    )
+
+
+def _preferred_disclosures_by_period(
+    rows: List[Dict[str, Any]],
+    max_periods: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    by_period: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    for row in rows:
+        try:
+            key = (int(row.get("year") or 0), int(row.get("period") or 0))
+        except (TypeError, ValueError):
+            continue
+        if key[0] <= 0 or key[1] < 1 or key[1] > 4:
+            continue
+        existing = by_period.get(key)
+        if existing is None or _disclosure_selection_key(row) > _disclosure_selection_key(existing):
+            by_period[key] = row
+
+    ordered = sorted(
+        by_period.values(),
+        key=lambda item: (
+            int(item.get("year") or 0),
+            int(item.get("period") or 0),
+            _disclosure_selection_key(item),
+        ),
+        reverse=True,
+    )
+    if max_periods is not None:
+        ordered = ordered[: max(1, int(max_periods))]
+
+    cleaned: List[Dict[str, Any]] = []
+    for row in ordered:
+        item = dict(row)
+        item.pop("_source_order", None)
+        cleaned.append(item)
+    return cleaned
 
 
 def _list_company_disclosures(
@@ -775,8 +995,14 @@ def _list_company_disclosures(
                     "disclosure_index": disclosure_index_int,
                     "stock_code": str(item.get("stockCode", "")).strip().upper(),
                     "title": str(item.get("title", "")).strip(),
+                    "summary": str(item.get("summary", "")).strip(),
+                    "subject": str(item.get("subject", "")).strip(),
+                    "financialStatementType": str(item.get("financialStatementType", "")).strip(),
+                    "financialStatementNature": str(item.get("financialStatementNature", "")).strip(),
+                    "financialTableNature": str(item.get("financialTableNature", "")).strip(),
                     "pd_oid": str(item.get("pdOid", "")).strip(),
                     "mkk_member_oid": str(item.get("mkkMemberOid", "")).strip(),
+                    "_source_order": len(rows),
                 }
             )
         if requested_periods is not None:
@@ -784,13 +1010,9 @@ def _list_company_disclosures(
             if period_count >= requested_periods:
                 break
 
-    unique: Dict[int, Dict[str, Any]] = {}
-    for row in sorted(rows, key=lambda x: (x["year"], x["period"], x["disclosure_index"]), reverse=True):
-        if row["disclosure_index"] in unique:
-            continue
-        unique[row["disclosure_index"]] = row
-    current_period_count = len({(row["year"], row["period"]) for row in unique.values()})
-    needs_fallback = not unique or (
+    selected_rows = _preferred_disclosures_by_period(rows)
+    current_period_count = len(selected_rows)
+    needs_fallback = not selected_rows or (
         requested_periods is not None and current_period_count < requested_periods
     )
     if needs_fallback:
@@ -801,30 +1023,11 @@ def _list_company_disclosures(
             max_periods=requested_periods,
         )
         if fallback_rows:
-            by_period: Dict[Tuple[int, int], Dict[str, Any]] = {}
-            for row in fallback_rows:
-                try:
-                    by_period[(int(row["year"]), int(row["period"]))] = row
-                except (KeyError, TypeError, ValueError):
-                    continue
-            for row in unique.values():
-                try:
-                    by_period[(int(row["year"]), int(row["period"]))] = row
-                except (KeyError, TypeError, ValueError):
-                    continue
-            merged = sorted(
-                by_period.values(),
-                key=lambda item: (
-                    int(item.get("year") or 0),
-                    int(item.get("period") or 0),
-                    int(item.get("disclosure_index") or 0),
-                ),
-                reverse=True,
+            return _preferred_disclosures_by_period(
+                selected_rows + fallback_rows,
+                requested_periods,
             )
-            if requested_periods is not None:
-                return merged[:requested_periods]
-            return merged
-    return list(unique.values())
+    return _preferred_disclosures_by_period(rows, requested_periods)
 
 
 def _list_financial_report_disclosures_by_criteria(
@@ -840,8 +1043,8 @@ def _list_financial_report_disclosures_by_criteria(
         cfg=cfg,
         lookback_days=lookback_days,
     )
-    by_period: Dict[Tuple[int, int], Dict[str, Any]] = {}
-    for row in rows:
+    candidates: List[Dict[str, Any]] = []
+    for source_order, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
         subject_norm = _normalize(str(row.get("subject") or ""))
@@ -855,30 +1058,20 @@ def _list_financial_report_disclosures_by_criteria(
             continue
         if disclosure_index <= 0 or year <= 0 or period < 1 or period > 4:
             continue
-        key = (year, period)
-        existing = by_period.get(key)
-        if existing and int(existing.get("disclosure_index") or 0) >= disclosure_index:
-            continue
-        by_period[key] = {
-            "year": year,
-            "period": period,
-            "disclosure_index": disclosure_index,
-            "stock_code": "",
-            "title": str(row.get("title") or row.get("summary") or "").strip(),
-        }
+        candidates.append(
+            {
+                "year": year,
+                "period": period,
+                "disclosure_index": disclosure_index,
+                "stock_code": "",
+                "title": str(row.get("title") or row.get("summary") or "").strip(),
+                "summary": str(row.get("summary", "")).strip(),
+                "subject": str(row.get("subject", "")).strip(),
+                "_source_order": source_order,
+            }
+        )
 
-    ordered = sorted(
-        by_period.values(),
-        key=lambda item: (
-            int(item.get("year") or 0),
-            int(item.get("period") or 0),
-            int(item.get("disclosure_index") or 0),
-        ),
-        reverse=True,
-    )
-    if max_periods is not None:
-        return ordered[: max(1, int(max_periods))]
-    return ordered
+    return _preferred_disclosures_by_period(candidates, max_periods)
 
 
 def _parse_unit_info(html_block: str) -> Dict[str, Any]:
@@ -959,18 +1152,28 @@ def _col_preference(
     income_statement: bool,
     prefer_income_statement_ytd: bool = False,
     comparison_mode: str = "current",
+    prefer_consolidated_balance: bool = False,
 ) -> Tuple[int, ...]:
     if comparison_mode == "comparative":
         if income_statement and int(period) > 1:
             return (5, 7, 4, 6) if prefer_income_statement_ytd else (7, 5, 6, 4)
         if income_statement:
             return (5, 7, 4, 6) if prefer_income_statement_ytd else (7, 5, 6, 4)
+        if prefer_consolidated_balance:
+            return (9, 7, 5, 8, 6, 4)
         return (5, 7, 4, 6)
     if income_statement and int(period) > 1:
         # Income statement rows usually expose: 4=YTD current, 5=YTD prev, 6=quarter current, 7=quarter prev.
         return (4, 6, 5, 7) if prefer_income_statement_ytd else (6, 4, 7, 5)
     if income_statement:
         return (4, 6, 5, 7)
+    if prefer_consolidated_balance:
+        # Banka bilanço raporlarında sütun düzeni genelde:
+        # 4 = TP cari, 5 = YP cari, 6 = toplam cari,
+        # 7 = TP önceki, 8 = YP önceki, 9 = toplam önceki.
+        # Banka özetinde toplam sütununu öne alıyoruz; eski 4/5/6/7 düzenleri
+        # için sonraki sütunlar geriye dönük fallback olarak kalıyor.
+        return (6, 4, 5, 9, 7, 8)
     return (4, 6, 5, 7)
 
 
@@ -980,6 +1183,7 @@ def _score_metric_candidate(
     period: int,
     prefer_income_statement_ytd: bool = False,
     comparison_mode: str = "current",
+    prefer_consolidated_balance: bool = False,
 ) -> int:
     score = 0
     label_norm = str(row.get("label_norm", ""))
@@ -1043,6 +1247,7 @@ def _score_metric_candidate(
         },
         prefer_income_statement_ytd=prefer_income_statement_ytd,
         comparison_mode=comparison_mode,
+        prefer_consolidated_balance=prefer_consolidated_balance,
     )
     if col_order in preferred_cols:
         score += max(1, 20 - preferred_cols.index(col_order) * 6)
@@ -1173,20 +1378,42 @@ def _score_metric_candidate(
         if "toplam varliklar" in label_norm:
             score += 80
     elif metric_key == "finansal_varliklar_net":
-        if "finansal varliklar (net)" in label_norm or "finansal varliklar net" in label_norm:
-            score += 80
+        # KAP banka raporunda hem üst toplam ("Finansal Varlıklar (Net)") hem de
+        # alt kalem ("İtfa Edilmiş Maliyeti ile Ölçülen Finansal Varlıklar (Net)")
+        # benzer etiketle geliyor. Üst toplama yüksek puan veriyor, alt kalem
+        # gerekirse düşük puanla eleniyor.
+        if label_norm in {"finansal varliklar (net)", "finansal varliklar net"}:
+            score += 100
+        elif "itfa edilmis" in label_norm and "finansal varliklar" in label_norm:
+            score -= 60
+        elif "finansal varliklar (net)" in label_norm or "finansal varliklar net" in label_norm:
+            score += 60
         elif "finansal varliklar" in label_norm:
             score += 30
     elif metric_key == "krediler":
-        if label_norm == "krediler":
-            score += 80
+        # Bankaların KAP bilanço başlığı genelde "Krediler ve Alacaklar" ya da
+        # tek başına "Krediler" olur. Müşteri kredilerinin alt kalemleri (ör.
+        # "Bireysel Krediler") kazara üstte tutulmasın diye sade etikete tam
+        # eşleşme önceliği veriyoruz.
+        if label_norm == "krediler" or label_norm == "krediler ve alacaklar":
+            score += 90
+        elif label_norm.startswith("krediler "):
+            score += 50
         elif "krediler" in label_norm:
-            score += 35
+            score += 25
     elif metric_key == "mevduatlar":
-        if label_norm == "mevduatlar":
-            score += 80
-        elif "mevduatlar" in label_norm:
-            score += 35
+        # KAP banka bilançosunda genelde tek satır: "MEVDUAT". Çoğul
+        # "Mevduatlar" formu da var (TFRS uyumlu raporlarda). Alt kalemler
+        # ("Bankalar Mevduatı", "Tasarruf Mevduatı") tek başına seçilmesin
+        # diye en yüksek puanı en sade ana etiketlere veriyoruz.
+        if label_norm in {"mevduat", "mevduatlar"}:
+            score += 95
+        elif label_norm in {"musteri mevduati", "toplam mevduat", "toplam mevduatlar"}:
+            score += 85
+        elif label_norm.endswith("mevduati") and "bankalar" not in label_norm and "merkez" not in label_norm:
+            score += 30
+        elif "mevduatlar" in label_norm or "mevduat" in label_norm:
+            score += 15
     elif metric_key == "beklenen_zarar_karsiliklari":
         if "beklenen zarar karsiliklari" in label_norm:
             score += 80
@@ -1276,6 +1503,7 @@ def _pick_metric_value(
     period: int,
     prefer_income_statement_ytd: bool = False,
     comparison_mode: str = "current",
+    prefer_consolidated_balance: bool = False,
 ) -> Optional[float]:
     filtered: List[Dict[str, Any]] = []
 
@@ -1379,15 +1607,26 @@ def _pick_metric_value(
             if "toplam varliklar" in label_norm:
                 filtered.append(row)
         elif metric_key == "finansal_varliklar_net":
-            if "finansal varliklar (net)" in label_norm or "finansal varliklar net" in label_norm:
+            if label_norm in {"finansal varliklar (net)", "finansal varliklar net"}:
+                filtered.append(row)
+            elif "itfa edilmis" in label_norm and "finansal varliklar" in label_norm:
+                # Banka bilançosunda alt kalem ("İtfa Edilmiş Maliyeti ile
+                # Ölçülen Finansal Varlıklar"). Hâlâ candidate listesine giriyor
+                # ama scoring negatif puan vereceği için zayıf öncelik kalıyor.
+                filtered.append(row)
+            elif "finansal varliklar (net)" in label_norm or "finansal varliklar net" in label_norm:
                 filtered.append(row)
             elif label_norm == "finansal varliklar":
                 filtered.append(row)
         elif metric_key == "krediler":
-            if label_norm == "krediler" or "krediler" in label_norm:
+            if label_norm in {"krediler", "krediler ve alacaklar"}:
+                filtered.append(row)
+            elif label_norm.startswith("krediler ") or "krediler" in label_norm:
                 filtered.append(row)
         elif metric_key == "mevduatlar":
-            if label_norm == "mevduatlar" or "mevduatlar" in label_norm:
+            if label_norm in {"mevduat", "mevduatlar", "musteri mevduati", "toplam mevduat", "toplam mevduatlar"}:
+                filtered.append(row)
+            elif "mevduatlar" in label_norm or "mevduat" in label_norm:
                 filtered.append(row)
         elif metric_key == "beklenen_zarar_karsiliklari":
             if "beklenen zarar karsiliklari" in label_norm or "beklenen kredi zarar karsiliklari" in label_norm:
@@ -1431,6 +1670,7 @@ def _pick_metric_value(
                 period,
                 prefer_income_statement_ytd=prefer_income_statement_ytd,
                 comparison_mode=comparison_mode,
+                prefer_consolidated_balance=prefer_consolidated_balance,
             ),
             abs(float(item.get("value", 0.0))),
         ),
@@ -1687,6 +1927,7 @@ def _extract_disclosure_metrics(
     *,
     prefer_income_statement_ytd: bool = False,
     comparison_mode: str = "current",
+    is_bank: bool = False,
 ) -> Tuple[Dict[str, Optional[float]], Dict[str, Any]]:
     disclosure_body = detail_payload.get("disclosureBody", [])
     if not isinstance(disclosure_body, list):
@@ -1811,24 +2052,24 @@ def _extract_disclosure_metrics(
         ),
         "faaliyet_nakit_akisi": _pick_metric_value("faaliyet_nakit_akisi", all_rows, period=period, comparison_mode=comparison_mode),
         "capex": _pick_metric_value("capex", all_rows, period=period, comparison_mode=comparison_mode),
-        "nakit_ve_nakit_benzerleri": _pick_metric_value("nakit_ve_nakit_benzerleri", all_rows, period=period, comparison_mode=comparison_mode),
+        "nakit_ve_nakit_benzerleri": _pick_metric_value("nakit_ve_nakit_benzerleri", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
         "finansal_varliklar_sigortacilik": _pick_metric_value("finansal_varliklar_sigortacilik", all_rows, period=period, comparison_mode=comparison_mode),
         "esas_faaliyetlerden_alacaklar": _pick_metric_value("esas_faaliyetlerden_alacaklar", all_rows, period=period, comparison_mode=comparison_mode),
         "teknik_karsiliklar": _pick_metric_value("teknik_karsiliklar", all_rows, period=period, comparison_mode=comparison_mode),
         "esas_faaliyetlerden_borclar": _pick_metric_value("esas_faaliyetlerden_borclar", all_rows, period=period, comparison_mode=comparison_mode),
-        "donen_varliklar": _pick_metric_value("donen_varliklar", all_rows, period=period, comparison_mode=comparison_mode),
-        "duran_varliklar": _pick_metric_value("duran_varliklar", all_rows, period=period, comparison_mode=comparison_mode),
-        "toplam_varliklar": _pick_metric_value("toplam_varliklar", all_rows, period=period, comparison_mode=comparison_mode),
-        "kisa_vadeli_yukumlulukler": _pick_metric_value("kisa_vadeli_yukumlulukler", all_rows, period=period, comparison_mode=comparison_mode),
-        "finansal_varliklar_net": _pick_metric_value("finansal_varliklar_net", all_rows, period=period, comparison_mode=comparison_mode),
-        "krediler": _pick_metric_value("krediler", all_rows, period=period, comparison_mode=comparison_mode),
-        "mevduatlar": _pick_metric_value("mevduatlar", all_rows, period=period, comparison_mode=comparison_mode),
-        "beklenen_zarar_karsiliklari": _pick_metric_value("beklenen_zarar_karsiliklari", all_rows, period=period, comparison_mode=comparison_mode),
-        "finansal_borclar": _pick_metric_value("finansal_borclar", all_rows, period=period, comparison_mode=comparison_mode),
-        "net_borc": _pick_metric_value("net_borc", all_rows, period=period, comparison_mode=comparison_mode),
-        "ozkaynaklar": _pick_metric_value("ozkaynaklar", all_rows, period=period, comparison_mode=comparison_mode),
-        "odenmis_sermaye": _pick_metric_value("odenmis_sermaye", all_rows, period=period, comparison_mode=comparison_mode),
-        "cikarilmis_sermaye": _pick_metric_value("cikarilmis_sermaye", all_rows, period=period, comparison_mode=comparison_mode),
+        "donen_varliklar": _pick_metric_value("donen_varliklar", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "duran_varliklar": _pick_metric_value("duran_varliklar", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "toplam_varliklar": _pick_metric_value("toplam_varliklar", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "kisa_vadeli_yukumlulukler": _pick_metric_value("kisa_vadeli_yukumlulukler", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "finansal_varliklar_net": _pick_metric_value("finansal_varliklar_net", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "krediler": _pick_metric_value("krediler", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "mevduatlar": _pick_metric_value("mevduatlar", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "beklenen_zarar_karsiliklari": _pick_metric_value("beklenen_zarar_karsiliklari", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "finansal_borclar": _pick_metric_value("finansal_borclar", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "net_borc": _pick_metric_value("net_borc", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "ozkaynaklar": _pick_metric_value("ozkaynaklar", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "odenmis_sermaye": _pick_metric_value("odenmis_sermaye", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
+        "cikarilmis_sermaye": _pick_metric_value("cikarilmis_sermaye", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
     }
     if metrics["finansal_borclar"] is None:
         metrics["finansal_borclar"] = _derive_finansal_borclar(
@@ -2940,6 +3181,16 @@ def fetch_kap_company_snapshot(
         if not member:
             raise RuntimeError(f"KAP uyelik kaydi bulunamadi: {company_norm}")
 
+        # KAP banka raporları solo + konsolide sütunları yan yana basıyor.
+        # BIST'teki yatırımcı ve veri sağlayıcılar konsolide rakamı kullanıyor;
+        # bilanço kalemlerini bankada konsolide sütunundan seçiyoruz.
+        member_title_norm = _normalize(str(member.get("title") or ""))
+        is_bank = bool(
+            company_norm in _KAP_BANK_TICKER_HINTS
+            or "bankasi" in member_title_norm
+            or "bank" in member_title_norm.split()
+        )
+
         disclosures = _list_company_disclosures(
             member_oid=member["mkk_member_oid"],
             cfg=cfg,
@@ -2973,24 +3224,28 @@ def fetch_kap_company_snapshot(
                 period=period,
                 prefer_income_statement_ytd=False,
                 comparison_mode="current",
+                is_bank=is_bank,
             )
             metrics_ytd, _ = _extract_disclosure_metrics(
                 detail,
                 period=period,
                 prefer_income_statement_ytd=True,
                 comparison_mode="current",
+                is_bank=is_bank,
             )
             metrics_comparative, _ = _extract_disclosure_metrics(
                 detail,
                 period=period,
                 prefer_income_statement_ytd=False,
                 comparison_mode="comparative",
+                is_bank=is_bank,
             )
             metrics_ytd_comparative, _ = _extract_disclosure_metrics(
                 detail,
                 period=period,
                 prefer_income_statement_ytd=True,
                 comparison_mode="comparative",
+                is_bank=is_bank,
             )
             quarter_rows.append(
                 {
@@ -3054,6 +3309,7 @@ def fetch_kap_company_snapshot(
                 cached["ok"]
                 and _cached_period_count(cached) > 0
                 and cache_has_requested_depth
+                and cache_version == KAP_CACHE_SCHEMA_VERSION
             ):
                 cached["cache_stale"] = False
                 cached.pop("error", None)

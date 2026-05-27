@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { 
     Calendar, 
     Layers, 
@@ -18,12 +19,15 @@ import GlobalTickerSearch from './GlobalTickerSearch';
 import './MarketsNavigation.css';
 
 export type MarketsNavigationSection = 'markets' | 'stocks' | 'funds' | 'indices';
+export type MarketsNavigationFundSection = 'investment' | 'compare';
 
 type MarketsNavigationProps = {
     collapsed: boolean;
     activeSection: MarketsNavigationSection;
+    activeFundSection?: MarketsNavigationFundSection;
     onCollapsedChange: (collapsed: boolean) => void;
     onSectionChange: (section: MarketsNavigationSection) => void;
+    onFundSectionChange?: (section: MarketsNavigationFundSection) => void;
     onSelectTicker?: (ticker: string) => void;
     onSelectFund?: (fundCode: string) => void;
 };
@@ -31,11 +35,23 @@ type MarketsNavigationProps = {
 export default function MarketsNavigation({
     collapsed,
     activeSection,
+    activeFundSection = 'investment',
     onCollapsedChange,
     onSectionChange,
+    onFundSectionChange,
     onSelectTicker,
     onSelectFund,
 }: MarketsNavigationProps) {
+    const [fundsExpanded, setFundsExpanded] = useState<boolean>(activeSection === 'funds');
+
+    // Auto-open the submenu whenever the user is already on the funds section
+    // (e.g. arriving via a fund detail URL), but allow manual collapse afterwards.
+    useEffect(() => {
+        if (activeSection === 'funds') {
+            setFundsExpanded(true);
+        }
+    }, [activeSection]);
+
     const navigate = (ticker: string) => {
         const normalizedTicker = ticker.trim().toUpperCase();
         if (!normalizedTicker) return;
@@ -72,17 +88,46 @@ export default function MarketsNavigation({
                         {!collapsed && <span className="mn-text">Hisseler</span>}
                     </div>
                 </button>
-                <button
-                    type="button"
-                    className={`mn-menu-item ${activeSection === 'funds' ? 'active' : ''}`}
-                    title="Fonlar"
-                    onClick={() => onSectionChange('funds')}
-                >
-                    <div className="mn-item-main">
-                        <Coins size={18} className="mn-icon" />
-                        {!collapsed && <span className="mn-text">Fonlar</span>}
-                    </div>
-                </button>
+                <div className={`mn-menu-subtree ${fundsExpanded ? 'is-open' : ''}`}>
+                    <button
+                        type="button"
+                        className={`mn-menu-item has-submenu ${activeSection === 'funds' ? 'active' : ''}`}
+                        title="Fonlar"
+                        aria-expanded={!collapsed && fundsExpanded}
+                        onClick={() => {
+                            if (collapsed) {
+                                onCollapsedChange(false);
+                                setFundsExpanded(true);
+                                return;
+                            }
+                            setFundsExpanded((prev) => !prev);
+                        }}
+                    >
+                        <div className="mn-item-main">
+                            <Coins size={18} className="mn-icon" />
+                            {!collapsed && <span className="mn-text">Fonlar</span>}
+                        </div>
+                        {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
+                    </button>
+                    {!collapsed && fundsExpanded && (
+                        <div className="mn-submenu" aria-label="Fonlar alt menüsü">
+                            <button
+                                type="button"
+                                className={`mn-submenu-item ${activeSection === 'funds' && activeFundSection === 'investment' ? 'active' : ''}`}
+                                onClick={() => (onFundSectionChange ? onFundSectionChange('investment') : onSectionChange('funds'))}
+                            >
+                                Yatırım Fonları
+                            </button>
+                            <button
+                                type="button"
+                                className={`mn-submenu-item ${activeSection === 'funds' && activeFundSection === 'compare' ? 'active' : ''}`}
+                                onClick={() => (onFundSectionChange ? onFundSectionChange('compare') : onSectionChange('funds'))}
+                            >
+                                Fon Karşılaştırma
+                            </button>
+                        </div>
+                    )}
+                </div>
                 <button
                     type="button"
                     className={`mn-menu-item ${activeSection === 'indices' ? 'active' : ''}`}

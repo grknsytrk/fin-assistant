@@ -332,6 +332,66 @@ def get_instrument(processed_dir: Path, kind: str, symbol: Any) -> Optional[Dict
         return _row_to_dict(row) if row else None
 
 
+def get_instruments(processed_dir: Path, kind: str, symbols: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
+    seed_manual_instruments(processed_dir)
+    normalized_kind = normalize_instrument_kind(kind)
+    requested_symbols: List[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        normalized_symbol = normalize_instrument_symbol(symbol)
+        if not normalized_symbol or normalized_symbol in seen:
+            continue
+        seen.add(normalized_symbol)
+        requested_symbols.append(normalized_symbol)
+    if not normalized_kind or not requested_symbols:
+        return {}
+
+    placeholders = ",".join("?" for _ in requested_symbols)
+    result: Dict[str, Dict[str, Any]] = {}
+    missing = set(requested_symbols)
+    with _connect(processed_dir) as conn:
+        rows = conn.execute(
+            f"SELECT * FROM instruments WHERE kind = ? AND symbol IN ({placeholders})",
+            (normalized_kind, *requested_symbols),
+        ).fetchall()
+        for row in rows:
+            instrument = _row_to_dict(row)
+            symbol = str(instrument.get("symbol") or "")
+            if symbol:
+                result[symbol] = instrument
+                missing.discard(symbol)
+
+        if missing:
+            alias_placeholders = ",".join("?" for _ in missing)
+            alias_rows = conn.execute(
+                f"SELECT alias, kind, symbol FROM instrument_aliases WHERE alias IN ({alias_placeholders})",
+                tuple(missing),
+            ).fetchall()
+            alias_targets = {
+                str(row["alias"]): str(row["symbol"])
+                for row in alias_rows
+                if row["kind"] == normalized_kind and row["symbol"]
+            }
+            target_symbols = sorted(set(alias_targets.values()))
+            if target_symbols:
+                target_placeholders = ",".join("?" for _ in target_symbols)
+                target_rows = conn.execute(
+                    f"SELECT * FROM instruments WHERE kind = ? AND symbol IN ({target_placeholders})",
+                    (normalized_kind, *target_symbols),
+                ).fetchall()
+                target_map: Dict[str, Dict[str, Any]] = {}
+                for row in target_rows:
+                    instrument = _row_to_dict(row)
+                    target_symbol = str(instrument.get("symbol") or "")
+                    if target_symbol:
+                        target_map[target_symbol] = instrument
+                for alias, target_symbol in alias_targets.items():
+                    instrument = target_map.get(target_symbol)
+                    if instrument:
+                        result[alias] = instrument
+    return result
+
+
 def get_instrument_name(processed_dir: Path, kind: str, symbol: Any) -> Optional[str]:
     instrument = get_instrument(processed_dir, kind, symbol)
     if not instrument:

@@ -24,7 +24,7 @@ import type { StockReturnMode } from '../routing/routes';
 import MarketWatchRail from '../components/MarketWatchRail';
 import MarketSidebar from '../components/MarketSidebar';
 import MarketWatchStrip from '../components/MarketWatchStrip';
-import MarketsNavigation, { type MarketsNavigationSection } from '../components/MarketsNavigation';
+import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo from '../components/SymbolLogo';
 import './MarketsView.css';
 
@@ -1766,6 +1766,7 @@ interface MarketsViewProps {
     routeSelectedIndex?: MarketIndexCode | null;
     routeReturnMode?: StockReturnMode;
     onNavigateSection?: (section: MarketSection) => void;
+    onNavigateFundSection?: (section: MarketsNavigationFundSection) => void;
     onNavigateStockIndex?: (index: MarketStockIndex) => void;
     onNavigateReturnMode?: (mode: StockReturnMode) => void;
     onNavigateIndexDetail?: (index: MarketIndexCode | null) => void;
@@ -1779,6 +1780,7 @@ export default function MarketsView({
     routeSelectedIndex = null,
     routeReturnMode = DEFAULT_STOCK_RETURN_MODE,
     onNavigateSection,
+    onNavigateFundSection,
     onNavigateStockIndex,
     onNavigateReturnMode,
     onNavigateIndexDetail,
@@ -1934,14 +1936,16 @@ export default function MarketsView({
         return () => window.clearInterval(intervalId);
     }, [activeSection]);
 
-    useEffect(() => { 
-        loadStats(); 
-        // XU100 ve pazar özetleri için her 10 saniyede bir arka planda sessizce çek
+    useEffect(() => {
+        if (activeSection !== 'markets') return;
+        loadStats();
         const intervalId = window.setInterval(() => {
-            loadStats(true);
+            if (document.visibilityState === 'visible') {
+                loadStats(true);
+            }
         }, 10000);
         return () => window.clearInterval(intervalId);
-    }, []);
+    }, [activeSection]);
 
     useEffect(() => {
         if (activeSection !== 'stocks') return;
@@ -2258,7 +2262,7 @@ export default function MarketsView({
               : 'Piyasa Görünümü';
     const pageDescription =
         activeSection === 'indices'
-            ? 'XUTUM, XU100 ve XU030 endekslerini, getirileri ve endeks içi şirket hareketlerini takip edin.'
+            ? 'BIST ana ve sektör endekslerini, getirileri ve endeks içi şirket hareketlerini takip edin.'
             : activeSection === 'stocks'
               ? 'XUTUM, XU100 ve XU030 hisselerini fiyat, hacim ve piyasa değeriyle karşılaştırın.'
             : 'Güncel fiyatlar, finansal görünüm ve analiz erişimi tek ekranda.';
@@ -2463,6 +2467,7 @@ export default function MarketsView({
                 activeSection={activeSection}
                 onCollapsedChange={setNavCollapsed}
                 onSectionChange={handleSectionChange}
+                onFundSectionChange={onNavigateFundSection}
                 onSelectTicker={onCompanyClick}
                 onSelectFund={onOpenFund}
             />

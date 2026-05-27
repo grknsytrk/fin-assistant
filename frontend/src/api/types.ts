@@ -141,7 +141,35 @@ export interface MarketStockRow extends MarketUniverseRow {
 }
 
 export type MarketStockIndex = 'XUTUM' | 'XU100' | 'XU030';
-export type MarketIndexCode = 'XUTUM' | 'XU100' | 'XU030';
+export type MarketSectorIndexCode =
+  | 'XUSIN'
+  | 'XUHIZ'
+  | 'XUMAL'
+  | 'XUTEK'
+  | 'XBANK'
+  | 'XAKUR'
+  | 'XBLSM'
+  | 'XELKT'
+  | 'XFINK'
+  | 'XGMYO'
+  | 'XGIDA'
+  | 'XHOLD'
+  | 'XILTM'
+  | 'XINSA'
+  | 'XKAGT'
+  | 'XKMYA'
+  | 'XMADN'
+  | 'XMANA'
+  | 'XMESY'
+  | 'XSGRT'
+  | 'XSPOR'
+  | 'XTAST'
+  | 'XTCRT'
+  | 'XTEKS'
+  | 'XTRZM'
+  | 'XULAS'
+  | 'XYORT';
+export type MarketIndexCode = MarketStockIndex | MarketSectorIndexCode;
 
 export interface MarketReturnBenchmark {
   return_1w_pct: number | null;
@@ -264,6 +292,11 @@ export interface FundSummary {
   aum?: number | null;
   investor_count?: number | null;
   share_count?: number | null;
+  management_fee?: number | null;
+  management_fee_applied?: number | null;
+  management_fee_prospectus?: number | null;
+  total_expense_ratio?: number | null;
+  tax_info?: string | null;
   isin?: string | null;
 }
 
@@ -271,6 +304,9 @@ export interface FundDetail extends FundSummary {
   strategy: string | null;
   benchmark: string | null;
   management_fee: number | null;
+  management_fee_applied?: number | null;
+  management_fee_prospectus?: number | null;
+  total_expense_ratio?: number | null;
   tax_info: string | null;
   fintables_url: string | null;
   kap_url: string | null;
@@ -284,6 +320,7 @@ export interface FundPricePoint {
   daily_return: number | null;
   aum: number | null;
   investor_count: number | null;
+  share_count?: number | null;
   source: string;
 }
 
@@ -309,6 +346,8 @@ export interface FundPortfolioPosition {
   market_value: number | null;
   price?: number | null;
   price_currency?: string | null;
+  sector_code?: string | null;
+  sector_label?: string | null;
   logo_url?: string | null;
   logo_source?: string | null;
   return_pct?: number | null;
@@ -433,6 +472,28 @@ export interface FundHoldingsResponse {
   portfolio_effect?: FundPortfolioEffect | null;
   source: string;
   message?: string;
+  source_metadata: FundSourceMetadata;
+}
+
+export interface FundHoldingsLivePosition {
+  asset_code: string | null;
+  price: number | null;
+  price_currency: string | null;
+  return_pct: number | null;
+  return_source: string | null;
+  return_as_of: string | null;
+  estimated_exposure_value: number | null;
+  estimated_pnl_value: number | null;
+  estimated_fund_return_contribution_pct: number | null;
+}
+
+export interface FundHoldingsLiveResponse {
+  fund_code: string;
+  status: 'unavailable' | 'not_parsed' | 'ok' | string;
+  positions: FundHoldingsLivePosition[];
+  portfolio_effect?: FundPortfolioEffect | null;
+  source: string;
+  as_of: string | null;
   source_metadata: FundSourceMetadata;
 }
 

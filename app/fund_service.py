@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import threading
+import time
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from importlib import metadata as importlib_metadata
@@ -20,6 +21,7 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from app.reference_data import (
+    get_instruments,
     get_instrument,
     get_instrument_name,
     get_instrument_names,
@@ -86,6 +88,10 @@ FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT
 FUNDS_DAILY_SNAPSHOT_CACHE_VERSION = 2
 FUNDS_HISTORY_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HISTORY_TTL_SECONDS", str(24 * 60 * 60)))
 FUNDS_ALLOCATION_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_ALLOCATION_TTL_SECONDS", str(24 * 60 * 60)))
+# Empty allocation/history payloads are cached aggressively to avoid hammering
+# TEFAS, but we keep the empty TTL much shorter than the populated one so the
+# UI eventually recovers when upstream data becomes available again.
+FUNDS_ALLOCATION_EMPTY_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_ALLOCATION_EMPTY_TTL_SECONDS", str(15 * 60)))
 FUNDS_HOLDINGS_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_TTL_SECONDS", str(7 * 24 * 60 * 60)))
 FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS", str(6 * 60 * 60)))
 FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS", str(30 * 60)))
@@ -322,6 +328,8 @@ def _connect_fund_prices_db(processed_dir: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
     _init_fund_prices_schema(conn)
     return conn
 
@@ -351,6 +359,12 @@ def _init_fund_prices_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_fund_prices_code_date
         ON fund_prices (fund_code, date)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fund_prices_code_date_updated
+        ON fund_prices (fund_code, date, updated_at DESC)
         """
     )
     conn.execute(
@@ -1070,6 +1084,15 @@ def _normalize_history_row(row: Dict[str, Any], fallback_code: str | None = None
         "manager_company": manager_company,
         "tefas_open": _tefas_open_status(row),
         "risk_value": _coerce_int(_first_present(row, "RISKDEGERI", "RISKDEGER", "RISK", "riskDegeri")),
+        "management_fee_applied": _coerce_tefas_percentage(
+            _first_present(row, "management_fee_applied", "uygulananYu1Y")
+        ),
+        "management_fee_prospectus": _coerce_tefas_percentage(
+            _first_present(row, "management_fee_prospectus", "fonIcTuzukYu1G")
+        ),
+        "total_expense_ratio": _coerce_tefas_percentage(
+            _first_present(row, "total_expense_ratio", "fonTopGiderKesoran")
+        ),
         "source": _normalize_price_source(source) if source else None,
         "source_url": _first_text(row, "source_url", "SOURCE_URL"),
         "raw": row,
@@ -1095,6 +1118,41 @@ def _upsert_fund_reference_data(
         }
         if not point.get("fund_code"):
             continue
+        # Snapshot rows may have already-coerced fee fields; otherwise pull them
+        # straight from the raw tefasfon MB payload.
+        management_fee_applied = (
+            point.get("management_fee_applied")
+            if point.get("management_fee_applied") is not None
+            else _coerce_tefas_percentage(_first_present(row, "uygulananYu1Y", "management_fee_applied"))
+        )
+        management_fee_prospectus = (
+            point.get("management_fee_prospectus")
+            if point.get("management_fee_prospectus") is not None
+            else _coerce_tefas_percentage(_first_present(row, "fonIcTuzukYu1G", "management_fee_prospectus"))
+        )
+        total_expense_ratio = (
+            point.get("total_expense_ratio")
+            if point.get("total_expense_ratio") is not None
+            else _coerce_tefas_percentage(_first_present(row, "fonTopGiderKesoran", "total_expense_ratio"))
+        )
+        tax_info = _fund_tax_info(point.get("fund_type"))
+        metadata: Dict[str, Any] = {
+            "fund_type": point.get("fund_type"),
+            "founder_company": point.get("founder_company"),
+            "manager_company": point.get("manager_company"),
+            "risk_value": point.get("risk_value"),
+            "tefas_open": point.get("tefas_open"),
+        }
+        # Only persist fee values when we actually have them so we don't clobber
+        # a previously cached payload with ``None`` on a partial refresh.
+        if management_fee_applied is not None:
+            metadata["management_fee_applied"] = management_fee_applied
+        if management_fee_prospectus is not None:
+            metadata["management_fee_prospectus"] = management_fee_prospectus
+        if total_expense_ratio is not None:
+            metadata["total_expense_ratio"] = total_expense_ratio
+        if tax_info is not None:
+            metadata["tax_info"] = tax_info
         records.append(
             {
                 "kind": "fund",
@@ -1104,13 +1162,7 @@ def _upsert_fund_reference_data(
                 "source": point.get("source") or TEFASFON_FUNDS_SOURCE,
                 "as_of": point.get("date"),
                 "active": point.get("tefas_open") is not False,
-                "metadata": {
-                    "fund_type": point.get("fund_type"),
-                    "founder_company": point.get("founder_company"),
-                    "manager_company": point.get("manager_company"),
-                    "risk_value": point.get("risk_value"),
-                    "tefas_open": point.get("tefas_open"),
-                },
+                "metadata": metadata,
             }
         )
     return upsert_instruments(processed_dir, records)
@@ -1808,6 +1860,31 @@ def _summary_from_points(fund_code: str, points: List[Dict[str, Any]]) -> Option
         for key in ("1w", "1m", "3m", "6m", "ytd", "1y")
     }
     raw_daily_return = _coerce_float(_first_present(raw, "gunlukGetiri", "daily_return"))
+    management_fee_applied = (
+        latest.get("management_fee_applied")
+        if latest.get("management_fee_applied") is not None
+        else _coerce_tefas_percentage(_first_present(raw, "uygulananYu1Y", "management_fee_applied"))
+    )
+    management_fee_prospectus = (
+        latest.get("management_fee_prospectus")
+        if latest.get("management_fee_prospectus") is not None
+        else _coerce_tefas_percentage(_first_present(raw, "fonIcTuzukYu1G", "management_fee_prospectus"))
+    )
+    total_expense_ratio = (
+        latest.get("total_expense_ratio")
+        if latest.get("total_expense_ratio") is not None
+        else _coerce_tefas_percentage(_first_present(raw, "fonTopGiderKesoran", "total_expense_ratio"))
+    )
+    # Önce uygulanan oranı seç; ama bu 0 (örn. performans ücretli serbest fonlar)
+    # ise prospektus / iç tüzük üst sınırına ya da toplam gider oranına düş.
+    if management_fee_applied is not None and management_fee_applied > 0:
+        management_fee = management_fee_applied
+    elif management_fee_prospectus is not None and management_fee_prospectus > 0:
+        management_fee = management_fee_prospectus
+    elif total_expense_ratio is not None and total_expense_ratio > 0:
+        management_fee = total_expense_ratio
+    else:
+        management_fee = management_fee_applied
     return {
         "fund_code": fund_code,
         "name": latest.get("name") or fund_code,
@@ -1825,6 +1902,11 @@ def _summary_from_points(fund_code: str, points: List[Dict[str, Any]]) -> Option
         "aum": latest.get("aum"),
         "investor_count": latest.get("investor_count"),
         "share_count": latest.get("share_count"),
+        "management_fee": management_fee,
+        "management_fee_applied": management_fee_applied,
+        "management_fee_prospectus": management_fee_prospectus,
+        "total_expense_ratio": total_expense_ratio,
+        "tax_info": _fund_tax_info(latest.get("fund_type")),
         "isin": _first_text(raw, "ISIN", "ISINKODU"),
     }
 
@@ -2145,7 +2227,147 @@ def _merge_tefasfon_range_returns(
     return merged_rows
 
 
+def _coerce_tefas_percentage(value: Any) -> Optional[float]:
+    """Convert tefasfon's Turkish-decimal percentage strings (e.g. ``"1,65"``)
+    or numeric values to a float in percentage units. Returns ``None`` when
+    the value is missing or non-numeric."""
+
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and value != value:  # NaN
+            return None
+        return float(value)
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "-"}:
+        return None
+    text = text.replace("%", "").replace(" ", "")
+    text = text.replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+# Stopaj (withholding tax) by fund category. Source: GVK Geçici 67. madde and
+# the Resmî Gazete updates on tax rates for collective investment vehicles.
+# Hisse senedi yoğun fonlar (HSY) %0, normal yatırım fonları %10, eurobond /
+# döviz fonları için ayrı oranlar mevcut. Yatırımcı tarafında nihai oran fonu
+# elde tutma süresine göre değişebileceği için "varsayılan" oranı veriyoruz ve
+# UI bunu olduğu gibi gösteriyor.
+_FUND_TAX_RULES = (
+    # ETFler ve borsa yatırım fonları %0 stopaj
+    (("borsa yatırım", "byf", "exchange"), "%0"),
+    # Hisse senedi yoğun fonlar — HSYF kapsamına girer ve %0 stopaja tabidir
+    (("hisse senedi yoğun", "hisse yoğun", "hisse senedi şemsiye", "hsyf"), "%0"),
+    # Emeklilik yatırım fonları için stopaj uygulanmaz
+    (("emeklilik", "pension"), "—"),
+    # Serbest fonlar normal yatırım fonu rejimine tabidir → %10
+    (("serbest",), "%10"),
+    # Para piyasası, kıymetli maden ve karma fonlar varsayılan %10 stopaja tabidir
+    (("para piyasası", "kıymetli maden", "katılım", "değişken", "karma", "borçlanma", "fon sepeti"), "%10"),
+)
+
+
+def _fund_tax_info(fund_type: Optional[str]) -> Optional[str]:
+    if not fund_type:
+        return None
+    text = str(fund_type).strip().lower()
+    if not text:
+        return None
+    for keywords, rate in _FUND_TAX_RULES:
+        if any(keyword in text for keyword in keywords):
+            return rate
+    # Düzenlenmiş "yatırım fonu" / "şemsiye fon" kategorileri varsayılan olarak %10
+    if "yatırım fonu" in text or "şemsiye" in text:
+        return "%10"
+    return None
+
+
+def _merge_tefasfon_management_fees(
+    fund_rows: Iterable[Dict[str, Any]],
+    fee_rows: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Attach management fee / total expense ratio fields from a tefasfon
+    ``get_returns(basis="MB")`` payload to fund snapshot rows."""
+
+    fees_by_code: Dict[str, Dict[str, Any]] = {}
+    for row in fee_rows:
+        if not isinstance(row, dict):
+            continue
+        code = normalize_fund_code(str(row.get("fonKodu") or row.get("fund_code") or ""))
+        if not code:
+            continue
+        applied = _coerce_tefas_percentage(row.get("uygulananYu1Y"))
+        prospectus = _coerce_tefas_percentage(row.get("fonIcTuzukYu1G"))
+        ter = _coerce_tefas_percentage(row.get("fonTopGiderKesoran"))
+        annual_return = _coerce_tefas_percentage(row.get("yillikGetiri"))
+        if applied is None and prospectus is None and ter is None:
+            continue
+        fees_by_code[code] = {
+            "management_fee_applied": applied,
+            "management_fee_prospectus": prospectus,
+            "total_expense_ratio": ter,
+            "annual_return_pct": annual_return,
+        }
+    merged_rows: List[Dict[str, Any]] = []
+    for row in fund_rows:
+        if not isinstance(row, dict):
+            continue
+        merged = dict(row)
+        code = normalize_fund_code(str(merged.get("fonKodu") or merged.get("fund_code") or ""))
+        info = fees_by_code.get(code)
+        if info:
+            for key, value in info.items():
+                if value is not None and merged.get(key) is None:
+                    merged[key] = value
+            merged["management_fee_source"] = TEFASFON_RETURNS_SOURCE
+        merged_rows.append(merged)
+    return merged_rows
+
+
 def _yield_periods_from_points(points: Iterable[Dict[str, Any]], normalized_code: str) -> Dict[str, Dict[str, Any]]:
+    ordered = _valid_performance_points(points, normalized_code)
+    if not ordered:
+        return {}
+    latest = ordered[-1]
+    latest_date = date.fromisoformat(latest["date"])
+    period_targets = {
+        "1w": latest_date - timedelta(days=7),
+        "1m": latest_date - timedelta(days=30),
+        "3m": latest_date - timedelta(days=90),
+        "6m": latest_date - timedelta(days=180),
+        "ytd": date(latest_date.year, 1, 1),
+        "1y": latest_date - timedelta(days=365),
+    }
+    periods: Dict[str, Dict[str, Any]] = {}
+    for key, target in period_targets.items():
+        base = _point_on_or_before(ordered, target)
+        period_points = [
+            point
+            for point in ordered
+            if target <= date.fromisoformat(point["date"]) <= latest_date and _coerce_float(point.get("price")) is not None
+        ]
+        prices = [float(point["price"]) for point in period_points if _coerce_float(point.get("price")) is not None]
+        if not base and not prices:
+            continue
+        periods[key] = {
+            "prev_close_date": base.get("date") if base else None,
+            "prev_close": _coerce_float(base.get("price")) if base else None,
+            "high": max(prices) if prices else None,
+            "low": min(prices) if prices else None,
+        }
+    oldest = ordered[0]
+    periods["oldest"] = {
+        "prev_close_date": oldest.get("date"),
+        "prev_close": _coerce_float(oldest.get("price")),
+        "high": max(float(point["price"]) for point in ordered),
+        "low": min(float(point["price"]) for point in ordered),
+    }
+    return periods
+
+
+
     ordered = _valid_performance_points(points, normalized_code)
     if not ordered:
         return {}
@@ -2324,6 +2546,47 @@ class TefasFonClient:
             rows.extend(_tefasfon_rows(records, source=TEFASFON_RETURNS_SOURCE, fund_type=fund_type))
         return rows
 
+    def fetch_management_fees(
+        self,
+        *,
+        fund_codes: Optional[Iterable[str]] = None,
+        lookback_days: int = 21,
+        as_of: Optional[date] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch management-fee/expense-ratio rows via tefasfon get_returns(basis='MB').
+
+        The ``basis='MB'`` endpoint exposes ``uygulananYu1Y`` (applied annual fee),
+        ``fonIcTuzukYu1G`` (prospectus annual fee) and ``fonTopGiderKesoran``
+        (total expense ratio). Tefas requires a date window for this call, and
+        the API fans out one request per month inside the window. We keep the
+        window small (3 weeks by default) so the call is fast while still
+        guaranteeing a recent business-day match.
+        """
+
+        end = as_of or date.today()
+        start = end - timedelta(days=max(7, int(lookback_days)))
+        codes = sorted({normalize_fund_code(code) for code in list(fund_codes or []) if normalize_fund_code(code)})
+        rows: List[Dict[str, Any]] = []
+        for fund_type in self.fund_types:
+            kwargs: Dict[str, Any] = {
+                "fund_type": fund_type,
+                "basis": "MB",
+                "start_date": _tefasfon_date(start),
+                "end_date": _tefasfon_date(end),
+            }
+            if codes:
+                kwargs["fund_codes"] = codes
+            try:
+                records = self._call_dataframe(
+                    "get_returns",
+                    context="tefasfon get_returns MB",
+                    **kwargs,
+                )
+            except TefasUpstreamError:
+                continue
+            rows.extend(_tefasfon_rows(records, source=TEFASFON_RETURNS_SOURCE, fund_type=fund_type))
+        return rows
+
     def fetch_daily_funds_snapshot(self, as_of: date) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         direct_errors: List[str] = []
@@ -2394,7 +2657,7 @@ class TefasFonClient:
             endpoint = tefas_getter._API_ENDPOINT["general_information"]
             as_of_iso = as_of.strftime("%Y-%m-%d")
             session = tefas_getter._new_session(portal_url, as_of_iso, as_of_iso, fund_url_param)
-            base_payload = {
+            base_payload: Dict[str, Any] = {
                 "fonTipi": fon_tipi,
                 "fonKodu": None,
                 "aramaMetni": None,
@@ -2404,12 +2667,112 @@ class TefasFonClient:
                 "basTarih": as_of.strftime("%Y%m%d"),
                 "bitTarih": as_of.strftime("%Y%m%d"),
                 "basSira": 1,
-                "bitSira": 1000,
+                "bitSira": 1,
                 "fonTurAciklama": None,
                 "dil": "TR",
                 "kurucuKod": None,
             }
-            return tefas_getter._get_all_pages(session, endpoint, base_payload, portal_url, as_of_iso, as_of_iso)
+            post_headers = {
+                "Content-Type": "application/json",
+                "Referer": f"{portal_url}?startDate={as_of_iso}&endDate={as_of_iso}",
+                "Origin": "https://www.tefas.gov.tr",
+            }
+            page_size = int(getattr(tefas_getter, "_PAGE_SIZE", 1000))
+            page_delay = float(getattr(tefas_getter, "_PAGE_DELAY", 1.0))
+            retry_delay = float(getattr(tefas_getter, "_RETRY_DELAY", 5.0))
+            max_retries = int(getattr(tefas_getter, "_MAX_RETRIES", 3))
+            collected: List[Dict[str, Any]] = []
+            seen_codes: set[str] = set()
+            page_index = 0
+            total_pages: Optional[int] = None
+            empty_streak = 0
+
+            def post_with_retries(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                last_err: Optional[Exception] = None
+                for attempt in range(max(1, max_retries)):
+                    try:
+                        response = session.post(endpoint, json=payload, headers=post_headers, timeout=30)
+                    except Exception as exc:  # network errors, dns, ssl, etc.
+                        last_err = exc
+                        response = None
+                    if response is not None and response.text and response.text.strip():
+                        try:
+                            return response.json()
+                        except Exception as exc:
+                            last_err = exc
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                if last_err is not None:
+                    raise last_err
+                return None
+
+            while True:
+                bas_sira = page_index * page_size + 1
+                payload = {
+                    **base_payload,
+                    "basSira": bas_sira,
+                    "bitSira": bas_sira + page_size - 1,
+                }
+                body = post_with_retries(payload)
+                if not body:
+                    raise TefasUpstreamError(
+                        f"tefasfon snapshot page {page_index + 1} returned empty body for {fund_type_code} {as_of.isoformat()}"
+                    )
+                error_message = body.get("errorMessage") or body.get("errorCode")
+                if error_message:
+                    raise TefasUpstreamError(
+                        f"tefasfon snapshot page {page_index + 1} for {fund_type_code} {as_of.isoformat()} failed: {error_message}"
+                    )
+                if total_pages is None:
+                    candidate = body.get("toplamSayfa") or body.get("totalPages") or 1
+                    try:
+                        total_pages = max(1, int(candidate))
+                    except (TypeError, ValueError):
+                        total_pages = 1
+                rows: Optional[List[Any]] = None
+                for key in ("resultList", "data", "Data", "result", "Result", "rows", "items"):
+                    value = body.get(key)
+                    if isinstance(value, list):
+                        rows = value
+                        break
+                if rows is None:
+                    rows = body if isinstance(body, list) else []
+                if not isinstance(rows, list):
+                    rows = []
+                added = 0
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    fund_code = normalize_fund_code(
+                        str(row.get("fonKodu") or row.get("fund_code") or "")
+                    )
+                    if fund_code:
+                        if fund_code in seen_codes:
+                            continue
+                        seen_codes.add(fund_code)
+                    collected.append(row)
+                    added += 1
+                if added == 0:
+                    empty_streak += 1
+                else:
+                    empty_streak = 0
+                page_index += 1
+                if total_pages is not None and page_index >= total_pages:
+                    break
+                if added < page_size and len(rows) < page_size:
+                    # Server reported fewer pages than expected; trust the actual payload size.
+                    break
+                if empty_streak >= 2:
+                    raise TefasUpstreamError(
+                        f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} stalled after page {page_index}"
+                    )
+                if page_delay > 0:
+                    time.sleep(page_delay)
+            if total_pages and total_pages > 1 and page_index < total_pages:
+                raise TefasUpstreamError(
+                    f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} aborted at page {page_index}/{total_pages}"
+                )
+            return collected
 
         records = self._call_records(
             fetch_records,
@@ -2542,6 +2905,11 @@ class TefasFonClient:
                 fund_rows = _merge_tefasfon_returns(fund_rows, return_rows)
             except TefasUpstreamError as exc:
                 warnings.append(f"tefasfon_returns failed: {exc}")
+            try:
+                fee_rows = self.fetch_management_fees(as_of=target_date)
+                fund_rows = _merge_tefasfon_management_fees(fund_rows, fee_rows)
+            except TefasUpstreamError as exc:
+                warnings.append(f"tefasfon_management_fees failed: {exc}")
             try:
                 previous_business_day = _previous_turkey_market_business_day(target_date)
                 daily_return_rows = self.fetch_returns(start_date=previous_business_day, end_date=target_date)
@@ -3022,6 +3390,28 @@ def refresh_funds_snapshot(processed_dir: Path, *, lookback_days: int = 10) -> D
             "degraded": True,
             "warnings": list(existing_snapshot.get("warnings") or []) + warnings + ["tefasfon_funds returned no valid fund rows"],
         }
+    # Guard: do not overwrite a healthy snapshot with a clearly-truncated refresh
+    # (e.g. TEFAS pagination cut short and we end up with the first page only).
+    new_count = len(snapshot["rows"])
+    existing_rows = list(existing_snapshot.get("rows") or [])
+    existing_count = len(existing_rows)
+    if existing_count >= 100 and new_count + 50 < int(existing_count * 0.9):
+        truncation_warning = (
+            f"tefasfon snapshot looked truncated ({new_count} rows vs cached {existing_count}); "
+            "preserving existing snapshot and marking it stale"
+        )
+        merged = dict(existing_snapshot)
+        merged_warnings = list(merged.get("warnings") or []) + warnings + [truncation_warning]
+        merged_meta = dict(merged.get("source_metadata") or {})
+        merged_meta["warnings"] = merged_warnings
+        merged_meta["stale"] = True
+        merged_meta["truncated_refresh_observed"] = True
+        merged_meta["truncated_refresh_row_count"] = new_count
+        merged_meta["truncated_refresh_total_count"] = existing_count
+        merged["warnings"] = merged_warnings
+        merged["stale"] = True
+        merged["source_metadata"] = merged_meta
+        return merged
     upsert_fund_price_points(
         processed_dir,
         rows,
@@ -3241,23 +3631,35 @@ def _refresh_funds_snapshot_if_stale(processed_dir: Path, snapshot: Dict[str, An
     source = _public_price_source(str(snapshot.get("source") or (snapshot.get("source_metadata") or {}).get("source") or ""))
     if source != TEFASFON_FUNDS_SOURCE:
         return snapshot
-    acquired = _SNAPSHOT_REFRESH_LOCK.acquire(blocking=False)
-    if not acquired:
+    # First the cheap process-local guard so a busy uvicorn worker doesn't kick
+    # off two refreshes at once.
+    acquired_local = _SNAPSHOT_REFRESH_LOCK.acquire(blocking=False)
+    if not acquired_local:
         return snapshot
     try:
-        refresh_funds_snapshot(processed_dir, lookback_days=10)
-        return load_funds_snapshot(processed_dir)
-    except Exception as exc:
-        payload = dict(snapshot)
-        warnings = list(payload.get("warnings") or [])
-        warnings.append(f"fund snapshot auto-refresh failed: {exc}")
-        meta = dict(payload.get("source_metadata") or {})
-        meta["auto_refresh_failed"] = True
-        meta["auto_refresh_error"] = str(exc)
-        meta["warnings"] = list(meta.get("warnings") or []) + [f"fund snapshot auto-refresh failed: {exc}"]
-        payload["warnings"] = warnings
-        payload["source_metadata"] = meta
-        return payload
+        # When Redis is wired up the distributed lock prevents *other* workers
+        # (or replicas) from also calling TEFAS at the same time. With the
+        # default in-memory backend this is just an immediate ``True``.
+        from app.cache import get_cache
+
+        cache = get_cache()
+        with cache.lock("funds-snapshot-refresh", timeout=120) as acquired_remote:
+            if not acquired_remote:
+                return snapshot
+            try:
+                refresh_funds_snapshot(processed_dir, lookback_days=10)
+                return load_funds_snapshot(processed_dir)
+            except Exception as exc:
+                payload = dict(snapshot)
+                warnings = list(payload.get("warnings") or [])
+                warnings.append(f"fund snapshot auto-refresh failed: {exc}")
+                meta = dict(payload.get("source_metadata") or {})
+                meta["auto_refresh_failed"] = True
+                meta["auto_refresh_error"] = str(exc)
+                meta["warnings"] = list(meta.get("warnings") or []) + [f"fund snapshot auto-refresh failed: {exc}"]
+                payload["warnings"] = warnings
+                payload["source_metadata"] = meta
+                return payload
     finally:
         _SNAPSHOT_REFRESH_LOCK.release()
 
@@ -3330,6 +3732,17 @@ def get_fund_categories_payload(processed_dir: Path) -> Dict[str, Any]:
     }
 
 
+def _fund_reference_metadata(processed_dir: Path, fund_code: str) -> Dict[str, Any]:
+    """Look up cached metadata (management fees, tax info, founder company, ...)
+    from the reference_data SQLite. Returns an empty dict when nothing is found."""
+
+    instrument = get_instrument(processed_dir, "fund", fund_code)
+    if not instrument:
+        return {}
+    metadata = instrument.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
 def _find_fund_row(processed_dir: Path, fund_code: str) -> Optional[Dict[str, Any]]:
     normalized = normalize_fund_code(fund_code)
     snapshot = load_funds_snapshot(processed_dir)
@@ -3339,6 +3752,19 @@ def _find_fund_row(processed_dir: Path, fund_code: str) -> Optional[Dict[str, An
             and _is_tefas_open_row(row)
             and normalize_fund_code(str(row.get("fund_code") or "")) == normalized
         ):
+            row = dict(row)
+            # Backfill management fee / tax fields from reference_data so a stale
+            # snapshot keeps surfacing the last-known values when the fund detail
+            # endpoint is hit.
+            ref_meta = _fund_reference_metadata(processed_dir, normalized)
+            for key in (
+                "management_fee_applied",
+                "management_fee_prospectus",
+                "total_expense_ratio",
+                "tax_info",
+            ):
+                if row.get(key) is None and ref_meta.get(key) is not None:
+                    row[key] = ref_meta[key]
             return row
     return None
 
@@ -3349,13 +3775,33 @@ def get_fund_detail_payload(processed_dir: Path, fund_code: str) -> Dict[str, An
     if not row:
         raise KeyError(normalized)
     snapshot = load_funds_snapshot(processed_dir)
+    applied = row.get("management_fee_applied")
+    prospectus = row.get("management_fee_prospectus")
+    ter = row.get("total_expense_ratio")
+    if row.get("management_fee") is not None and (
+        not isinstance(row.get("management_fee"), (int, float))
+        or row.get("management_fee") > 0
+    ):
+        management_fee = row.get("management_fee")
+    elif applied is not None and applied > 0:
+        management_fee = applied
+    elif prospectus is not None and prospectus > 0:
+        management_fee = prospectus
+    elif ter is not None and ter > 0:
+        management_fee = ter
+    else:
+        management_fee = applied if applied is not None else prospectus
+    tax_info = row.get("tax_info") or _fund_tax_info(row.get("fund_type"))
     return {
         **row,
         "isin": row.get("isin"),
         "strategy": None,
         "benchmark": None,
-        "management_fee": None,
-        "tax_info": None,
+        "management_fee": management_fee,
+        "management_fee_applied": row.get("management_fee_applied"),
+        "management_fee_prospectus": row.get("management_fee_prospectus"),
+        "total_expense_ratio": row.get("total_expense_ratio"),
+        "tax_info": tax_info,
         "fintables_url": f"{FINTABLES_FUND_BASE_URL}/{normalized}",
         "kap_url": None,
         "source_metadata": snapshot.get("source_metadata") or {},
@@ -4003,6 +4449,16 @@ def _auto_refresh_fund_overview_metrics(
             _remember_auto_fetch_failure(key, error)
             metadata["warnings"] = all_warnings + [error]
             metadata["warning_count"] = len(metadata["warnings"])
+        else:
+            # The TEFAS overview metric snapshot only fills the most recent few
+            # months, older months stay permanently empty. Without a positive
+            # TTL we would re-trigger this expensive backfill on every request
+            # that asks for a long range. Remember the success so we avoid the
+            # round-trip until the TTL expires.
+            _remember_auto_fetch_failure(
+                key,
+                "overview metric backfill recently completed",
+            )
         return metadata
     except FundUpstreamError as exc:
         error = str(exc)
@@ -4522,7 +4978,10 @@ def get_fund_allocations_history_payload(
     payload = _read_json(path)
     stale = True
     if payload:
-        stale = (_cache_age_seconds(payload.get("source_metadata", {}).get("fetched_at")) or (FUNDS_ALLOCATION_TTL_SECONDS + 1)) > FUNDS_ALLOCATION_TTL_SECONDS
+        cache_age = _cache_age_seconds(payload.get("source_metadata", {}).get("fetched_at"))
+        history_present = bool(payload.get("history"))
+        ttl = FUNDS_ALLOCATION_TTL_SECONDS if history_present else FUNDS_ALLOCATION_EMPTY_TTL_SECONDS
+        stale = (cache_age or (ttl + 1)) > ttl
         if not stale:
             meta = dict(payload.get("source_metadata") or {})
             meta["cache_hit"] = True
@@ -5433,7 +5892,9 @@ def _normalize_holding_positions_for_response(
 ) -> List[Dict[str, Any]]:
     fund_names = _kap_fund_name_map(processed_dir)
     current_fund_code = normalize_fund_code(fund_code).replace(".", "")
-    normalized_rows: List[Dict[str, Any]] = []
+    candidates: List[Tuple[Dict[str, Any], str, str]] = []
+    stock_codes: List[str] = []
+    fund_codes: List[str] = []
     for position in positions:
         code = normalize_fund_code(position.get("asset_code")).replace(".", "")
         if not code or code in _KAP_POSITION_STOPWORDS:
@@ -5444,11 +5905,27 @@ def _normalize_holding_positions_for_response(
                 code = left
         if code == current_fund_code:
             continue
+        if _kap_is_stock_symbol(code):
+            candidates.append((position, code, "local_equity"))
+            stock_codes.append(code)
+            continue
+        row_type = str(position.get("asset_type") or "").strip().lower()
+        name_norm = _normalize_match_text(position.get("asset_name") or "")
+        looks_like_named_fund = any(token in name_norm for token in ("YATIRIM FONU", "BORSA YATIRIM FONU", " FONU", "FON ", "BYF"))
+        if not _kap_looks_like_fund_symbol(code) or not (row_type == "fund" or looks_like_named_fund or fund_names.get(code)):
+            continue
+        candidates.append((position, code, "fund"))
+        fund_codes.append(code)
+
+    stock_instruments = get_instruments(processed_dir, "stock", stock_codes)
+    fund_instruments = get_instruments(processed_dir, "fund", fund_codes)
+    normalized_rows: List[Dict[str, Any]] = []
+    for position, code, asset_type in candidates:
         row = dict(position)
         row["asset_code"] = code
-        if _kap_is_stock_symbol(code):
+        if asset_type == "local_equity":
             row["asset_type"] = "local_equity"
-            instrument = get_instrument(processed_dir, "stock", code)
+            instrument = stock_instruments.get(code)
             row["asset_name"] = (
                 str((instrument or {}).get("name") or "").strip()
                 or _kap_stock_name_from_cache(processed_dir, code)
@@ -5459,13 +5936,8 @@ def _normalize_holding_positions_for_response(
                 row["logo_url"] = instrument.get("logo_url")
                 row["logo_source"] = instrument.get("logo_source")
         else:
-            row_type = str(row.get("asset_type") or "").strip().lower()
-            name_norm = _normalize_match_text(row.get("asset_name") or "")
-            looks_like_named_fund = any(token in name_norm for token in ("YATIRIM FONU", "BORSA YATIRIM FONU", " FONU", "FON ", "BYF"))
-            if not _kap_looks_like_fund_symbol(code) or not (row_type == "fund" or looks_like_named_fund or fund_names.get(code)):
-                continue
             row["asset_type"] = "fund"
-            instrument = get_instrument(processed_dir, "fund", code)
+            instrument = fund_instruments.get(code)
             row["asset_name"] = (
                 str((instrument or {}).get("name") or "").strip()
                 or fund_names.get(code)

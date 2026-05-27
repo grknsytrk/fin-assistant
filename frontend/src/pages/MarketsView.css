@@ -13,6 +13,12 @@
     --mn-sidebar-width: 60px;
 }
 
+@media (max-width: 760px) {
+    .mn-layout {
+        --mn-sidebar-width: 60px;
+    }
+}
+
 .markets-workspace {
     display: flex;
     flex: 1;

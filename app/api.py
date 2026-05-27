@@ -54,8 +54,10 @@ from src.ratio_engine import (
 )
 from src.retrieve import RetrievedChunk, Retriever, RetrieverV2, RetrieverV3, RetrieverV5Hybrid, RetrieverV6Cross
 from app.cache import cache_status as _cache_status
+from app.cache import cached as _cached_response
+from app.cache import get_cache as _get_cache
 from app.reference_data import (
-    get_instrument,
+    get_instruments,
     get_instrument_name,
     sync_reference_data_from_caches,
     upsert_instrument,
@@ -66,11 +68,32 @@ CONFIG = load_config(ROOT / "config.yaml")
 FEEDBACK_FILE = CONFIG.paths.processed_dir / "feedback.jsonl"
 LOGGER = logging.getLogger("uvicorn.error")
 _FUND_COLLECTOR_TASK: Optional[asyncio.Task[None]] = None
+_KAP_SNAPSHOT_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_KAP_SNAPSHOT_RESPONSE_CACHE_TTL_SECONDS", "300"))
+_KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT_SECONDS", "120"))
+_FUND_YIELD_SUMMARY_CACHE_TTL = int(os.getenv("RAGFIN_FUND_YIELD_SUMMARY_CACHE_TTL_SECONDS", "900"))
+_FUND_HOLDINGS_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_CACHE_TTL_SECONDS", str(60 * 60)))
+_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT_SECONDS", "120"))
+_FUND_HOLDING_SECTOR_MAP_CACHE_TTL = 6 * 60 * 60
 
 
 def _truthy_env(name: str, default: str = "1") -> bool:
     value = os.getenv(name, default).strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _shared_cache_get_dict(key: str) -> Optional[Dict[str, Any]]:
+    try:
+        cached = _get_cache().get(key)
+    except Exception:
+        return None
+    return dict(cached) if isinstance(cached, dict) else None
+
+
+def _shared_cache_set(key: str, value: Any, ttl_seconds: int) -> None:
+    try:
+        _get_cache().set(key, value, ttl_seconds=ttl_seconds)
+    except Exception:
+        return
 
 
 async def _fund_price_collector_loop() -> None:
@@ -1116,6 +1139,35 @@ def funds(
     sort: str = Query("fund_code"),
     order: str = Query("asc"),
 ) -> Dict[str, Any]:
+    return _funds_listing_payload(
+        q=q,
+        fund_type=fund_type,
+        founder=founder,
+        manager=manager,
+        risk=risk,
+        sort=sort,
+        order=order,
+    )
+
+
+@_cached_response(
+    key_fn=lambda *, q, fund_type, founder, manager, risk, sort, order: (
+        "api:funds:"
+        f"q={q or ''}|type={fund_type or ''}|founder={founder or ''}|manager={manager or ''}"
+        f"|risk={risk or ''}|sort={sort}|order={order}"
+    ),
+    ttl_seconds=45,
+)
+def _funds_listing_payload(
+    *,
+    q: Optional[str],
+    fund_type: Optional[str],
+    founder: Optional[str],
+    manager: Optional[str],
+    risk: Optional[str],
+    sort: str,
+    order: str,
+) -> Dict[str, Any]:
     from app.fund_service import get_funds_payload
 
     return get_funds_payload(
@@ -1133,9 +1185,24 @@ def funds(
 
 @app.get("/funds/search")
 def funds_search(q: str = Query("", min_length=0), limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
+    payload = _funds_search_payload(q=q)
+    rows = list(payload.get("rows") or [])[:limit]
+    # Trim and clone so each caller gets the right slice without mutating the
+    # cached payload referenced by other concurrent requests.
+    out = dict(payload)
+    out["rows"] = rows
+    out["count"] = len(rows)
+    return out
+
+
+@_cached_response(
+    key_fn=lambda *, q: f"api:funds-search:q={q or ''}",
+    ttl_seconds=60,
+)
+def _funds_search_payload(*, q: str) -> Dict[str, Any]:
     from app.fund_service import get_funds_payload
 
-    payload = get_funds_payload(
+    return get_funds_payload(
         CONFIG.paths.processed_dir,
         q=q,
         sort="fund_code",
@@ -1143,13 +1210,15 @@ def funds_search(q: str = Query("", min_length=0), limit: int = Query(50, ge=1, 
         min_aum=None,
         auto_refresh=True,
     )
-    payload["rows"] = list(payload.get("rows") or [])[:limit]
-    payload["count"] = len(payload["rows"])
-    return payload
 
 
 @app.get("/funds/categories")
 def funds_categories() -> Dict[str, Any]:
+    return _funds_categories_payload()
+
+
+@_cached_response(key_fn=lambda: "api:funds-categories", ttl_seconds=300)
+def _funds_categories_payload() -> Dict[str, Any]:
     from app.fund_service import get_fund_categories_payload
 
     return get_fund_categories_payload(CONFIG.paths.processed_dir)
@@ -1162,36 +1231,279 @@ def fund_performance(
     end_date: Optional[date] = Query(None),
     fallback: bool = Query(False),
 ) -> Dict[str, Any]:
-    from app.fund_service import get_fund_performance_payload
-
     if start_date and end_date and start_date > end_date:
         raise HTTPException(status_code=400, detail="start_date end_date sonrasinda olamaz")
+    return _fund_performance_payload(
+        fund_code=fund_code,
+        start_iso=start_date.isoformat() if start_date else None,
+        end_iso=end_date.isoformat() if end_date else None,
+        fallback=fallback,
+    )
+
+
+@_cached_response(
+    key_fn=lambda *, fund_code, start_iso, end_iso, fallback: (
+        f"api:fund-performance:{fund_code}:{start_iso or 'full'}:{end_iso or 'today'}"
+        f":fb={1 if fallback else 0}"
+    ),
+    ttl_seconds=60,
+)
+def _fund_performance_payload(
+    *,
+    fund_code: str,
+    start_iso: Optional[str],
+    end_iso: Optional[str],
+    fallback: bool,
+) -> Dict[str, Any]:
+    from app.fund_service import get_fund_performance_payload
+
+    start = date.fromisoformat(start_iso) if start_iso else None
+    end = date.fromisoformat(end_iso) if end_iso else None
     return get_fund_performance_payload(
         CONFIG.paths.processed_dir,
         fund_code,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=start,
+        end_date=end,
         allow_upstream_fallback=fallback,
     )
 
 
 @app.get("/funds/{fund_code}/yield-summary")
 def fund_yield_summary(fund_code: str) -> Dict[str, Any]:
-    from app.fund_service import FintablesUpstreamError, get_fund_yield_summary_payload, normalize_fund_code
+    from app.fund_service import FintablesUpstreamError, normalize_fund_code
 
     normalized = normalize_fund_code(fund_code)
     try:
-        return get_fund_yield_summary_payload(normalized, processed_dir=CONFIG.paths.processed_dir)
+        return _fund_yield_summary_payload(normalized=normalized)
     except FintablesUpstreamError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@_cached_response(
+    key_fn=lambda *, normalized: f"api:fund-yield-summary:{normalized}",
+    ttl_seconds=_FUND_YIELD_SUMMARY_CACHE_TTL,
+    skip_when=lambda *, normalized: not normalized,
+    single_flight=True,
+    lock_timeout=20,
+)
+def _fund_yield_summary_payload(*, normalized: str) -> Dict[str, Any]:
+    from app.fund_service import get_fund_yield_summary_payload
+
+    return get_fund_yield_summary_payload(normalized, processed_dir=CONFIG.paths.processed_dir)
+
+
 @app.get("/funds/{fund_code}/holdings")
 def fund_holdings(fund_code: str) -> Dict[str, Any]:
+    from app.fund_service import normalize_fund_code
+
+    normalized = normalize_fund_code(fund_code)
+    payload = _fund_holdings_static_payload(normalized=normalized)
+    return _enrich_fund_holdings_with_daily_market_data(payload, normalized)
+
+
+@_cached_response(
+    key_fn=lambda *, normalized: f"api:fund-holdings:{normalized}",
+    ttl_seconds=_FUND_HOLDINGS_RESPONSE_CACHE_TTL,
+    skip_when=lambda *, normalized: not normalized,
+    single_flight=True,
+    lock_timeout=_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT,
+)
+def _fund_holdings_static_payload(*, normalized: str) -> Dict[str, Any]:
     from app.fund_service import get_fund_holdings_payload
 
-    payload = get_fund_holdings_payload(CONFIG.paths.processed_dir, fund_code)
-    return _enrich_fund_holdings_with_daily_market_data(payload, fund_code)
+    return get_fund_holdings_payload(CONFIG.paths.processed_dir, normalized)
+
+
+_FUND_HOLDINGS_LIVE_POSITION_FIELDS = (
+    "asset_code",
+    "price",
+    "price_currency",
+    "return_pct",
+    "return_source",
+    "return_as_of",
+    "estimated_exposure_value",
+    "estimated_pnl_value",
+    "estimated_fund_return_contribution_pct",
+)
+
+
+_FUND_HOLDING_SECTOR_LABELS: Dict[str, str] = {
+    "XBANK": "Bankacılık",
+    "XAKUR": "Aracı Kurum",
+    "XBLSM": "Bilişim ve Yazılım",
+    "XELKT": "Elektrik",
+    "XFINK": "Finansal Kiralama Faktoring",
+    "XGMYO": "Gayrimenkul",
+    "XGIDA": "Gıda İçecek",
+    "XHOLD": "Holding",
+    "XILTM": "İletişim",
+    "XINSA": "İnşaat",
+    "XKAGT": "Orman Kağıt Basım",
+    "XKMYA": "Kimya Petrol Plastik",
+    "XMADN": "Madencilik",
+    "XMANA": "Metal Ana",
+    "XMESY": "Metal Eşya Makina",
+    "XSGRT": "Sigorta",
+    "XSPOR": "Spor",
+    "XTAST": "Taş Toprak",
+    "XTCRT": "Ticaret",
+    "XTEKS": "Tekstil Deri",
+    "XTRZM": "Turizm",
+    "XULAS": "Ulaştırma",
+    "XYORT": "Menkul Kıymet Y.O.",
+    "XUSIN": "Sınai",
+    "XUHIZ": "Hizmetler",
+    "XUMAL": "Mali",
+    "XUTEK": "Teknoloji",
+}
+_FUND_HOLDING_SECTOR_PRIORITY = (
+    "XBANK",
+    "XAKUR",
+    "XBLSM",
+    "XELKT",
+    "XFINK",
+    "XGMYO",
+    "XGIDA",
+    "XHOLD",
+    "XILTM",
+    "XINSA",
+    "XKAGT",
+    "XKMYA",
+    "XMADN",
+    "XMANA",
+    "XMESY",
+    "XSGRT",
+    "XSPOR",
+    "XTAST",
+    "XTCRT",
+    "XTEKS",
+    "XTRZM",
+    "XULAS",
+    "XYORT",
+    "XUSIN",
+    "XUHIZ",
+    "XUMAL",
+    "XUTEK",
+)
+_FUND_HOLDING_SECTOR_MAP_CACHE: Dict[str, Any] = {}
+
+
+def _fund_holding_sector_map() -> tuple[Dict[str, Dict[str, str]], Dict[str, Any]]:
+    cached = _FUND_HOLDING_SECTOR_MAP_CACHE.get("default")
+    now = time.time()
+    if cached and now - float(cached.get("_ts", 0)) < _FUND_HOLDING_SECTOR_MAP_CACHE_TTL:
+        return dict(cached.get("map") or {}), {
+            "cache_hit": True,
+            "symbol_count": cached.get("symbol_count", 0),
+            "source": cached.get("source"),
+            "source_date": cached.get("source_date"),
+            "warnings": list(cached.get("warnings") or []),
+        }
+    cache_key = "api:fund-holding-sector-map"
+    try:
+        redis_cached = _get_cache().get(cache_key)
+    except Exception:
+        redis_cached = None
+    if isinstance(redis_cached, dict):
+        _FUND_HOLDING_SECTOR_MAP_CACHE["default"] = {
+            "_ts": now,
+            "map": dict(redis_cached.get("map") or {}),
+            "symbol_count": redis_cached.get("symbol_count", 0),
+            "source": redis_cached.get("source"),
+            "source_date": redis_cached.get("source_date"),
+            "warnings": list(redis_cached.get("warnings") or []),
+        }
+        return dict(redis_cached.get("map") or {}), {
+            "cache_hit": True,
+            "symbol_count": redis_cached.get("symbol_count", 0),
+            "source": redis_cached.get("source"),
+            "source_date": redis_cached.get("source_date"),
+            "warnings": list(redis_cached.get("warnings") or []),
+        }
+
+    from app.kap_service import get_bist_index_universe
+
+    sector_map: Dict[str, Dict[str, str]] = {}
+    warnings: List[str] = []
+    source = None
+    source_date = None
+    for sector_code in _FUND_HOLDING_SECTOR_PRIORITY:
+        try:
+            universe = get_bist_index_universe(sector_code)
+        except Exception as exc:
+            warnings.append(f"{sector_code}: {exc}")
+            continue
+        source = source or universe.get("source")
+        source_date = source_date or universe.get("source_date")
+        sector_label = _FUND_HOLDING_SECTOR_LABELS.get(sector_code, sector_code)
+        for symbol in list(universe.get("symbols") or []):
+            normalized_symbol = str(symbol or "").strip().upper().replace(".", "")
+            if normalized_symbol and normalized_symbol not in sector_map:
+                sector_map[normalized_symbol] = {
+                    "sector_code": sector_code,
+                    "sector_label": sector_label,
+                }
+
+    cache_payload = {
+        "_ts": now,
+        "map": sector_map,
+        "symbol_count": len(sector_map),
+        "source": source,
+        "source_date": source_date,
+        "warnings": warnings,
+    }
+    _FUND_HOLDING_SECTOR_MAP_CACHE["default"] = cache_payload
+    try:
+        _get_cache().set(
+            cache_key,
+            {
+                "map": sector_map,
+                "symbol_count": len(sector_map),
+                "source": source,
+                "source_date": source_date,
+                "warnings": warnings,
+            },
+            ttl_seconds=_FUND_HOLDING_SECTOR_MAP_CACHE_TTL,
+        )
+    except Exception:
+        pass
+    return dict(sector_map), {
+        "cache_hit": False,
+        "symbol_count": len(sector_map),
+        "source": source,
+        "source_date": source_date,
+        "warnings": warnings,
+    }
+
+
+@app.get("/funds/{fund_code}/holdings/live")
+def fund_holdings_live(fund_code: str) -> Dict[str, Any]:
+    from app.fund_service import normalize_fund_code
+
+    normalized = normalize_fund_code(fund_code)
+    payload = _fund_holdings_static_payload(normalized=normalized)
+    enriched = _enrich_fund_holdings_with_daily_market_data(payload, normalized)
+    positions = []
+    for position in enriched.get("positions") or []:
+        if not isinstance(position, dict):
+            continue
+        positions.append({field: position.get(field) for field in _FUND_HOLDINGS_LIVE_POSITION_FIELDS})
+    metadata = dict(enriched.get("source_metadata") or {})
+    return {
+        "fund_code": normalized,
+        "status": enriched.get("status"),
+        "positions": positions,
+        "portfolio_effect": enriched.get("portfolio_effect"),
+        "source": "daily_market_enrichment",
+        "as_of": (enriched.get("portfolio_effect") or {}).get("as_of"),
+        "source_metadata": {
+            "source": "daily_market_enrichment",
+            "static_cache_hit": metadata.get("cache_hit"),
+            "disclosure_check": metadata.get("disclosure_check"),
+            "daily_market_enrichment": metadata.get("daily_market_enrichment"),
+            "market_enrichment": metadata.get("market_enrichment"),
+        },
+    }
 
 
 def _api_number(raw: Any) -> Optional[float]:
@@ -1476,6 +1788,7 @@ def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_c
             if quote.get("_cache_hit"):
                 gefas_quote_cache_hits += 1
             gefas_quotes[code] = quote
+    sector_map, sector_meta = _fund_holding_sector_map()
 
     enriched_positions: List[Dict[str, Any]] = []
     estimated_return_pct = 0.0
@@ -1486,6 +1799,9 @@ def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_c
 
     for position in positions:
         row = dict(position)
+        sector_info = sector_map.get(_holding_code(row)) if _holding_type(row) == "local_equity" else None
+        row["sector_code"] = sector_info.get("sector_code") if sector_info else None
+        row["sector_label"] = sector_info.get("sector_label") if sector_info else None
         daily_fields = _position_daily_market_fields(row, stock_quotes=stock_quotes, gefas_quotes=gefas_quotes, fund_rows=fund_rows)
         row.update(daily_fields)
 
@@ -1528,6 +1844,10 @@ def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_c
         "fund_snapshot_count": len(fund_rows),
         "gefas_gyf_quote_count": len(gefas_quotes),
         "gefas_gyf_quote_cache_hits": gefas_quote_cache_hits,
+        "sector_symbol_count": sector_meta.get("symbol_count"),
+        "sector_cache_hit": sector_meta.get("cache_hit"),
+        "sector_source": sector_meta.get("source"),
+        "sector_source_date": sector_meta.get("source_date"),
         "daily_reference_cache_hit": bool(fund_rows_meta.get("cache_hit")),
         "daily_reference_row_count": fund_rows_meta.get("row_count"),
         "priced_weight": round(priced_weight, 6),
@@ -1567,13 +1887,24 @@ def fund_allocations_history(
 
 @app.get("/funds/{fund_code}")
 def fund_detail(fund_code: str) -> Dict[str, Any]:
-    from app.fund_service import get_fund_detail_payload, normalize_fund_code
+    from app.fund_service import normalize_fund_code
 
     normalized = normalize_fund_code(fund_code)
     try:
-        return get_fund_detail_payload(CONFIG.paths.processed_dir, normalized)
+        return _fund_detail_payload(normalized=normalized)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Fon bulunamadi: {normalized}") from exc
+
+
+@_cached_response(
+    key_fn=lambda *, normalized: f"api:fund-detail:{normalized}",
+    ttl_seconds=60,
+    skip_when=lambda *, normalized: not normalized,
+)
+def _fund_detail_payload(*, normalized: str) -> Dict[str, Any]:
+    from app.fund_service import get_fund_detail_payload
+
+    return get_fund_detail_payload(CONFIG.paths.processed_dir, normalized)
 
 
 @app.post("/admin/funds/refresh-snapshot")
@@ -1581,9 +1912,50 @@ def admin_refresh_funds_snapshot(lookback_days: int = Query(10, ge=1, le=45)) ->
     from app.fund_service import FundUpstreamError, refresh_funds_snapshot
 
     try:
-        return refresh_funds_snapshot(CONFIG.paths.processed_dir, lookback_days=lookback_days)
+        result = refresh_funds_snapshot(CONFIG.paths.processed_dir, lookback_days=lookback_days)
     except FundUpstreamError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    _invalidate_fund_response_cache()
+    return result
+
+
+def _invalidate_fund_response_cache() -> None:
+    """Drop cached fund responses after a snapshot refresh."""
+
+    backend = _get_cache()
+    for prefix in (
+        "api:funds:",
+        "api:funds-search:",
+        "api:fund-performance:",
+        "api:fund-detail:",
+        "api:fund-yield-summary:",
+        "api:fund-holdings:",
+    ):
+        try:
+            backend.delete_prefix(prefix)
+        except Exception:
+            continue
+    try:
+        backend.delete("api:funds-categories")
+    except Exception:
+        pass
+
+
+def _invalidate_single_fund_response_cache(normalized: str) -> None:
+    backend = _get_cache()
+    for key_or_prefix in (
+        f"api:fund-performance:{normalized}:",
+        f"api:fund-detail:{normalized}",
+        f"api:fund-yield-summary:{normalized}",
+        f"api:fund-holdings:{normalized}",
+    ):
+        try:
+            if key_or_prefix.endswith(":"):
+                backend.delete_prefix(key_or_prefix)
+            else:
+                backend.delete(key_or_prefix)
+        except Exception:
+            continue
 
 
 @app.post("/admin/funds/collect-prices")
@@ -1613,7 +1985,7 @@ def admin_refresh_fund_performance(
     if start_date > effective_end_date:
         raise HTTPException(status_code=400, detail="start_date end_date sonrasinda olamaz")
     try:
-        return refresh_fund_performance(
+        result = refresh_fund_performance(
             CONFIG.paths.processed_dir,
             normalized,
             start_date=start_date,
@@ -1621,6 +1993,8 @@ def admin_refresh_fund_performance(
         )
     except FundUpstreamError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    _invalidate_single_fund_response_cache(normalized)
+    return result
 
 
 @app.post("/admin/funds/{fund_code}/refresh-allocations")
@@ -1632,9 +2006,11 @@ def admin_refresh_fund_allocations(
 
     normalized = normalize_fund_code(fund_code)
     try:
-        return refresh_fund_allocations(CONFIG.paths.processed_dir, normalized, as_of=as_of)
+        result = refresh_fund_allocations(CONFIG.paths.processed_dir, normalized, as_of=as_of)
     except FundUpstreamError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    _invalidate_single_fund_response_cache(normalized)
+    return result
 
 
 @app.post("/ingest")
@@ -3182,16 +3558,30 @@ def kap_companies() -> Dict[str, Any]:
     return {"companies": companies, "items": items}
 
 
-@app.get("/kap/snapshot")
-def kap_snapshot(
-    company: str = Query(..., min_length=1),
-    refresh: bool = Query(False),
-    max_quarters: int = Query(10, ge=1, le=20),
-) -> Dict[str, Any]:
-    from app.kap_service import get_kap_snapshot, normalize_snapshot_for_frontend
+def _kap_snapshot_response_cache_key(company: str, max_quarters: int) -> str:
+    from app.kap_service import normalize_kap_symbol
+    from src.kap_fetcher import KAP_CACHE_SCHEMA_VERSION
 
-    if not getattr(CONFIG, "kap", None) or not getattr(CONFIG.kap, "enabled", False):
-        raise HTTPException(status_code=503, detail="KAP modülü devre dışı.")
+    normalized = normalize_kap_symbol(str(company or "").strip().upper().replace(".", ""))
+    return f"api:kap-snapshot:{normalized}:quarters={max_quarters}:schema={KAP_CACHE_SCHEMA_VERSION}"
+
+
+def _annotate_kap_response_cache(
+    payload: Dict[str, Any],
+    *,
+    cache_hit: bool,
+    ttl_seconds: int = _KAP_SNAPSHOT_RESPONSE_CACHE_TTL,
+) -> Dict[str, Any]:
+    out = dict(payload)
+    status = _cache_status()
+    out["response_cache_hit"] = cache_hit
+    out["response_cache_backend"] = status.get("cache_backend")
+    out["response_cache_ttl_seconds"] = ttl_seconds
+    return out
+
+
+def _build_kap_snapshot_response(company: str, *, refresh: bool, max_quarters: int) -> Dict[str, Any]:
+    from app.kap_service import get_kap_snapshot, normalize_snapshot_for_frontend
 
     raw = get_kap_snapshot(
         company=company,
@@ -3212,6 +3602,40 @@ def kap_snapshot(
         isyatirim_payload=isyatirim_payload,
     )
     return normalized
+
+
+@app.get("/kap/snapshot")
+def kap_snapshot(
+    company: str = Query(..., min_length=1),
+    refresh: bool = Query(False),
+    max_quarters: int = Query(10, ge=1, le=20),
+) -> Dict[str, Any]:
+    if not getattr(CONFIG, "kap", None) or not getattr(CONFIG.kap, "enabled", False):
+        raise HTTPException(status_code=503, detail="KAP modülü devre dışı.")
+
+    cache_key = _kap_snapshot_response_cache_key(company, max_quarters)
+    cache = _get_cache()
+    if not refresh:
+        cached = cache.get(cache_key)
+        if isinstance(cached, dict):
+            return _annotate_kap_response_cache(cached, cache_hit=True)
+
+    with cache.lock(f"kap-snapshot-response:{cache_key}", timeout=_KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT) as acquired:
+        if acquired and not refresh:
+            cached = cache.get(cache_key)
+            if isinstance(cached, dict):
+                return _annotate_kap_response_cache(cached, cache_hit=True)
+        if not acquired and not refresh:
+            deadline = time.time() + min(5.0, max(0.1, _KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT))
+            while time.time() < deadline:
+                time.sleep(0.05)
+                cached = cache.get(cache_key)
+                if isinstance(cached, dict):
+                    return _annotate_kap_response_cache(cached, cache_hit=True)
+        normalized = _build_kap_snapshot_response(company, refresh=refresh, max_quarters=max_quarters)
+        payload = _annotate_kap_response_cache(normalized, cache_hit=False)
+        cache.set(cache_key, payload, ttl_seconds=_KAP_SNAPSHOT_RESPONSE_CACHE_TTL)
+        return payload
 
 
 def _quarter_sort_key(quarter: Dict[str, Any]) -> tuple[int, int]:
@@ -3386,6 +3810,36 @@ _ISYATIRIM_CACHE_TTL = 900  # 15 minutes
 _ISYATIRIM_BASIC_SUMMARY_CACHE: Dict[str, Any] = {}
 _ISYATIRIM_BASIC_SUMMARY_CACHE_TTL = 60
 _MARKET_STOCK_INDEX_ORDER = ["XUTUM", "XU100", "XU030"]
+_MARKET_SECTOR_INDEX_ORDER = [
+    "XUSIN",
+    "XUHIZ",
+    "XUMAL",
+    "XUTEK",
+    "XBANK",
+    "XAKUR",
+    "XBLSM",
+    "XELKT",
+    "XFINK",
+    "XGMYO",
+    "XGIDA",
+    "XHOLD",
+    "XILTM",
+    "XINSA",
+    "XKAGT",
+    "XKMYA",
+    "XMADN",
+    "XMANA",
+    "XMESY",
+    "XSGRT",
+    "XSPOR",
+    "XTAST",
+    "XTCRT",
+    "XTEKS",
+    "XTRZM",
+    "XULAS",
+    "XYORT",
+]
+_MARKET_INDEX_ORDER = _MARKET_STOCK_INDEX_ORDER + _MARKET_SECTOR_INDEX_ORDER
 _MARKET_STOCK_INDEXES = set(_MARKET_STOCK_INDEX_ORDER)
 _MARKET_INDICES_CACHE: Dict[str, Any] = {}
 _MARKET_INDEX_DETAIL_CACHE: Dict[str, Any] = {}
@@ -3414,10 +3868,53 @@ _MARKET_INDEX_META: Dict[str, Dict[str, Any]] = {
         "yahoo_candidates": ["XU030.IS", "^XU030", "XU030"],
     },
 }
+_MARKET_SECTOR_INDEX_LABELS: Dict[str, str] = {
+    "XUSIN": "BIST Sınai",
+    "XUHIZ": "BIST Hizmetler",
+    "XUMAL": "BIST Mali",
+    "XUTEK": "BIST Teknoloji",
+    "XBANK": "BIST Banka",
+    "XAKUR": "BIST Aracı Kurumlar",
+    "XBLSM": "BIST Bilişim",
+    "XELKT": "BIST Elektrik",
+    "XFINK": "BIST Fin. Kir. Faktoring",
+    "XGMYO": "BIST Gayrimenkul Y.O.",
+    "XGIDA": "BIST Gıda İçecek",
+    "XHOLD": "BIST Holding ve Yatırım",
+    "XILTM": "BIST İletişim",
+    "XINSA": "BIST İnşaat",
+    "XKAGT": "BIST Orman Kağıt Basım",
+    "XKMYA": "BIST Kimya Petrol Plastik",
+    "XMADN": "BIST Madencilik",
+    "XMANA": "BIST Metal Ana",
+    "XMESY": "BIST Metal Eşya Makina",
+    "XSGRT": "BIST Sigorta",
+    "XSPOR": "BIST Spor",
+    "XTAST": "BIST Taş Toprak",
+    "XTCRT": "BIST Ticaret",
+    "XTEKS": "BIST Tekstil Deri",
+    "XTRZM": "BIST Turizm",
+    "XULAS": "BIST Ulaştırma",
+    "XYORT": "BIST Menkul Kıym. Y.O.",
+}
+for _sector_index_code in _MARKET_SECTOR_INDEX_ORDER:
+    _MARKET_INDEX_META[_sector_index_code] = {
+        "symbol": _sector_index_code,
+        "label": _MARKET_SECTOR_INDEX_LABELS[_sector_index_code],
+        "yahoo_candidates": [
+            f"{_sector_index_code}.IS",
+            f"^{_sector_index_code}",
+            _sector_index_code,
+        ],
+    }
+
+
+def _supported_stock_indexes_text() -> str:
+    return ", ".join(_MARKET_STOCK_INDEX_ORDER)
 
 
 def _supported_market_indexes_text() -> str:
-    return ", ".join(_MARKET_STOCK_INDEX_ORDER)
+    return ", ".join(_MARKET_INDEX_ORDER)
 
 
 def _normalize_stock_index(index_name: str) -> str:
@@ -3425,7 +3922,7 @@ def _normalize_stock_index(index_name: str) -> str:
     if normalized not in _MARKET_STOCK_INDEXES:
         raise HTTPException(
             status_code=400,
-            detail=f"Desteklenmeyen endeks. {_supported_market_indexes_text()} kullanin.",
+            detail=f"Desteklenmeyen endeks. {_supported_stock_indexes_text()} kullanin.",
         )
     return normalized
 _RETURN_BASE_FIELDS: List[tuple[str, str]] = [
@@ -3753,6 +4250,10 @@ def _fetch_stock_return_bases(symbol: str) -> Dict[str, Any]:
     cached = _STOCK_RETURN_BASE_CACHE.get(ticker)
     if cached and now - cached.get("_ts", 0) < _STOCK_RETURN_BASE_CACHE_TTL:
         return dict(cached.get("data") or {})
+    shared_cached = _shared_cache_get_dict(f"api:stock-return-bases:{ticker}")
+    if shared_cached:
+        _STOCK_RETURN_BASE_CACHE[ticker] = {"_ts": now, "data": shared_cached}
+        return dict(shared_cached)
 
     yahoo_symbol = f"{ticker}.IS"
     url = (
@@ -3832,6 +4333,7 @@ def _fetch_stock_return_bases(symbol: str) -> Dict[str, Any]:
         "as_of": latest_dt.isoformat(),
     }
     _STOCK_RETURN_BASE_CACHE[ticker] = {"_ts": now, "data": bases}
+    _shared_cache_set(f"api:stock-return-bases:{ticker}", bases, _STOCK_RETURN_BASE_CACHE_TTL)
     return dict(bases)
 
 
@@ -3847,8 +4349,13 @@ def _fetch_stock_return_bases_bulk(symbols: List[str]) -> Dict[str, Dict[str, An
         cached = _STOCK_RETURN_BASE_CACHE.get(symbol)
         if cached and now - cached.get("_ts", 0) < _STOCK_RETURN_BASE_CACHE_TTL:
             result[symbol] = dict(cached.get("data") or {})
-        else:
-            stale.append(symbol)
+            continue
+        shared_cached = _shared_cache_get_dict(f"api:stock-return-bases:{symbol}")
+        if shared_cached:
+            _STOCK_RETURN_BASE_CACHE[symbol] = {"_ts": now, "data": shared_cached}
+            result[symbol] = dict(shared_cached)
+            continue
+        stale.append(symbol)
 
     if not stale:
         return result
@@ -3925,6 +4432,11 @@ def _cached_stock_return_bases_bulk(symbols: List[str]) -> Dict[str, Dict[str, A
         cached = _STOCK_RETURN_BASE_CACHE.get(normalized)
         if cached and now - cached.get("_ts", 0) < _STOCK_RETURN_BASE_CACHE_TTL:
             result[normalized] = dict(cached.get("data") or {})
+            continue
+        shared_cached = _shared_cache_get_dict(f"api:stock-return-bases:{normalized}")
+        if shared_cached:
+            _STOCK_RETURN_BASE_CACHE[normalized] = {"_ts": now, "data": shared_cached}
+            result[normalized] = dict(shared_cached)
     return result
 
 
@@ -4473,6 +4985,14 @@ def _resolve_market_card_valuation(symbol: str, *, market_cap: Any) -> Dict[str,
             {**cached, "_cache_hit": True},
             market_cap=market_cap,
         )
+    shared_key = f"api:stock-card-valuation:{ticker}"
+    shared_cached = _shared_cache_get_dict(shared_key)
+    if shared_cached:
+        _STOCK_CARD_VALUATION_CACHE[ticker] = {**shared_cached, "_ts": now}
+        return _resolve_market_card_valuation_from_cached_data(
+            {**shared_cached, "_cache_hit": True},
+            market_cap=market_cap,
+        )
 
     snapshot = _stock_card_financial_snapshot_from_cache(ticker)
     computed = _stock_card_financial_ratios_from_snapshot(snapshot, market_cap=market_cap)
@@ -4495,6 +5015,7 @@ def _resolve_market_card_valuation(symbol: str, *, market_cap: Any) -> Dict[str,
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
     _STOCK_CARD_VALUATION_CACHE[ticker] = cached_payload
+    _shared_cache_set(shared_key, cached_payload, _STOCK_CARD_VALUATION_CACHE_TTL)
     return _resolve_market_card_valuation_from_cached_data(cached_payload, market_cap=market_cap)
 
 
@@ -4511,13 +5032,14 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
     price_map = _fetch_market_price_map(normalized_symbols)
     basic_summary_map = _fetch_isyatirim_basic_summary_map()
     return_base_map = _fetch_stock_return_bases_bulk(normalized_symbols)
+    instrument_map = get_instruments(CONFIG.paths.processed_dir, "stock", normalized_symbols)
 
     items: List[Dict[str, Any]] = []
     for symbol in normalized_symbols:
         quote = price_map.get(symbol, {})
         intraday = _fetch_stock_card_intraday(symbol, force_refresh=force_refresh)
         cached_meta = _load_cached_kap_market_metadata(cache_dir, symbol)
-        instrument = get_instrument(CONFIG.paths.processed_dir, "stock", symbol)
+        instrument = instrument_map.get(symbol)
         company_name = str((instrument or {}).get("name") or cached_meta.get("company_title") or "").strip() or symbol
         basic_summary = basic_summary_map.get(symbol)
         market_cap = _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary)
@@ -4655,6 +5177,11 @@ def _fetch_isyatirim_basic_summary_map() -> Dict[str, Dict[str, Any]]:
     cached = _ISYATIRIM_BASIC_SUMMARY_CACHE.get("payload")
     if cached and now - cached.get("_ts", 0) < _ISYATIRIM_BASIC_SUMMARY_CACHE_TTL:
         return cached.get("items", {})
+    shared_cached = _shared_cache_get_dict("api:isyatirim-basic-summary")
+    if shared_cached:
+        items = dict(shared_cached.get("items") or {})
+        _ISYATIRIM_BASIC_SUMMARY_CACHE["payload"] = {"_ts": now, "items": items}
+        return items
 
     request = urllib.request.Request(
         url=_isyatirim_basic_summary_url(),
@@ -4672,6 +5199,7 @@ def _fetch_isyatirim_basic_summary_map() -> Dict[str, Dict[str, Any]]:
 
     items = _extract_isyatirim_basic_summary_map(html_text)
     _ISYATIRIM_BASIC_SUMMARY_CACHE["payload"] = {"_ts": now, "items": items}
+    _shared_cache_set("api:isyatirim-basic-summary", {"items": items}, _ISYATIRIM_BASIC_SUMMARY_CACHE_TTL)
     return items
 
 
@@ -4821,6 +5349,11 @@ def _fetch_isyatirim_multiples(symbol: str) -> Dict[str, Any]:
     cached = _ISYATIRIM_CACHE.get(cache_key)
     if cached and now - cached.get("_ts", 0) < _ISYATIRIM_CACHE_TTL:
         return cached
+    shared_key = f"api:isyatirim-multiples:{cache_key}"
+    shared_cached = _shared_cache_get_dict(shared_key)
+    if shared_cached:
+        _ISYATIRIM_CACHE[cache_key] = {**shared_cached, "_ts": now}
+        return dict(shared_cached)
 
     url = _isyatirim_company_card_url(ticker)
     request = urllib.request.Request(
@@ -4853,6 +5386,7 @@ def _fetch_isyatirim_multiples(symbol: str) -> Dict[str, Any]:
     }
     payload.update(parsed)
     _ISYATIRIM_CACHE[cache_key] = payload
+    _shared_cache_set(shared_key, payload, _ISYATIRIM_CACHE_TTL)
     return payload
 
 
@@ -5608,7 +6142,13 @@ def _market_indices_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
     if cached and not force_refresh and now - cached.get("_ts", 0) < _MARKET_INDICES_CACHE_TTL:
         return cached["data"]
 
-    rows = [_market_index_row(index_code) for index_code in _MARKET_STOCK_INDEX_ORDER]
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        with ThreadPoolExecutor(max_workers=min(8, len(_MARKET_INDEX_ORDER))) as pool:
+            rows = list(pool.map(_market_index_row, _MARKET_INDEX_ORDER))
+    except Exception:
+        rows = [_market_index_row(index_code) for index_code in _MARKET_INDEX_ORDER]
     data = {
         "rows": rows,
         "source": "yahoo_finance_chart",
@@ -5778,11 +6318,51 @@ def _apply_index_weight_formula(
     return calculated, "available"
 
 
+def _market_index_constituent_stock_rows(index_code: str) -> List[Dict[str, Any]]:
+    normalized = _normalize_market_index(index_code)
+    if normalized in _MARKET_STOCK_INDEXES:
+        return list(_market_stocks_payload(index_name=normalized).get("rows", []))
+
+    from app.kap_service import get_bist_index_universe
+
+    try:
+        universe = get_bist_index_universe(normalized)
+        symbols = [
+            str(symbol or "").strip().upper()
+            for symbol in universe.get("symbols", [])
+            if str(symbol or "").strip()
+        ]
+    except Exception:
+        symbols = []
+    if not symbols:
+        return []
+
+    price_map = _fetch_market_price_map(symbols, index_name="XUTUM")
+    basic_summary_map = _fetch_isyatirim_basic_summary_map()
+    cache_dir = CONFIG.paths.processed_dir / "kap_cache"
+    rows: List[Dict[str, Any]] = []
+    for symbol in symbols:
+        quote = price_map.get(symbol, {})
+        cached_meta = _load_cached_kap_market_metadata(cache_dir, symbol)
+        basic_summary = basic_summary_map.get(symbol)
+        rows.append(
+            {
+                "company": symbol,
+                "price": quote.get("price"),
+                "price_currency": quote.get("currency"),
+                "change_pct": quote.get("change_pct"),
+                "volume": quote.get("volume"),
+                "market_cap": _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary),
+                **_empty_logo_payload(),
+            }
+        )
+    return rows
+
+
 def _index_constituents(index_code: str, *, index_level: Any) -> tuple[List[Dict[str, Any]], str]:
     normalized = _normalize_market_index(index_code)
-    stocks_payload = _market_stocks_payload(index_name=normalized)
     rows: List[Dict[str, Any]] = []
-    for stock in stocks_payload.get("rows", []):
+    for stock in _market_index_constituent_stock_rows(normalized):
         symbol = str(stock.get("company") or "").strip().upper()
         if not symbol:
             continue

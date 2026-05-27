@@ -5,6 +5,7 @@ import {
     _buildCustomSeries,
     _takeLastSeries,
     _buildRatioSeries,
+    _buildAnnualizedRoeSeries,
     CHART_WINDOW_QUARTERS,
 } from './chartBuilders';
 import {
@@ -240,7 +241,7 @@ export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters
         favokMarji: _buildRatioSeries(quarters, 'favok', 'satis_gelirleri', true, true, 100, v => `${v.toFixed(2)}%`),
         netKarMarji: _buildRatioSeries(quarters, 'net_kar', 'satis_gelirleri', true, true, 100, v => `${v.toFixed(2)}%`),
         cariOran: _buildRatioSeries(quarters, 'donen_varliklar', 'kisa_vadeli_yukumlulukler', false, false, 1, v => `${v.toFixed(2)}x`),
-        roe: _buildRatioSeries(quarters, 'net_kar', 'ozkaynaklar', true, false, 100, v => `${v.toFixed(2)}%`),
+        roe: _buildAnnualizedRoeSeries(quarters, 'net_kar', 'ozkaynaklar', v => `${v.toFixed(2)}%`),
     };
 
     const lineCharts: OverviewChartGroup[] = [

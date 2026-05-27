@@ -83,6 +83,52 @@ export function _buildRatioSeries(
         .filter((row): row is SeriesPoint => row !== null);
 }
 
+
+// ROE = TTM (son 4 çeyrek toplam akım) Net Kâr / Ortalama Özkaynak × 100.
+// Tek bir çeyreğin akımını bilanço özkaynağına bölmek %0,4 gibi anlamsız bir
+// rakam üretiyor; ROE'yi yıllıklandırılmış ortalama üzerinden hesaplıyoruz.
+export function _buildAnnualizedRoeSeries(
+    quarters: KapQuarter[],
+    numeratorKey: string,
+    denominatorKey: string,
+    suffixFormatter: (val: number) => string,
+): SeriesPoint[] {
+    const TTM_LOOKBACK = 4;
+    return quarters
+        .map((q, idx) => {
+            // Son 4 çeyreklik akımın toplamını al; eksik çeyrek varsa hesabı atla.
+            let ttmFlow = 0;
+            for (let lookback = 0; lookback < TTM_LOOKBACK; lookback += 1) {
+                const cursor = idx - lookback;
+                if (cursor < 0) return null;
+                const value = _resolveMetricValue(quarters, cursor, numeratorKey, true);
+                if (value === null) return null;
+                ttmFlow += value;
+            }
+
+            // Ortalama özkaynak: dönem sonu ile bir önceki çeyrek dönem sonunun
+            // ortalaması. Önceki çeyrek yoksa yalnız dönem sonu kullanılır.
+            const denominatorEnd = _resolveMetricValue(quarters, idx, denominatorKey, false);
+            if (denominatorEnd === null || denominatorEnd === 0) return null;
+            const denominatorPrev = idx > 0
+                ? _resolveMetricValue(quarters, idx - 1, denominatorKey, false)
+                : null;
+            const averageDenominator = denominatorPrev !== null && denominatorPrev !== 0
+                ? (denominatorEnd + denominatorPrev) / 2
+                : denominatorEnd;
+            if (!averageDenominator) return null;
+
+            const value = (ttmFlow / averageDenominator) * 100;
+            return {
+                key: `${q.quarter}-${numeratorKey}-${denominatorKey}-ttm`,
+                label: _periodLabel(q.year, q.period, q.quarter),
+                value,
+                display: suffixFormatter(value),
+            };
+        })
+        .filter((row): row is SeriesPoint => row !== null);
+}
+
 export function prepareOrderedQuarters(snapshot: any): KapQuarter[] {
     if (!snapshot || !snapshot.quarters) return [];
     

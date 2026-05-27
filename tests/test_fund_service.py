@@ -14,6 +14,20 @@ def test_fintables_defaults_match_current_history_contract() -> None:
     assert fund_service.FINTABLES_YIELD_SUMMARY_ENDPOINT.endswith("/barbar/server/yield")
 
 
+def test_fund_prices_db_uses_wal_and_updated_index(tmp_path) -> None:
+    with fund_service._connect_fund_prices_db(tmp_path) as conn:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
+        indexes = {
+            row["name"]
+            for row in conn.execute("PRAGMA index_list('fund_prices')").fetchall()
+        }
+
+    assert str(journal_mode).lower() == "wal"
+    assert int(synchronous) == 1
+    assert "idx_fund_prices_code_date_updated" in indexes
+
+
 def test_normalize_fintables_udf_history_payload_uses_close_series() -> None:
     rows = fund_service._normalize_fintables_udf_history_payload(
         {
@@ -1687,3 +1701,112 @@ def test_get_fund_allocations_history_payload_caches_empty_result(monkeypatch, t
     assert second["source_metadata"]["cache_hit"] is True
     assert first_call_count > 1
     assert len(calls) == first_call_count
+
+
+def test_fund_tax_info_maps_known_fund_categories() -> None:
+    assert fund_service._fund_tax_info("Hisse Senedi Şemsiye Fonu") == "%0"
+    assert fund_service._fund_tax_info("Borsa Yatırım Fonu") == "%0"
+    assert fund_service._fund_tax_info("Serbest Şemsiye Fonu") == "%10"
+    assert fund_service._fund_tax_info("Para Piyasası Şemsiye Fonu") == "%10"
+    assert fund_service._fund_tax_info("Bireysel Emeklilik Fonu") == "—"
+    assert fund_service._fund_tax_info("") is None
+    assert fund_service._fund_tax_info(None) is None
+
+
+def test_coerce_tefas_percentage_handles_turkish_decimal_strings() -> None:
+    assert fund_service._coerce_tefas_percentage("1,65") == pytest.approx(1.65)
+    assert fund_service._coerce_tefas_percentage("2") == pytest.approx(2.0)
+    assert fund_service._coerce_tefas_percentage("% 0,5") == pytest.approx(0.5)
+    assert fund_service._coerce_tefas_percentage(0) == 0.0
+    assert fund_service._coerce_tefas_percentage(None) is None
+    assert fund_service._coerce_tefas_percentage("nan") is None
+
+
+def test_merge_tefasfon_management_fees_attaches_fee_columns() -> None:
+    fund_rows = [
+        {"fonKodu": "TLY", "fonUnvan": "TERA"},
+        {"fonKodu": "PHE", "fonUnvan": "PUSULA"},
+    ]
+    fee_rows = [
+        {
+            "fonKodu": "TLY",
+            "uygulananYu1Y": "0",
+            "fonIcTuzukYu1G": "2",
+            "fonTopGiderKesoran": "2",
+        },
+        {
+            "fonKodu": "PHE",
+            "uygulananYu1Y": "2,5",
+            "fonIcTuzukYu1G": "2,5",
+            "fonTopGiderKesoran": "1,65",
+        },
+    ]
+    merged = fund_service._merge_tefasfon_management_fees(fund_rows, fee_rows)
+    by_code = {row["fonKodu"]: row for row in merged}
+    assert by_code["TLY"]["management_fee_applied"] == 0
+    assert by_code["TLY"]["management_fee_prospectus"] == 2
+    assert by_code["TLY"]["total_expense_ratio"] == 2
+    assert by_code["PHE"]["management_fee_applied"] == 2.5
+    assert by_code["PHE"]["total_expense_ratio"] == pytest.approx(1.65)
+
+
+def test_get_fund_detail_payload_falls_back_to_reference_data(tmp_path) -> None:
+    snapshot = {
+        "status": "ok",
+        "rows": [
+            {
+                "fund_code": "TLY",
+                "name": "TERA PORTFÖY BİRİNCİ SERBEST FON",
+                "fund_type": "Serbest Şemsiye Fonu",
+                "founder_company": "TERA PORTFÖY",
+                "manager_company": "TERA PORTFÖY",
+                "tefas_open": True,
+                "price": 5479.81,
+                "daily_return": 3.6,
+                "period_returns": {},
+                "risk_value": 7,
+                "currency": "TRY",
+                "as_of": "2026-05-25",
+                "source": "tefasfon_funds",
+                "aum": 137_000_000_000.0,
+                "investor_count": 82_659,
+                "share_count": 25_000_000.0,
+                # Snapshot intentionally lacks the management fee columns to simulate
+                # a partial refresh. Reference data should plug them back in.
+            },
+        ],
+        "as_of": "2026-05-25",
+        "fetched_at": "2026-05-25T13:11:01+00:00",
+        "stale": False,
+        "source": "tefasfon_funds",
+        "source_url": "https://pypi.org/project/tefasfon/",
+        "source_metadata": {"source": "tefasfon_funds", "parse_status": "ok"},
+    }
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    upsert_instrument(
+        tmp_path,
+        kind="fund",
+        symbol="TLY",
+        name="TERA PORTFÖY BİRİNCİ SERBEST FON",
+        source="tefasfon_funds",
+        metadata={
+            "fund_type": "Serbest Şemsiye Fonu",
+            "management_fee_applied": 0.0,
+            "management_fee_prospectus": 2.0,
+            "total_expense_ratio": 2.0,
+            "tax_info": "%10",
+        },
+    )
+
+    payload = fund_service.get_fund_detail_payload(tmp_path, "TLY")
+
+    assert payload["management_fee_applied"] == 0.0
+    assert payload["management_fee_prospectus"] == 2.0
+    assert payload["total_expense_ratio"] == 2.0
+    # `management_fee` should fall back to the prospectus value when the applied
+    # rate is 0 (typical for performance-fee serbest funds like TLY).
+    assert payload["management_fee"] == 2.0
+    assert payload["tax_info"] == "%10"

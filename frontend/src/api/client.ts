@@ -27,6 +27,7 @@ import type {
     FundAllocationsHistoryResponse,
     FundCategoriesResponse,
     FundDetail,
+    FundHoldingsLiveResponse,
     FundHoldingsResponse,
     FundPerformanceResponse,
     FundYieldSummaryResponse,
@@ -48,6 +49,7 @@ const TIMEOUT_MESSAGE = 'Istek suresi asildi. Lutfen tekrar deneyin.';
 const FUND_HOLDINGS_MEMORY_CACHE_TTL_MS = 15_000;
 const fundHoldingsMemoryCache = new Map<string, { payload: FundHoldingsResponse; fetchedAt: number }>();
 const fundHoldingsInFlight = new Map<string, Promise<FundHoldingsResponse>>();
+const fundHoldingsLiveInFlight = new Map<string, Promise<FundHoldingsLiveResponse>>();
 
 type FetchApiOptions = RequestInit & {
     timeoutMs?: number;
@@ -391,6 +393,19 @@ export const apiClient = {
                 }
             });
         fundHoldingsInFlight.set(normalizedCode, request);
+        return request;
+    },
+    fundHoldingsLive: async (fundCode: string) => {
+        const normalizedCode = fundCode.trim().toUpperCase();
+        const existingRequest = fundHoldingsLiveInFlight.get(normalizedCode);
+        if (existingRequest) return existingRequest;
+        const request = fetchApi<FundHoldingsLiveResponse>(`/funds/${encodeURIComponent(normalizedCode)}/holdings/live`)
+            .finally(() => {
+                if (fundHoldingsLiveInFlight.get(normalizedCode) === request) {
+                    fundHoldingsLiveInFlight.delete(normalizedCode);
+                }
+            });
+        fundHoldingsLiveInFlight.set(normalizedCode, request);
         return request;
     },
 

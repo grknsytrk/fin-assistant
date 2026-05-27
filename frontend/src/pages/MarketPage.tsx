@@ -25,10 +25,10 @@ export default function MarketPage({ onOpenTicker, onOpenMarkets }: MarketPagePr
 
     const getTabImage = () => {
         switch(activeTab) {
-            case 'Piyasa ve Tablolar': return '/piyasa_tablolar.png';
-            case 'Hisse Tarama': return '/hisse_tarama.png';
-            case 'Model Portföy': return '/model_portfoy.png';
-            default: return '/piyasa_tablolar.png';
+            case 'Piyasa ve Tablolar': return '/piyasa_tablolar.webp';
+            case 'Hisse Tarama': return '/hisse_tarama.webp';
+            case 'Model Portföy': return '/model_portfoy.webp';
+            default: return '/piyasa_tablolar.webp';
         }
     };
 
@@ -64,7 +64,14 @@ export default function MarketPage({ onOpenTicker, onOpenMarkets }: MarketPagePr
                     }}
                     style={{ cursor: 'pointer' }}
                 >
-                    <img src="/hero_dashboard.png" alt="Platform Ekranı" className="mockup-full-image" />
+                    <img
+                        src="/hero_dashboard.png"
+                        alt="Platform Ekranı"
+                        className="mockup-full-image"
+                        loading="eager"
+                        decoding="async"
+                        fetchPriority="high"
+                    />
                 </div>
             </section>
 
@@ -104,8 +111,14 @@ export default function MarketPage({ onOpenTicker, onOpenMarkets }: MarketPagePr
                         </button>
                     </div>
                     <div className="tabs-content">
-                        <div className="tab-visual-mockup" style={{ padding: '0', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-                            <img src={getTabImage()} alt={activeTab} style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.85 }} />
+                        <div className="tab-visual-mockup">
+                            <img
+                                src={getTabImage()}
+                                alt={activeTab}
+                                className="tab-visual-image"
+                                loading="lazy"
+                                decoding="async"
+                            />
                         </div>
                     </div>
                 </div>

@@ -75,14 +75,14 @@ def test_list_company_disclosures_falls_back_to_bycriteria_on_rate_limit(
         "_list_member_disclosures_by_criteria",
         lambda **_kwargs: [
             {
-                "disclosureIndex": 10,
+                "disclosureIndex": 11,
                 "subject": "Finansal Rapor",
                 "year": 2026,
                 "period": 1,
                 "summary": "Konsolide olmayan",
             },
             {
-                "disclosureIndex": 11,
+                "disclosureIndex": 10,
                 "subject": "Finansal Rapor",
                 "year": 2026,
                 "period": 1,
@@ -112,7 +112,7 @@ def test_list_company_disclosures_falls_back_to_bycriteria_on_rate_limit(
     )
 
     assert [(row["year"], row["period"], row["disclosure_index"]) for row in result] == [
-        (2026, 1, 11),
+        (2026, 1, 10),
         (2025, 4, 8),
     ]
 
@@ -157,6 +157,53 @@ def test_list_company_disclosures_supplements_incomplete_excel_rows(
         (2026, 1, 30),
         (2025, 4, 20),
         (2025, 3, 19),
+    ]
+
+
+def test_list_company_disclosures_prefers_first_duplicate_period_from_excel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(kap_fetcher.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_utc_now",
+        lambda: datetime(2026, 5, 17, tzinfo=timezone.utc),
+    )
+
+    def fake_http_get_json(url: str, _cfg_obj: object) -> list[dict[str, object]]:
+        if "/2026/" not in url:
+            return []
+        return [
+            {
+                "mkkMemberOid": "oid-akbnk",
+                "stockCode": "AKBNK",
+                "pdOid": "pd-consolidated",
+                "disclosureIndex": 1598259,
+                "year": 2026,
+                "period": 1,
+                "title": "AKBANK T.A.Ş.",
+            },
+            {
+                "mkkMemberOid": "oid-akbnk",
+                "stockCode": "AKBNK",
+                "pdOid": "pd-solo",
+                "disclosureIndex": 1598264,
+                "year": 2026,
+                "period": 1,
+                "title": "AKBANK T.A.Ş.",
+            },
+        ]
+
+    monkeypatch.setattr(kap_fetcher, "_http_get_json", fake_http_get_json)
+
+    result = kap_fetcher._list_company_disclosures(
+        member_oid="oid-akbnk",
+        cfg=_cfg(),
+        max_periods=1,
+    )
+
+    assert [(row["year"], row["period"], row["disclosure_index"]) for row in result] == [
+        (2026, 1, 1598259),
     ]
 
 
@@ -387,6 +434,46 @@ def test_fetch_snapshot_can_serve_complete_cache_without_live_request(
     assert payload["cache_stale"] is False
     assert "error" not in payload
     assert len(payload["quarters"]) == 20
+
+
+def test_fetch_snapshot_keeps_schema_mismatched_cache_stale_on_live_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    cache_dir = tmp_path / "kap_cache"
+    cache_dir.mkdir()
+    (cache_dir / "AKBNK.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "schema_version": KAP_CACHE_SCHEMA_VERSION - 1,
+                "company": "AKBNK",
+                "stock_code": "AKBNK",
+                "member_oid": "oid-akbnk",
+                "fetched_at": "2026-05-01T00:00:00+00:00",
+                "quarters": [{"quarter": "2026Q1", "year": 2026, "period": 1}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_resolve_member",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("live kap unavailable")),
+    )
+
+    payload = fetch_kap_company_snapshot(
+        company="AKBNK",
+        cfg=SimpleNamespace(cache_ttl_hours=24.0, timeout_seconds=1.0, user_agent="ragfin-test/1.0"),
+        processed_dir=tmp_path,
+        force_refresh=False,
+        max_quarters=1,
+    )
+
+    assert payload["cache_hit"] is True
+    assert payload["cache_stale"] is True
+    assert payload["error"] == "live kap unavailable"
 
 
 def test_parse_insurance_premium_pdf_text_extracts_general_total() -> None:
@@ -899,6 +986,67 @@ def test_fetch_snapshot_uses_marketvisuals_premium_only_when_member_resolution_f
     assert payload["insurance_premium_disclosures"] == [
         {"year": 2026, "month": 4, "monthly_gross_premium": 2_056_630_000.0}
     ]
+
+
+def test_bank_balance_metrics_use_total_columns_for_current_and_comparative() -> None:
+    metric_rows = {
+        "finansal_varliklar_net": (
+            "finansal varliklar (net)",
+            1_226_714_375_000.0,
+            1_265_460_612_000.0,
+        ),
+        "krediler": (
+            "krediler",
+            2_024_256_851_000.0,
+            1_920_958_252_000.0,
+        ),
+        "mevduatlar": (
+            "mevduat",
+            2_318_398_125_000.0,
+            2_173_421_167_000.0,
+        ),
+        "beklenen_zarar_karsiliklari": (
+            "beklenen zarar karsiliklari (-)",
+            -76_157_255_000.0,
+            -71_072_754_000.0,
+        ),
+        "ozkaynaklar": (
+            "ozkaynaklar",
+            302_574_628_000.0,
+            310_169_116_000.0,
+        ),
+    }
+
+    for metric_key, (label_norm, current_total, previous_total) in metric_rows.items():
+        rows = [
+            {"label_norm": label_norm, "body_index": 0, "col_order": 4, "value": current_total - 100.0},
+            {"label_norm": label_norm, "body_index": 0, "col_order": 5, "value": current_total - 50.0},
+            {"label_norm": label_norm, "body_index": 0, "col_order": 6, "value": current_total},
+            {"label_norm": label_norm, "body_index": 0, "col_order": 7, "value": previous_total - 100.0},
+            {"label_norm": label_norm, "body_index": 0, "col_order": 8, "value": previous_total - 50.0},
+            {"label_norm": label_norm, "body_index": 0, "col_order": 9, "value": previous_total},
+        ]
+
+        assert (
+            _pick_metric_value(
+                metric_key,
+                rows,
+                period=1,
+                comparison_mode="current",
+                prefer_consolidated_balance=True,
+            )
+            == current_total
+        )
+        assert (
+            _pick_metric_value(
+                metric_key,
+                rows,
+                period=1,
+                comparison_mode="comparative",
+                prefer_consolidated_balance=True,
+            )
+            == previous_total
+        )
 
 
 def test_net_kar_prefers_parent_or_net_profit_rows() -> None:

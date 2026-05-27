@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import api as api_module
+from app import cache as cache_module
 from app import fund_service as fund_service_module
 from app import kap_service as kap_service_module
 from app.api import app
@@ -18,7 +19,11 @@ from src.nvidia_commentary import NvidiaCommentaryError
 
 
 @pytest.fixture(autouse=True)
-def _reset_flow_state() -> None:
+def _reset_flow_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RAGFIN_CACHE_BACKEND", raising=False)
+    monkeypatch.delenv("RAGFIN_REDIS_URL", raising=False)
+    monkeypatch.delenv("RAGFIN_CACHE_NAMESPACE", raising=False)
+    cache_module.reset_cache_for_tests()
     api_module._FLOW_CACHE.clear()
     api_module._WATCH_CACHE.clear()
     api_module._WATCH_GLOBAL_CACHE.clear()
@@ -33,12 +38,15 @@ def _reset_flow_state() -> None:
     api_module._MARKET_INDEX_QUOTE_CACHE.clear()
     api_module._MARKET_INDEX_INTRADAY_CACHE.clear()
     api_module._MARKET_INDEX_RETURN_CACHE.clear()
+    api_module._FUND_HOLDING_SECTOR_MAP_CACHE.clear()
     api_module._ISYATIRIM_BASIC_SUMMARY_CACHE.clear()
     api_module._GEFAS_GYF_QUOTE_CACHE.clear()
     api_module._FUND_SNAPSHOT_ROW_MAP_CACHE.clear()
     fund_service_module.reset_fund_caches_for_tests()
     kap_service_module._BIST_UNIVERSE_CACHE.clear()
     kap_vyk_client.reset_caches_for_tests()
+    yield
+    cache_module.reset_cache_for_tests()
 
 
 def test_api_health() -> None:
@@ -47,6 +55,53 @@ def test_api_health() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
+    assert payload["cache_backend"] in {"memory", "redis"}
+    assert payload["cache_namespace"]
+
+
+def test_kap_snapshot_response_cache_uses_schema_and_refresh_bypasses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.kap_fetcher import KAP_CACHE_SCHEMA_VERSION
+
+    calls: List[bool] = []
+
+    def fake_get_kap_snapshot(**kwargs: Any) -> Dict[str, Any]:
+        calls.append(bool(kwargs.get("force_refresh")))
+        return {
+            "ok": True,
+            "stock_code": str(kwargs.get("company") or "").upper(),
+            "company_title": "Akbank",
+            "quarters": [],
+        }
+
+    def fake_normalize_snapshot(raw: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "stock_code": raw["stock_code"],
+            "latest_quarter": "2026/3",
+            "source_metadata": {"source": "kap"},
+        }
+
+    monkeypatch.setattr(kap_service_module, "get_kap_snapshot", fake_get_kap_snapshot)
+    monkeypatch.setattr(kap_service_module, "normalize_snapshot_for_frontend", fake_normalize_snapshot)
+    monkeypatch.setattr(api_module, "_upsert_stock_reference_from_kap_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api_module, "_fetch_kap_price_payload", lambda _symbol: {})
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_multiples", lambda _symbol: {})
+    monkeypatch.setattr(api_module, "_build_kap_valuation_payload", lambda **_kwargs: {"ok": True})
+    client = TestClient(app)
+
+    first = client.get("/kap/snapshot", params={"company": "AKBNK", "max_quarters": 20})
+    second = client.get("/kap/snapshot", params={"company": "AKBNK", "max_quarters": 20})
+    refreshed = client.get("/kap/snapshot", params={"company": "AKBNK", "max_quarters": 20, "refresh": "true"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert refreshed.status_code == 200
+    assert first.json()["response_cache_hit"] is False
+    assert second.json()["response_cache_hit"] is True
+    assert refreshed.json()["response_cache_hit"] is False
+    assert calls == [False, True]
+    assert f"schema={KAP_CACHE_SCHEMA_VERSION}" in api_module._kap_snapshot_response_cache_key("AKBNK", 20)
 
 
 def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,6 +177,86 @@ def test_api_funds_search_keeps_full_universe(monkeypatch: pytest.MonkeyPatch) -
     assert seen_kwargs["min_aum"] is None
 
 
+def test_api_fund_yield_summary_uses_response_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"count": 0}
+
+    def fake_payload(fund_code: str, *, processed_dir: Any) -> Dict[str, Any]:
+        calls["count"] += 1
+        return {
+            "fund_code": fund_code,
+            "status": "ok",
+            "items": [{"period": "1A", "return_pct": 1.23}],
+            "source_metadata": {"call": calls["count"]},
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_fund_yield_summary_payload", fake_payload)
+    client = TestClient(app)
+
+    first = client.get("/funds/TLY/yield-summary")
+    second = client.get("/funds/TLY/yield-summary")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["source_metadata"]["call"] == 1
+    assert second.json()["source_metadata"]["call"] == 1
+    assert calls["count"] == 1
+
+
+def test_api_fund_holdings_reuses_static_response_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"count": 0}
+
+    def fake_holdings(_processed_dir: Any, fund_code: str) -> Dict[str, Any]:
+        calls["count"] += 1
+        return {
+            "fund_code": fund_code,
+            "status": "ok",
+            "positions": [],
+            "source_metadata": {"call": calls["count"]},
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_fund_holdings_payload", fake_holdings)
+    monkeypatch.setattr(
+        api_module,
+        "_enrich_fund_holdings_with_daily_market_data",
+        lambda payload, fund_code: {**payload, "enriched_for": fund_code},
+    )
+    client = TestClient(app)
+
+    first = client.get("/funds/TLY/holdings")
+    second = client.get("/funds/TLY/holdings")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["source_metadata"]["call"] == 1
+    assert second.json()["source_metadata"]["call"] == 1
+    assert calls["count"] == 1
+
+
+def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = cache_module.get_cache()
+    backend.set("api:funds:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc", {"stale": True}, ttl_seconds=60)
+    backend.set("api:funds-search:q=", {"stale": True}, ttl_seconds=60)
+    backend.set("api:funds-categories", {"stale": True}, ttl_seconds=60)
+    backend.set("api:fund-yield-summary:TLY", {"stale": True}, ttl_seconds=60)
+    backend.set("api:fund-holdings:TLY", {"stale": True}, ttl_seconds=60)
+
+    monkeypatch.setattr(
+        fund_service_module,
+        "refresh_funds_snapshot",
+        lambda _processed_dir, *, lookback_days: {"status": "ok", "lookback_days": lookback_days},
+    )
+    client = TestClient(app)
+
+    response = client.post("/admin/funds/refresh-snapshot", params={"lookback_days": 1})
+
+    assert response.status_code == 200
+    assert backend.get("api:funds:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc") is None
+    assert backend.get("api:funds-search:q=") is None
+    assert backend.get("api:funds-categories") is None
+    assert backend.get("api:fund-yield-summary:TLY") is None
+    assert backend.get("api:fund-holdings:TLY") is None
+
+
 def _patch_holdings_cache_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     monkeypatch.setattr(
         fund_service_module,
@@ -136,6 +271,11 @@ def _patch_holdings_cache_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -
     monkeypatch.setattr(api_module, "_fetch_market_price_map", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(api_module, "_fetch_infoyatirim_stock_page_quote", lambda _symbol: {})
     monkeypatch.setattr(api_module, "_fetch_gefas_gyf_quote", lambda _symbol: None)
+    monkeypatch.setattr(
+        api_module,
+        "_fund_holding_sector_map",
+        lambda: ({}, {"cache_hit": False, "symbol_count": 0, "source": None, "source_date": None, "warnings": []}),
+    )
 
 
 def test_api_fund_holdings_unavailable_when_kap_fund_not_found(
@@ -223,6 +363,80 @@ AKBNK Akbank T.A.S. 300,00 2,00 600,00 3,00TRYTRAAKBNKXXX
     assert positions["BIMAS"]["change_status"] == "new"
     assert positions["AKBNK"]["change_status"] == "removed"
     assert payload["source_metadata"]["latest_report"]["file_name"] == "TST_2026.04.pdf"
+
+
+def test_api_fund_holdings_adds_optional_sector_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    cache_payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {
+                "fund_code": "TLY",
+                "asset_code": "DSTKF",
+                "asset_name": "DESTEK FİNANS FAKTORİNG A.Ş.",
+                "asset_type": "local_equity",
+                "weight": 23.6,
+                "previous_weight": None,
+                "weight_change": None,
+                "change_status": "unchanged",
+                "amount": None,
+                "market_value": None,
+                "report_date": "2026-04-30",
+                "source_report_url": None,
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.9,
+            },
+            {
+                "fund_code": "TLY",
+                "asset_code": "BIMAS",
+                "asset_name": "Bilinmeyen Hisse",
+                "asset_type": "local_equity",
+                "weight": 1.0,
+                "previous_weight": None,
+                "weight_change": None,
+                "change_status": "unchanged",
+                "amount": None,
+                "market_value": None,
+                "report_date": "2026-04-30",
+                "source_report_url": None,
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.9,
+            },
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-05-01T00:00:00+00:00",
+            "parse_status": "ok",
+        },
+    }
+    (tmp_path / "TLY.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+    monkeypatch.setattr(
+        api_module,
+        "_fund_holding_sector_map",
+        lambda: (
+            {"DSTKF": {"sector_code": "XFINK", "sector_label": "Finansal Kiralama Faktoring"}},
+            {"cache_hit": False, "symbol_count": 1, "source": "test", "source_date": "2026-04-30", "warnings": []},
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.get("/funds/TLY/holdings")
+
+    assert response.status_code == 200
+    positions = {item["asset_code"]: item for item in response.json()["positions"]}
+    assert positions["DSTKF"]["sector_code"] == "XFINK"
+    assert positions["DSTKF"]["sector_label"] == "Finansal Kiralama Faktoring"
+
+    direct_payload = dict(cache_payload)
+    direct_payload["positions"] = [cache_payload["positions"][1]]
+    direct = api_module._enrich_fund_holdings_with_daily_market_data(direct_payload, "TLY")
+    assert direct["positions"][0]["sector_code"] is None
+    assert direct["positions"][0]["sector_label"] is None
 
 
 def test_api_fund_holdings_reuses_monthly_report_cache(
@@ -720,6 +934,87 @@ def test_api_fund_holdings_does_not_cache_final_live_quote_response(
     assert first["positions"][0]["price"] == 41.0
     assert second["positions"][0]["price"] == 42.0
     assert calls["count"] == 2
+
+
+def test_api_fund_holdings_live_returns_small_market_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    cache_payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {
+                "fund_code": "TLY",
+                "asset_code": "DSTKF",
+                "asset_name": "DESTEK FİNANS FAKTORİNG A.Ş.",
+                "asset_type": "local_equity",
+                "weight": 20.0,
+                "previous_weight": 18.0,
+                "weight_change": 2.0,
+                "change_status": "increased",
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": "https://www.kap.org.tr/tr/Bildirim/1601574",
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            }
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "message": None,
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-05-01T00:00:00+00:00",
+            "as_of": "2026-04-30",
+            "cache_hit": True,
+            "parse_status": "ok",
+            "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
+            "disclosure_check": {"checked_at": "2026-05-20T11:00:00+00:00", "ttl_seconds": 21600},
+            "warnings": [],
+        },
+    }
+    (tmp_path / "TLY.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 20, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(
+        fund_service_module,
+        "refresh_fund_holdings",
+        lambda *_args, **_kwargs: pytest.fail("live holdings should reuse static KAP cache"),
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "load_funds_snapshot",
+        lambda _processed_dir: {"rows": [{"fund_code": "TLY", "as_of": "2026-05-20", "aum": 100_000_000.0}]},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_market_price_map",
+        lambda symbols, **_kwargs: {
+            "DSTKF": {"price": 40.0, "currency": "TRY", "change_pct": 2.5, "as_of": "2026-05-20T10:00:00+00:00"}
+        },
+    )
+    client = TestClient(app)
+
+    response = client.get("/funds/TLY/holdings/live")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "daily_market_enrichment"
+    assert payload["positions"] == [
+        {
+            "asset_code": "DSTKF",
+            "price": 40.0,
+            "price_currency": "TRY",
+            "return_pct": 2.5,
+            "return_source": "infoyatirim_live_quote",
+            "return_as_of": "2026-05-20T10:00:00+00:00",
+            "estimated_exposure_value": 20_000_000.0,
+            "estimated_pnl_value": 500_000.0,
+            "estimated_fund_return_contribution_pct": 0.5,
+        }
+    ]
+    assert payload["portfolio_effect"]["estimated_return_pct"] == 0.5
+    assert payload["source_metadata"]["static_cache_hit"] is True
 
 
 def test_kap_holdings_parser_keeps_only_equities_and_funds() -> None:
@@ -1889,12 +2184,31 @@ CONSTITUENT CODE;CONSTITUENT NAME;INDEX CODE;INDEX NAME IN TURKISH;INDEX NAME IN
 AAA.E;AAA TEST;XUTUM;BIST TUM;BIST ALL SHARES;29/04/2026
 BBB.E;BBB TEST;XUTUM;BIST TUM;BIST ALL SHARES;29/04/2026
 AAA.E;AAA TEST;XU100;BIST 100;BIST 100;29/04/2026
+BNK.E;BANK TEST;XBANK;BIST BANKA;BIST BANKS;29/04/2026
 """
     parsed = kap_service_module.parse_bist_index_report_csv(csv_payload)
 
     assert parsed["XUTUM"]["symbols"] == ["AAA", "BBB"]
     assert parsed["XUTUM"]["source_date"] == "29/04/2026"
     assert parsed["XU100"]["symbols"] == ["AAA"]
+    assert parsed["XBANK"]["symbols"] == ["BNK"]
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return csv_payload.encode("utf-8-sig")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse())
+    sector_payload = kap_service_module.get_bist_index_universe("XBANK", force_refresh=True)
+
+    assert sector_payload["index"] == "XBANK"
+    assert sector_payload["symbols"] == ["BNK"]
+    assert sector_payload["fallback_used"] is False
 
     def fail_urlopen(*_args: Any, **_kwargs: Any) -> Any:
         raise OSError("network down")
@@ -2340,7 +2654,7 @@ def test_market_stock_cards_returns_quotes_and_line_points(monkeypatch: pytest.M
         "_kap_logo_payload_for_symbol",
         lambda symbol: pytest.fail(f"stock cards should not resolve logos over KAP: {symbol}"),
     )
-    monkeypatch.setattr(api_module, "get_instrument", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api_module, "get_instruments", lambda *_args, **_kwargs: {})
 
     client = TestClient(app)
     response = client.get("/market/stocks/cards?symbols=BIMAS,THYAO&refresh=true")
@@ -2823,11 +3137,11 @@ def test_market_stocks_rejects_unknown_index() -> None:
     assert "Desteklenmeyen endeks" in response.json()["detail"]
 
 
-def test_market_indices_list_returns_xutum_xu100_and_xu030(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_market_indices_list_returns_main_and_sector_indices(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_quote(index_code: str) -> Dict[str, Any]:
-        prices = {"XUTUM": 330.0, "XU100": 110.0, "XU030": 220.0}
-        prevs = {"XUTUM": 300.0, "XU100": 100.0, "XU030": 200.0}
-        labels = {"XUTUM": "BIST Tüm", "XU100": "BIST 100", "XU030": "BIST 30"}
+        prices = {"XUTUM": 330.0, "XU100": 110.0, "XU030": 220.0, "XBANK": 440.0}
+        prevs = {"XUTUM": 300.0, "XU100": 100.0, "XU030": 200.0, "XBANK": 400.0}
+        labels = {"XUTUM": "BIST Tüm", "XU100": "BIST 100", "XU030": "BIST 30", "XBANK": "BIST Banka"}
         return {
             "symbol": index_code,
             "label": labels[index_code],
@@ -2846,7 +3160,7 @@ def test_market_indices_list_returns_xutum_xu100_and_xu030(monkeypatch: pytest.M
         }
 
     def fake_bases(index_code: str) -> Dict[str, Any]:
-        latest = {"XUTUM": 330.0, "XU100": 110.0, "XU030": 220.0}[index_code]
+        latest = {"XUTUM": 330.0, "XU100": 110.0, "XU030": 220.0, "XBANK": 440.0}[index_code]
         return {
             "base_1w": latest / 1.1,
             "base_1m": latest - 20.0,
@@ -2862,16 +3176,26 @@ def test_market_indices_list_returns_xutum_xu100_and_xu030(monkeypatch: pytest.M
 
     monkeypatch.setattr(api_module, "_fetch_index_quote", fake_quote)
     monkeypatch.setattr(api_module, "_fetch_index_return_bases", fake_bases)
+    monkeypatch.setattr(api_module, "_MARKET_INDEX_ORDER", ["XUTUM", "XU100", "XU030", "XBANK"])
 
     client = TestClient(app)
     response = client.get("/market/indices")
 
     assert response.status_code == 200
     payload = response.json()
-    assert [row["symbol"] for row in payload["rows"]] == ["XUTUM", "XU100", "XU030"]
+    assert [row["symbol"] for row in payload["rows"]] == ["XUTUM", "XU100", "XU030", "XBANK"]
     assert payload["rows"][0]["label"] == "BIST Tüm"
     assert payload["rows"][0]["return_1w_pct"] == 10.0
     assert payload["rows"][0]["volume"] == 123000000.0
+    assert "XPTIC" not in {row["symbol"] for row in payload["rows"]}
+
+
+def test_market_sector_index_order_excludes_capped_and_removed_codes() -> None:
+    assert "XBANK" in api_module._MARKET_INDEX_ORDER
+    assert "XUSIN" in api_module._MARKET_INDEX_ORDER
+    for code in {"XSINS", "XGYOS", "XTKJS", "XTTIC", "XPTIC", "XKNKL", "XYIHZ"}:
+        assert code not in api_module._MARKET_INDEX_ORDER
+        assert code not in api_module._MARKET_INDEX_META
 
 
 def test_market_index_detail_returns_line_points_and_weighted_constituents(
@@ -2972,6 +3296,107 @@ def test_market_index_detail_returns_line_points_and_weighted_constituents(
     assert rows["AAA"]["point_effect"] == 5.0
     assert rows["BBB"]["weight_pct"] == 75.0
     assert rows["BBB"]["point_effect"] == -7.5
+
+
+def test_market_sector_index_detail_uses_bist_universe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_index_quote",
+        lambda _index_code: {
+            "symbol": "XBANK",
+            "label": "BIST Banka",
+            "yahoo_symbol": "XBANK.IS",
+            "price": 1500.0,
+            "prev_close": 1450.0,
+            "change": 50.0,
+            "change_pct": 3.45,
+            "high": 1510.0,
+            "low": 1440.0,
+            "volume": 5000000.0,
+            "currency": "TRY",
+            "market_state": "REGULAR",
+            "as_of": "2026-04-24T12:00:00+00:00",
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_index_return_bases",
+        lambda _index_code: {
+            "base_1w": 1400.0,
+            "base_1m": 1300.0,
+            "base_3m": 1200.0,
+            "base_6m": 1100.0,
+            "base_ytd": 1000.0,
+            "base_1y": 900.0,
+            "base_5y": 750.0,
+            "latest_close": 1500.0,
+            "as_of": "2026-04-24T12:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_index_intraday_payload",
+        lambda _index_code: {
+            "line_points": [{"time": "2026-04-24T10:00:00+00:00", "close": 1500.0}],
+            "high": 1510.0,
+            "low": 1440.0,
+            "prev_close": 1450.0,
+            "yahoo_symbol": "XBANK.IS",
+        },
+    )
+    monkeypatch.setattr(
+        "app.kap_service.get_bist_index_universe",
+        lambda index, force_refresh=False: {
+            "index": str(index).upper(),
+            "symbols": ["AAA", "BBB"],
+            "count": 2,
+            "source": "test",
+            "source_url": "test://bist",
+            "source_date": "29/04/2026",
+            "fetched_at": "2026-04-29T12:00:00+00:00",
+            "cache_hit": False,
+            "fallback_used": False,
+        },
+    )
+
+    def fake_price_map(symbols: List[str], *, index_name: str = "XU100") -> Dict[str, Dict[str, Any]]:
+        assert symbols == ["AAA", "BBB"]
+        assert index_name == "XUTUM"
+        return {
+            "AAA": {"price": 10.0, "currency": "TRY", "change_pct": 2.0, "volume": 100.0},
+            "BBB": {"price": 30.0, "currency": "TRY", "change_pct": -1.0, "volume": 200.0},
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_market_price_map", fake_price_map)
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: {})
+    monkeypatch.setattr(api_module, "_load_cached_kap_market_metadata", lambda _cache_dir, _symbol: {})
+    monkeypatch.setattr(
+        api_module,
+        "_market_stocks_payload",
+        lambda **_kwargs: pytest.fail("sector index detail should use the BIST index universe directly"),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_index_weight_inputs_for_symbol",
+        lambda symbol: {
+            "shares_outstanding": 100.0,
+            "fdpo": 0.5,
+            "weight_coefficient": 1.0,
+        },
+    )
+
+    client = TestClient(app)
+    response = client.get("/market/indices/XBANK")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "XBANK"
+    assert payload["return_5y_pct"] == 100.0
+    assert payload["weight_status"] == "available"
+    assert [row["symbol"] for row in payload["constituents"]] == ["BBB", "AAA"]
 
 
 def test_market_index_detail_leaves_weights_empty_when_inputs_missing(
