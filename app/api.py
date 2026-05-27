@@ -53,6 +53,7 @@ from src.ratio_engine import (
     run_cross_company_comparison,
 )
 from src.retrieve import RetrievedChunk, Retriever, RetrieverV2, RetrieverV3, RetrieverV5Hybrid, RetrieverV6Cross
+from app.cache import cache_status as _cache_status
 from app.reference_data import (
     get_instrument,
     get_instrument_name,
@@ -1051,7 +1052,7 @@ def _run_trend_mode(question: str, retriever_name: str, company: Optional[str] =
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"status": "ok"}
+    return {"status": "ok", **_cache_status()}
 
 
 @app.get("/stats")
