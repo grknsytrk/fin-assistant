@@ -530,6 +530,42 @@ export function tradingViewLogoUrl(
     return `https://s3-symbol-logo.tradingview.com/${slug}${hasKnownExtension ? '' : '.svg'}`;
 }
 
+export function tradingViewLogoUrlsForSymbol(
+    symbol: string,
+    companyName?: string,
+    options?: { force?: boolean }
+): string[] {
+    if (!options?.force && !TRADINGVIEW_FALLBACK_ENABLED) return [];
+    
+    const normalized = normalizeLogoSymbol(symbol);
+    const mappedSlug = TRADINGVIEW_SYMBOL_SLUG_MAP[normalized] || '';
+    
+    const slugs: string[] = [];
+    if (mappedSlug) {
+        slugs.push(mappedSlug);
+    }
+    
+    // Generate company name-based seeds
+    const seeds = companySlugCandidates(normalized, companyName);
+    
+    for (const seed of seeds) {
+        slugs.push(`${seed}--big`);
+        slugs.push(seed);
+    }
+    
+    // Always fall back to the symbol slug just in case
+    const symbolSlug = normalized.toLowerCase().replace(/\//g, '-');
+    slugs.push(`${symbolSlug}--big`);
+    slugs.push(symbolSlug);
+    
+    const urls = slugs.map((slug) => {
+        const hasKnownExtension = /\.(svg|png|jpe?g|webp)$/i.test(slug);
+        return `https://s3-symbol-logo.tradingview.com/${slug}${hasKnownExtension ? '' : '.svg'}`;
+    });
+    
+    return Array.from(new Set(urls));
+}
+
 export function logoDevDomainUrl(domain: string | null): string | null {
     if (!LOGO_DEV_ENABLED || !domain) return null;
     const cleanDomain = String(domain).trim().toLowerCase();

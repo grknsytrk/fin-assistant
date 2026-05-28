@@ -11,6 +11,7 @@ import {
     stockLogoDevDomains,
     tradingViewCountryFlagUrl,
     tradingViewLogoUrl,
+    tradingViewLogoUrlsForSymbol,
 } from './symbolLogoMaps';
 import './SymbolLogo.css';
 
@@ -178,15 +179,8 @@ function buildCandidates({
         candidates.push(...explicitLogoUrlsForSymbol(normalized));
         candidates.push(...fintablesLogoUrlsForSymbol(normalized));
 
-        const mappedTradingViewUrl = tradingViewLogoUrl(normalized, { force: true, requireMappedSlug: true });
-        if (mappedTradingViewUrl) {
-            candidates.push(mappedTradingViewUrl);
-        }
-
-        const tradingViewUrl = tradingViewLogoUrl(normalized, { force: true });
-        if (tradingViewUrl) {
-            candidates.push(tradingViewUrl);
-        }
+        const tvUrls = tradingViewLogoUrlsForSymbol(normalized, name, { force: true });
+        candidates.push(...tvUrls);
 
         const domains = stockLogoDevDomains(normalized, name);
         for (const domain of domains) {
