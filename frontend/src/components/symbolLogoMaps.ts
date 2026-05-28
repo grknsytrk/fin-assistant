@@ -546,25 +546,32 @@ export function tradingViewLogoUrlsForSymbol(
     const normalized = normalizeLogoSymbol(symbol);
     const mappedSlug = TRADINGVIEW_SYMBOL_SLUG_MAP[normalized] || '';
     
-    const slugs: string[] = [];
-    if (mappedSlug) {
-        slugs.push(mappedSlug);
-    }
+    const dynamicSlugs: string[] = [];
     
     // Generate company name-based seeds
     const seeds = companySlugCandidates(normalized, companyName);
     
     for (const seed of seeds) {
-        slugs.push(`${seed}--big`);
-        slugs.push(seed);
+        dynamicSlugs.push(`${seed}--big`);
+        dynamicSlugs.push(seed);
     }
     
     // Always fall back to the symbol slug just in case
     const symbolSlug = normalized.toLowerCase().replace(/\//g, '-');
-    slugs.push(`${symbolSlug}--big`);
-    slugs.push(symbolSlug);
+    dynamicSlugs.push(`${symbolSlug}--big`);
+    dynamicSlugs.push(symbolSlug);
     
-    const urls = slugs.map((slug) => {
+    // Sort dynamic slugs by length descending so that more specific/longer slugs (e.g. advanced-micro-devices)
+    // are tried before shorter/generic ones (e.g. advanced) that might exist for other companies.
+    const sortedDynamicSlugs = Array.from(new Set(dynamicSlugs)).sort((a, b) => b.length - a.length);
+    
+    const finalSlugs: string[] = [];
+    if (mappedSlug) {
+        finalSlugs.push(mappedSlug);
+    }
+    finalSlugs.push(...sortedDynamicSlugs);
+    
+    const urls = finalSlugs.map((slug) => {
         const hasKnownExtension = /\.(svg|png|jpe?g|webp)$/i.test(slug);
         return `https://s3-symbol-logo.tradingview.com/${slug}${hasKnownExtension ? '' : '.svg'}`;
     });
