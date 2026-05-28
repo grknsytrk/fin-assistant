@@ -18,8 +18,8 @@
 }
 
 .symbol-logo-fallback {
-    font-family: var(--font-mono);
-    font-weight: 900;
+    font-family: var(--font-mono) !important;
+    font-weight: 700 !important;
     letter-spacing: 0.02em;
     line-height: 1;
     text-transform: uppercase;
