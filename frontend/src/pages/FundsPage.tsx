@@ -902,10 +902,18 @@ function formatHoldingWeight(position: FundPortfolioPosition, key: 'weight' | 'p
     return formatAllocationWeight(holdingWeightValue(position, key));
 }
 
-function formatWeightDelta(value: number | null | undefined): string {
+
+
+function renderWeightDelta(value: number | null | undefined): ReactNode {
     if (value == null || !Number.isFinite(value)) return '-';
     const sign = value > 0 ? '+' : '';
-    return `${sign}${value.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} puan`;
+    const numStr = `${sign}${value.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return (
+        <>
+            <span style={{ fontFamily: 'var(--font-mono)' }}>{numStr}</span>
+            <span style={{ fontFamily: 'var(--font-family)', marginLeft: '0.22rem' }}>puan</span>
+        </>
+    );
 }
 
 function formatCompactWeightDelta(value: number | null | undefined): string {
@@ -2228,7 +2236,7 @@ function AllocationHistoryChart({
                             <i style={{ background: trend.color }} />
                             <em>{trend.label}</em>
                             <b>{formatAllocationWeight(weight)}</b>
-                            <small className={pctClass(delta)}>{formatWeightDelta(delta)}</small>
+                            <small className={pctClass(delta)}>{renderWeightDelta(delta)}</small>
                         </span>
                     ))}
                 </div>
@@ -2300,8 +2308,8 @@ function FundAllocationHistoryPanel({
                                         </td>
                                         <td>{formatAllocationWeight(trend.startWeight)}</td>
                                         <td>{formatAllocationWeight(trend.endWeight)}</td>
-                                        <td className={pctClass(latestAllocationDelta(trend))}>{formatWeightDelta(latestAllocationDelta(trend))}</td>
-                                        <td className={pctClass(trend.delta)}>{formatWeightDelta(trend.delta)}</td>
+                                        <td className={pctClass(latestAllocationDelta(trend))}>{renderWeightDelta(latestAllocationDelta(trend))}</td>
+                                        <td className={pctClass(trend.delta)}>{renderWeightDelta(trend.delta)}</td>
                                         <td><AllocationSparkline trend={trend} /></td>
                                     </tr>
                                 ))}
@@ -2938,7 +2946,7 @@ function FundHoldingsPanel({
                                                 />
                                             </div>
                                             <span className="fund-holdings-rank-weight">{formatHoldingWeight(position)}</span>
-                                            <span className={pctClass(position.weight_change)}>{formatWeightDelta(position.weight_change)}</span>
+                                            <span className={pctClass(position.weight_change)}>{renderWeightDelta(position.weight_change)}</span>
                                         </div>
                                         <span className="fund-holdings-rank-previous">
                                             {previousRank == null
@@ -3097,7 +3105,7 @@ function FundHoldingsPanel({
                                                     <td className="fund-holding-weight-previous">
                                                         {formatHoldingWeight(position, 'previous_weight')}
                                                     </td>
-                                                    <td className={pctClass(position.weight_change)}>{formatWeightDelta(position.weight_change)}</td>
+                                                    <td className={pctClass(position.weight_change)}>{renderWeightDelta(position.weight_change)}</td>
                                                     <td>
                                                         {position.source_report_url ? (
                                                             <a
