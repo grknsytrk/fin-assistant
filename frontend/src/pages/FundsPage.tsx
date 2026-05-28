@@ -31,6 +31,7 @@ import {
     ShieldAlert,
     SlidersHorizontal,
     Star,
+    Trophy,
     X,
 } from 'lucide-react';
 import { apiClient } from '../api/client';
@@ -57,6 +58,7 @@ import type {
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo from '../components/SymbolLogo';
 import { STOCK_LOGO_DOMAIN_MAP } from '../components/symbolLogoMaps';
+import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useWatchlist } from '../hooks/useWatchlist';
 import type { FundTab } from '../routing/routes';
 import './FundsPage.css';
@@ -885,6 +887,15 @@ function formatAllocationWeight(value: number | null | undefined): string {
     return `% ${value.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function holdingWeightValue(position: FundPortfolioPosition, key: 'weight' | 'previous_weight' = 'weight'): number | null {
+    const value = Number(key === 'weight' ? position.weight : position.previous_weight);
+    return Number.isFinite(value) ? value : null;
+}
+
+function formatHoldingWeight(position: FundPortfolioPosition, key: 'weight' | 'previous_weight' = 'weight'): string {
+    return formatAllocationWeight(holdingWeightValue(position, key));
+}
+
 function formatWeightDelta(value: number | null | undefined): string {
     if (value == null || !Number.isFinite(value)) return '-';
     const sign = value > 0 ? '+' : '';
@@ -1014,6 +1025,8 @@ function holdingSortLabel(position: FundPortfolioPosition): string {
 }
 
 function holdingNumberValue(position: FundPortfolioPosition, key: Exclude<FundHoldingSortKey, 'asset'>): number | null {
+    if (key === 'weight') return holdingWeightValue(position, 'weight');
+    if (key === 'previous_weight') return holdingWeightValue(position, 'previous_weight');
     const value = Number(position[key]);
     return Number.isFinite(value) ? value : null;
 }
@@ -2330,7 +2343,7 @@ function FundHoldingsHighlightCard({ title, positions }: FundHoldingsHighlightCa
                                     <strong>{position.asset_code || '-'}</strong>
                                 </span>
                                 <span className="fund-holdings-highlight-values">
-                                    <strong>{formatAllocationWeight(position.weight)}</strong>
+                                    <strong>{formatHoldingWeight(position)}</strong>
                                     <small className={pctClass(position.weight_change)}>{formatCompactWeightDelta(position.weight_change)}</small>
                                 </span>
                             </div>
@@ -2355,8 +2368,8 @@ function FundHoldingsSnapshot({
 }) {
     const relevantPositions = useMemo(
         () => positions.filter((position) => {
-            const weight = Number(position.weight);
-            return Number.isFinite(weight) && weight > 0;
+            const weight = holdingWeightValue(position);
+            return weight != null && weight > 0;
         }),
         [positions],
     );
@@ -2474,6 +2487,35 @@ function FundOverviewMetrics({ series }: { series: FundOverviewMetricSeries }) {
     );
 }
 
+function FundCategoryRankingsPanel({ rankings }: { rankings: FundDetail['category_rankings'] | undefined }) {
+    const items = (rankings?.items || []).filter((item) => item.rank > 0 && item.total > 0).slice(0, 4);
+    if (!items.length) return null;
+
+    return (
+        <section className="fund-category-ranking-panel" aria-label="Kategori sıralaması">
+            <div className="fund-category-ranking-head">
+                <div>
+                    <span>Kategori Sıralaması</span>
+                    <strong>{rankings?.category || 'Fon türü'}</strong>
+                </div>
+                <small>
+                    <Trophy size={15} aria-hidden="true" />
+                    {(rankings?.category_total || items[0]?.total || 0).toLocaleString('tr-TR')} fon
+                </small>
+            </div>
+            <div className="fund-category-ranking-grid">
+                {items.map((item) => (
+                    <div className="fund-category-ranking-card" key={item.key} title={`${item.label}: ${formatPct(item.value)}`}>
+                        <span>{item.label}</span>
+                        <strong>{item.rank.toLocaleString('tr-TR')}/{item.total.toLocaleString('tr-TR')}</strong>
+                        <small>{item.top_percentile != null ? `Üst %${item.top_percentile.toLocaleString('tr-TR')}` : formatPct(item.value)}</small>
+                    </div>
+                ))}
+            </div>
+        </section>
+    );
+}
+
 function FundOverviewHoldingsSection({
     holdings,
     loading,
@@ -2581,50 +2623,64 @@ function FundHoldingsPanel({
         () => positions.filter((position) => holdingAssetCategory(position)),
         [positions],
     );
+    const activeDisplayablePositions = useMemo(
+        () => displayablePositions.filter((position) => {
+            const weight = holdingWeightValue(position);
+            return weight != null && weight > 0;
+        }),
+        [displayablePositions],
+    );
     const filteredPositions = useMemo(
         () => filterFundHoldings(displayablePositions, categoryFilter, changeFilter),
         [displayablePositions, categoryFilter, changeFilter],
     );
+    const activeFilteredPositions = useMemo(
+        () => filteredPositions.filter((position) => {
+            const weight = holdingWeightValue(position);
+            return weight != null && weight > 0;
+        }),
+        [filteredPositions],
+    );
     const sortedFilteredPositions = useMemo(
-        () => sortHoldingPositions(filteredPositions, holdingSort.key, holdingSort.direction),
-        [filteredPositions, holdingSort],
+        () => sortHoldingPositions(activeFilteredPositions, holdingSort.key, holdingSort.direction),
+        [activeFilteredPositions, holdingSort],
     );
     const rankingPositions = useMemo(() => {
         const currentPositions = sortHoldingPositionsByWeight(
             filteredPositions.filter((position) => {
-                const weight = Number(position.weight);
-                return Number.isFinite(weight) && weight > 0;
+                const weight = holdingWeightValue(position);
+                return weight != null && weight > 0;
             }),
             'desc',
         );
-        const selectedKeys = new Set(currentPositions.slice(0, 12).map(holdingPositionKey));
+        const selectedKeys = new Set(currentPositions.map(holdingPositionKey));
         const removedPositions = sortHoldingPositions(
             filteredPositions.filter((position) => {
                 if (selectedKeys.has(holdingPositionKey(position))) return false;
-                const currentWeight = Number(position.weight);
-                const previousWeight = Number(position.previous_weight);
-                return (!Number.isFinite(currentWeight) || currentWeight <= 0)
-                    && Number.isFinite(previousWeight)
+                const currentWeight = holdingWeightValue(position);
+                const previousWeight = holdingWeightValue(position, 'previous_weight');
+                return (currentWeight == null || currentWeight <= 0)
+                    && previousWeight != null
                     && previousWeight > 0;
             }),
             'previous_weight',
             'desc',
         );
-        return [...currentPositions.slice(0, 12), ...removedPositions.slice(0, 2)];
+        return [...currentPositions, ...removedPositions];
     }, [filteredPositions]);
     const maxRankingWeight = Math.max(
         0,
         ...rankingPositions.flatMap((position) => [
-            Number(position.weight) || 0,
-            Number(position.previous_weight) || 0,
+            holdingWeightValue(position) || 0,
+            holdingWeightValue(position, 'previous_weight') || 0,
         ]),
     );
     const previousRankByKey = useMemo(() => {
         const map = new Map<string, number>();
         sortHoldingPositions(
             filteredPositions.filter((position) => {
-                const weight = Number(position.previous_weight);
-                return Number.isFinite(weight) && weight > 0;
+                const weight = holdingWeightValue(position, 'previous_weight');
+                return weight != null && weight > 0;
             }),
             'previous_weight',
             'desc',
@@ -2646,12 +2702,17 @@ function FundHoldingsPanel({
     const previousReport = previousHoldingReportMeta(holdings);
     const asOf = latestReport?.report_date || holdings?.source_metadata?.as_of || displayablePositions.find((position) => position.report_date)?.report_date || null;
     const portfolioEffect = holdings?.portfolio_effect || null;
+    const holdingsQuality = holdings?.source_metadata?.holdings_quality || null;
     const currentMonthLabel = formatMonthLegendLabel(asOf, 'GÜNCEL');
     const previousMonthLabel = formatMonthLegendLabel(
         previousReport?.report_date || displayablePositions.find((position) => position.previous_report_date)?.previous_report_date,
         'ÖNCEKİ',
     );
-    const hasPartialWarning = Boolean(holdings && holdings.status !== 'ok' && displayablePositions.length);
+    const normalizedCount = finiteNumber(holdingsQuality?.normalized_position_count);
+    const qualityWarning = normalizedCount != null && normalizedCount > 0
+        ? `${normalizedCount} ağırlık ölçek hatası nedeniyle normalize edildi.`
+        : null;
+    const hasPartialWarning = Boolean(holdings && displayablePositions.length && (holdings.status !== 'ok' || qualityWarning));
 
     return (
         <section className="fund-holdings-panel" aria-label="Fon içeriği">
@@ -2661,7 +2722,7 @@ function FundHoldingsPanel({
                     <p>{asOf ? `${formatDate(asOf)} KAP portföy dağılım raporu` : 'KAP portföy dağılım raporu'}</p>
                 </div>
                 <div className="fund-holdings-head-actions">
-                    <strong>{displayablePositions.length ? `${displayablePositions.length} varlık` : loading ? 'Yükleniyor' : '-'}</strong>
+                    <strong>{activeDisplayablePositions.length ? `${activeDisplayablePositions.length} varlık` : loading ? 'Yükleniyor' : '-'}</strong>
                 </div>
             </div>
 
@@ -2672,7 +2733,9 @@ function FundHoldingsPanel({
             ) : displayablePositions.length ? (
                 <>
                     {hasPartialWarning && (
-                        <div className="fund-holdings-warning">KAP raporu kısmi parse edildi; bazı satırlar eksik olabilir.</div>
+                        <div className="fund-holdings-warning">
+                            {qualityWarning || 'KAP raporu kısmi parse edildi; bazı satırlar eksik olabilir.'}
+                        </div>
                     )}
                     {portfolioEffect && (
                         <div className="fund-holdings-effect-summary" aria-label="KAP ağırlıklarıyla günlük tahmin">
@@ -2693,7 +2756,9 @@ function FundHoldingsPanel({
                             <div className="fund-holdings-effect-card">
                                 <span>Fiyatlanan ağırlık</span>
                                 <strong>{formatAllocationWeight(portfolioEffect.priced_weight)}</strong>
-                                <small>Eksik {formatAllocationWeight(portfolioEffect.missing_weight)}</small>
+                                <small>
+                                    Eksik {formatAllocationWeight(portfolioEffect.missing_weight)}
+                                </small>
                             </div>
                         </div>
                     )}
@@ -2736,14 +2801,14 @@ function FundHoldingsPanel({
                                 const logoKind = category === 'fund' ? 'fund' : 'stock';
                                 const stockTicker = category === 'local_equity' ? normalizeCompareSymbol(position.asset_code) : '';
                                 const canOpenStock = Boolean(onOpenTicker && stockTicker);
-                                const weight = Number(position.weight) || 0;
-                                const previousWeight = Number(position.previous_weight) || 0;
+                                const weight = holdingWeightValue(position) || 0;
+                                const previousWeight = holdingWeightValue(position, 'previous_weight') || 0;
                                 const widthPct = maxRankingWeight > 0 && weight > 0 ? Math.max(3, (weight / maxRankingWeight) * 100) : 0;
                                 const previousWidthPct = maxRankingWeight > 0 && previousWeight > 0 ? Math.max(3, (previousWeight / maxRankingWeight) * 100) : 0;
                                 const previousRank = previousRankByKey.get(holdingPositionKey(position));
                                 const rankDelta = previousRank == null ? null : previousRank - (index + 1);
                                 const rankTrend = rankDelta == null ? '' : rankDelta > 0 ? '▲' : rankDelta < 0 ? '▼' : '—';
-                                const barTooltip = `${currentMonthLabel}: ${formatAllocationWeight(position.weight)} · ${previousMonthLabel}: ${formatAllocationWeight(position.previous_weight)}`;
+                                const barTooltip = `${currentMonthLabel}: ${formatHoldingWeight(position)} · ${previousMonthLabel}: ${formatHoldingWeight(position, 'previous_weight')}`;
                                 const status = holdingChangeStatus(position);
                                 const statusIcon = status === 'new'
                                     ? <LogIn size={13} aria-label="Fona girdi" />
@@ -2796,7 +2861,7 @@ function FundHoldingsPanel({
                                                     style={{ '--holding-weight-width': `${previousWidthPct}%` } as CSSProperties}
                                                 />
                                             </div>
-                                            <span className="fund-holdings-rank-weight">{formatAllocationWeight(position.weight)}</span>
+                                            <span className="fund-holdings-rank-weight">{formatHoldingWeight(position)}</span>
                                             <span className={pctClass(position.weight_change)}>{formatWeightDelta(position.weight_change)}</span>
                                         </div>
                                         <span className="fund-holdings-rank-previous">
@@ -2938,8 +3003,12 @@ function FundHoldingsPanel({
                                                             </small>
                                                         </span>
                                                     </FundLiveValueCell>
-                                                    <td className="fund-holding-weight-current">{formatAllocationWeight(position.weight)}</td>
-                                                    <td className="fund-holding-weight-previous">{formatAllocationWeight(position.previous_weight)}</td>
+                                                    <td className="fund-holding-weight-current">
+                                                        {formatHoldingWeight(position)}
+                                                    </td>
+                                                    <td className="fund-holding-weight-previous">
+                                                        {formatHoldingWeight(position, 'previous_weight')}
+                                                    </td>
                                                     <td className={pctClass(position.weight_change)}>{formatWeightDelta(position.weight_change)}</td>
                                                     <td>
                                                         {position.source_report_url ? (
@@ -2964,8 +3033,8 @@ function FundHoldingsPanel({
                             </tbody>
                         </table>
                     </div>
-                    {!filteredPositions.length && (
-                        <div className="funds-state">Bu filtre için fon içeriği bulunamadı.</div>
+                    {!activeFilteredPositions.length && (
+                        <div className="funds-state">Bu filtre için güncel portföyde varlık bulunamadı.</div>
                     )}
                 </>
             ) : (
@@ -3059,6 +3128,14 @@ type FundCompareDataset = {
     performance: FundPerformanceResponse | null;
     allocations: FundAllocationsResponse | null;
     holdings: FundHoldingsResponse | null;
+    detailLoading: boolean;
+    performanceLoading: boolean;
+    allocationsLoading: boolean;
+    holdingsLoading: boolean;
+    detailError: string | null;
+    performanceError: string | null;
+    allocationsError: string | null;
+    holdingsError: string | null;
     loading: boolean;
     error: string | null;
 };
@@ -3073,6 +3150,54 @@ type FundCompareTableRow = {
     label: string;
     values: FundCompareCell[];
 };
+
+function emptyFundCompareDataset(): FundCompareDataset {
+    return {
+        detail: null,
+        performance: null,
+        allocations: null,
+        holdings: null,
+        detailLoading: false,
+        performanceLoading: false,
+        allocationsLoading: false,
+        holdingsLoading: false,
+        detailError: null,
+        performanceError: null,
+        allocationsError: null,
+        holdingsError: null,
+        loading: false,
+        error: null,
+    };
+}
+
+function mergeFundCompareDataset(
+    dataset: FundCompareDataset | undefined,
+    patch: Partial<FundCompareDataset>,
+): FundCompareDataset {
+    const next = { ...(dataset || emptyFundCompareDataset()), ...patch };
+    return {
+        ...next,
+        loading: next.detailLoading || next.performanceLoading || next.allocationsLoading || next.holdingsLoading,
+        error: next.detailError || next.performanceError || next.allocationsError || next.holdingsError,
+    };
+}
+
+function fundSummaryShell(fundCode: string): FundSummary {
+    return {
+        fund_code: fundCode,
+        name: fundCode,
+        fund_type: null,
+        founder_company: null,
+        manager_company: null,
+        price: null,
+        daily_return: null,
+        period_returns: {},
+        risk_value: null,
+        currency: 'TRY',
+        as_of: null,
+        source: 'selected',
+    };
+}
 
 function finiteNumber(value: number | null | undefined): number | null {
     return value == null || !Number.isFinite(value) ? null : value;
@@ -3169,8 +3294,11 @@ function topAllocations(payload: FundAllocationsResponse | null): FundAllocation
 
 function topHoldingPositions(payload: FundHoldingsResponse | null): FundPortfolioPosition[] {
     return [...(payload?.positions || [])]
-        .filter((position) => finiteNumber(position.weight) != null && Number(position.weight) > 0)
-        .sort((a, b) => Number(b.weight || 0) - Number(a.weight || 0))
+        .filter((position) => {
+            const weight = holdingWeightValue(position);
+            return weight != null && weight > 0;
+        })
+        .sort((a, b) => Number(holdingWeightValue(b) || 0) - Number(holdingWeightValue(a) || 0))
         .slice(0, 5);
 }
 
@@ -3178,7 +3306,7 @@ function topHoldingSectors(payload: FundHoldingsResponse | null): Array<{ label:
     const weights = new Map<string, number>();
     for (const position of payload?.positions || []) {
         if (position.asset_type !== 'local_equity' || !position.sector_label) continue;
-        const weight = finiteNumber(position.weight);
+        const weight = holdingWeightValue(position);
         if (weight == null || weight <= 0) continue;
         weights.set(position.sector_label, (weights.get(position.sector_label) || 0) + weight);
     }
@@ -3505,6 +3633,7 @@ function FundComparisonPage({
 }) {
     const rows = funds?.rows || [];
     const [selectedCodes, setSelectedCodes] = useState<string[]>([]);
+    const [selectedFundCache, setSelectedFundCache] = useState<Record<string, FundSummary>>({});
     const [range, setRange] = useState<FundCompareRange>('6m');
     const [datasets, setDatasets] = useState<Record<string, FundCompareDataset>>({});
     const [picker, setPicker] = useState<{ mode: 'add' } | { mode: 'swap'; index: number } | null>(null);
@@ -3513,6 +3642,8 @@ function FundComparisonPage({
     const [searchLoading, setSearchLoading] = useState(false);
     const inputRef = useRef<HTMLInputElement | null>(null);
     const swapPopoverRef = useRef<HTMLDivElement | null>(null);
+    const staticRequestRef = useRef(0);
+    const performanceRequestRef = useRef(0);
 
     const searchOpen = picker !== null;
     const isSwapping = (index: number) => picker?.mode === 'swap' && picker.index === index;
@@ -3522,9 +3653,69 @@ function FundComparisonPage({
             setDatasets({});
             return;
         }
-        let alive = true;
-        // Pick the start date for the chosen range so the backend returns enough history,
-        // mirroring how the fund detail chart fetches its performance per range.
+        const generation = staticRequestRef.current + 1;
+        staticRequestRef.current = generation;
+        const selectedSet = new Set(selectedCodes);
+        setDatasets((current) => {
+            const next: Record<string, FundCompareDataset> = {};
+            for (const code of selectedCodes) {
+                const currentDataset = current[code];
+                next[code] = mergeFundCompareDataset(currentDataset, {
+                    detailLoading: !currentDataset?.detail,
+                    allocationsLoading: !currentDataset?.allocations,
+                    holdingsLoading: !currentDataset?.holdings,
+                    detailError: null,
+                    allocationsError: null,
+                    holdingsError: null,
+                });
+            }
+            return next;
+        });
+
+        const updateSlice = (code: string, patch: Partial<FundCompareDataset>) => {
+            if (staticRequestRef.current !== generation || !selectedSet.has(code)) return;
+            setDatasets((current) => {
+                if (!selectedSet.has(code)) return current;
+                return {
+                    ...current,
+                    [code]: mergeFundCompareDataset(current[code], patch),
+                };
+            });
+        };
+
+        for (const code of selectedCodes) {
+            apiClient
+                .fundDetail(code)
+                .then((detail) => {
+                    setSelectedFundCache((current) => ({ ...current, [code]: detail }));
+                    updateSlice(code, { detail, detailLoading: false, detailError: null });
+                })
+                .catch((err) => updateSlice(code, {
+                    detailLoading: false,
+                    detailError: err instanceof Error ? err.message : 'Fon detayı alınamadı.',
+                }));
+            apiClient
+                .fundAllocations(code)
+                .then((allocations) => updateSlice(code, { allocations, allocationsLoading: false, allocationsError: null }))
+                .catch((err) => updateSlice(code, {
+                    allocationsLoading: false,
+                    allocationsError: err instanceof Error ? err.message : 'Varlık dağılımı alınamadı.',
+                }));
+            apiClient
+                .fundHoldings(code)
+                .then((holdings) => updateSlice(code, { holdings, holdingsLoading: false, holdingsError: null }))
+                .catch((err) => updateSlice(code, {
+                    holdingsLoading: false,
+                    holdingsError: err instanceof Error ? err.message : 'KAP fon içeriği alınamadı.',
+                }));
+        }
+    }, [selectedCodes]);
+
+    useEffect(() => {
+        if (!selectedCodes.length) return;
+        const generation = performanceRequestRef.current + 1;
+        performanceRequestRef.current = generation;
+        const selectedSet = new Set(selectedCodes);
         const todayIso = new Date().toISOString().slice(0, 10);
         const performanceStartDate = range === 'all'
             ? undefined
@@ -3532,44 +3723,34 @@ function FundComparisonPage({
         setDatasets((current) => {
             const next: Record<string, FundCompareDataset> = {};
             for (const code of selectedCodes) {
-                next[code] = current[code] || { detail: null, performance: null, allocations: null, holdings: null, loading: true, error: null };
-                next[code] = { ...next[code], loading: true, error: null };
+                next[code] = mergeFundCompareDataset(current[code], {
+                    performanceLoading: true,
+                    performanceError: null,
+                });
             }
             return next;
         });
-        Promise.all(selectedCodes.map(async (code) => {
-            const [detailResult, performanceResult, allocationsResult, holdingsResult] = await Promise.allSettled([
-                apiClient.fundDetail(code),
-                apiClient.fundPerformance(code, performanceStartDate ? { startDate: performanceStartDate } : undefined),
-                apiClient.fundAllocations(code),
-                apiClient.fundHoldings(code),
-            ]);
-            const firstError = [detailResult, performanceResult, allocationsResult, holdingsResult]
-                .find((result) => result.status === 'rejected') as PromiseRejectedResult | undefined;
-            return {
-                code,
-                dataset: {
-                    detail: detailResult.status === 'fulfilled' ? detailResult.value : null,
-                    performance: performanceResult.status === 'fulfilled' ? performanceResult.value : null,
-                    allocations: allocationsResult.status === 'fulfilled' ? allocationsResult.value : null,
-                    holdings: holdingsResult.status === 'fulfilled' ? holdingsResult.value : null,
-                    loading: false,
-                    error: firstError?.reason instanceof Error ? firstError.reason.message : null,
-                } satisfies FundCompareDataset,
-            };
-        })).then((results) => {
-            if (!alive) return;
-            setDatasets(() => {
-                const next: Record<string, FundCompareDataset> = {};
-                for (const result of results) {
-                    next[result.code] = result.dataset;
-                }
-                return next;
-            });
-        });
-        return () => {
-            alive = false;
-        };
+        for (const code of selectedCodes) {
+            apiClient
+                .fundPerformance(code, performanceStartDate ? { startDate: performanceStartDate } : undefined)
+                .then((performance) => {
+                    if (performanceRequestRef.current !== generation || !selectedSet.has(code)) return;
+                    setDatasets((current) => ({
+                        ...current,
+                        [code]: mergeFundCompareDataset(current[code], { performance, performanceLoading: false, performanceError: null }),
+                    }));
+                })
+                .catch((err) => {
+                    if (performanceRequestRef.current !== generation || !selectedSet.has(code)) return;
+                    setDatasets((current) => ({
+                        ...current,
+                        [code]: mergeFundCompareDataset(current[code], {
+                            performanceLoading: false,
+                            performanceError: err instanceof Error ? err.message : 'Performans verisi alınamadı.',
+                        }),
+                    }));
+                });
+        }
     }, [selectedCodes, range]);
 
     useEffect(() => {
@@ -3601,8 +3782,19 @@ function FundComparisonPage({
     }, [query, searchOpen]);
 
     const selectedFunds = useMemo(() => selectedCodes
-        .map((code) => datasets[code]?.detail || rows.find((row) => row.fund_code === code) || searchRows.find((row) => row.fund_code === code) || null)
-        .filter((row): row is FundSummary => Boolean(row)), [datasets, rows, searchRows, selectedCodes]);
+        .map((code) => datasets[code]?.detail
+            || selectedFundCache[code]
+            || rows.find((row) => row.fund_code === code)
+            || searchRows.find((row) => row.fund_code === code)
+            || fundSummaryShell(code)), [datasets, rows, searchRows, selectedCodes, selectedFundCache]);
+    const documentTitle = useMemo(
+        () => buildDocumentTitle(
+            'Fon Karşılaştırma',
+            selectedFunds.length ? selectedFunds.map((fund) => fund.fund_code).join(' / ') : 'Fon seçimi',
+        ),
+        [selectedFunds],
+    );
+    useDocumentTitle(documentTitle);
 
     const searchResults = useMemo(() => {
         const selectedSet = new Set(selectedCodes);
@@ -3625,6 +3817,7 @@ function FundComparisonPage({
     }, [query, rows, searchRows, selectedCodes]);
 
     const addFund = useCallback((fund: FundSummary) => {
+        setSelectedFundCache((current) => ({ ...current, [fund.fund_code]: fund }));
         setSelectedCodes((current) => {
             if (current.length >= FUND_COMPARE_MAX_FUNDS) return current;
             if (current.includes(fund.fund_code)) return current;
@@ -3635,6 +3828,7 @@ function FundComparisonPage({
     }, []);
 
     const swapFundAt = useCallback((index: number, fund: FundSummary) => {
+        setSelectedFundCache((current) => ({ ...current, [fund.fund_code]: fund }));
         setSelectedCodes((current) => {
             if (index < 0 || index >= current.length) return current;
             // If the picked fund is already in another slot, ignore the swap silently.
@@ -3718,21 +3912,30 @@ function FundComparisonPage({
     const allocationRowsForTable: FundCompareTableRow[] = Array.from({ length: 5 }, (_, index) => ({
         label: `${index + 1}. Varlık`,
         values: selectedFunds.map((fund) => {
-            const allocation = topAllocations(datasets[fund.fund_code]?.allocations || null)[index];
+            const dataset = datasets[fund.fund_code];
+            if (dataset?.allocationsLoading && !dataset.allocations) return comparisonCell('Yükleniyor');
+            if (dataset?.allocationsError && !dataset.allocations) return comparisonCell('Alınamadı');
+            const allocation = topAllocations(dataset?.allocations || null)[index];
             return comparisonCell(allocation?.label, allocation ? `(${formatPlainPct(allocation.weight)})` : undefined);
         }),
     }));
     const positionRows: FundCompareTableRow[] = Array.from({ length: 5 }, (_, index) => ({
         label: `${index + 1}. Hisse`,
         values: selectedFunds.map((fund) => {
-            const position = topHoldingPositions(datasets[fund.fund_code]?.holdings || null)[index];
-            return comparisonCell(position?.asset_code || position?.asset_name, position ? formatPlainPct(position.weight) : undefined);
+            const dataset = datasets[fund.fund_code];
+            if (dataset?.holdingsLoading && !dataset.holdings) return comparisonCell('Yükleniyor');
+            if (dataset?.holdingsError && !dataset.holdings) return comparisonCell('Alınamadı');
+            const position = topHoldingPositions(dataset?.holdings || null)[index];
+            return comparisonCell(position?.asset_code || position?.asset_name, position ? formatPlainPct(holdingWeightValue(position)) : undefined);
         }),
     }));
     const sectorRows: FundCompareTableRow[] = Array.from({ length: 5 }, (_, index) => ({
         label: `${index + 1}. Sektör`,
         values: selectedFunds.map((fund) => {
-            const sector = topHoldingSectors(datasets[fund.fund_code]?.holdings || null)[index];
+            const dataset = datasets[fund.fund_code];
+            if (dataset?.holdingsLoading && !dataset.holdings) return comparisonCell('Yükleniyor');
+            if (dataset?.holdingsError && !dataset.holdings) return comparisonCell('Alınamadı');
+            const sector = topHoldingSectors(dataset?.holdings || null)[index];
             return comparisonCell(sector?.label, sector ? formatPlainPct(sector.weight) : undefined);
         }),
     }));
@@ -3796,9 +3999,21 @@ function FundComparisonPage({
         }),
     }));
     const datasetErrors = selectedFunds
-        .map((fund) => datasets[fund.fund_code]?.error)
+        .flatMap((fund) => {
+            const dataset = datasets[fund.fund_code];
+            return [
+                dataset?.performanceError,
+                dataset?.detailError,
+                dataset?.allocationsError,
+                dataset?.holdingsError,
+            ];
+        })
         .filter((item): item is string => Boolean(item));
-    const anyDatasetLoading = selectedFunds.some((fund) => datasets[fund.fund_code]?.loading);
+    const anyPerformanceLoading = selectedFunds.some((fund) => {
+        const dataset = datasets[fund.fund_code];
+        return Boolean(dataset?.performanceLoading && !(dataset.performance?.points || []).length);
+    });
+    const hasChartPerformance = selectedFunds.some((fund) => (datasets[fund.fund_code]?.performance?.points || []).length >= 2);
 
     return (
         <div className={`fund-compare-page ${searchOpen ? 'is-picker-open' : ''}`}>
@@ -3839,8 +4054,8 @@ function FundComparisonPage({
                     <div className="fund-compare-chart-empty">
                         Karşılaştırmak için en az bir fon ekleyin.
                     </div>
-                ) : anyDatasetLoading ? (
-                    <div className="fund-compare-chart-empty">Fon karşılaştırma verileri yükleniyor...</div>
+                ) : anyPerformanceLoading && !hasChartPerformance ? (
+                    <div className="fund-compare-chart-empty">Grafik verileri yükleniyor...</div>
                 ) : (
                     <FundCompareLineChart selectedFunds={selectedFunds} datasets={datasets} range={range} />
                 )}
@@ -4594,6 +4809,49 @@ function FundHistoryTable({ points }: { points: FundPricePoint[] }) {
     );
 }
 
+function fundPeriodStatTitle(key: string, label: string): string {
+    if (key === 'current_month') return 'Bu ay';
+    if (key === 'last_30_days') return 'Son 30 gün';
+    if (key === 'previous_month') return 'Önceki ay';
+    return label;
+}
+
+function FundPeriodStatsStrip({ stats }: { stats: FundPerformanceResponse['period_stats'] }) {
+    const periods = (stats?.periods || [])
+        .filter((period) => period.trading_days > 0)
+        .filter((period) => ['current_month', 'last_30_days', 'previous_month'].includes(period.key));
+    if (!periods.length) return null;
+
+    return (
+        <div className="fund-period-stats" aria-label="Dönem performans özeti">
+            {periods.map((period) => (
+                <div className="fund-period-stat" key={period.key}>
+                    <div className="fund-period-stat-head">
+                        <span>{fundPeriodStatTitle(period.key, period.label)}</span>
+                        <small>{formatDate(period.start_date)} - {formatDate(period.end_date)}</small>
+                    </div>
+                    <div className="fund-period-stat-main">
+                        <strong className={pctClass(period.average_daily_return)}>
+                            {formatPct(period.average_daily_return)}
+                        </strong>
+                        <span>ortalama günlük</span>
+                    </div>
+                    <div className="fund-period-stat-grid">
+                        <span>Toplam</span>
+                        <strong className={pctClass(period.cumulative_return)}>{formatPct(period.cumulative_return)}</strong>
+                        <span>İş günü</span>
+                        <strong>{period.trading_days.toLocaleString('tr-TR')}</strong>
+                        <span>Pozitif / Negatif</span>
+                        <strong>
+                            {period.positive_days.toLocaleString('tr-TR')} / {period.negative_days.toLocaleString('tr-TR')}
+                        </strong>
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+}
+
 export default function FundsPage({
     view = 'list',
     fundCode,
@@ -5024,6 +5282,28 @@ export default function FundsPage({
         },
         [detailLatestPrice, selectedFund, yieldSummary],
     );
+    const fundsDocumentTitle = useMemo(() => {
+        if (fundCode || selectedFund) {
+            const normalizedCode = selectedFund?.fund_code || fundCode?.trim().toUpperCase();
+            const quoteTitle = [
+                formatTitleCurrency(detailLatestPrice ?? selectedFund?.price, selectedFund?.currency, {
+                    minimumFractionDigits: 4,
+                    maximumFractionDigits: 6,
+                }),
+                formatTitlePct(selectedFund?.daily_return),
+            ].filter(Boolean).join(' ');
+            return buildDocumentTitle(normalizedCode, quoteTitle, selectedFund?.name || 'Fon Detayı');
+        }
+        const fundCount = filteredFunds.length || funds?.rows.length;
+        return buildDocumentTitle('Fonlar', fundCount ? `${fundCount} fon` : null);
+    }, [
+        detailLatestPrice,
+        filteredFunds.length,
+        fundCode,
+        funds?.rows.length,
+        selectedFund,
+    ]);
+    useDocumentTitle(fundsDocumentTitle, view !== 'compare');
     const comparisonState = useFundComparisonState({
         selectedFund,
         baseReturns: detailPeriodReturns,
@@ -5510,6 +5790,7 @@ export default function FundsPage({
                                                 />
                                             </div>
                                             <FundOverviewMetrics series={overviewMetricSeries} />
+                                            <FundCategoryRankingsPanel rankings={detail?.category_rankings} />
                                             <FundOverviewHoldingsSection
                                                 holdings={holdings}
                                                 loading={holdingsLoading}
@@ -5609,7 +5890,10 @@ export default function FundsPage({
                                                 ) : performanceError ? (
                                                     <div className="funds-state funds-state-error">{performanceError}</div>
                                                 ) : performancePoints.length ? (
-                                                    <FundHistoryTable points={performancePoints} />
+                                                    <>
+                                                        <FundPeriodStatsStrip stats={performance?.period_stats} />
+                                                        <FundHistoryTable points={performancePoints} />
+                                                    </>
                                                 ) : (
                                                     <div className="funds-state">Geçmiş fiyat verisi henüz hazır değil.</div>
                                                 )

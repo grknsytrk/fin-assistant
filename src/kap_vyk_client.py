@@ -54,6 +54,37 @@ _TOKEN_KEYS = {
 # endregion
 
 
+def _shared_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    try:
+        from app.cache import get_json_dict
+
+        return get_json_dict(key)
+    except Exception:
+        return None
+
+
+def _shared_cache_set(key: str, value: Dict[str, Any], ttl_seconds: int) -> None:
+    try:
+        from app.cache import set_json
+
+        set_json(key, value, ttl_seconds=ttl_seconds)
+    except Exception:
+        return
+
+
+def _shared_cache_delete_prefix(prefix: str) -> None:
+    try:
+        from app.cache import get_cache
+
+        get_cache().delete_prefix(prefix)
+    except Exception:
+        return
+
+
+def _vyk_cache_scope(cfg: "KapConfig") -> str:
+    return urllib.parse.quote(str(getattr(cfg, "vyk_base_url", "") or "default"), safe="")
+
+
 def _basic_header(api_key: str, api_secret: str) -> str:
     token = f"{api_key}:{api_secret}".encode("utf-8")
     return "Basic " + base64.b64encode(token).decode("ascii")
@@ -385,7 +416,7 @@ def get_disclosure_detail(
     *,
     file_type: str = "data",
 ) -> Optional[Dict[str, Any]]:
-    """Fetch `/disclosureDetail/{id}` with a long-TTL in-memory cache."""
+    """Fetch `/disclosureDetail/{id}` with L1 memory + shared L2 cache."""
     if not is_enabled(cfg):
         return None
     idx = str(disclosure_index or "").strip()
@@ -398,6 +429,11 @@ def get_disclosure_detail(
     if cached and (now - float(cached.get("_ts") or 0.0)) < _DETAIL_CACHE_TTL_SECONDS:
         data = cached.get("data")
         return dict(data) if isinstance(data, dict) else None
+    shared_key = f"api:kap:vyk-detail:{_vyk_cache_scope(cfg)}:{idx}:file={file_type}:v1"
+    shared_cached = _shared_cache_get(shared_key)
+    if shared_cached is not None:
+        _DETAIL_CACHE[cache_key] = {"_ts": now, "data": shared_cached}
+        return dict(shared_cached)
 
     params = urllib.parse.urlencode({"fileType": file_type})
     url = f"{cfg.vyk_base_url}/disclosureDetail/{urllib.parse.quote(idx)}?{params}"
@@ -408,11 +444,12 @@ def get_disclosure_detail(
     if not isinstance(payload, dict):
         return None
     _DETAIL_CACHE[cache_key] = {"_ts": now, "data": payload}
+    _shared_cache_set(shared_key, payload, ttl_seconds=_DETAIL_CACHE_TTL_SECONDS)
     return dict(payload)
 
 
 def list_members(cfg: "KapConfig") -> List[Dict[str, Any]]:
-    """Return the full KAP member list (long-TTL cached)."""
+    """Return the full KAP member list (L1 memory + shared L2 cache)."""
     if not is_enabled(cfg):
         return []
     now = time.time()
@@ -420,6 +457,13 @@ def list_members(cfg: "KapConfig") -> List[Dict[str, Any]]:
     data = cache.get("data")
     if isinstance(data, list) and (now - float(cache.get("ts") or 0.0)) < _MEMBERS_CACHE_TTL_SECONDS:
         return [dict(row) for row in data if isinstance(row, dict)]
+    shared_key = f"api:kap:vyk-members:{_vyk_cache_scope(cfg)}:v1"
+    shared_cached = _shared_cache_get(shared_key)
+    if shared_cached is not None:
+        rows = [dict(row) for row in list(shared_cached.get("rows") or []) if isinstance(row, dict)]
+        cache["data"] = rows
+        cache["ts"] = now
+        return [dict(row) for row in rows]
     try:
         payload = _request_json(f"{cfg.vyk_base_url}/members", cfg=cfg)
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError, OSError):
@@ -429,6 +473,7 @@ def list_members(cfg: "KapConfig") -> List[Dict[str, Any]]:
     normalized = [dict(row) for row in payload if isinstance(row, dict)]
     cache["data"] = normalized
     cache["ts"] = now
+    _shared_cache_set(shared_key, {"rows": normalized}, ttl_seconds=_MEMBERS_CACHE_TTL_SECONDS)
     return [dict(row) for row in normalized]
 
 
@@ -449,4 +494,5 @@ def reset_caches_for_tests() -> None:
     _MEMBERS_CACHE["ts"] = 0.0
     _LAST_INDEX_CACHE["value"] = None
     _LAST_INDEX_CACHE["ts"] = 0.0
+    _shared_cache_delete_prefix("api:kap:vyk-")
     _clear_token_cache()

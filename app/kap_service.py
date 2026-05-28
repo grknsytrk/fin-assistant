@@ -231,12 +231,12 @@ def get_bist_index_universe(index_code: str = "XUTUM", *, force_refresh: bool = 
         data["symbols"] = list(data.get("symbols") or [])
         data["cache_hit"] = True
         return data
-    redis_key = f"kap:bist-index-universe:{normalized}"
+    redis_key = f"api:kap:bist-index-universe:{normalized}:v1"
     if not force_refresh:
         try:
-            from app.cache import get_cache
+            from app.cache import get_json_dict
 
-            redis_cached = get_cache().get(redis_key)
+            redis_cached = get_json_dict(redis_key)
         except Exception:
             redis_cached = None
         if isinstance(redis_cached, dict):
@@ -261,9 +261,9 @@ def get_bist_index_universe(index_code: str = "XUTUM", *, force_refresh: bool = 
         fallback = _fallback_bist_universe(normalized)
         _BIST_UNIVERSE_CACHE[normalized] = {"_ts": now, "data": fallback}
         try:
-            from app.cache import get_cache
+            from app.cache import set_json
 
-            get_cache().set(redis_key, fallback, ttl_seconds=BIST_INDEX_CACHE_TTL)
+            set_json(redis_key, fallback, ttl_seconds=BIST_INDEX_CACHE_TTL)
         except Exception:
             pass
         return dict(fallback)
@@ -289,9 +289,9 @@ def get_bist_index_universe(index_code: str = "XUTUM", *, force_refresh: bool = 
         }
         _BIST_UNIVERSE_CACHE[code] = {"_ts": now, "data": data}
         try:
-            from app.cache import get_cache
+            from app.cache import set_json
 
-            get_cache().set(f"kap:bist-index-universe:{code}", data, ttl_seconds=BIST_INDEX_CACHE_TTL)
+            set_json(f"api:kap:bist-index-universe:{code}:v1", data, ttl_seconds=BIST_INDEX_CACHE_TTL)
         except Exception:
             pass
 

@@ -6,6 +6,7 @@ import type { KapSnapshotResponse, KapQuarter } from '../api/types';
 import { prepareOrderedQuarters } from '../utils/chartBuilders';
 import SymbolLogo from '../components/SymbolLogo';
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
+import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useWatchlist } from '../hooks/useWatchlist';
 import type { StockTab } from '../routing/routes';
 
@@ -228,6 +229,12 @@ export default function StockDetailPage({
     const displayCurrency = priceData?.currency || valuation?.price_currency;
     const displayAsOf = priceData?.as_of || valuation?.price_as_of || snapshot?.fetched_at;
     const displayChangePct = priceData?.ok ? priceData.change_pct : null;
+    const selectedTabLabel = STOCK_DETAIL_TABS.find((tab) => tab.key === selectedTab)?.label;
+    const quoteTitle = [
+        formatTitleCurrency(displayPrice, displayCurrency),
+        formatTitlePct(displayChangePct),
+    ].filter(Boolean).join(' ');
+    useDocumentTitle(buildDocumentTitle(normalizedTicker, quoteTitle, selectedTabLabel));
     const isStarred = watchlist.hasItem('stock', normalizedTicker);
     const toggleStarredStock = useCallback(() => {
         if (!normalizedTicker) return;

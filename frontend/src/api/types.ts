@@ -244,6 +244,17 @@ export interface FundSourceMetadata {
   cached_fallback_point_count?: number | null;
   source_policy?: string | null;
   adapter_version?: string | null;
+  holdings_quality?: {
+    status?: string | null;
+    normalized_position_count?: number | null;
+    raw_total_weight?: number | null;
+    adjusted_total_weight?: number | null;
+    normalization?: {
+      action?: string | null;
+      factor?: number | null;
+      reason?: string | null;
+    } | null;
+  } | null;
 }
 
 export interface FundPeriodReturns {
@@ -300,6 +311,23 @@ export interface FundSummary {
   isin?: string | null;
 }
 
+export interface FundCategoryRankingItem {
+  key: string;
+  label: string;
+  value: number | null;
+  rank: number;
+  total: number;
+  top_percentile: number | null;
+  direction: string;
+}
+
+export interface FundCategoryRankings {
+  category: string | null;
+  category_total: number;
+  as_of: string | null;
+  items: FundCategoryRankingItem[];
+}
+
 export interface FundDetail extends FundSummary {
   strategy: string | null;
   benchmark: string | null;
@@ -310,6 +338,7 @@ export interface FundDetail extends FundSummary {
   tax_info: string | null;
   fintables_url: string | null;
   kap_url: string | null;
+  category_rankings?: FundCategoryRankings;
   source_metadata: FundSourceMetadata;
 }
 
@@ -322,6 +351,30 @@ export interface FundPricePoint {
   investor_count: number | null;
   share_count?: number | null;
   source: string;
+}
+
+export interface FundPeriodStat {
+  key: 'current_month' | 'last_30_days' | 'previous_month' | string;
+  label: string;
+  start_date: string;
+  end_date: string;
+  trading_days: number;
+  return_days: number;
+  positive_days: number;
+  negative_days: number;
+  flat_days: number;
+  average_daily_return: number | null;
+  cumulative_return: number | null;
+  best_day_return: number | null;
+  best_day_date: string | null;
+  worst_day_return: number | null;
+  worst_day_date: string | null;
+  basis: string;
+}
+
+export interface FundPeriodStats {
+  as_of: string | null;
+  periods: FundPeriodStat[];
 }
 
 export interface FundAllocation {
@@ -339,8 +392,15 @@ export interface FundPortfolioPosition {
   asset_name: string;
   asset_type: string | null;
   weight: number | null;
+  raw_weight?: number | null;
+  weight_quality?: 'ok' | 'normalized' | 'missing' | string | null;
+  weight_warning?: string | null;
   previous_weight?: number | null;
+  raw_previous_weight?: number | null;
+  previous_weight_quality?: 'ok' | 'normalized' | 'missing' | string | null;
+  previous_weight_warning?: string | null;
   weight_change?: number | null;
+  raw_weight_change?: number | null;
   change_status?: 'new' | 'increased' | 'decreased' | 'removed' | 'unchanged' | string | null;
   amount: number | null;
   market_value: number | null;
@@ -406,6 +466,7 @@ export interface FundPerformanceResponse {
   as_of: string | null;
   fetched_at: string | null;
   stale: boolean;
+  period_stats?: FundPeriodStats;
   source_metadata: FundSourceMetadata;
 }
 
@@ -576,6 +637,12 @@ export interface MarketStockCardItem {
   low_1y?: number | null;
   market_state: string;
   as_of: string | null;
+  session_status?: 'open' | 'closed' | 'previous_session' | 'pre' | 'post' | 'unknown' | string | null;
+  session_label?: string | null;
+  is_live?: boolean | null;
+  is_stale?: boolean | null;
+  last_trade_at?: string | null;
+  last_trade_date?: string | null;
   line_points: MarketIndexLinePoint[];
   error: string | null;
   logo_url?: string | null;
@@ -596,6 +663,12 @@ export interface MarketStockCardChartResponse {
   source: 'yahoo_live' | 'yahoo_cache' | string;
   as_of: string | null;
   error: string | null;
+  session_status?: 'open' | 'closed' | 'previous_session' | 'pre' | 'post' | 'unknown' | string | null;
+  session_label?: string | null;
+  is_live?: boolean | null;
+  is_stale?: boolean | null;
+  last_trade_at?: string | null;
+  last_trade_date?: string | null;
 }
 
 export interface MarketIndexConstituent {

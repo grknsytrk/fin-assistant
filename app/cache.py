@@ -292,6 +292,116 @@ def cache_status() -> Dict[str, Any]:
     }
 
 
+def get_json_dict(key: str) -> Optional[Dict[str, Any]]:
+    """Return a cached JSON object, ignoring non-dict payloads."""
+
+    try:
+        cached_value = get_cache().get(key)
+    except Exception:
+        return None
+    return dict(cached_value) if isinstance(cached_value, dict) else None
+
+
+def set_json(key: str, value: Dict[str, Any], ttl_seconds: int) -> bool:
+    """Store a JSON object and report whether the cache write was attempted."""
+
+    try:
+        get_cache().set(key, value, ttl_seconds=ttl_seconds)
+    except Exception:
+        return False
+    return True
+
+
+def get_or_set(
+    key: str,
+    *,
+    ttl_seconds: int,
+    factory: Callable[[], Any],
+    single_flight: bool = False,
+    lock_timeout: float = 30.0,
+    cache_none: bool = False,
+) -> tuple[Any, bool]:
+    """Fetch a cached value or compute and store it.
+
+    Returns ``(value, cache_hit)``. ``single_flight`` reuses the same lock
+    semantics as ``cached`` so expensive upstream calls are only performed by
+    one worker when Redis is enabled.
+    """
+
+    backend = get_cache()
+    try:
+        cached_value = backend.get(key)
+    except Exception:
+        cached_value = None
+    if cached_value is not None:
+        return cached_value, True
+
+    def compute_and_store() -> Any:
+        result = factory()
+        if result is not None or cache_none:
+            try:
+                backend.set(key, result, ttl_seconds=ttl_seconds)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("cache set failed for %s: %s", key, exc)
+        return result
+
+    if not single_flight:
+        return compute_and_store(), False
+
+    with backend.lock(f"single-flight:{key}", timeout=lock_timeout) as acquired:
+        if acquired:
+            try:
+                cached_value = backend.get(key)
+            except Exception:
+                cached_value = None
+            if cached_value is not None:
+                return cached_value, True
+            return compute_and_store(), False
+
+        deadline = time.time() + max(0.05, lock_timeout)
+        while time.time() < deadline:
+            time.sleep(0.05)
+            try:
+                cached_value = backend.get(key)
+            except Exception:
+                cached_value = None
+            if cached_value is not None:
+                return cached_value, True
+        return compute_and_store(), False
+
+
+def l1_l2_cached(
+    local_cache: Dict[str, Dict[str, Any]],
+    key: str,
+    *,
+    ttl_seconds: int,
+    factory: Callable[[], Any],
+    l2_key: Optional[str] = None,
+    cache_none: bool = False,
+) -> tuple[Any, bool]:
+    """Small helper for process-local L1 + shared backend L2 caching.
+
+    ``local_cache`` stores entries as ``{"_ts": ts, "data": value}``, matching
+    the existing module-level cache pattern used throughout the app.
+    """
+
+    now = time.time()
+    cached = local_cache.get(key)
+    if cached and now - float(cached.get("_ts") or 0.0) < ttl_seconds:
+        return cached.get("data"), True
+
+    shared_key = l2_key or key
+    value, shared_hit = get_or_set(
+        shared_key,
+        ttl_seconds=ttl_seconds,
+        factory=factory,
+        cache_none=cache_none,
+    )
+    if value is not None or cache_none:
+        local_cache[key] = {"_ts": now, "data": value}
+    return value, shared_hit
+
+
 def cached(
     *,
     key_fn: Callable[..., str],

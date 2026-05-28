@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Search, BarChart2, TrendingUp, PieChart, ShieldAlert, LineChart, Activity, ChevronRight, LayoutGrid } from 'lucide-react';
+import { buildDocumentTitle, useDocumentTitle } from '../hooks/useDocumentTitle';
 import './MarketPage.css';
 
 interface MarketPageProps {
@@ -10,6 +11,7 @@ interface MarketPageProps {
 export default function MarketPage({ onOpenTicker, onOpenMarkets }: MarketPageProps) {
     const [searchTerm, setSearchTerm] = useState('');
     const [activeTab, setActiveTab] = useState('Piyasa ve Tablolar');
+    useDocumentTitle(buildDocumentTitle('Piyasa ve Finansal Analiz'));
 
     const handleSearch = (e: React.FormEvent) => {
         e.preventDefault();

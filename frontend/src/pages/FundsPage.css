@@ -807,6 +807,91 @@
     white-space: nowrap;
 }
 
+.fund-category-ranking-panel {
+    display: grid;
+    gap: 0.9rem;
+    padding: 1rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+}
+
+.fund-category-ranking-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.fund-category-ranking-head div {
+    display: grid;
+    gap: 0.18rem;
+    min-width: 0;
+}
+
+.fund-category-ranking-head span {
+    color: var(--text-primary);
+    font-size: 0.92rem;
+    font-weight: 850;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.fund-category-ranking-head strong {
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fund-category-ranking-head small {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+}
+
+.fund-category-ranking-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.7rem;
+}
+
+.fund-category-ranking-card {
+    display: grid;
+    justify-items: center;
+    gap: 0.38rem;
+    min-width: 0;
+    padding: 0.8rem 0.6rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 54%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-color) 62%, var(--surface-color));
+    text-align: center;
+}
+
+.fund-category-ranking-card span {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+}
+
+.fund-category-ranking-card strong {
+    padding: 0.18rem 0.52rem;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--success-color) 18%, transparent);
+    color: var(--success-color);
+    font-family: var(--font-mono);
+    font-size: 1.02rem;
+}
+
+.fund-category-ranking-card small {
+    color: var(--text-secondary);
+    font-size: 0.74rem;
+}
+
 .fund-chart-panel,
 .fund-allocation-panel,
 .fund-heatmap-panel {
@@ -1424,6 +1509,70 @@
 .fund-history-tabs button.active {
     border-color: color-mix(in srgb, var(--accent-color) 65%, var(--surface-border));
     background: color-mix(in srgb, var(--accent-color) 18%, var(--surface-color));
+}
+
+.fund-period-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.7rem;
+}
+
+.fund-period-stat {
+    display: grid;
+    gap: 0.65rem;
+    min-width: 0;
+    padding: 0.85rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+}
+
+.fund-period-stat-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.65rem;
+}
+
+.fund-period-stat-head span {
+    color: var(--text-primary);
+    font-size: 0.88rem;
+    font-weight: 800;
+}
+
+.fund-period-stat-head small {
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+
+.fund-period-stat-main {
+    display: grid;
+    gap: 0.15rem;
+}
+
+.fund-period-stat-main strong {
+    font-family: var(--font-mono);
+    font-size: 1.35rem;
+}
+
+.fund-period-stat-main span,
+.fund-period-stat-grid span {
+    color: var(--text-secondary);
+    font-size: 0.76rem;
+}
+
+.fund-period-stat-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.32rem 0.65rem;
+    align-items: baseline;
+}
+
+.fund-period-stat-grid strong {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    text-align: right;
 }
 
 .fund-allocation-history-panel {
@@ -2247,6 +2396,11 @@
     text-overflow: ellipsis;
     text-transform: uppercase;
     white-space: nowrap;
+}
+
+.fund-holdings-effect-card small {
+    line-height: 1.3;
+    white-space: normal;
 }
 
 .fund-holdings-effect-card strong {
@@ -3428,6 +3582,10 @@
         grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
+    .fund-category-ranking-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .funds-search,
     .funds-filter {
         width: 100%;
@@ -3499,9 +3657,15 @@
     .funds-header-stats,
     .fund-metrics-grid,
     .fund-overview-metrics-row,
+    .fund-category-ranking-grid,
     .fund-detail-list,
     .fund-heatmap-stats {
         grid-template-columns: 1fr;
+    }
+
+    .fund-category-ranking-head {
+        flex-direction: column;
+        gap: 0.45rem;
     }
 
     .fund-detail-chart {
@@ -3569,6 +3733,10 @@
 
     .fund-history-tabs button {
         flex: 1 1 150px;
+    }
+
+    .fund-period-stats {
+        grid-template-columns: 1fr;
     }
 
     .fund-allocation-history-range {

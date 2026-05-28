@@ -51,6 +51,30 @@ def test_normalize_fintables_udf_history_payload_uses_close_series() -> None:
     assert [row["date"] for row in fund_service._valid_performance_points(rows, "TLY")] == ["2026-04-01"]
 
 
+def test_fund_period_stats_summarizes_current_month_returns() -> None:
+    stats = fund_service._fund_period_stats(
+        [
+            {"date": "2026-04-30", "price": 100.0, "daily_return": None},
+            {"date": "2026-05-04", "price": 101.0, "daily_return": 1.0},
+            {"date": "2026-05-05", "price": 99.0, "daily_return": -2.0},
+            {"date": "2026-05-06", "price": 99.0, "daily_return": 0.0},
+            {"date": "2026-05-07", "price": 102.0, "daily_return": 3.0},
+        ],
+        as_of=date(2026, 5, 31),
+    )
+
+    current_month = next(row for row in stats["periods"] if row["key"] == "current_month")
+    assert current_month["label"] == "2026-05"
+    assert current_month["trading_days"] == 4
+    assert current_month["return_days"] == 4
+    assert current_month["positive_days"] == 2
+    assert current_month["negative_days"] == 1
+    assert current_month["flat_days"] == 1
+    assert current_month["average_daily_return"] == pytest.approx(0.5)
+    assert current_month["cumulative_return"] == pytest.approx(2.0)
+    assert current_month["basis"] == "previous_close"
+
+
 def test_normalize_fintables_udf_history_requires_ok_and_matching_t_c() -> None:
     for payload in (
         {"s": "no_data", "t": [], "c": []},
@@ -1810,3 +1834,62 @@ def test_get_fund_detail_payload_falls_back_to_reference_data(tmp_path) -> None:
     # rate is 0 (typical for performance-fee serbest funds like TLY).
     assert payload["management_fee"] == 2.0
     assert payload["tax_info"] == "%10"
+
+
+def test_get_fund_detail_payload_includes_category_rankings(tmp_path) -> None:
+    def row(
+        code: str,
+        one_month: float,
+        ytd: float,
+        one_year: float,
+        six_month: float,
+        *,
+        aum: float = 1_000_000_000,
+    ) -> dict:
+        return {
+            "fund_code": code,
+            "name": f"{code} TEST FONU",
+            "fund_type": "Hisse Senedi Şemsiye Fonu",
+            "founder_company": "TEST PORTFÖY",
+            "manager_company": "TEST PORTFÖY",
+            "tefas_open": True,
+            "price": 1.0,
+            "daily_return": 0.1,
+            "period_returns": {"1m": one_month, "ytd": ytd, "1y": one_year, "6m": six_month},
+            "risk_value": 6,
+            "currency": "TRY",
+            "as_of": "2026-05-26",
+            "source": "tefasfon_funds",
+            "aum": aum,
+        }
+
+    snapshot = {
+        "status": "ok",
+        "rows": [
+            row("TLY", 5.0, 8.0, 10.0, 6.0),
+            row("AAA", 10.0, 12.0, 8.0, 5.0),
+            row("BBB", 7.0, 7.0, 12.0, 4.0),
+            row("CCC", -1.0, 4.0, 6.0, 9.0),
+            row("LOW", 20.0, 20.0, 20.0, 20.0, aum=1_000),
+            {**row("PPF", 30.0, 30.0, 30.0, 30.0), "fund_type": "Para Piyasası Şemsiye Fonu"},
+        ],
+        "as_of": "2026-05-26",
+        "fetched_at": "2026-05-26T13:11:01+00:00",
+        "stale": False,
+        "source": "tefasfon_funds",
+        "source_url": "https://pypi.org/project/tefasfon/",
+        "source_metadata": {"source": "tefasfon_funds", "parse_status": "ok"},
+    }
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    payload = fund_service.get_fund_detail_payload(tmp_path, "TLY")
+
+    rankings = payload["category_rankings"]
+    assert rankings["category"] == "Hisse Senedi Şemsiye Fonu"
+    assert rankings["category_total"] == 4
+    monthly = next(item for item in rankings["items"] if item["key"] == "1m")
+    assert monthly["rank"] == 3
+    assert monthly["total"] == 4
+    assert monthly["top_percentile"] == 50

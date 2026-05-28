@@ -28,6 +28,13 @@ from app.reference_data import (
     upsert_instruments,
 )
 
+try:
+    from app.cache import get_json_dict as _cache_get_dict
+    from app.cache import set_json as _cache_set_json
+except Exception:  # pragma: no cover - cache layer is optional for import-time tools
+    _cache_get_dict = None  # type: ignore[assignment]
+    _cache_set_json = None  # type: ignore[assignment]
+
 FINTABLES_USER_AGENT = os.getenv(
     "RAGFIN_FINTABLES_USER_AGENT",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -3769,6 +3776,75 @@ def _find_fund_row(processed_dir: Path, fund_code: str) -> Optional[Dict[str, An
     return None
 
 
+def _fund_return_rank_value(row: Dict[str, Any], key: str) -> Optional[float]:
+    period_returns = row.get("period_returns")
+    if not isinstance(period_returns, dict):
+        return None
+    return _coerce_float(period_returns.get(key))
+
+
+def _fund_category_rankings(snapshot: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
+    category = str(row.get("fund_type") or "").strip()
+    normalized_code = normalize_fund_code(str(row.get("fund_code") or ""))
+    if not category or not normalized_code:
+        return {"category": category or None, "category_total": 0, "as_of": snapshot.get("as_of"), "items": []}
+
+    category_rows: List[Dict[str, Any]] = []
+    seen_codes: set[str] = set()
+    for candidate in list(snapshot.get("rows") or []):
+        if not isinstance(candidate, dict):
+            continue
+        candidate_code = normalize_fund_code(str(candidate.get("fund_code") or ""))
+        if not candidate_code or candidate_code in seen_codes:
+            continue
+        if str(candidate.get("fund_type") or "").strip() != category:
+            continue
+        if not _is_tefas_open_row(candidate) or not _meets_min_aum(candidate, FUNDS_LIST_MIN_AUM):
+            continue
+        seen_codes.add(candidate_code)
+        category_rows.append(candidate)
+
+    metrics = [
+        ("1m", "Aylık Getiri"),
+        ("ytd", "YBB Getiri"),
+        ("1y", "1 Yıllık Getiri"),
+        ("6m", "6 Aylık Getiri"),
+    ]
+    items: List[Dict[str, Any]] = []
+    for key, label in metrics:
+        selected_value = _fund_return_rank_value(row, key)
+        if selected_value is None:
+            continue
+        values: List[float] = []
+        for candidate in category_rows:
+            candidate_value = _fund_return_rank_value(candidate, key)
+            if candidate_value is not None:
+                values.append(candidate_value)
+        total = len(values)
+        if total <= 0:
+            continue
+        rank = 1 + sum(1 for value in values if value is not None and value > selected_value)
+        top_percentile = ((total - rank + 1) / total) * 100 if total else None
+        items.append(
+            {
+                "key": key,
+                "label": label,
+                "value": selected_value,
+                "rank": rank,
+                "total": total,
+                "top_percentile": round(top_percentile) if top_percentile is not None else None,
+                "direction": "higher_is_better",
+            }
+        )
+
+    return {
+        "category": category,
+        "category_total": len(category_rows),
+        "as_of": snapshot.get("as_of"),
+        "items": items,
+    }
+
+
 def get_fund_detail_payload(processed_dir: Path, fund_code: str) -> Dict[str, Any]:
     normalized = normalize_fund_code(fund_code)
     row = _find_fund_row(processed_dir, normalized)
@@ -3804,6 +3880,7 @@ def get_fund_detail_payload(processed_dir: Path, fund_code: str) -> Dict[str, An
         "tax_info": tax_info,
         "fintables_url": f"{FINTABLES_FUND_BASE_URL}/{normalized}",
         "kap_url": None,
+        "category_rankings": _fund_category_rankings(snapshot, row),
         "source_metadata": snapshot.get("source_metadata") or {},
     }
 
@@ -4016,6 +4093,7 @@ def _fund_performance_payload_from_points(
         "fund_code": normalized_code,
         "status": "ok" if ordered else "empty",
         "points": ordered,
+        "period_stats": _fund_period_stats(ordered, as_of=effective_end),
         "source": "sqlite",
         "source_url": str(_fund_prices_db_path(processed_dir)),
         "as_of": latest_point_date,
@@ -4138,6 +4216,105 @@ def _fund_point_date(point: Dict[str, Any]) -> Optional[date]:
         return date.fromisoformat(raw_date)
     except ValueError:
         return None
+
+
+def _fund_period_stats(points: List[Dict[str, Any]], *, as_of: Optional[date] = None) -> Dict[str, Any]:
+    dated_points: List[Tuple[date, Dict[str, Any], float]] = []
+    for point in points:
+        point_date = _fund_point_date(point)
+        price = _coerce_float(point.get("price"))
+        if point_date is None or price is None or price <= 0:
+            continue
+        dated_points.append((point_date, point, price))
+    dated_points.sort(key=lambda item: item[0])
+    if not dated_points:
+        return {"as_of": None, "periods": []}
+
+    latest_available = dated_points[-1][0]
+    anchor = min(as_of, latest_available) if as_of is not None else latest_available
+    current_month_start = _month_start(anchor)
+    previous_month_start = _shift_month(current_month_start, -1)
+    period_defs = [
+        ("current_month", _month_key(current_month_start), current_month_start, min(anchor, _month_end(current_month_start))),
+        ("last_30_days", "last_30_days", anchor - timedelta(days=29), anchor),
+        ("previous_month", _month_key(previous_month_start), previous_month_start, _month_end(previous_month_start)),
+    ]
+
+    periods: List[Dict[str, Any]] = []
+    for key, label, start, end in period_defs:
+        selected = [
+            (idx, point_date, point, price)
+            for idx, (point_date, point, price) in enumerate(dated_points)
+            if start <= point_date <= end
+        ]
+        if not selected:
+            periods.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
+                    "trading_days": 0,
+                    "return_days": 0,
+                    "positive_days": 0,
+                    "negative_days": 0,
+                    "flat_days": 0,
+                    "average_daily_return": None,
+                    "cumulative_return": None,
+                    "best_day_return": None,
+                    "best_day_date": None,
+                    "worst_day_return": None,
+                    "worst_day_date": None,
+                    "basis": "none",
+                }
+            )
+            continue
+
+        return_rows: List[Tuple[date, float]] = []
+        for idx, point_date, point, price in selected:
+            daily_return = _coerce_float(point.get("daily_return"))
+            if daily_return is None and idx > 0:
+                daily_return = _return_between(price, dated_points[idx - 1][2])
+            if daily_return is not None:
+                return_rows.append((point_date, daily_return))
+
+        first_idx = selected[0][0]
+        base_price = dated_points[first_idx - 1][2] if first_idx > 0 else selected[0][3]
+        basis = "previous_close" if first_idx > 0 else "first_point"
+        cumulative_return = _return_between(selected[-1][3], base_price)
+        best = max(return_rows, key=lambda item: item[1], default=None)
+        worst = min(return_rows, key=lambda item: item[1], default=None)
+        positive_days = sum(1 for _, value in return_rows if value > 0)
+        negative_days = sum(1 for _, value in return_rows if value < 0)
+        flat_days = len(return_rows) - positive_days - negative_days
+        average_daily_return = (
+            sum(value for _, value in return_rows) / len(return_rows)
+            if return_rows
+            else None
+        )
+
+        periods.append(
+            {
+                "key": key,
+                "label": label,
+                "start_date": selected[0][1].isoformat(),
+                "end_date": selected[-1][1].isoformat(),
+                "trading_days": len(selected),
+                "return_days": len(return_rows),
+                "positive_days": positive_days,
+                "negative_days": negative_days,
+                "flat_days": flat_days,
+                "average_daily_return": average_daily_return,
+                "cumulative_return": cumulative_return,
+                "best_day_return": best[1] if best else None,
+                "best_day_date": best[0].isoformat() if best else None,
+                "worst_day_return": worst[1] if worst else None,
+                "worst_day_date": worst[0].isoformat() if worst else None,
+                "basis": basis,
+            }
+        )
+
+    return {"as_of": anchor.isoformat(), "periods": periods}
 
 
 def _overview_metric_targets(end_date: date) -> List[Dict[str, Any]]:
@@ -4274,21 +4451,49 @@ def _auto_fetch_key(
 def _recent_auto_fetch_failure(key: str) -> Optional[str]:
     with _AUTO_FETCH_LOCK:
         cached = _AUTO_FETCH_NEGATIVE_CACHE.get(key)
-        if not cached:
-            return None
-        expires_at = cached.get("expires_at")
-        if isinstance(expires_at, datetime) and expires_at > _utc_now():
-            return str(cached.get("error") or "recent fund history failure")
-        _AUTO_FETCH_NEGATIVE_CACHE.pop(key, None)
-    return None
+        if cached:
+            expires_at = cached.get("expires_at")
+            if isinstance(expires_at, datetime) and expires_at > _utc_now():
+                return str(cached.get("error") or "recent fund history failure")
+            _AUTO_FETCH_NEGATIVE_CACHE.pop(key, None)
+    if _cache_get_dict is None:
+        return None
+    try:
+        shared = _cache_get_dict(f"api:funds:auto-fetch-negative:{key}:v1")
+    except Exception:
+        shared = None
+    if not isinstance(shared, dict):
+        return None
+    expires_at_epoch = shared.get("expires_at_epoch")
+    try:
+        expires_at = datetime.fromtimestamp(float(expires_at_epoch), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+    if expires_at <= _utc_now():
+        return None
+    error = str(shared.get("error") or "recent fund history failure")
+    with _AUTO_FETCH_LOCK:
+        _AUTO_FETCH_NEGATIVE_CACHE[key] = {"error": error, "expires_at": expires_at}
+    return error
 
 
 def _remember_auto_fetch_failure(key: str, error: str) -> None:
+    ttl = max(1, FUNDS_AUTO_FETCH_NEGATIVE_TTL_SECONDS)
+    expires_at = _utc_now() + timedelta(seconds=ttl)
     with _AUTO_FETCH_LOCK:
         _AUTO_FETCH_NEGATIVE_CACHE[key] = {
             "error": error,
-            "expires_at": _utc_now() + timedelta(seconds=max(1, FUNDS_AUTO_FETCH_NEGATIVE_TTL_SECONDS)),
+            "expires_at": expires_at,
         }
+    if _cache_set_json is not None:
+        try:
+            _cache_set_json(
+                f"api:funds:auto-fetch-negative:{key}:v1",
+                {"error": error, "expires_at_epoch": expires_at.timestamp()},
+                ttl_seconds=ttl,
+            )
+        except Exception:
+            pass
 
 
 def _auto_refresh_fund_performance(
@@ -5041,12 +5246,44 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
 
 
 KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
-KAP_HOLDINGS_PARSE_VERSION = 6
+KAP_HOLDINGS_PARSE_VERSION = 9
 _KAP_NUMBER_PATTERN = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d+|-?\d+,\d+")
 _KAP_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{2,4}\b")
+# A trailing ISIN may be glued directly to a borsa/sözleşme code that is
+# itself glued to the currency token (e.g. ``14,41TL 80100511TRABTCIM91F5``),
+# so we tolerate an optional numeric prefix between the currency and the ISIN.
 _KAP_ISIN_TAIL_PATTERN = re.compile(
-    r"(?P<weight>-?\d{1,3}(?:[,.]\d{1,6}))\s*(?:TL|TRY|USD|EUR|JPY|GBP)?\s*[A-Z]{2}[A-Z0-9]{6,}\s*$",
+    r"(?P<weight>-?\d{1,3}(?:[,.]\d{1,6}))\s*(?:TL|TRY|USD|EUR|JPY|GBP)?\s*\d*[A-Z]{2}[A-Z0-9]{6,}\s*$",
     flags=re.IGNORECASE,
+)
+# Lines that introduce continuation rows for an already-listed position
+# (e.g. ``Tem.Ver.``/``Teminat Veren`` collateral lender prefixes) must not
+# be treated as a new asset code, otherwise the parser invents a phantom row
+# and swallows the next real position into its buffer.
+_KAP_LINE_PREFIX_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^(?:Tem\.?\s*Ver\.?|Teminat\s+Veren)\s+", flags=re.IGNORECASE), "Tem.Ver."),
+    (re.compile(r"^Tem\.?\s+", flags=re.IGNORECASE), "Tem."),
+)
+# Category contexts that publish numeric rows whose leading token is a
+# borsa-listed stock code (e.g. REPO/Mevduat collateral booked against
+# ``BTCIM`` or a deposit booked against ``T.IS BANKASI``).  Such rows must
+# never be promoted to ``local_equity``; doing so otherwise overwrites the
+# real stock holding with the negative collateral leg.
+_KAP_NON_HOLDING_CONTEXT_TOKENS = (
+    "REPO",
+    "TREPO",
+    "T.REPO",
+    "TPP",
+    "BPP",
+    "BORCLANMA",
+    "BONO",
+    "TAHVIL",
+    "MEVDUAT",
+    "NAKIT",
+    "DOVIZ",
+    "TEMINAT",
+    "VIOP",
+    "KIRA SERTIFIKA",
 )
 _KAP_POSITION_STOPWORDS = {
     "AÇIKLAMA",
@@ -5082,6 +5319,12 @@ _KAP_POSITION_STOPWORDS = {
     "ŞİRKETİN",
     "TARIH",
     "TARİH",
+    "TEM",
+    "TEM.",
+    "TEM.VER",
+    "TEM.VER.",
+    "TEMINAT",
+    "TEMİNAT",
     "TOPLAM",
     "TUTAR",
     "VADE",
@@ -5589,6 +5832,11 @@ def _kap_is_included_holding_type(asset_type: Any) -> bool:
     return str(asset_type or "").strip().lower() in _KAP_INCLUDED_HOLDING_TYPES
 
 
+def _kap_is_included_holding_context(context: str) -> bool:
+    norm = _normalize_match_text(context)
+    return any(token in norm for token in ("HISSE", "Y.FONU", "YATIRIM FONU", "BORSA Y", "BYF", "FON SEPETI"))
+
+
 def _kap_asset_type_from_context(context: str, code: str, name: str) -> str:
     context_norm = _normalize_match_text(context)
     name_norm = _normalize_match_text(name)
@@ -5596,18 +5844,27 @@ def _kap_asset_type_from_context(context: str, code: str, name: str) -> str:
     symbol = normalize_fund_code(code)
     has_equity_context = any(token in context_norm for token in ("HISSE SENEDI", "HISSE SENETLERI", "HISSE"))
     has_fund_context = any(token in context_norm for token in ("Y.FONU", "YATIRIM FONU", "BORSA Y", "BYF", "FON SEPETI"))
-    has_excluded_context = any(
-        token in context_norm
-        for token in ("REPO", "TAHVIL", "BONO", "BORCLANMA", "HAZINE", "KIRA SERTIFIKASI", "DOVIZ", "NAKIT", "MEVDUAT", "TEMINAT")
-    )
-    if _kap_is_stock_symbol(symbol):
-        return "local_equity"
-    if has_equity_context and _kap_looks_like_equity_symbol(symbol):
-        return "local_equity"
+    has_excluded_context = any(token in context_norm for token in _KAP_NON_HOLDING_CONTEXT_TOKENS)
+    # When the table section explicitly belongs to a non-holding instrument
+    # type (REPO, mevduat, borçlanma, etc.) we must never classify the row
+    # as a stock/fund holding even if the leading token happens to match a
+    # known BIST symbol.  The same ticker can appear as a deposit/repo
+    # collateral leg with a negative weight, which would otherwise overwrite
+    # the genuine stock holding picked up from the equities section.
+    if has_excluded_context and not has_equity_context and not has_fund_context:
+        if any(token in haystack for token in ("REPO", "TAHVIL", "BONO", "BORCLANMA", "HAZINE", "KIRA SERTIFIKASI")):
+            return "debt"
+        if any(token in haystack for token in ("DOVIZ", "NAKIT", "MEVDUAT", "TEMINAT")):
+            return "cash_fx"
+        return "other"
     if has_fund_context and _kap_looks_like_fund_symbol(symbol):
         return "fund"
     if not has_excluded_context and _kap_looks_like_fund_symbol(symbol) and any(token in name_norm for token in ("YATIRIM FONU", "PORTFOY", "BYF", "FON")):
         return "fund"
+    if _kap_is_stock_symbol(symbol):
+        return "local_equity"
+    if has_equity_context and _kap_looks_like_equity_symbol(symbol):
+        return "local_equity"
     if any(token in haystack for token in ("REPO", "TAHVIL", "BONO", "BORCLANMA", "HAZINE", "KIRA SERTIFIKASI")):
         return "debt"
     if symbol in {"USD", "EUR", "JPY", "GBP"} or any(token in haystack for token in ("DOVIZ", "NAKIT", "MEVDUAT", "TEMINAT")):
@@ -5650,6 +5907,25 @@ def _kap_strip_inline_category(line: str) -> Tuple[str, Optional[str]]:
                 stripped = ""
             return stripped, marker
     return text, None
+
+
+def _kap_strip_continuation_prefix(line: str) -> Tuple[str, Optional[str]]:
+    """Strip leading collateral / lender prefixes (e.g. ``Tem.Ver.``).
+
+    KAP portfolio PDFs often print collateral entries with a ``Teminat
+    Veren`` prefix in front of the actual security code.  Without
+    stripping, the parser would treat the prefix word as a brand new
+    asset code and either invent a phantom row or swallow the next real
+    position into its buffer.
+    """
+    text = str(line or "").strip()
+    if not text:
+        return line, None
+    for pattern, marker in _KAP_LINE_PREFIX_PATTERNS:
+        match = pattern.match(text)
+        if match:
+            return text[match.end():].strip(), marker
+    return line, None
 
 
 def _kap_line_starts_position(line: str) -> bool:
@@ -5715,6 +5991,16 @@ def _kap_buffer_is_header_noise(buffer: List[str]) -> bool:
     if any(_kap_is_stock_symbol(token) for token in tokens[:4]):
         return False
     return True
+
+
+def _kap_buffer_starts_with_fund_symbol(buffer: List[str], context: str) -> bool:
+    if "FON" not in _normalize_match_text(context) and "BYF" not in _normalize_match_text(context):
+        return False
+    first_line = str(buffer[0] if buffer else "").strip()
+    first = first_line.split()[0].strip(":-,;()") if first_line.split() else ""
+    candidate = first.split("-", 1)[0] if "-" in first else first
+    candidate = normalize_fund_code(candidate).replace(".", "")
+    return _kap_looks_like_fund_symbol(candidate)
 
 
 def _parse_kap_holding_block(
@@ -5822,14 +6108,38 @@ def _parse_kap_holdings_pdf_text(
 
     for line in lines:
         original_line = line
+        norm = _normalize_match_text(line)
+        if current_category and "FON PORTFOY DEGERI" in norm and "TABLOSU" not in norm:
+            if _kap_number_matches(line):
+                flush()
+                break
+            continue
+        # Strip ``Tem.Ver.`` / ``Teminat Veren`` style collateral lender
+        # prefixes so the parser sees the real security code as the
+        # leading token instead of the prefix word.
+        stripped_line, _continuation_marker = _kap_strip_continuation_prefix(line)
+        if stripped_line != line:
+            line = stripped_line
+            if not line:
+                continue
+        first_token = line.split()[0].strip(":-,;()") if line.split() else ""
+        if "-" in first_token and normalize_fund_code(first_token.split("-", 1)[0]) == normalize_fund_code(fund_code):
+            buffer = []
+            buffer_category = ""
+            continue
         line, inline_marker = _kap_strip_inline_category(line)
+        if (
+            inline_marker
+            and not line
+            and buffer
+            and not _kap_row_complete(" ".join(buffer))
+            and _kap_buffer_starts_with_fund_symbol(buffer, buffer_category)
+        ):
+            line = original_line
+            inline_marker = None
         if inline_marker and buffer and not _kap_row_complete(" ".join(buffer)):
-            if _kap_buffer_is_header_noise(buffer):
-                buffer = []
-                buffer_category = ""
-            else:
-                line = original_line
-                inline_marker = None
+            buffer = []
+            buffer_category = ""
         if inline_marker:
             if buffer:
                 flush()
@@ -5839,7 +6149,7 @@ def _parse_kap_holdings_pdf_text(
         norm = _normalize_match_text(line)
         marker = _kap_category_marker(line)
         if marker and len(_kap_number_matches(line)) < 2 and buffer and not _kap_row_complete(" ".join(buffer)):
-            if _kap_buffer_is_header_noise(buffer):
+            if _kap_buffer_is_header_noise(buffer) and not _kap_buffer_starts_with_fund_symbol(buffer, buffer_category):
                 buffer = []
                 buffer_category = ""
             else:
@@ -5855,7 +6165,7 @@ def _parse_kap_holdings_pdf_text(
             flush()
             continue
         if buffer and _kap_line_starts_position(line) and not _kap_row_complete(" ".join(buffer)):
-            if _kap_buffer_is_header_noise(buffer):
+            if _kap_buffer_is_header_noise(buffer) and not _kap_buffer_starts_with_fund_symbol(buffer, buffer_category):
                 buffer = []
                 buffer_category = ""
         if not buffer and not _kap_line_starts_position(line):

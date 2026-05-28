@@ -5,13 +5,18 @@ import urllib.error
 
 import pytest
 
+from app import cache as cache_module
 from src import kap_vyk_client
 from src.config import KapConfig
 
 
 @pytest.fixture(autouse=True)
 def _reset_kap_vyk_caches() -> None:
+    cache_module.reset_cache_for_tests()
     kap_vyk_client.reset_caches_for_tests()
+    yield
+    kap_vyk_client.reset_caches_for_tests()
+    cache_module.reset_cache_for_tests()
 
 
 def _kap_cfg(
@@ -180,3 +185,36 @@ def test_request_json_refreshes_token_after_er006(
     assert payload == {"lastDisclosureIndex": 123}
     assert [url for url, _ in calls].count("https://apigw.mkk.com.tr/auth/generateToken?apiKey=key-123") == 2
     assert ("https://apigw.mkk.com.tr/api/vyk/lastDisclosureIndex", "Bearer token-two-value") in calls
+
+
+def test_disclosure_detail_uses_shared_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _kap_cfg(base_url="https://apigwdev.mkk.com.tr/api/vyk")
+    key = (
+        "api:kap:vyk-detail:"
+        "https%3A%2F%2Fapigwdev.mkk.com.tr%2Fapi%2Fvyk:42:file=data:v1"
+    )
+    cache_module.set_json(key, {"disclosureIndex": 42, "cached": True}, ttl_seconds=60)
+    monkeypatch.setattr(
+        kap_vyk_client,
+        "_request_json",
+        lambda *_args, **_kwargs: pytest.fail("shared cache should satisfy detail"),
+    )
+
+    payload = kap_vyk_client.get_disclosure_detail(cfg, 42)
+
+    assert payload == {"disclosureIndex": 42, "cached": True}
+
+
+def test_members_uses_shared_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _kap_cfg(base_url="https://apigwdev.mkk.com.tr/api/vyk")
+    key = "api:kap:vyk-members:https%3A%2F%2Fapigwdev.mkk.com.tr%2Fapi%2Fvyk:v1"
+    cache_module.set_json(key, {"rows": [{"id": "oid-akbnk", "stockCode": "AKBNK"}]}, ttl_seconds=60)
+    monkeypatch.setattr(
+        kap_vyk_client,
+        "_request_json",
+        lambda *_args, **_kwargs: pytest.fail("shared cache should satisfy members"),
+    )
+
+    rows = kap_vyk_client.list_members(cfg)
+
+    assert rows == [{"id": "oid-akbnk", "stockCode": "AKBNK"}]

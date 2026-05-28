@@ -88,6 +88,49 @@ def test_delete_prefix_invalidates_matching_keys() -> None:
     assert backend.get("api:other") == 3
 
 
+def test_json_helpers_ignore_non_dict_values() -> None:
+    backend = cache_module.get_cache()
+    backend.set("json:bad", ["not", "a", "dict"], ttl_seconds=60)
+
+    assert cache_module.get_json_dict("json:bad") is None
+    assert cache_module.set_json("json:ok", {"hello": "world"}, ttl_seconds=60) is True
+    assert cache_module.get_json_dict("json:ok") == {"hello": "world"}
+
+
+def test_get_or_set_returns_cache_hit_flag() -> None:
+    calls = {"n": 0}
+
+    def factory() -> dict:
+        calls["n"] += 1
+        return {"call": calls["n"]}
+
+    first, first_hit = cache_module.get_or_set("compute:key", ttl_seconds=60, factory=factory)
+    second, second_hit = cache_module.get_or_set("compute:key", ttl_seconds=60, factory=factory)
+
+    assert first == {"call": 1}
+    assert first_hit is False
+    assert second == {"call": 1}
+    assert second_hit is True
+    assert calls["n"] == 1
+
+
+def test_l1_l2_cached_populates_local_cache_from_shared_cache() -> None:
+    local_cache: dict[str, dict] = {}
+    cache_module.set_json("shared:key", {"value": 42}, ttl_seconds=60)
+
+    value, hit = cache_module.l1_l2_cached(
+        local_cache,
+        "local:key",
+        ttl_seconds=60,
+        l2_key="shared:key",
+        factory=lambda: {"value": 99},
+    )
+
+    assert value == {"value": 42}
+    assert hit is True
+    assert local_cache["local:key"]["data"] == {"value": 42}
+
+
 def test_cached_decorator_returns_cached_payload() -> None:
     calls = {"n": 0}
 

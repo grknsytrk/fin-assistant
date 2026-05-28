@@ -38,6 +38,11 @@ def _reset_flow_state(monkeypatch: pytest.MonkeyPatch) -> None:
     api_module._MARKET_INDEX_QUOTE_CACHE.clear()
     api_module._MARKET_INDEX_INTRADAY_CACHE.clear()
     api_module._MARKET_INDEX_RETURN_CACHE.clear()
+    api_module._JSONL_ROW_COUNT_CACHE.clear()
+    api_module._AVAILABLE_COMPANIES_CACHE.clear()
+    api_module._COMPANY_BREAKDOWN_CACHE.clear()
+    api_module._KAP_MARKET_METADATA_CACHE.clear()
+    api_module._STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE.clear()
     api_module._FUND_HOLDING_SECTOR_MAP_CACHE.clear()
     api_module._ISYATIRIM_BASIC_SUMMARY_CACHE.clear()
     api_module._GEFAS_GYF_QUOTE_CACHE.clear()
@@ -792,6 +797,99 @@ def test_api_fund_holdings_enriches_daily_market_effect(
     assert payload["portfolio_effect"]["missing_weight"] == 5.0
 
 
+def test_api_fund_holdings_keeps_leveraged_weights_in_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fund_snapshot_row_map_with_meta",
+        lambda: ({"TLY": {"as_of": "2026-05-20", "aum": 100_000_000.0}}, {"cache_hit": False, "row_count": 1}),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_quote_map_for_holding_stocks",
+        lambda _symbols: {
+            "GOOD": {"price": 20.0, "currency": "TRY", "change_pct": 2.5, "as_of": "2026-05-20T10:00:00+00:00"},
+            "LEVR": {"price": 10.0, "currency": "TRY", "change_pct": 10.0, "as_of": "2026-05-20T10:00:00+00:00"},
+        },
+    )
+    monkeypatch.setattr(api_module, "_fund_holding_sector_map", lambda: ({}, {"symbol_count": 0}))
+    payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {"asset_code": "LEVR", "asset_name": "Kaldıraçlı Pozisyon", "asset_type": "local_equity", "weight": 127.5, "previous_weight": 45.2},
+            {"asset_code": "GOOD", "asset_name": "Geçerli", "asset_type": "local_equity", "weight": 20.0, "previous_weight": 18.0},
+            {"asset_code": "MISS", "asset_name": "Eksik", "asset_type": "local_equity", "weight": 5.0, "previous_weight": 4.0},
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {"source": "kap_portfolio_allocation_report", "as_of": "2026-04-30", "warnings": []},
+    }
+
+    enriched = api_module._enrich_fund_holdings_with_daily_market_data(payload, "TLY")
+
+    positions = {item["asset_code"]: item for item in enriched["positions"]}
+    assert enriched["status"] == "ok"
+    assert positions["LEVR"]["weight"] == 127.5
+    assert positions["LEVR"]["weight_quality"] == "ok"
+    assert positions["LEVR"]["estimated_fund_return_contribution_pct"] == pytest.approx(12.75)
+    assert positions["GOOD"]["estimated_fund_return_contribution_pct"] == 0.5
+    assert enriched["portfolio_effect"]["estimated_return_pct"] == pytest.approx(13.25)
+    assert enriched["portfolio_effect"]["priced_weight"] == 147.5
+    assert enriched["portfolio_effect"]["missing_weight"] == 5.0
+    quality = enriched["source_metadata"]["holdings_quality"]
+    assert quality["status"] == "ok"
+    assert quality["raw_total_weight"] == 152.5
+    assert quality["adjusted_total_weight"] == 152.5
+
+
+def test_api_fund_holdings_normalizes_high_confidence_basis_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fund_snapshot_row_map_with_meta",
+        lambda: ({"TLY": {"as_of": "2026-05-20", "aum": 100_000_000.0}}, {"cache_hit": False, "row_count": 1}),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_quote_map_for_holding_stocks",
+        lambda _symbols: {
+            "AAA": {"price": 10.0, "currency": "TRY", "change_pct": 1.0, "as_of": "2026-05-20T10:00:00+00:00"},
+            "BBB": {"price": 20.0, "currency": "TRY", "change_pct": 2.0, "as_of": "2026-05-20T10:00:00+00:00"},
+            "CCC": {"price": 30.0, "currency": "TRY", "change_pct": 3.0, "as_of": "2026-05-20T10:00:00+00:00"},
+        },
+    )
+    monkeypatch.setattr(api_module, "_fund_holding_sector_map", lambda: ({}, {"symbol_count": 0}))
+    payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {"asset_code": "AAA", "asset_name": "AAA", "asset_type": "local_equity", "weight": 4000.0, "previous_weight": 3500.0},
+            {"asset_code": "BBB", "asset_name": "BBB", "asset_type": "local_equity", "weight": 3500.0, "previous_weight": 3500.0},
+            {"asset_code": "CCC", "asset_name": "CCC", "asset_type": "local_equity", "weight": 2500.0, "previous_weight": 3000.0},
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {"source": "kap_portfolio_allocation_report", "as_of": "2026-04-30", "warnings": []},
+    }
+
+    enriched = api_module._enrich_fund_holdings_with_daily_market_data(payload, "TLY")
+
+    positions = {item["asset_code"]: item for item in enriched["positions"]}
+    assert enriched["status"] == "ok"
+    assert positions["AAA"]["weight"] == 40.0
+    assert positions["AAA"]["raw_weight"] == 4000.0
+    assert positions["AAA"]["weight_quality"] == "normalized"
+    assert positions["AAA"]["weight_change"] == 5.0
+    assert enriched["portfolio_effect"]["priced_weight"] == 100.0
+    assert enriched["portfolio_effect"]["missing_weight"] == 0.0
+    assert enriched["portfolio_effect"]["estimated_return_pct"] == pytest.approx(1.85)
+    quality = enriched["source_metadata"]["holdings_quality"]
+    assert quality["status"] == "ok"
+    assert quality["normalized_position_count"] == 3
+    assert quality["normalization"]["action"] == "basis_points_to_percent"
+
+
 def test_api_fund_holdings_enriches_tpkgy_from_gefas(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
@@ -1113,6 +1211,64 @@ TRT131027T36 HAZİNE 0 10.000,00 1,00 10.000,00 0,68TL 0,68TRT131027T36
     assert "TRT131027T36" not in by_code
 
 
+def test_kap_holdings_parser_stops_before_trade_flow_and_keeps_fund_rows() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+Hisse Türk
+DSTKF DESTEK FİNANS FAKTORİNG A.Ş.
+297.000,00 2.100,000000 30/04/26 2.105,000000 625.185.000,00 8,90 7,42TL 80100511 7,42TREDSTK00016
+ALKLC ALTINKILIÇ GIDA VE SÜT SANAYİ TİCARET A.Ş.
+100.000,00 33,120000 30/04/26 34,000000 3.400.000,00 5,68 4,74TL 80100511 4,74TREALTC00018
+28.628.328,84 616.050.828,67 84,88100,00 GRUP TOPLAMI 91,28
+VIOP Nakit Teminatı
+VIOP Nakit Teminatı 511.675,39 511.675,39 100,00 0,07
+IV-FON TOPLAM DEĞERİ TABLOSU
+AÇIKLAMA TUTAR ORAN%
+A-)FON PORTFÖY DEĞERİ
+B-)HAZIR DEĞERLER
+725.771.076,08
+36.919,65
+FON TOPLAM DEĞERİ 674.990.430,71 100,00 %
+DİĞER
+Y.Fonu Türk
+IDL AKTİF PORTFÖY
+PARA PİYASASI (TL)
+FONU
+AKTİF PORTFÖY YÖNETİM A.Ş
+10.721.000,00 5,296661 30/04/26 5,348747 57.343.916,59 52,51 7,90TL 8,50TRYMKFT00190
+NKL AKTİF PORTFÖY
+KISA VADELİ
+SERBEST(TL) FON
+AKTİF PORTFÖY YÖNETİM A.Ş
+16.524.000,00 3,101976 27/04/26 3,138747 51.864.655,43 47,49 7,15TL 7,68TRYMKFT00281
+725.771.076,08FON PORTFÖY DEĞERİ 100,00
+Nisan-2026
+HRZ-AKTİF PORTFÖY BIST HALKA ARZ ŞİRKETLERİ HİSSE SENEDİ (TL) FONU
+VII-PORTFÖYDEN SATIŞLAR
+KIYMET VADE IŞLEM TARIHI FIYAT İŞLEM DEĞERI NOMINAL DEĞERI
+A) HİSSE SENETLERİ(SATIŞLAR)
+HISSE TÜRK
+06/04/26 30.072,00OBAMS 8,480 255.010,56OBA MAKARNACILIK SANAYI VE TICARET A.Ş.
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="HRZ",
+        report_date="2026-04-30",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1605671",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert set(by_code) == {"DSTKF", "ALKLC", "IDL", "NKL"}
+    assert by_code["DSTKF"]["asset_type"] == "local_equity"
+    assert by_code["IDL"]["asset_type"] == "fund"
+    assert by_code["IDL"]["weight"] == 8.5
+    assert by_code["NKL"]["asset_type"] == "fund"
+    assert by_code["NKL"]["weight"] == 7.68
+    assert "VII" not in by_code
+    assert "OBAMS" not in by_code
+
+
 def test_kap_holdings_parser_drops_orphan_page_header_before_position() -> None:
     text = """
 III-FON PORTFÖY DEĞERİ TABLOSU
@@ -1170,6 +1326,142 @@ A.Ş
     assert by_code["PEKGY"]["asset_type"] == "local_equity"
     assert "TLY" not in by_code
     assert "ENERJI" not in by_code
+
+
+def test_kap_holdings_parser_skips_collateral_lender_prefix() -> None:
+    """``Tem.Ver.``/``Teminat Veren`` rows must not invent a phantom code or
+    swallow the next position into their buffer."""
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+HİSSE SENETLERİ
+Hisse Türk
+BSOKE BATISÖKE
+SÖKE
+ÇİMENTO
+SANAYİİ
+T.A.Ş.
+1.325.828,00 22,365319 31/03/26 32,400000 42.956.827,20 2,77 3,67TL 80100511 3,88TRABSOKE91F5
+BTCIM BATIÇİM
+BATI
+ANADOLU
+ÇİMENTO
+SANAYİİ
+A.Ş.
+186.952,00 4,532224 31/03/26 5,950000 1.112.325,13 0,07 0,10TL 80100511 0,10TRABTCIM91F5
+Tem.Ver. BTCIM BATIÇİM
+BATI
+ANADOLU
+ÇİMENTO
+SANAYİİ
+A.Ş.
+28.363.048,00 4,532224 31/03/26 5,950000 168.760.174,87 10,89 14,41TL 80100511TRABTCIM91F5
+GRTHO GRAINTUR
+K HOLDİNG
+A.Ş.
+3.104.500,00 113,537810 31/03/26 226,000000 701.617.000,00 45,26 59,93TL 63,31TREGRNT00029
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="IIE",
+        report_date="2026-03-31",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1584779",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    # The ``Tem.Ver.`` continuation row and the main BSOKE/GRTHO rows must
+    # all surface, none of them as a phantom ``TEM.VER`` code.
+    assert "TEM.VER" not in by_code
+    assert "TEM" not in by_code
+    assert by_code["BSOKE"]["asset_type"] == "local_equity"
+    assert by_code["BSOKE"]["weight"] == 3.88
+    # The collateral leg has the larger absolute weight (14.41 vs 0.10) so
+    # it must be the one kept after de-duplication, NOT a negative leg.
+    assert by_code["BTCIM"]["asset_type"] == "local_equity"
+    assert by_code["BTCIM"]["weight"] == 14.41
+    # GRTHO must not have been swallowed into the previous buffer; its main
+    # equity weight must remain intact.
+    assert by_code["GRTHO"]["asset_type"] == "local_equity"
+    assert by_code["GRTHO"]["weight"] == 63.31
+
+
+def test_kap_holdings_parser_excludes_repo_collateral_using_known_stock_ticker() -> None:
+    """REPO/Mevduat collateral rows must not be promoted to ``local_equity``
+    even when the leading token is a known BIST stock code, otherwise the
+    negative collateral leg overwrites the real holding."""
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+HİSSE SENETLERİ
+Hisse Türk
+BTCIM BATIÇİM
+BATI
+ANADOLU
+ÇİMENTO
+SANAYİİ
+A.Ş.
+28.363.048,00 4,532224 31/03/26 5,950000 168.760.174,87 10,89 14,41TL 80100511TRABTCIM91F5
+REPO
+BTCIM 01/04/26 0 43,00 100.117.808,22 43,000000 31/03/26 16.207.456,00 100.117.808,22 43,000000 -100.117.808,22 57,14 -8,5581313833 -9,03
+BTCIM 01/04/26 0 43,00 75.088.356,16 43,000000 31/03/26 12.155.592,00 75.088.356,16 43,000000 -75.088.356,16 42,86 -6,4181313833 -6,78
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="IIE",
+        report_date="2026-03-31",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    # Only the genuine equity holding may surface; the REPO collateral
+    # legs must stay in non-holding bucket and therefore be filtered out.
+    assert "BTCIM" in by_code
+    assert by_code["BTCIM"]["asset_type"] == "local_equity"
+    assert by_code["BTCIM"]["weight"] == 14.41
+    # No negative-weight ghost row is allowed for the same ticker.
+    assert all(
+        position["weight"] is None or position["weight"] >= 0
+        for position in positions
+    ), positions
+
+
+def test_kap_holdings_parser_handles_glued_borsa_code_before_isin() -> None:
+    """ISIN tail recognition must tolerate borsa/sözleşme codes glued
+    between the currency token and the ISIN (e.g. ``14,41TL 80100511TRABTCIM91F5``).
+
+    Without this tolerance, ``_kap_row_complete`` returns False for the row
+    and the buffer keeps absorbing the next position's lines."""
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+Hisse Türk
+BTCIM BATIÇİM
+BATI
+ANADOLU
+ÇİMENTO
+SANAYİİ
+A.Ş.
+28.363.048,00 4,532224 30/04/26 5,950000 168.760.174,87 10,89 14,41TL 80100511TRABTCIM91F5
+BSOKE BATISÖKE
+SÖKE
+ÇİMENTO
+SANAYİİ
+T.A.Ş.
+1.325.828,00 22,365319 30/04/26 32,400000 42.956.827,20 2,77 3,67TL 80100511 3,88TRABSOKE91F5
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="TST",
+        report_date="2026-04-30",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    # The ISIN tail with glued borsa code must still complete the BTCIM
+    # row, otherwise its lines bleed into BSOKE and one of them disappears.
+    assert {"BTCIM", "BSOKE"}.issubset(by_code.keys())
+    assert by_code["BTCIM"]["weight"] == 14.41
+    assert by_code["BSOKE"]["weight"] == 3.88
 
 
 def test_api_fund_holdings_partial_when_pdf_not_parsed(
@@ -2209,6 +2501,14 @@ BNK.E;BANK TEST;XBANK;BIST BANKA;BIST BANKS;29/04/2026
     assert sector_payload["index"] == "XBANK"
     assert sector_payload["symbols"] == ["BNK"]
     assert sector_payload["fallback_used"] is False
+    kap_service_module._BIST_UNIVERSE_CACHE.clear()
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: pytest.fail("shared BIST universe cache should satisfy request"),
+    )
+    cached_sector = kap_service_module.get_bist_index_universe("XBANK")
+    assert cached_sector["symbols"] == ["BNK"]
+    assert cached_sector["cache_hit"] is True
 
     def fail_urlopen(*_args: Any, **_kwargs: Any) -> Any:
         raise OSError("network down")
@@ -2933,6 +3233,22 @@ def test_market_stock_card_chart_falls_back_to_previous_session_when_daily_empty
     assert period_calls
 
 
+def test_stock_card_session_state_marks_old_intraday_points_as_closed() -> None:
+    state = api_module._stock_card_session_state(
+        [{"time": "2026-05-26T09:40:00+00:00", "close": 373.0}],
+        market_state="REGULAR",
+        source="yahoo_live",
+        now=datetime(2026, 5, 28, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert state["session_status"] == "previous_session"
+    assert state["session_label"] == "Piyasa kapalı"
+    assert state["is_live"] is False
+    assert state["is_stale"] is True
+    assert state["last_trade_at"] == "2026-05-26T09:40:00+00:00"
+    assert state["last_trade_date"] == "2026-05-26"
+
+
 def test_market_stock_card_chart_rejects_invalid_symbol_and_range() -> None:
     client = TestClient(app)
 
@@ -3196,6 +3512,71 @@ def test_market_sector_index_order_excludes_capped_and_removed_codes() -> None:
     for code in {"XSINS", "XGYOS", "XTKJS", "XTTIC", "XPTIC", "XKNKL", "XYIHZ"}:
         assert code not in api_module._MARKET_INDEX_ORDER
         assert code not in api_module._MARKET_INDEX_META
+
+
+def test_market_index_return_bases_fall_back_to_isyatirim_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_yahoo_chart(_yahoo_symbol: str, **_kwargs: Any) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "points": [{"time": "2026-05-27T00:00:00+00:00", "close": 200.0}],
+        }
+
+    def fake_isyatirim_history(
+        index_code: str,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> List[tuple[datetime, float]]:
+        assert index_code == "XAKUR"
+        assert start_date < end_date
+        return [
+            (datetime(2021, 5, 17, tzinfo=timezone.utc), 70.0),
+            (datetime(2025, 5, 27, tzinfo=timezone.utc), 100.0),
+            (datetime(2025, 11, 26, tzinfo=timezone.utc), 110.0),
+            (datetime(2026, 1, 2, tzinfo=timezone.utc), 120.0),
+            (datetime(2026, 2, 25, tzinfo=timezone.utc), 130.0),
+            (datetime(2026, 4, 27, tzinfo=timezone.utc), 150.0),
+            (datetime(2026, 5, 20, tzinfo=timezone.utc), 160.0),
+            (datetime(2026, 5, 27, tzinfo=timezone.utc), 200.0),
+        ]
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_raw", fake_yahoo_chart)
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_index_history", fake_isyatirim_history)
+
+    bases = api_module._fetch_index_return_bases("XAKUR")
+
+    assert bases["history_source"] == "isyatirim"
+    assert bases["base_1w"] == 160.0
+    assert bases["base_1m"] == 150.0
+    assert bases["base_3m"] == 130.0
+    assert bases["base_6m"] == 110.0
+    assert bases["base_ytd"] == 120.0
+    assert bases["base_1y"] == 100.0
+
+    row = api_module._market_index_row(
+        "XAKUR",
+        quote={
+            "symbol": "XAKUR",
+            "label": "BIST Aracı Kurumlar",
+            "yahoo_symbol": "XAKUR.IS",
+            "price": 220.0,
+            "prev_close": 200.0,
+            "change": 20.0,
+            "change_pct": 10.0,
+            "high": 225.0,
+            "low": 198.0,
+            "volume": None,
+            "currency": "TRY",
+            "market_state": "REGULAR",
+            "as_of": "2026-05-27T12:00:00+00:00",
+            "error": None,
+        },
+    )
+    assert row["return_1w_pct"] == 37.5
+    assert row["return_1m_pct"] == 46.67
+    assert row["return_ytd_pct"] == 83.33
 
 
 def test_market_index_detail_returns_line_points_and_weighted_constituents(

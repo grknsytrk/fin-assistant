@@ -26,6 +26,7 @@ import MarketSidebar from '../components/MarketSidebar';
 import MarketWatchStrip from '../components/MarketWatchStrip';
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo from '../components/SymbolLogo';
+import { buildDocumentTitle, formatTitleNumber, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import './MarketsView.css';
 
 type MarketSection = MarketsNavigationSection;
@@ -269,11 +270,56 @@ function formatStockCardAxisDate(iso: string | null | undefined, range: MarketSt
     }).format(dt);
 }
 
+function formatStockCardAxisTime(date: Date): string {
+    if (Number.isNaN(date.getTime())) return '';
+    return new Intl.DateTimeFormat('tr-TR', {
+        timeZone: 'Europe/Istanbul',
+        hour: '2-digit',
+        minute: '2-digit',
+    }).format(date);
+}
+
 function formatUpdateTime(iso: string | null | undefined): string {
     if (!iso) return '--:--';
     const dt = new Date(iso);
     if (Number.isNaN(dt.getTime())) return '--:--';
     return dt.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function formatStockCardTradeTime(iso: string | null | undefined): string {
+    if (!iso) return '--:--';
+    const dt = new Date(iso);
+    if (Number.isNaN(dt.getTime())) return '--:--';
+    const today = new Date();
+    const isToday = dt.toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' })
+        === today.toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' });
+    return new Intl.DateTimeFormat('tr-TR', {
+        timeZone: 'Europe/Istanbul',
+        ...(isToday ? {} : { day: '2-digit', month: 'short' }),
+        hour: '2-digit',
+        minute: '2-digit',
+    }).format(dt);
+}
+
+function latestStockCardPointTime(points: MarketIndexLinePoint[] | null | undefined): string | null {
+    const valid = (points || [])
+        .map((point) => point.time)
+        .filter((time): time is string => Boolean(time))
+        .sort();
+    return valid[valid.length - 1] || null;
+}
+
+function isPreviousIstanbulDate(iso: string | null | undefined): boolean {
+    if (!iso) return false;
+    const dt = new Date(iso);
+    if (Number.isNaN(dt.getTime())) return false;
+    const format = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Europe/Istanbul',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    });
+    return format.format(dt) < format.format(new Date());
 }
 
 function formatDateTime(iso: string | null | undefined): string {
@@ -755,6 +801,7 @@ function StockCardMiniChart({
     rangeError,
     onRangeSelect,
     isLoading = false,
+    isLive = false,
 }: {
     symbol: string;
     points: MarketIndexLinePoint[] | undefined;
@@ -767,6 +814,7 @@ function StockCardMiniChart({
     rangeError: Partial<Record<MarketStockCardChartRange, string | null>>;
     onRangeSelect: (range: MarketStockCardChartRange) => void;
     isLoading?: boolean;
+    isLive?: boolean;
 }) {
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const width = 360;
@@ -892,9 +940,20 @@ function StockCardMiniChart({
     if (useTimeScale) {
         const d = new Date(validPoints[0].time);
         const start = new Date(d); start.setHours(10, 0, 0, 0);
-        const end = new Date(d); end.setHours(18, 0, 0, 0);
+        const end = new Date(d);
+        if (isLive) {
+            end.setHours(18, 0, 0, 0);
+        } else {
+            const lastPointDate = new Date(validPoints[validPoints.length - 1].time);
+            const lastMinutes = lastPointDate.getHours() * 60 + lastPointDate.getMinutes();
+            const roundedEndHour = Math.min(18, Math.max(13, Math.ceil(lastMinutes / 60)));
+            end.setHours(roundedEndHour, 0, 0, 0);
+            if (end.getTime() <= lastPointDate.getTime()) {
+                end.setHours(Math.min(18, end.getHours() + 1), 0, 0, 0);
+            }
+        }
         startTimeMs = start.getTime();
-        endTimeMs = end.getTime();
+        endTimeMs = Math.max(end.getTime(), startTimeMs + 60 * 60 * 1000);
     }
 
     const xFor = (index: number) => {
@@ -975,11 +1034,22 @@ function StockCardMiniChart({
                     strokeDasharray="3 4"
                 />
                 {useTimeScale ? (
-                    <>
-                        <text x={padding.left} y={height - 6} fill="rgba(255,255,255,0.24)" fontSize="10" fontFamily="monospace" textAnchor="start">10:00</text>
-                        <text x={padding.left + plotWidth / 2} y={height - 6} fill="rgba(255,255,255,0.24)" fontSize="10" fontFamily="monospace" textAnchor="middle">14:00</text>
-                        <text x={width - padding.right} y={height - 6} fill="rgba(255,255,255,0.24)" fontSize="10" fontFamily="monospace" textAnchor="end">18:00</text>
-                    </>
+                    [startTimeMs, startTimeMs + (endTimeMs - startTimeMs) / 2, endTimeMs].map((timeMs, index) => {
+                        const x = index === 0 ? padding.left : index === 2 ? width - padding.right : padding.left + plotWidth / 2;
+                        return (
+                            <text
+                                key={timeMs}
+                                x={x}
+                                y={height - 6}
+                                fill="rgba(255,255,255,0.24)"
+                                fontSize="10"
+                                fontFamily="monospace"
+                                textAnchor={index === 0 ? 'start' : index === 2 ? 'end' : 'middle'}
+                            >
+                                {formatStockCardAxisTime(new Date(timeMs))}
+                            </text>
+                        );
+                    })
                 ) : (
                     timeTickIndexes.map((index) => {
                         const x = xFor(index);
@@ -1003,10 +1073,12 @@ function StockCardMiniChart({
                 
                 {selectedRange === '1d' && (
                     <>
-                        <circle cx={xFor(validPoints.length - 1)} cy={yFor(validPoints[validPoints.length - 1].close)} r="4" fill={color} opacity="0.6">
-                            <animate attributeName="r" values="4; 14; 14" keyTimes="0; 0.5; 1" dur="2s" repeatCount="indefinite" />
-                            <animate attributeName="opacity" values="0.6; 0; 0" keyTimes="0; 0.5; 1" dur="2s" repeatCount="indefinite" />
-                        </circle>
+                        {isLive && (
+                            <circle cx={xFor(validPoints.length - 1)} cy={yFor(validPoints[validPoints.length - 1].close)} r="4" fill={color} opacity="0.6">
+                                <animate attributeName="r" values="4; 14; 14" keyTimes="0; 0.5; 1" dur="2s" repeatCount="indefinite" />
+                                <animate attributeName="opacity" values="0.6; 0; 0" keyTimes="0; 0.5; 1" dur="2s" repeatCount="indefinite" />
+                            </circle>
+                        )}
                         <circle cx={xFor(validPoints.length - 1)} cy={yFor(validPoints[validPoints.length - 1].close)} r="4" fill={color} />
                     </>
                 )}
@@ -1077,6 +1149,12 @@ function emptyStockCardItem(symbol: string): MarketStockCardItem {
         return_1y_pct: null,
         market_state: '',
         as_of: null,
+        session_status: 'unknown',
+        session_label: 'Veri bekleniyor',
+        is_live: false,
+        is_stale: false,
+        last_trade_at: null,
+        last_trade_date: null,
         line_points: [],
         error: 'data_unavailable',
         logo_url: null,
@@ -1304,6 +1382,17 @@ function MarketStockCard({
             maximumFractionDigits: 2,
         });
     };
+    const latestPointTime = latestStockCardPointTime(item.line_points);
+    const hasPreviousSessionData = item.is_stale === true || item.session_status === 'previous_session' || isPreviousIstanbulDate(item.last_trade_at || latestPointTime);
+    const isCardLive = !hasPreviousSessionData && (item.is_live === true || item.session_status === 'open');
+    const sessionLabel = item.session_label || (isCardLive ? 'Canlı' : hasPreviousSessionData ? 'Piyasa kapalı' : 'Piyasa kapalı');
+    const sessionStatusClass = isCardLive
+        ? 'is-live'
+        : hasPreviousSessionData
+            ? 'is-previous'
+            : 'is-closed';
+    const sessionTime = formatStockCardTradeTime(item.last_trade_at || latestPointTime || item.as_of);
+    const footerLabel = isCardLive ? 'Canlı güncelleme' : hasPreviousSessionData ? 'Son işlem' : sessionLabel;
 
     return (
         <article
@@ -1383,6 +1472,11 @@ function MarketStockCard({
                         <span>{item.company}</span>
                     </div>
                 </div>
+                {!isLoading && (
+                    <span className={`stock-card-session-badge ${sessionStatusClass}`}>
+                        {sessionLabel}
+                    </span>
+                )}
             </div>
 
             <div className="stock-card-price-row">
@@ -1452,6 +1546,7 @@ function MarketStockCard({
                 rangeError={rangeError}
                 onRangeSelect={handleRangeSelect}
                 isLoading={isLoading}
+                isLive={isCardLive}
             />
 
             <div className="stock-card-detail-metrics">
@@ -1590,7 +1685,7 @@ function MarketStockCard({
                 {isLoading ? (
                     <span className="stock-card-inline-skeleton-time stock-card-inline-skeleton-pulse" aria-hidden="true" />
                 ) : (
-                    <span>Son güncelleme {formatUpdateTime(item.as_of)}</span>
+                    <span>{footerLabel} {sessionTime}</span>
                 )}
             </div>
         </article>
@@ -2265,7 +2360,44 @@ export default function MarketsView({
             ? 'BIST ana ve sektör endekslerini, getirileri ve endeks içi şirket hareketlerini takip edin.'
             : activeSection === 'stocks'
               ? 'XUTUM, XU100 ve XU030 hisselerini fiyat, hacim ve piyasa değeriyle karşılaştırın.'
-            : 'Güncel fiyatlar, finansal görünüm ve analiz erişimi tek ekranda.';
+              : 'Güncel fiyatlar, finansal görünüm ve analiz erişimi tek ekranda.';
+    const documentTitle = useMemo(() => {
+        if (activeSection === 'indices' && selectedIndex) {
+            const indexQuoteTitle = [
+                formatTitleNumber(indexDetail?.price),
+                formatTitlePct(indexDetail?.change_pct),
+            ].filter(Boolean).join(' ');
+            return buildDocumentTitle(
+                indexDetail?.symbol || selectedIndex,
+                indexQuoteTitle,
+                indexDetail?.label || 'Endeks Detayı',
+            );
+        }
+        if (activeSection === 'indices') {
+            const indexCount = sortedIndices.length || indices?.rows.length;
+            return buildDocumentTitle('Endeksler', indexCount ? `${indexCount} endeks` : null);
+        }
+        if (activeSection === 'stocks') {
+            const stockCount = sortedStocks.length || stocks?.rows.length;
+            return buildDocumentTitle('BIST Hisseleri', stocks?.index || stockIndex, stockCount ? `${stockCount} hisse` : null);
+        }
+        return buildDocumentTitle('Piyasa Özeti', market?.rows.length ? `${market.rows.length} hisse` : null);
+    }, [
+        activeSection,
+        indexDetail?.change_pct,
+        indexDetail?.label,
+        indexDetail?.price,
+        indexDetail?.symbol,
+        indices?.rows.length,
+        market?.rows.length,
+        selectedIndex,
+        sortedIndices.length,
+        sortedStocks.length,
+        stockIndex,
+        stocks?.index,
+        stocks?.rows.length,
+    ]);
+    useDocumentTitle(documentTitle);
 
     const onCompanyClick = (ticker: string) => {
         const normalizedTicker = String(ticker || '').trim().toUpperCase();

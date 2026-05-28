@@ -804,7 +804,7 @@ _RESOLVED_MEMBER_TTL_SECONDS = 24 * 60 * 60  # 24 saat
 
 
 def _resolved_member_cache_key(company_key: str) -> str:
-    return f"kap:resolve-member:{company_key}"
+    return f"api:kap:resolve-member:{company_key}:v1"
 
 
 def _empty_member_to_none(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -815,30 +815,26 @@ def _empty_member_to_none(payload: Optional[Dict[str, Any]]) -> Optional[Dict[st
 
 def _resolve_member_from_cache(company_key: str) -> Optional[Dict[str, Any]]:
     try:
-        from app.cache import get_cache  # local import to avoid heavy deps at module import time
+        from app.cache import get_json_dict  # local import to avoid heavy deps at module import time
     except Exception:
         return None
     try:
-        cached = get_cache().get(_resolved_member_cache_key(company_key))
+        cached = get_json_dict(_resolved_member_cache_key(company_key))
     except Exception:
         return None
-    if cached is None:
-        return None
-    if isinstance(cached, dict):
-        return cached
-    return None
+    return cached
 
 
 def _store_resolved_member(company_key: str, resolved: Optional[Dict[str, Any]]) -> None:
     try:
-        from app.cache import get_cache
+        from app.cache import set_json
     except Exception:
         return
     payload: Dict[str, Any] = dict(resolved) if isinstance(resolved, dict) else {}
     # KAP'ta hiç bulunmayan ticker'ları (KOZAL, KOZAA gibi delisting'ler) negatif
     # cache'e alıyoruz; aksi halde her snapshot çağrısı KAP'ı yine yokluyor.
     try:
-        get_cache().set(
+        set_json(
             _resolved_member_cache_key(company_key),
             payload,
             ttl_seconds=_RESOLVED_MEMBER_TTL_SECONDS,

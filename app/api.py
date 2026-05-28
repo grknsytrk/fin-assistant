@@ -56,6 +56,8 @@ from src.retrieve import RetrievedChunk, Retriever, RetrieverV2, RetrieverV3, Re
 from app.cache import cache_status as _cache_status
 from app.cache import cached as _cached_response
 from app.cache import get_cache as _get_cache
+from app.cache import get_json_dict as _cache_get_dict
+from app.cache import set_json as _cache_set_json
 from app.reference_data import (
     get_instruments,
     get_instrument_name,
@@ -73,6 +75,7 @@ _KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_KAP_SNAPSHOT_RESPO
 _FUND_YIELD_SUMMARY_CACHE_TTL = int(os.getenv("RAGFIN_FUND_YIELD_SUMMARY_CACHE_TTL_SECONDS", "900"))
 _FUND_HOLDINGS_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_CACHE_TTL_SECONDS", str(60 * 60)))
 _FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT_SECONDS", "120"))
+_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 3
 _FUND_HOLDING_SECTOR_MAP_CACHE_TTL = 6 * 60 * 60
 
 
@@ -82,18 +85,12 @@ def _truthy_env(name: str, default: str = "1") -> bool:
 
 
 def _shared_cache_get_dict(key: str) -> Optional[Dict[str, Any]]:
-    try:
-        cached = _get_cache().get(key)
-    except Exception:
-        return None
-    return dict(cached) if isinstance(cached, dict) else None
+    return _cache_get_dict(key)
 
 
 def _shared_cache_set(key: str, value: Any, ttl_seconds: int) -> None:
-    try:
-        _get_cache().set(key, value, ttl_seconds=ttl_seconds)
-    except Exception:
-        return
+    if isinstance(value, dict):
+        _cache_set_json(key, value, ttl_seconds=ttl_seconds)
 
 
 async def _fund_price_collector_loop() -> None:
@@ -254,11 +251,51 @@ class MarketComparisonHistoryRequest(BaseModel):
     end_date: date
 
 
+_JSONL_ROW_COUNT_CACHE: Dict[str, Any] = {}
+_JSONL_ROW_COUNT_CACHE_TTL = 10 * 60
+
+
 def _count_jsonl_rows(path: Path) -> int:
     if not path.exists():
         return 0
+    cache_key = ""
+    signature = None
+    shared_key = None
+    try:
+        stat = path.stat()
+        cache_key = str(path.resolve())
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = _JSONL_ROW_COUNT_CACHE.get(cache_key)
+        if cached and cached.get("signature") == signature:
+            return int(cached.get("count") or 0)
+        shared_key = f"api:stats:jsonl-row-count:{path.name}:mtime={stat.st_mtime_ns}:size={stat.st_size}:v1"
+        shared_cached = _shared_cache_get_dict(shared_key)
+        if shared_cached is not None:
+            count = int(shared_cached.get("count") or 0)
+            _JSONL_ROW_COUNT_CACHE[cache_key] = {
+                "signature": signature,
+                "count": count,
+            }
+            return count
+    except Exception:
+        cache_key = ""
+        signature = None
+        shared_key = None
+
     with path.open("r", encoding="utf-8") as f:
-        return sum(1 for line in f if line.strip())
+        count = sum(1 for line in f if line.strip())
+    if cache_key and signature:
+        _JSONL_ROW_COUNT_CACHE[cache_key] = {
+            "signature": signature,
+            "count": count,
+        }
+        if shared_key:
+            _shared_cache_set(
+                shared_key,
+                {"count": count},
+                ttl_seconds=_JSONL_ROW_COUNT_CACHE_TTL,
+            )
+    return count
 
 
 def _collection_count(collection_name: str) -> Optional[int]:
@@ -290,6 +327,7 @@ def _stats_payload() -> Dict[str, Any]:
 
 
 _AVAILABLE_COMPANIES_CACHE: Dict[str, Any] = {}
+_COMPANY_BREAKDOWN_CACHE: Dict[str, Any] = {}
 
 
 def _available_companies_from_chunks(chunks_file: Path) -> List[str]:
@@ -302,9 +340,19 @@ def _available_companies_from_chunks(chunks_file: Path) -> List[str]:
         signature = (stat.st_mtime_ns, stat.st_size)
         if cached and cached.get("signature") == signature:
             return list(cached.get("companies") or [])
+        shared_key = f"api:stats:available-companies:mtime={stat.st_mtime_ns}:size={stat.st_size}:v1"
+        shared_cached = _shared_cache_get_dict(shared_key)
+        if shared_cached is not None:
+            companies = list(shared_cached.get("companies") or [])
+            _AVAILABLE_COMPANIES_CACHE[cache_key] = {
+                "signature": signature,
+                "companies": companies,
+            }
+            return companies
     except Exception:
         cache_key = ""
         signature = None
+        shared_key = None
 
     companies = set()
     with chunks_file.open("r", encoding="utf-8") as f:
@@ -324,12 +372,41 @@ def _available_companies_from_chunks(chunks_file: Path) -> List[str]:
             "signature": signature,
             "companies": result,
         }
+        if shared_key:
+            _shared_cache_set(
+                shared_key,
+                {"companies": result},
+                ttl_seconds=10 * 60,
+            )
     return result
 
 
 def _company_breakdown_from_chunks(chunks_file: Path) -> List[Dict[str, Any]]:
     if not chunks_file.exists():
         return []
+    cache_key = ""
+    signature = None
+    shared_key = None
+    try:
+        stat = chunks_file.stat()
+        cache_key = str(chunks_file.resolve())
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = _COMPANY_BREAKDOWN_CACHE.get(cache_key)
+        if cached and cached.get("signature") == signature:
+            return [dict(row) for row in list(cached.get("rows") or []) if isinstance(row, dict)]
+        shared_key = f"api:stats:company-breakdown:mtime={stat.st_mtime_ns}:size={stat.st_size}:v1"
+        shared_cached = _shared_cache_get_dict(shared_key)
+        if shared_cached is not None:
+            rows = [dict(row) for row in list(shared_cached.get("rows") or []) if isinstance(row, dict)]
+            _COMPANY_BREAKDOWN_CACHE[cache_key] = {
+                "signature": signature,
+                "rows": rows,
+            }
+            return rows
+    except Exception:
+        cache_key = ""
+        signature = None
+        shared_key = None
 
     counts: Dict[str, Dict[str, Any]] = {}
     with chunks_file.open("r", encoding="utf-8") as f:
@@ -362,6 +439,17 @@ def _company_breakdown_from_chunks(chunks_file: Path) -> List[Dict[str, Any]]:
             }
         )
     rows.sort(key=lambda item: (-int(item["chunks"]), str(item["company"])))
+    if cache_key and signature:
+        _COMPANY_BREAKDOWN_CACHE[cache_key] = {
+            "signature": signature,
+            "rows": rows,
+        }
+        if shared_key:
+            _shared_cache_set(
+                shared_key,
+                {"rows": rows},
+                ttl_seconds=10 * 60,
+            )
     return rows
 
 
@@ -385,10 +473,41 @@ def _latest_quarter_label(quarters: List[str]) -> Optional[str]:
     return max(candidates, key=_quarter_label_sort_key)
 
 
+_KAP_MARKET_METADATA_CACHE: Dict[str, Any] = {}
+_KAP_MARKET_METADATA_CACHE_TTL = 6 * 60 * 60
+
+
 def _load_cached_kap_market_metadata(cache_dir: Path, symbol: str) -> Dict[str, Any]:
-    cache_file = cache_dir / f"{symbol}.json"
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        return {}
+    cache_file = cache_dir / f"{normalized_symbol}.json"
     if not cache_file.exists():
         return {}
+    cache_key = ""
+    signature = None
+    shared_key = None
+    try:
+        stat = cache_file.stat()
+        cache_key = str(cache_file.resolve())
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = _KAP_MARKET_METADATA_CACHE.get(cache_key)
+        if cached and cached.get("signature") == signature:
+            return dict(cached.get("data") or {})
+        shared_key = f"api:kap:market-metadata:{normalized_symbol}:mtime={stat.st_mtime_ns}:size={stat.st_size}:v1"
+        shared_cached = _shared_cache_get_dict(shared_key)
+        if shared_cached is not None:
+            metadata = dict(shared_cached)
+            _KAP_MARKET_METADATA_CACHE[cache_key] = {
+                "signature": signature,
+                "data": metadata,
+            }
+            return metadata
+    except Exception:
+        cache_key = ""
+        signature = None
+        shared_key = None
+
     try:
         with cache_file.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
@@ -427,14 +546,22 @@ def _load_cached_kap_market_metadata(cache_dir: Path, symbol: str) -> Dict[str, 
                 break
             if shares_outstanding is not None:
                 break
-    return {
+    metadata = {
         "latest_quarter": _latest_quarter_label(quarters),
         "has_kap_cache": True,
         "shares_outstanding": shares_outstanding,
         "share_source": share_source,
         "company_title": company_title or None,
-        "company": company_code or symbol,
+        "company": company_code or normalized_symbol,
     }
+    if cache_key and signature:
+        _KAP_MARKET_METADATA_CACHE[cache_key] = {
+            "signature": signature,
+            "data": metadata,
+        }
+        if shared_key:
+            _shared_cache_set(shared_key, metadata, ttl_seconds=_KAP_MARKET_METADATA_CACHE_TTL)
+    return metadata
 
 
 def _stock_reference_record_from_kap_payload(symbol: str, payload: Dict[str, Any], *, source: str) -> Dict[str, Any]:
@@ -527,6 +654,12 @@ def _market_universe_payload(*, index_name: str = "XUTUM", force_refresh: bool =
     cached = _UNIVERSE_CACHE.get(cache_key)
     if cached and not force_refresh and now_ts - cached.get("_ts", 0) < _UNIVERSE_CACHE_TTL:
         return cached["data"]
+    shared_key = f"api:market:universe:{normalized_index}:v1"
+    if not force_refresh:
+        shared_cached = _shared_cache_get_dict(shared_key)
+        if shared_cached is not None:
+            _UNIVERSE_CACHE[cache_key] = {"_ts": now_ts, "data": shared_cached}
+            return dict(shared_cached)
 
     stats = _stats_payload()
     universe = get_bist_index_universe(normalized_index, force_refresh=force_refresh)
@@ -625,6 +758,7 @@ def _market_universe_payload(*, index_name: str = "XUTUM", force_refresh: bool =
         "coverage_rows": coverage_rows,
     }
     _UNIVERSE_CACHE[cache_key] = {"_ts": now_ts, "data": data}
+    _shared_cache_set(shared_key, data, ttl_seconds=_UNIVERSE_CACHE_TTL)
     return data
 
 
@@ -1302,7 +1436,7 @@ def fund_holdings(fund_code: str) -> Dict[str, Any]:
 
 
 @_cached_response(
-    key_fn=lambda *, normalized: f"api:fund-holdings:{normalized}",
+    key_fn=lambda *, normalized: f"api:fund-holdings:{normalized}:v{_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION}",
     ttl_seconds=_FUND_HOLDINGS_RESPONSE_CACHE_TTL,
     skip_when=lambda *, normalized: not normalized,
     single_flight=True,
@@ -1399,11 +1533,8 @@ def _fund_holding_sector_map() -> tuple[Dict[str, Dict[str, str]], Dict[str, Any
             "source_date": cached.get("source_date"),
             "warnings": list(cached.get("warnings") or []),
         }
-    cache_key = "api:fund-holding-sector-map"
-    try:
-        redis_cached = _get_cache().get(cache_key)
-    except Exception:
-        redis_cached = None
+    cache_key = "api:funds:holding-sector-map:v1"
+    redis_cached = _shared_cache_get_dict(cache_key)
     if isinstance(redis_cached, dict):
         _FUND_HOLDING_SECTOR_MAP_CACHE["default"] = {
             "_ts": now,
@@ -1453,20 +1584,17 @@ def _fund_holding_sector_map() -> tuple[Dict[str, Dict[str, str]], Dict[str, Any
         "warnings": warnings,
     }
     _FUND_HOLDING_SECTOR_MAP_CACHE["default"] = cache_payload
-    try:
-        _get_cache().set(
-            cache_key,
-            {
-                "map": sector_map,
-                "symbol_count": len(sector_map),
-                "source": source,
-                "source_date": source_date,
-                "warnings": warnings,
-            },
-            ttl_seconds=_FUND_HOLDING_SECTOR_MAP_CACHE_TTL,
-        )
-    except Exception:
-        pass
+    _shared_cache_set(
+        cache_key,
+        {
+            "map": sector_map,
+            "symbol_count": len(sector_map),
+            "source": source,
+            "source_date": source_date,
+            "warnings": warnings,
+        },
+        ttl_seconds=_FUND_HOLDING_SECTOR_MAP_CACHE_TTL,
+    )
     return dict(sector_map), {
         "cache_hit": False,
         "symbol_count": len(sector_map),
@@ -1539,6 +1667,25 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
             "row_count": cached.get("row_count", 0),
             "as_of": cached.get("as_of"),
         }
+    stat_version = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)) if stat else None
+    shared_key = f"api:funds:snapshot-row-map:mtime={stat_version}:v1" if stat_version is not None else None
+    if shared_key:
+        shared_cached = _shared_cache_get_dict(shared_key)
+        if shared_cached is not None:
+            rows = dict(shared_cached.get("rows") or {})
+            cache_payload = {
+                "mtime": stat.st_mtime if stat else None,
+                "rows": rows,
+                "row_count": shared_cached.get("row_count", len(rows)),
+                "as_of": shared_cached.get("as_of"),
+            }
+            _FUND_SNAPSHOT_ROW_MAP_CACHE[cache_key] = cache_payload
+            return rows, {
+                "cache_hit": True,
+                "row_count": cache_payload["row_count"],
+                "as_of": cache_payload["as_of"],
+                "shared_cache_hit": True,
+            }
 
     try:
         snapshot = load_funds_snapshot(CONFIG.paths.processed_dir)
@@ -1558,6 +1705,16 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
             "row_count": len(rows),
             "as_of": snapshot.get("as_of"),
         }
+        if shared_key:
+            _shared_cache_set(
+                shared_key,
+                {
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "as_of": snapshot.get("as_of"),
+                },
+                ttl_seconds=300,
+            )
     return dict(rows), {"cache_hit": False, "row_count": len(rows), "as_of": snapshot.get("as_of")}
 
 
@@ -1644,6 +1801,14 @@ def _fetch_gefas_gyf_quote(symbol: str) -> Optional[Dict[str, Any]]:
         if data:
             data["_cache_hit"] = True
         return data
+    shared_key = f"api:funds:gefas-gyf-quote:{cache_key}:v1"
+    shared_cached = _shared_cache_get_dict(shared_key)
+    if shared_cached is not None:
+        _GEFAS_GYF_QUOTE_CACHE[cache_key] = {"_ts": now, "data": shared_cached}
+        data = dict(shared_cached)
+        if data:
+            data["_cache_hit"] = True
+        return data
 
     price_chart = _fetch_gefas_gyf_chart(config["isin"], 0)
     return_chart = _fetch_gefas_gyf_chart(config["isin"], 2)
@@ -1656,6 +1821,7 @@ def _fetch_gefas_gyf_quote(symbol: str) -> Optional[Dict[str, Any]]:
     as_of = _gefas_chart_date(price_labels[-1] if price_labels else None) or _gefas_chart_date(return_labels[-1] if return_labels else None)
     if price is None and return_pct is None:
         _GEFAS_GYF_QUOTE_CACHE[cache_key] = {"_ts": now, "data": {}}
+        _shared_cache_set(shared_key, {}, ttl_seconds=_GEFAS_GYF_QUOTE_CACHE_TTL)
         return {}
 
     data = {
@@ -1670,6 +1836,7 @@ def _fetch_gefas_gyf_quote(symbol: str) -> Optional[Dict[str, Any]]:
         "label": config.get("label"),
     }
     _GEFAS_GYF_QUOTE_CACHE[cache_key] = {"_ts": now, "data": data}
+    _shared_cache_set(shared_key, data, ttl_seconds=_GEFAS_GYF_QUOTE_CACHE_TTL)
     result = dict(data)
     result["_cache_hit"] = False
     return result
@@ -1755,11 +1922,103 @@ def _position_daily_market_fields(
     }
 
 
+def _holding_weight_scale_context(positions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    weights = [
+        weight
+        for weight in (_api_number(position.get("weight")) for position in positions)
+        if weight is not None and weight > 0
+    ]
+    total = sum(weights)
+    if len(weights) >= 3 and 9000 <= total <= 11000 and max(weights) <= 10000:
+        return {
+            "action": "basis_points_to_percent",
+            "factor": 0.01,
+            "reason": "positive weights sum near 10000 basis points",
+        }
+    return {"action": "none", "factor": 1.0, "reason": None}
+
+
+def _validated_holding_weight(raw_value: Any, scale_factor: float) -> Dict[str, Any]:
+    raw_number = _api_number(raw_value)
+    if raw_number is None:
+        return {"weight": None, "raw_weight": None, "quality": "missing"}
+    weight = raw_number * scale_factor
+    quality = "normalized" if scale_factor != 1.0 else "ok"
+    return {
+        "weight": round(weight, 6),
+        "raw_weight": raw_number if quality == "normalized" else None,
+        "quality": quality,
+    }
+
+
+def _validate_fund_holding_weights(positions: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    scale_context = _holding_weight_scale_context(positions)
+    scale_factor = float(scale_context.get("factor") or 1.0)
+    validated: List[Dict[str, Any]] = []
+    normalized_count = 0
+    raw_positive_total = 0.0
+    adjusted_positive_total = 0.0
+
+    for position in positions:
+        row = dict(position)
+        raw_weight = _api_number(row.get("weight"))
+        if raw_weight is not None and raw_weight > 0:
+            raw_positive_total += raw_weight
+
+        weight_result = _validated_holding_weight(row.get("weight"), scale_factor)
+        previous_result = _validated_holding_weight(row.get("previous_weight"), scale_factor)
+
+        row["weight"] = weight_result["weight"]
+        row["weight_quality"] = weight_result["quality"]
+        row["weight_warning"] = None
+        if weight_result["raw_weight"] is not None:
+            row["raw_weight"] = weight_result["raw_weight"]
+        else:
+            row.pop("raw_weight", None)
+
+        row["previous_weight"] = previous_result["weight"]
+        row["previous_weight_quality"] = previous_result["quality"]
+        row["previous_weight_warning"] = None
+        if previous_result["raw_weight"] is not None:
+            row["raw_previous_weight"] = previous_result["raw_weight"]
+        else:
+            row.pop("raw_previous_weight", None)
+
+        if weight_result["quality"] == "normalized":
+            normalized_count += 1
+            if previous_result["weight"] is not None:
+                row["weight_change"] = round(weight_result["weight"] - previous_result["weight"], 6)
+            elif row.get("weight_change") is not None:
+                raw_change = _api_number(row.get("weight_change"))
+                row["weight_change"] = round(raw_change * scale_factor, 6) if raw_change is not None else None
+        elif previous_result["quality"] == "normalized" and row.get("weight") is not None:
+            row["weight_change"] = round(float(row["weight"]) - float(previous_result["weight"] or 0.0), 6)
+
+        if row.get("weight") is not None and row["weight"] > 0:
+            adjusted_positive_total += float(row["weight"])
+
+        validated.append(row)
+
+    quality = {
+        "status": "ok",
+        "normalized_position_count": normalized_count,
+        "raw_total_weight": round(raw_positive_total, 6),
+        "adjusted_total_weight": round(adjusted_positive_total, 6),
+        "normalization": {
+            "action": scale_context.get("action") or "none",
+            "factor": scale_factor,
+            "reason": scale_context.get("reason"),
+        },
+    }
+    return validated, quality
+
+
 def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_code: str) -> Dict[str, Any]:
     from app.fund_service import normalize_fund_code
 
     normalized_fund = normalize_fund_code(fund_code)
-    positions = [dict(position) for position in list(payload.get("positions") or []) if isinstance(position, dict)]
+    raw_positions = [dict(position) for position in list(payload.get("positions") or []) if isinstance(position, dict)]
+    positions, holdings_quality = _validate_fund_holding_weights(raw_positions)
     fund_rows, fund_rows_meta = _fund_snapshot_row_map_with_meta()
     fund_row = fund_rows.get(normalized_fund) or {}
     fund_aum = _api_number(fund_row.get("aum"))
@@ -1838,6 +2097,7 @@ def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_c
         "as_of": fund_row.get("as_of") or (payload.get("source_metadata") or {}).get("as_of"),
     }
     metadata = dict(enriched_payload.get("source_metadata") or {})
+    metadata["holdings_quality"] = holdings_quality
     metadata["daily_market_enrichment"] = {
         "period": "daily",
         "stock_quote_count": len(stock_quotes),
@@ -1930,6 +2190,8 @@ def _invalidate_fund_response_cache() -> None:
         "api:fund-detail:",
         "api:fund-yield-summary:",
         "api:fund-holdings:",
+        "api:funds:snapshot-row-map:",
+        "api:funds:holding-sector-map:",
     ):
         try:
             backend.delete_prefix(prefix)
@@ -1947,7 +2209,7 @@ def _invalidate_single_fund_response_cache(normalized: str) -> None:
         f"api:fund-performance:{normalized}:",
         f"api:fund-detail:{normalized}",
         f"api:fund-yield-summary:{normalized}",
-        f"api:fund-holdings:{normalized}",
+        f"api:fund-holdings:{normalized}:",
     ):
         try:
             if key_or_prefix.endswith(":"):
@@ -3108,6 +3370,12 @@ def _fetch_kap_member_disclosures_for(symbol: str, year: int) -> List[Dict[str, 
     import urllib.request
 
     oid = _KAP_MEMBER_OID_CACHE.get(symbol)
+    if not oid:
+        shared_oid = _shared_cache_get_dict(f"api:kap:member-oid:{symbol}:v1")
+        if shared_oid and shared_oid.get("oid"):
+            oid = str(shared_oid.get("oid") or "").strip()
+            if oid:
+                _KAP_MEMBER_OID_CACHE[symbol] = oid
     headers = {
         "Accept": "application/json",
         "Accept-Language": "tr",
@@ -3125,6 +3393,11 @@ def _fetch_kap_member_disclosures_for(symbol: str, year: int) -> List[Dict[str, 
                 oid = str(rows[0].get("mkkMemberOid") or "").strip()
                 if oid:
                     _KAP_MEMBER_OID_CACHE[symbol] = oid
+                    _shared_cache_set(
+                        f"api:kap:member-oid:{symbol}:v1",
+                        {"oid": oid},
+                        ttl_seconds=24 * 60 * 60,
+                    )
         except Exception:
             return []
     if not oid:
@@ -3167,6 +3440,14 @@ def _resolve_kap_member_oid(symbol: str) -> Optional[str]:
     oid = _KAP_MEMBER_OID_CACHE.get(normalized)
     if oid:
         return oid
+    shared_oid = _shared_cache_get_dict(f"api:kap:member-oid:{normalized}:v1")
+    if shared_oid and shared_oid.get("oid"):
+        oid = str(shared_oid.get("oid") or "").strip()
+        if oid:
+            _KAP_MEMBER_OID_CACHE[normalized] = oid
+            return oid
+    if _shared_cache_get_dict(f"api:kap:member-oid-miss:{normalized}:v1"):
+        return None
 
     now = time.time()
     negative_ts = _KAP_MEMBER_OID_NEGATIVE_CACHE.get(normalized, 0.0)
@@ -3197,11 +3478,21 @@ def _resolve_kap_member_oid(symbol: str) -> Optional[str]:
                 if candidate:
                     _KAP_MEMBER_OID_CACHE[normalized] = candidate
                     _KAP_MEMBER_OID_NEGATIVE_CACHE.pop(normalized, None)
+                    _shared_cache_set(
+                        f"api:kap:member-oid:{normalized}:v1",
+                        {"oid": candidate},
+                        ttl_seconds=24 * 60 * 60,
+                    )
                     return candidate
     except Exception:
         pass
 
     _KAP_MEMBER_OID_NEGATIVE_CACHE[normalized] = now
+    _shared_cache_set(
+        f"api:kap:member-oid-miss:{normalized}:v1",
+        {"miss": True},
+        ttl_seconds=_KAP_MEMBER_OID_NEGATIVE_TTL,
+    )
     return None
 
 
@@ -3214,6 +3505,11 @@ def _kap_logo_payload_for_symbol(symbol: str) -> Dict[str, Optional[str]]:
     cached = _MARKET_KAP_LOGO_CACHE.get(normalized)
     if cached and now - cached.get("_ts", 0) < _MARKET_KAP_LOGO_CACHE_TTL:
         return dict(cached.get("data") or {"logo_url": None, "logo_source": None})
+    shared_key = f"api:kap:logo:{normalized}:v1"
+    shared_cached = _shared_cache_get_dict(shared_key)
+    if shared_cached is not None:
+        _MARKET_KAP_LOGO_CACHE[normalized] = {"_ts": now, "data": shared_cached}
+        return dict(shared_cached or {"logo_url": None, "logo_source": None})
 
     oid = _resolve_kap_member_oid(normalized)
     data = {
@@ -3221,6 +3517,7 @@ def _kap_logo_payload_for_symbol(symbol: str) -> Dict[str, Optional[str]]:
         "logo_source": "kap" if oid else None,
     }
     _MARKET_KAP_LOGO_CACHE[normalized] = {"_ts": now, "data": data}
+    _shared_cache_set(shared_key, data, ttl_seconds=_MARKET_KAP_LOGO_CACHE_TTL)
     return dict(data)
 
 
@@ -3260,6 +3557,14 @@ def _fetch_kap_member_feed(
     cache = _KAP_MEMBER_FEED_CACHE
     if cache.get("items") and (now - cache.get("ts", 0)) < _KAP_MEMBER_FEED_TTL:
         return list(cache["items"])
+    shared_key = f"api:kap:member-feed:max={max_companies}:items={max_items}:v1"
+    shared_cached = _shared_cache_get_dict(shared_key)
+    if shared_cached is not None:
+        items = [dict(row) for row in list(shared_cached.get("items") or []) if isinstance(row, dict)]
+        if items:
+            cache["items"] = items
+            cache["ts"] = now
+            return list(items)
 
     started = time.time()
     symbols = list(BIST100_SYMBOLS[:max_companies])
@@ -3405,6 +3710,7 @@ def _fetch_kap_member_feed(
     # endregion
     cache["items"] = items
     cache["ts"] = now
+    _shared_cache_set(shared_key, {"items": items}, ttl_seconds=_KAP_MEMBER_FEED_TTL)
     return list(items)
 
 
@@ -3431,6 +3737,13 @@ def _market_flow_payload(
         ttl = _FLOW_DEGRADED_TTL if cached_data.get("degraded_mode") else _FLOW_CACHE_TTL
         if now - cached.get("_ts", 0) < ttl:
             return {**cached_data, "items": cached_data["items"][:limit]}
+    shared_key = f"api:kap:market-flow:category={category or ''}:budget={effective_budget}:v1"
+    if not force_refresh:
+        shared_cached = _shared_cache_get_dict(shared_key)
+        if shared_cached is not None:
+            ttl = _FLOW_DEGRADED_TTL if shared_cached.get("degraded_mode") else _FLOW_CACHE_TTL
+            _FLOW_CACHE[cache_key] = {"_ts": now, "data": shared_cached}
+            return {**shared_cached, "items": list(shared_cached.get("items") or [])[:limit]}
 
     # Resmi KAP VYK akisi: credential'lar varsa en oncelikli kaynak.
     # UYARI: Kullanici kap.org.tr uzerinden canli veri istedigi icin VYK akisi gecici olarak devre disi birakildi.
@@ -3494,6 +3807,8 @@ def _market_flow_payload(
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
     _FLOW_CACHE[cache_key] = {"_ts": now, "data": data}
+    flow_ttl = _FLOW_DEGRADED_TTL if degraded else _FLOW_CACHE_TTL
+    _shared_cache_set(shared_key, data, ttl_seconds=flow_ttl)
     # region agent log
     _debug_log(
         "H2",
@@ -4085,6 +4400,11 @@ def _fetch_infoyatirim_stock_page_quote(symbol: str) -> Dict[str, Any]:
     cached = _INFOYATIRIM_STOCK_PAGE_CACHE.get(ticker)
     if cached and now - cached.get("_ts", 0) < _INFOYATIRIM_STOCK_PAGE_CACHE_TTL:
         return dict(cached.get("data") or {})
+    shared_key = f"api:market:infoyatirim-page-quote:{ticker}:v1"
+    shared_cached = _shared_cache_get_dict(shared_key)
+    if shared_cached is not None:
+        _INFOYATIRIM_STOCK_PAGE_CACHE[ticker] = {"_ts": now, "data": shared_cached}
+        return dict(shared_cached)
 
     request = urllib.request.Request(
         _infoyatirim_stock_page_url(ticker),
@@ -4098,10 +4418,12 @@ def _fetch_infoyatirim_stock_page_quote(symbol: str) -> Dict[str, Any]:
             html_text = response.read().decode("utf-8", errors="ignore")
     except (urllib.error.URLError, Exception):
         _INFOYATIRIM_STOCK_PAGE_CACHE[ticker] = {"_ts": now, "data": {}}
+        _shared_cache_set(shared_key, {}, ttl_seconds=_INFOYATIRIM_STOCK_PAGE_CACHE_TTL)
         return {}
 
     data = _extract_infoyatirim_stock_page_quote(ticker, html_text)
     _INFOYATIRIM_STOCK_PAGE_CACHE[ticker] = {"_ts": now, "data": data}
+    _shared_cache_set(shared_key, data, ttl_seconds=_INFOYATIRIM_STOCK_PAGE_CACHE_TTL)
     return dict(data)
 
 
@@ -4642,6 +4964,68 @@ def _normalize_stock_card_line_points(raw_points: Any) -> List[Dict[str, Any]]:
     return [deduped[key] for key in sorted(deduped)]
 
 
+def _stock_card_latest_point_dt(points: List[Dict[str, Any]]) -> Optional[datetime]:
+    for point in reversed(points or []):
+        point_dt = _point_datetime(point.get("time"))
+        if point_dt is not None:
+            return point_dt
+    return None
+
+
+def _stock_card_session_state(
+    points: List[Dict[str, Any]],
+    *,
+    market_state: Any = None,
+    source: Any = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    state = str(market_state or "").strip().upper()
+    source_text = str(source or "").strip()
+    now_local = (now or datetime.now(_TURKEY_TIMEZONE)).astimezone(_TURKEY_TIMEZONE)
+    latest_dt = _stock_card_latest_point_dt(points)
+    latest_local = latest_dt.astimezone(_TURKEY_TIMEZONE) if latest_dt else None
+    last_trade_at = latest_dt.isoformat() if latest_dt else None
+    last_trade_date = latest_local.date().isoformat() if latest_local else None
+    previous_session = (
+        source_text == "yahoo_previous_session"
+        or (latest_local is not None and latest_local.date() < now_local.date())
+    )
+
+    if previous_session:
+        status = "previous_session"
+        label = "Piyasa kapalı"
+        is_live = False
+    elif state == "REGULAR":
+        status = "open"
+        label = "Canlı"
+        is_live = True
+    elif state in {"PRE", "PREPRE"}:
+        status = "pre"
+        label = "Açılış öncesi"
+        is_live = False
+    elif state in {"POST", "POSTPOST"}:
+        status = "post"
+        label = "Kapanış sonrası"
+        is_live = False
+    elif latest_local is not None:
+        status = "closed"
+        label = "Piyasa kapalı"
+        is_live = False
+    else:
+        status = "unknown"
+        label = "Veri bekleniyor"
+        is_live = False
+
+    return {
+        "session_status": status,
+        "session_label": label,
+        "is_live": is_live,
+        "last_trade_at": last_trade_at,
+        "last_trade_date": last_trade_date,
+        "is_stale": previous_session,
+    }
+
+
 def _fetch_previous_stock_card_intraday_chart(yahoo_symbol: str) -> Dict[str, Any]:
     today = datetime.now(_TURKEY_TIMEZONE).date()
     errors: List[str] = []
@@ -4686,6 +5070,14 @@ def _fetch_stock_card_chart(symbol: str, chart_range: str, *, force_refresh: boo
         payload = dict(cached.get("data") or {})
         payload["source"] = "yahoo_cache"
         return payload
+    shared_key = f"api:market:stock-card-chart:{ticker}:range={normalized_range}:v2"
+    if not force_refresh:
+        shared_cached = _shared_cache_get_dict(shared_key)
+        if shared_cached is not None:
+            _MARKET_STOCK_CARD_CHART_CACHE[cache_key] = {"_ts": now, "data": shared_cached}
+            payload = dict(shared_cached)
+            payload["source"] = "yahoo_cache"
+            return payload
 
     yahoo_symbol = f"{ticker}.IS"
     fetched_at = datetime.now(timezone.utc).isoformat()
@@ -4699,6 +5091,11 @@ def _fetch_stock_card_chart(symbol: str, chart_range: str, *, force_refresh: boo
             chart = fallback_chart
             points = fallback_points
             source = "yahoo_previous_session"
+    session_state = _stock_card_session_state(
+        points,
+        market_state=(chart.get("meta") or {}).get("marketState"),
+        source=source,
+    )
     payload = {
         "symbol": ticker,
         "range": normalized_range,
@@ -4708,8 +5105,10 @@ def _fetch_stock_card_chart(symbol: str, chart_range: str, *, force_refresh: boo
         "as_of": fetched_at,
         "error": None if chart.get("ok") and points else chart.get("error") or "chart_unavailable",
         "meta": chart.get("meta") or {},
+        **session_state,
     }
     _MARKET_STOCK_CARD_CHART_CACHE[cache_key] = {"_ts": now, "data": payload}
+    _shared_cache_set(shared_key, payload, ttl_seconds=int(config["ttl"]))
     return dict(payload)
 
 
@@ -4723,6 +5122,12 @@ def _market_stock_card_chart_payload(*, symbol: str, chart_range: str, force_ref
         "source": payload.get("source") or "yahoo_live",
         "as_of": payload.get("as_of"),
         "error": payload.get("error"),
+        "session_status": payload.get("session_status"),
+        "session_label": payload.get("session_label"),
+        "is_live": payload.get("is_live"),
+        "is_stale": payload.get("is_stale"),
+        "last_trade_at": payload.get("last_trade_at"),
+        "last_trade_date": payload.get("last_trade_date"),
     }
 
 
@@ -4763,6 +5168,12 @@ def _fetch_stock_card_intraday(symbol: str, *, force_refresh: bool = False) -> D
                 change = None
                 change_pct = None
 
+        last_trade_at = _stock_card_latest_point_dt(points)
+        session_state = _stock_card_session_state(
+            points,
+            market_state=meta_payload.get("marketState"),
+            source=chart_payload.get("source"),
+        )
         as_of = None
         rmt = meta_payload.get("regularMarketTime")
         if isinstance(rmt, (int, float)):
@@ -4770,6 +5181,8 @@ def _fetch_stock_card_intraday(symbol: str, *, force_refresh: bool = False) -> D
                 as_of = datetime.fromtimestamp(float(rmt), tz=timezone.utc).isoformat()
             except Exception:
                 as_of = None
+        if session_state.get("is_stale") or not as_of:
+            as_of = session_state.get("last_trade_at") or (last_trade_at.isoformat() if last_trade_at else None)
 
         payload = {
             "line_points": points,
@@ -4786,6 +5199,7 @@ def _fetch_stock_card_intraday(symbol: str, *, force_refresh: bool = False) -> D
             "as_of": as_of or chart_payload.get("as_of"),
             "yahoo_symbol": yahoo_symbol,
             "error": None,
+            **session_state,
         }
         return dict(payload)
 
@@ -4804,6 +5218,7 @@ def _fetch_stock_card_intraday(symbol: str, *, force_refresh: bool = False) -> D
         "as_of": chart_payload.get("as_of"),
         "yahoo_symbol": yahoo_symbol,
         "error": chart_payload.get("error") or "chart_unavailable",
+        **_stock_card_session_state([], market_state="", source=chart_payload.get("source")),
     }
     return dict(fallback)
 
@@ -4867,8 +5282,41 @@ def _resolve_market_card_multiples(symbol: str, multiples_payload: Dict[str, Any
     return {"fk": fk, "pd_dd": pd_dd, "fd_favok": fd_favok}
 
 
+_STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE: Dict[str, Any] = {}
+_STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE_TTL = 6 * 60 * 60
+
+
 def _stock_card_financial_snapshot_from_cache(symbol: str) -> Dict[str, Any]:
-    cache_path = CONFIG.paths.processed_dir / "kap_cache" / f"{str(symbol or '').strip().upper()}.json"
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        return {}
+    cache_path = CONFIG.paths.processed_dir / "kap_cache" / f"{normalized_symbol}.json"
+    if not cache_path.exists():
+        return {}
+    cache_key = ""
+    signature = None
+    shared_key = None
+    try:
+        stat = cache_path.stat()
+        cache_key = str(cache_path.resolve())
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = _STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE.get(cache_key)
+        if cached and cached.get("signature") == signature:
+            return dict(cached.get("data") or {})
+        shared_key = f"api:kap:financial-snapshot:{normalized_symbol}:mtime={stat.st_mtime_ns}:size={stat.st_size}:v1"
+        shared_cached = _shared_cache_get_dict(shared_key)
+        if shared_cached is not None:
+            snapshot = dict(shared_cached)
+            _STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE[cache_key] = {
+                "signature": signature,
+                "data": snapshot,
+            }
+            return snapshot
+    except Exception:
+        cache_key = ""
+        signature = None
+        shared_key = None
+
     try:
         with cache_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
@@ -4878,6 +5326,13 @@ def _stock_card_financial_snapshot_from_cache(symbol: str) -> Dict[str, Any]:
     quarters_raw = payload.get("quarters")
     quarters = [q for q in quarters_raw if isinstance(q, dict)] if isinstance(quarters_raw, list) else []
     if not quarters:
+        if cache_key and signature:
+            _STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE[cache_key] = {
+                "signature": signature,
+                "data": {},
+            }
+            if shared_key:
+                _shared_cache_set(shared_key, {}, ttl_seconds=_STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE_TTL)
         return {}
 
     quarters_sorted = sorted(quarters, key=_quarter_sort_key)
@@ -4887,8 +5342,8 @@ def _stock_card_financial_snapshot_from_cache(symbol: str) -> Dict[str, Any]:
     ozkaynaklar = _extract_quarter_metric(latest, "ozkaynaklar", priority=["metrics", "metrics_ytd"])
     net_borc = _extract_quarter_metric(latest, "net_borc", priority=["metrics", "metrics_ytd"])
     latest_quarter = str(latest.get("quarter") or "").strip().upper() or None
-    return {
-        "symbol": str(payload.get("company") or payload.get("stock_code") or symbol or "").strip().upper(),
+    snapshot = {
+        "symbol": str(payload.get("company") or payload.get("stock_code") or normalized_symbol or "").strip().upper(),
         "latest_quarter": latest_quarter,
         "quarter_count": len(quarters_sorted),
         "ttm_net_kar": ttm_net_kar,
@@ -4898,6 +5353,14 @@ def _stock_card_financial_snapshot_from_cache(symbol: str) -> Dict[str, Any]:
         "source": "kap_cache",
         "as_of": payload.get("fetched_at"),
     }
+    if cache_key and signature:
+        _STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE[cache_key] = {
+            "signature": signature,
+            "data": snapshot,
+        }
+        if shared_key:
+            _shared_cache_set(shared_key, snapshot, ttl_seconds=_STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE_TTL)
+    return snapshot
 
 
 def _stock_card_financial_ratios_from_snapshot(snapshot: Dict[str, Any], *, market_cap: Any) -> Dict[str, Any]:
@@ -5051,6 +5514,8 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
         volume_tl = quote.get("volume")
         volume_lot = _first_not_none(intraday.get("volume_lot"), intraday.get("volume"))
         current_for_returns = price if price is not None else return_bases.get("latest_close")
+        session_status = intraday.get("session_status") or "unknown"
+        as_of = intraday.get("as_of") if session_status != "open" else (quote.get("as_of") or intraday.get("as_of"))
         item = {
             "symbol": symbol,
             "company": company_name,
@@ -5076,7 +5541,13 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
             "valuation_financial_period": valuation.get("valuation_financial_period"),
             "valuation_cache_hit": valuation.get("cache_hit"),
             "market_state": quote.get("market_state") or intraday.get("market_state") or "",
-            "as_of": quote.get("as_of") or intraday.get("as_of"),
+            "as_of": as_of,
+            "session_status": session_status,
+            "session_label": intraday.get("session_label"),
+            "is_live": intraday.get("is_live"),
+            "is_stale": intraday.get("is_stale"),
+            "last_trade_at": intraday.get("last_trade_at"),
+            "last_trade_date": intraday.get("last_trade_date"),
             "line_points": intraday.get("line_points") or [],
             "error": None if price is not None or intraday.get("line_points") else intraday.get("error"),
             "logo_url": (instrument or {}).get("logo_url"),
@@ -5409,6 +5880,13 @@ def _fetch_kap_price_payload(symbol: str) -> Dict[str, Any]:
     cached = _PRICE_CACHE.get(cache_key)
     if cached and now - cached["_ts"] < _PRICE_CACHE_TTL:
         return cached
+    shared_key = f"api:market:stock-price:{ticker}:v1"
+    shared_cached = _shared_cache_get_dict(shared_key)
+    if shared_cached is not None:
+        result = dict(shared_cached)
+        result["_ts"] = now
+        _PRICE_CACHE[cache_key] = result
+        return result
 
     yahoo_symbol = f"{ticker}.IS"
     url = (
@@ -5460,6 +5938,7 @@ def _fetch_kap_price_payload(symbol: str) -> Dict[str, Any]:
             "_ts": now,
         }
         _PRICE_CACHE[cache_key] = result
+        _shared_cache_set(shared_key, {k: v for k, v in result.items() if k != "_ts"}, ttl_seconds=_PRICE_CACHE_TTL)
         return result
     except (KeyError, IndexError, TypeError) as exc:
         return {
@@ -5765,6 +6244,117 @@ def _fetch_yahoo_chart_period_raw(
     return _fetch_yahoo_chart_url(url, yahoo_symbol)
 
 
+def _format_isyatirim_chart_datetime(value: date) -> str:
+    return f"{value.year:04d}{value.month:02d}{value.day:02d}000000"
+
+
+def _parse_isyatirim_chart_datetime(raw: Any) -> Optional[datetime]:
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        try:
+            timestamp = float(raw)
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000.0
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except Exception:
+            return None
+    return _point_datetime(raw)
+
+
+def _fetch_isyatirim_index_history(index_code: str, *, start_date: date, end_date: date) -> List[tuple[datetime, float]]:
+    import urllib.error
+    import urllib.request
+
+    normalized = _normalize_market_index(index_code)
+    url = (
+        "https://www.isyatirim.com.tr/_Layouts/15/IsYatirim.Website/Common/ChartData.aspx/"
+        "IndexHistoricalAll"
+        f"?period=1440&from={_format_isyatirim_chart_datetime(start_date)}"
+        f"&to={_format_isyatirim_chart_datetime(end_date)}&endeks={normalized}"
+    )
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": "https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/Endeksler.aspx",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8", errors="ignore"))
+    except (urllib.error.URLError, Exception):
+        return []
+
+    raw_rows = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(raw_rows, list):
+        return []
+
+    points: List[tuple[datetime, float]] = []
+    for row in raw_rows:
+        raw_time = None
+        raw_close = None
+        if isinstance(row, dict):
+            raw_time = row.get("d") or row.get("date") or row.get("time") or row.get("x")
+            raw_close = row.get("c") or row.get("close") or row.get("last") or row.get("y")
+        elif isinstance(row, (list, tuple)) and len(row) >= 2:
+            raw_time = row[0]
+            raw_close = row[1]
+
+        point_dt = _parse_isyatirim_chart_datetime(raw_time)
+        close = _numeric_chart_value(raw_close)
+        if point_dt is None or close is None or close <= 0:
+            continue
+        points.append((point_dt, close))
+
+    points.sort(key=lambda item: item[0])
+    return points
+
+
+def _index_return_bases_from_points(
+    points: List[tuple[datetime, float]],
+    *,
+    history_source: str,
+    provider_symbol: Optional[str] = None,
+) -> Dict[str, Any]:
+    cleaned: List[tuple[datetime, float]] = []
+    for point_dt, close in points:
+        if not isinstance(point_dt, datetime):
+            continue
+        if point_dt.tzinfo is None:
+            point_dt = point_dt.replace(tzinfo=timezone.utc)
+        cleaned.append((point_dt.astimezone(timezone.utc), float(close)))
+    if not cleaned:
+        return {}
+
+    cleaned.sort(key=lambda item: item[0])
+    latest_dt, latest_close = cleaned[-1]
+    year_start = datetime(latest_dt.year, 1, 1, tzinfo=timezone.utc)
+    bases = {
+        "base_1w": _pick_series_value_at_or_before(cleaned, latest_dt - timedelta(days=7)),
+        "base_1m": _pick_series_value_at_or_before(cleaned, latest_dt - timedelta(days=30)),
+        "base_3m": _pick_series_value_at_or_before(cleaned, latest_dt - timedelta(days=91)),
+        "base_6m": _pick_series_value_at_or_before(cleaned, latest_dt - timedelta(days=182)),
+        "base_ytd": _pick_series_value_at_or_after(cleaned, year_start),
+        "base_1y": _pick_series_value_at_or_before(cleaned, latest_dt - timedelta(days=365)),
+        "base_5y": _pick_series_value_at_or_before(cleaned, latest_dt - timedelta(days=365 * 5)),
+        "latest_close": latest_close,
+        "as_of": latest_dt.isoformat(),
+        "history_source": history_source,
+    }
+    if provider_symbol:
+        bases["yahoo_symbol"] = provider_symbol
+    return bases
+
+
+def _index_return_bases_have_period_history(bases: Dict[str, Any]) -> bool:
+    return any(
+        bases.get(key) is not None
+        for key in ("base_1w", "base_1m", "base_3m", "base_6m", "base_1y")
+    )
+
+
 def _fetch_index_quote(index_code: str) -> Dict[str, Any]:
     normalized = _normalize_market_index(index_code)
     now = time.time()
@@ -5823,8 +6413,14 @@ def _fetch_index_return_bases(index_code: str) -> Dict[str, Any]:
     cached = _MARKET_INDEX_RETURN_CACHE.get(normalized)
     if cached and now - cached.get("_ts", 0) < _MARKET_INDEX_RETURN_CACHE_TTL:
         return dict(cached.get("data") or {})
+    shared_key = f"api:market:index-return-bases:{normalized}:v2"
+    shared_cached = _shared_cache_get_dict(shared_key)
+    if shared_cached is not None:
+        _MARKET_INDEX_RETURN_CACHE[normalized] = {"_ts": now, "data": shared_cached}
+        return dict(shared_cached)
 
     meta = _MARKET_INDEX_META[normalized]
+    yahoo_partial: Optional[Dict[str, Any]] = None
     for yahoo_symbol in meta["yahoo_candidates"]:
         chart = _fetch_yahoo_chart_raw(yahoo_symbol, interval="1d", range_="5y")
         if not chart.get("ok"):
@@ -5836,25 +6432,30 @@ def _fetch_index_return_bases(index_code: str) -> Dict[str, Any]:
         ]
         if not points:
             continue
-        points.sort(key=lambda item: item[0])
-        latest_dt, latest_close = points[-1]
-        year_start = datetime(latest_dt.year, 1, 1, tzinfo=timezone.utc)
-        bases = {
-            "base_1w": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=7)),
-            "base_1m": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=30)),
-            "base_3m": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=91)),
-            "base_6m": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=182)),
-            "base_ytd": _pick_series_value_at_or_after(points, year_start),
-            "base_1y": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=365)),
-            "base_5y": _pick_series_value_at_or_before(points, latest_dt - timedelta(days=365 * 5)),
-            "latest_close": latest_close,
-            "as_of": latest_dt.isoformat(),
-            "yahoo_symbol": yahoo_symbol,
-        }
+        bases = _index_return_bases_from_points(points, history_source="yahoo", provider_symbol=yahoo_symbol)
+        if _index_return_bases_have_period_history(bases):
+            _MARKET_INDEX_RETURN_CACHE[normalized] = {"_ts": now, "data": bases}
+            _shared_cache_set(shared_key, bases, ttl_seconds=_MARKET_INDEX_RETURN_CACHE_TTL)
+            return dict(bases)
+        if yahoo_partial is None:
+            yahoo_partial = bases
+
+    today = datetime.now(_TURKEY_TIMEZONE).date()
+    history_start = today - timedelta(days=(365 * 5) + 14)
+    history_points = _fetch_isyatirim_index_history(normalized, start_date=history_start, end_date=today + timedelta(days=1))
+    bases = _index_return_bases_from_points(history_points, history_source="isyatirim")
+    if _index_return_bases_have_period_history(bases):
         _MARKET_INDEX_RETURN_CACHE[normalized] = {"_ts": now, "data": bases}
+        _shared_cache_set(shared_key, bases, ttl_seconds=_MARKET_INDEX_RETURN_CACHE_TTL)
         return dict(bases)
 
+    if yahoo_partial and _index_return_bases_have_period_history(yahoo_partial):
+        _MARKET_INDEX_RETURN_CACHE[normalized] = {"_ts": now, "data": yahoo_partial}
+        _shared_cache_set(shared_key, yahoo_partial, ttl_seconds=_MARKET_INDEX_RETURN_CACHE_TTL)
+        return dict(yahoo_partial)
+
     _MARKET_INDEX_RETURN_CACHE[normalized] = {"_ts": now, "data": {}}
+    _shared_cache_set(shared_key, {}, ttl_seconds=_MARKET_INDEX_RETURN_CACHE_TTL)
     return {}
 
 
@@ -6207,23 +6808,8 @@ def _index_intraday_payload(index_code: str) -> Dict[str, Any]:
 
 
 def _latest_share_count_from_kap_cache(symbol: str) -> Optional[float]:
-    cache_path = CONFIG.paths.processed_dir / "kap_cache" / f"{symbol}.json"
-    try:
-        with cache_path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except Exception:
-        return None
-    quarters_raw = payload.get("quarters")
-    quarters = [q for q in quarters_raw if isinstance(q, dict)] if isinstance(quarters_raw, list) else []
-    if not quarters:
-        return None
-    latest = sorted(quarters, key=_quarter_sort_key)[-1]
-    shares = _extract_quarter_metric(latest, "odenmis_sermaye", priority=["metrics", "metrics_ytd"])
-    if shares is None:
-        shares = _extract_quarter_metric(latest, "cikarilmis_sermaye", priority=["metrics", "metrics_ytd"])
-    if shares is None or shares <= 0:
-        return None
-    return shares
+    metadata = _load_cached_kap_market_metadata(CONFIG.paths.processed_dir / "kap_cache", symbol)
+    return _positive_float(metadata.get("shares_outstanding"))
 
 
 def _index_weight_inputs_for_symbol(symbol: str) -> Dict[str, Optional[float]]:
@@ -6544,10 +7130,16 @@ def _fetch_fx_return_bases(yahoo_symbol: str) -> Dict[str, Any]:
     cached = _FX_RETURN_CACHE.get(normalized)
     if cached and now - cached.get("_ts", 0) < _FX_RETURN_CACHE_TTL:
         return dict(cached.get("data") or {})
+    shared_key = f"api:market:fx-return-bases:{normalized}:v1"
+    shared_cached = _shared_cache_get_dict(shared_key)
+    if shared_cached is not None:
+        _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": shared_cached}
+        return dict(shared_cached)
 
     chart = _fetch_yahoo_chart_raw(normalized, interval="1d", range_="1y")
     if not chart.get("ok"):
         _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": {}}
+        _shared_cache_set(shared_key, {}, ttl_seconds=_FX_RETURN_CACHE_TTL)
         return {}
 
     points = [
@@ -6557,6 +7149,7 @@ def _fetch_fx_return_bases(yahoo_symbol: str) -> Dict[str, Any]:
     ]
     if not points:
         _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": {}}
+        _shared_cache_set(shared_key, {}, ttl_seconds=_FX_RETURN_CACHE_TTL)
         return {}
 
     points.sort(key=lambda item: item[0])
@@ -6573,6 +7166,7 @@ def _fetch_fx_return_bases(yahoo_symbol: str) -> Dict[str, Any]:
         "as_of": latest_dt.isoformat(),
     }
     _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": data}
+    _shared_cache_set(shared_key, data, ttl_seconds=_FX_RETURN_CACHE_TTL)
     return dict(data)
 
 
@@ -6885,6 +7479,12 @@ def _market_watch_global_payload(*, force_refresh: bool = False) -> Dict[str, An
     cached = _WATCH_GLOBAL_CACHE.get("payload")
     if cached and not force_refresh and now - cached.get("_ts", 0) < _WATCH_GLOBAL_CACHE_TTL:
         return cached["data"]
+    shared_key = "api:market:watch-global:v1"
+    if not force_refresh:
+        shared_cached = _shared_cache_get_dict(shared_key)
+        if shared_cached is not None:
+            _WATCH_GLOBAL_CACHE["payload"] = {"_ts": now, "data": shared_cached}
+            return dict(shared_cached)
 
     from concurrent.futures import ThreadPoolExecutor
 
@@ -6911,6 +7511,7 @@ def _market_watch_global_payload(*, force_refresh: bool = False) -> Dict[str, An
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
     _WATCH_GLOBAL_CACHE["payload"] = {"_ts": now, "data": data}
+    _shared_cache_set(shared_key, data, ttl_seconds=_WATCH_GLOBAL_CACHE_TTL)
     return data
 
 
