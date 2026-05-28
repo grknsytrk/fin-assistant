@@ -7,6 +7,7 @@ import {
     fintablesLogoUrlsForSymbol,
     localIconForSymbol,
     logoDevDomainUrl,
+    clearbitLogoUrl,
     normalizeLogoSymbol,
     stockLogoDevDomains,
     tradingViewCountryFlagUrl,
@@ -187,6 +188,10 @@ function buildCandidates({
             const logoDevUrl = logoDevDomainUrl(domain);
             if (logoDevUrl) {
                 candidates.push(logoDevUrl);
+            }
+            const clearbitUrl = clearbitLogoUrl(domain);
+            if (clearbitUrl) {
+                candidates.push(clearbitUrl);
             }
         }
 

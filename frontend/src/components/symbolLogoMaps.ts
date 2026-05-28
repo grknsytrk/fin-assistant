@@ -580,8 +580,18 @@ export function tradingViewLogoUrlsForSymbol(
 }
 
 export function logoDevDomainUrl(domain: string | null): string | null {
-    if (!LOGO_DEV_ENABLED || !domain) return null;
+    if (!domain) return null;
     const cleanDomain = String(domain).trim().toLowerCase();
     if (!cleanDomain) return null;
-    return `https://img.logo.dev/${cleanDomain}?token=${encodeURIComponent(LOGO_DEV_TOKEN)}`;
+    if (LOGO_DEV_TOKEN) {
+        return `https://img.logo.dev/${cleanDomain}?token=${encodeURIComponent(LOGO_DEV_TOKEN)}`;
+    }
+    return `https://img.logo.dev/${cleanDomain}`;
+}
+
+export function clearbitLogoUrl(domain: string | null): string | null {
+    if (!domain) return null;
+    const cleanDomain = String(domain).trim().toLowerCase();
+    if (!cleanDomain) return null;
+    return `https://logo.clearbit.com/${cleanDomain}`;
 }
