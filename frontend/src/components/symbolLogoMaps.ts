@@ -486,8 +486,14 @@ function companySlugCandidates(symbol: string, companyName?: string): string[] {
     const hasGrupLikeWord = rawTokens.includes('grup') || rawTokens.includes('grubu') || rawTokens.includes('group');
     const hasHoldingWord = rawTokens.includes('holding') || rawTokens.includes('holdings');
 
+    const hyphenJoined: string[] = [];
+    for (let i = 1; i <= Math.min(filteredTokens.length, 5); i++) {
+        hyphenJoined.push(filteredTokens.slice(0, i).join('-'));
+    }
+
     const dynamicSeeds = uniqueLimited([
         symbolSlug,
+        ...hyphenJoined,
         first,
         joinedTwo,
         joinedThree,
