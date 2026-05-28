@@ -481,6 +481,122 @@ def test_fund_history_gap_still_warns_for_real_business_day_gap() -> None:
     ]
 
 
+def test_refresh_funds_snapshot_backfills_daily_return_from_local_prices(monkeypatch, tmp_path) -> None:
+    """When TEFAS does not publish a daily return for a fund (typical for
+    qualified-investor / TEFAS-closed funds), the snapshot should still pick up
+    a daily_return computed from the last two locally cached price points and
+    flag the fallback in source_metadata.
+    """
+
+    seed_rows = [
+        {"fund_code": "UCP", "date": "2026-05-25", "price": 1.206595, "source": "tefasfon_funds"},
+        {"fund_code": "UCP", "date": "2026-05-26", "price": 1.207886, "source": "tefasfon_funds"},
+    ]
+    fund_service.upsert_fund_price_points(tmp_path, seed_rows, source="tefasfon_funds", fetched_at="2026-05-26T16:00:00+00:00")
+
+    class FakeTefasFonClient:
+        def fetch_latest_fund_list_snapshot(self, *, as_of, lookback_days):
+            return [
+                {
+                    "fund_code": "UCP",
+                    "name": "FAKE PORTFOY UCP FONU",
+                    "founder_company": "FAKE PORTFOY",
+                    "manager_company": "FAKE PORTFOY",
+                    "date": "2026-05-26",
+                    "price": 1.207886,
+                    "aum": 5_285_049_438.0,
+                    "investor_count": 27,
+                    "tefasDurum": True,
+                    "source": "tefasfon_funds",
+                    # TEFAS returns no getiriOrani for this fund
+                    "gunlukGetiri": None,
+                    "daily_return": None,
+                }
+            ], []
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+
+    payload = fund_service.refresh_funds_snapshot(tmp_path, lookback_days=1)
+
+    row = payload["rows"][0]
+    assert row["fund_code"] == "UCP"
+    assert row["daily_return"] == pytest.approx(0.107, rel=1e-2)
+    assert payload["source_metadata"]["daily_return_local_fallback_count"] == 1
+
+
+def test_refresh_funds_snapshot_keeps_official_daily_return_over_local_fallback(monkeypatch, tmp_path) -> None:
+    """If TEFAS does publish a daily return, the local fallback must not run."""
+
+    seed_rows = [
+        {"fund_code": "TLY", "date": "2026-05-25", "price": 3.10, "source": "tefasfon_funds"},
+        {"fund_code": "TLY", "date": "2026-05-26", "price": 3.17, "source": "tefasfon_funds"},
+    ]
+    fund_service.upsert_fund_price_points(tmp_path, seed_rows, source="tefasfon_funds", fetched_at="2026-05-26T16:00:00+00:00")
+
+    class FakeTefasFonClient:
+        def fetch_latest_fund_list_snapshot(self, *, as_of, lookback_days):
+            return [
+                {
+                    "fund_code": "TLY",
+                    "name": "TERA PORTFOY TEST FONU",
+                    "founder_company": "TERA PORTFOY",
+                    "manager_company": "TERA PORTFOY",
+                    "date": "2026-05-26",
+                    "price": 3.17,
+                    "aum": 1_000_000,
+                    "investor_count": 123,
+                    "tefasDurum": True,
+                    "source": "tefasfon_funds",
+                    "gunlukGetiri": 0.42,  # official value should win
+                }
+            ], []
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+
+    payload = fund_service.refresh_funds_snapshot(tmp_path, lookback_days=1)
+
+    row = payload["rows"][0]
+    assert row["daily_return"] == pytest.approx(0.42)
+    assert "daily_return_local_fallback_count" not in payload["source_metadata"]
+
+
+def test_refresh_funds_snapshot_skips_fallback_when_local_gap_too_large(monkeypatch, tmp_path) -> None:
+    """If the previous local point is older than the configured gap window,
+    we leave daily_return None rather than emitting a stale value."""
+
+    seed_rows = [
+        {"fund_code": "STAL", "date": "2026-05-01", "price": 1.10, "source": "tefasfon_funds"},
+        {"fund_code": "STAL", "date": "2026-05-26", "price": 1.20, "source": "tefasfon_funds"},
+    ]
+    fund_service.upsert_fund_price_points(tmp_path, seed_rows, source="tefasfon_funds", fetched_at="2026-05-26T16:00:00+00:00")
+
+    class FakeTefasFonClient:
+        def fetch_latest_fund_list_snapshot(self, *, as_of, lookback_days):
+            return [
+                {
+                    "fund_code": "STAL",
+                    "name": "STALE FUND",
+                    "founder_company": "STALE",
+                    "manager_company": "STALE",
+                    "date": "2026-05-26",
+                    "price": 1.20,
+                    "aum": 1_000_000,
+                    "investor_count": 1,
+                    "tefasDurum": True,
+                    "source": "tefasfon_funds",
+                    "gunlukGetiri": None,
+                }
+            ], []
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+
+    payload = fund_service.refresh_funds_snapshot(tmp_path, lookback_days=1)
+
+    row = payload["rows"][0]
+    assert row["daily_return"] is None
+    assert "daily_return_local_fallback_count" not in payload["source_metadata"]
+
+
 def test_refresh_funds_snapshot_uses_tefasfon_source(monkeypatch, tmp_path) -> None:
     class FakeTefasFonClient:
         def fetch_latest_fund_list_snapshot(self, *, as_of, lookback_days):

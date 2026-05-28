@@ -46,6 +46,7 @@ def _reset_flow_state(monkeypatch: pytest.MonkeyPatch) -> None:
     api_module._FUND_HOLDING_SECTOR_MAP_CACHE.clear()
     api_module._ISYATIRIM_BASIC_SUMMARY_CACHE.clear()
     api_module._GEFAS_GYF_QUOTE_CACHE.clear()
+    api_module._FOREIGN_HOLDING_QUOTE_CACHE.clear()
     api_module._FUND_SNAPSHOT_ROW_MAP_CACHE.clear()
     fund_service_module.reset_fund_caches_for_tests()
     kap_service_module._BIST_UNIVERSE_CACHE.clear()
@@ -797,6 +798,196 @@ def test_api_fund_holdings_enriches_daily_market_effect(
     assert payload["portfolio_effect"]["missing_weight"] == 5.0
 
 
+def test_api_fund_holdings_enriches_foreign_assets_with_yahoo_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fund_snapshot_row_map_with_meta",
+        lambda: ({"GTZ": {"as_of": "2026-05-20", "aum": 100_000_000.0}}, {"cache_hit": False, "row_count": 1}),
+    )
+    monkeypatch.setattr(api_module, "_quote_map_for_holding_stocks", lambda _symbols: {})
+    monkeypatch.setattr(api_module, "_fund_holding_sector_map", lambda: ({}, {"symbol_count": 0}))
+
+    def fake_yahoo_quote(symbol: str) -> Dict[str, Any]:
+        if symbol == "SIVR":
+            return {
+                "ok": True,
+                "price": 71.5,
+                "currency": "USD",
+                "change_pct": 1.4,
+                "as_of": "2026-05-20T10:00:00+00:00",
+                "long_name": "abrdn Physical Silver Shares ETF",
+            }
+        return {"ok": False, "error": "not_found"}
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_quote", fake_yahoo_quote)
+    payload = {
+        "fund_code": "GTZ",
+        "status": "ok",
+        "positions": [
+            {
+                "asset_code": "SIVRUS",
+                "asset_name": "ABERDEEN STANDARD PHYSICAL SILVER SHARES ETF",
+                "asset_type": "foreign_fund",
+                "asset_region": "foreign",
+                "provider_symbol": "SIVR",
+                "weight": 10.0,
+                "previous_weight": 8.0,
+            },
+            {
+                "asset_code": "MISSUS",
+                "asset_name": "Çözülemeyen Yabancı Hisse",
+                "asset_type": "foreign_equity",
+                "asset_region": "foreign",
+                "provider_symbol": "MISS",
+                "weight": 5.0,
+                "previous_weight": 4.0,
+            },
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {"source": "kap_portfolio_allocation_report", "as_of": "2026-04-30", "warnings": []},
+    }
+
+    enriched = api_module._enrich_fund_holdings_with_daily_market_data(payload, "GTZ")
+
+    positions = {item["asset_code"]: item for item in enriched["positions"]}
+    assert positions["SIVRUS"]["price"] == 71.5
+    assert positions["SIVRUS"]["price_currency"] == "USD"
+    assert positions["SIVRUS"]["return_pct"] == 1.4
+    assert positions["SIVRUS"]["return_source"] == "yahoo_finance_chart"
+    assert positions["SIVRUS"]["provider_name"] == "abrdn Physical Silver Shares ETF"
+    assert positions["SIVRUS"]["asset_name"] == "abrdn Physical Silver Shares ETF"
+    assert positions["SIVRUS"]["tefas_tradable"] is False
+    assert positions["SIVRUS"]["detail_clickable"] is False
+    assert positions["MISSUS"]["return_pct"] is None
+    assert positions["MISSUS"]["return_source"] is None
+    assert positions["MISSUS"]["detail_clickable"] is False
+    assert enriched["portfolio_effect"]["estimated_return_pct"] == pytest.approx(0.14)
+    assert enriched["portfolio_effect"]["priced_weight"] == 10.0
+    assert enriched["portfolio_effect"]["missing_weight"] == 5.0
+    enrichment_meta = enriched["source_metadata"]["daily_market_enrichment"]
+    assert enrichment_meta["foreign_quote_count"] == 1
+    assert enrichment_meta["foreign_quote_missing_count"] == 1
+
+
+def test_api_fund_holdings_marks_inner_funds_as_tefas_tradable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Inner fund-type positions must expose ``tefas_tradable`` so the
+    frontend can decide whether to make the row clickable."""
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    cache_payload = {
+        "fund_code": "IIE",
+        "status": "ok",
+        "positions": [
+            {
+                "fund_code": "IIE",
+                "asset_code": "PKZ",
+                "asset_name": "PUSULA PORTFÖY KUZEY HİSSE SENEDİ SERBEST FON",
+                "asset_type": "fund",
+                "weight": 5.0,
+                "previous_weight": 4.0,
+                "weight_change": 1.0,
+                "change_status": "increased",
+                "amount": None,
+                "market_value": None,
+                "price": None,
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": None,
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            },
+            {
+                "fund_code": "IIE",
+                "asset_code": "ITH",
+                "asset_name": "İSTANBUL PORTFÖY YÖNETİMİ A.Ş. ONE LIFE VENTURES",
+                "asset_type": "fund",
+                "weight": 2.5,
+                "previous_weight": 2.85,
+                "weight_change": -0.35,
+                "change_status": "decreased",
+                "amount": None,
+                "market_value": None,
+                "price": None,
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": None,
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            },
+            {
+                "fund_code": "IIE",
+                "asset_code": "BSOKE",
+                "asset_name": "BATISÖKE SÖKE ÇİMENTO SANAYİİ T.A.Ş.",
+                "asset_type": "local_equity",
+                "weight": 71.0,
+                "previous_weight": 58.2,
+                "weight_change": 12.8,
+                "change_status": "increased",
+                "amount": None,
+                "market_value": None,
+                "price": None,
+                "report_date": "2026-04-30",
+                "previous_report_date": "2026-03-31",
+                "source_report_url": None,
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.82,
+            },
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "message": None,
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-05-01T00:00:00+00:00",
+            "as_of": "2026-04-30",
+            "cache_hit": False,
+            "stale": False,
+            "parse_status": "ok",
+            "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
+            "disclosure_check": {"checked_at": "2026-05-20T11:00:00+00:00", "ttl_seconds": 21600},
+            "warnings": [],
+        },
+    }
+    (tmp_path / "IIE.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 20, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(api_module, "_fetch_market_price_map", lambda symbols, **_kwargs: {})
+    # PKZ is in the TEFAS-open snapshot, ITH is not.
+    monkeypatch.setattr(
+        fund_service_module,
+        "load_funds_snapshot",
+        lambda _processed_dir: {
+            "rows": [
+                {"fund_code": "IIE", "as_of": "2026-05-20", "aum": 100_000_000.0},
+                {
+                    "fund_code": "PKZ",
+                    "as_of": "2026-05-20",
+                    "price": 12.34,
+                    "daily_return": 1.2,
+                    "founder_company": "PUSULA PORTFÖY",
+                },
+            ]
+        },
+    )
+    client = TestClient(app)
+
+    response = client.get("/funds/IIE/holdings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    positions = {item["asset_code"]: item for item in payload["positions"]}
+    # PKZ is in the TEFAS funds snapshot → tradable.
+    assert positions["PKZ"]["tefas_tradable"] is True
+    assert positions["PKZ"]["provider_name"] == "PUSULA PORTFÖY"
+    assert positions["PKZ"]["logo_symbol"] == "PUSULA PORTFÖY"
+    # ITH is not in the snapshot → not tradable.
+    assert positions["ITH"]["tefas_tradable"] is False
+    # Stock positions must not carry the flag.
+    assert positions["BSOKE"]["tefas_tradable"] is None
+
+
 def test_api_fund_holdings_keeps_leveraged_weights_in_effect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -838,7 +1029,7 @@ def test_api_fund_holdings_keeps_leveraged_weights_in_effect(
     assert enriched["portfolio_effect"]["priced_weight"] == 147.5
     assert enriched["portfolio_effect"]["missing_weight"] == 5.0
     quality = enriched["source_metadata"]["holdings_quality"]
-    assert quality["status"] == "ok"
+    assert quality["status"] == "gross_exposure"
     assert quality["raw_total_weight"] == 152.5
     assert quality["adjusted_total_weight"] == 152.5
 
@@ -888,6 +1079,125 @@ def test_api_fund_holdings_normalizes_high_confidence_basis_points(
     assert quality["status"] == "ok"
     assert quality["normalized_position_count"] == 3
     assert quality["normalization"]["action"] == "basis_points_to_percent"
+
+
+def test_api_fund_holdings_normalizes_fractional_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fund_snapshot_row_map_with_meta",
+        lambda: ({"TLY": {"as_of": "2026-05-20", "aum": 100_000_000.0}}, {"cache_hit": False, "row_count": 1}),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_quote_map_for_holding_stocks",
+        lambda _symbols: {},
+    )
+    monkeypatch.setattr(api_module, "_fund_holding_sector_map", lambda: ({}, {"symbol_count": 0}))
+    payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {"asset_code": "AAA", "asset_name": "AAA", "asset_type": "local_equity", "weight": 0.40, "previous_weight": 0.35},
+            {"asset_code": "BBB", "asset_name": "BBB", "asset_type": "local_equity", "weight": 0.35, "previous_weight": 0.35},
+            {"asset_code": "CCC", "asset_name": "CCC", "asset_type": "local_equity", "weight": 0.25, "previous_weight": 0.30},
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {"source": "kap_portfolio_allocation_report", "as_of": "2026-04-30", "warnings": []},
+    }
+
+    enriched = api_module._enrich_fund_holdings_with_daily_market_data(payload, "TLY")
+
+    positions = {item["asset_code"]: item for item in enriched["positions"]}
+    assert positions["AAA"]["weight"] == 40.0
+    assert positions["AAA"]["raw_weight"] == 0.40
+    assert positions["AAA"]["weight_quality"] == "normalized"
+    quality = enriched["source_metadata"]["holdings_quality"]
+    assert quality["status"] == "ok"
+    assert quality["normalized_position_count"] == 3
+    assert quality["normalization"]["action"] == "fraction_to_percent"
+    assert quality["adjusted_total_weight"] == pytest.approx(100.0)
+
+
+def test_api_fund_holdings_normalizes_per_position_basis_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fund_snapshot_row_map_with_meta",
+        lambda: ({"TLY": {"as_of": "2026-05-20", "aum": 100_000_000.0}}, {"cache_hit": False, "row_count": 1}),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_quote_map_for_holding_stocks",
+        lambda _symbols: {},
+    )
+    monkeypatch.setattr(api_module, "_fund_holding_sector_map", lambda: ({}, {"symbol_count": 0}))
+    # Most rows are normal percents, but a single row leaks basis points.
+    payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {"asset_code": "GOOD1", "asset_name": "GOOD1", "asset_type": "local_equity", "weight": 30.0, "previous_weight": 30.0},
+            {"asset_code": "GOOD2", "asset_name": "GOOD2", "asset_type": "local_equity", "weight": 30.0, "previous_weight": 28.0},
+            {"asset_code": "BPLEAK", "asset_name": "BPLEAK", "asset_type": "local_equity", "weight": 4000.0, "previous_weight": 3500.0},
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {"source": "kap_portfolio_allocation_report", "as_of": "2026-04-30", "warnings": []},
+    }
+
+    enriched = api_module._enrich_fund_holdings_with_daily_market_data(payload, "TLY")
+
+    positions = {item["asset_code"]: item for item in enriched["positions"]}
+    assert positions["GOOD1"]["weight"] == 30.0
+    assert positions["GOOD1"]["weight_quality"] == "ok"
+    assert positions["BPLEAK"]["weight"] == 40.0
+    assert positions["BPLEAK"]["raw_weight"] == 4000.0
+    assert positions["BPLEAK"]["weight_quality"] == "normalized"
+    quality = enriched["source_metadata"]["holdings_quality"]
+    assert quality["normalization"]["action"] == "none"
+    assert quality["normalized_position_count"] == 1
+    assert quality["adjusted_total_weight"] == pytest.approx(100.0)
+    assert quality["status"] == "ok"
+
+
+def test_api_fund_holdings_flags_gross_exposure_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fund_snapshot_row_map_with_meta",
+        lambda: ({"TLY": {"as_of": "2026-05-20", "aum": 100_000_000.0}}, {"cache_hit": False, "row_count": 1}),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_quote_map_for_holding_stocks",
+        lambda _symbols: {},
+    )
+    monkeypatch.setattr(api_module, "_fund_holding_sector_map", lambda: ({}, {"symbol_count": 0}))
+    payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {"asset_code": "AAA", "asset_name": "AAA", "asset_type": "local_equity", "weight": 71.0, "previous_weight": 60.0},
+            {"asset_code": "BBB", "asset_name": "BBB", "asset_type": "local_equity", "weight": 66.0, "previous_weight": 50.0},
+            {"asset_code": "CCC", "asset_name": "CCC", "asset_type": "local_equity", "weight": 20.0, "previous_weight": 30.0},
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {"source": "kap_portfolio_allocation_report", "as_of": "2026-04-30", "warnings": []},
+    }
+
+    enriched = api_module._enrich_fund_holdings_with_daily_market_data(payload, "TLY")
+
+    quality = enriched["source_metadata"]["holdings_quality"]
+    assert quality["status"] == "gross_exposure"
+    assert quality["adjusted_total_weight"] == pytest.approx(157.0)
+    assert quality["normalization"]["action"] == "none"
+    # Raw weights remain reported to the UI.
+    positions = {item["asset_code"]: item for item in enriched["positions"]}
+    assert positions["AAA"]["weight"] == 71.0
+    assert positions["BBB"]["weight"] == 66.0
 
 
 def test_api_fund_holdings_enriches_tpkgy_from_gefas(
@@ -1322,7 +1632,7 @@ A.Ş
     )
 
     by_code = {position["asset_code"]: position for position in positions}
-    assert by_code["PEKGY"]["weight"] == 7.55
+    assert by_code["PEKGY"]["weight"] == 7.56
     assert by_code["PEKGY"]["asset_type"] == "local_equity"
     assert "TLY" not in by_code
     assert "ENERJI" not in by_code
@@ -1462,6 +1772,255 @@ T.A.Ş.
     assert {"BTCIM", "BSOKE"}.issubset(by_code.keys())
     assert by_code["BTCIM"]["weight"] == 14.41
     assert by_code["BSOKE"]["weight"] == 3.88
+
+
+def test_kap_holdings_parser_sums_foreign_etf_lots_and_ignores_totals() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+A.PAY
+GMSTR.F QNB FİNANS PORTFÖY GÜMÜŞ ETF TRYFNBK00030 0.00% 0 100,000.00 252.29 03.04.2025 0.00% 0 0 666.25 66,625,000.00 3.33% 0.44%
+GMSTR.F QNB FİNANS PORTFÖY GÜMÜŞ ETF TRYFNBK00030 0.00% 0 30,000.00 252.29 03.04.2025 0.00% 0 0 666.25 19,987,500.00 1.00% 0.13%
+Ana Grup Toplamı 130,000.00 86,612,500.00 4.33% 0.57%
+c.YABANCI SERMAYE PİYASASI ARAÇLARI
+BORSA YATIRIM FONgARI
+SIVRUS ABERDEEN STANDARD INVESTMENTS US0032641088 0.00% 0 10,810.00 29.58 23.09.2024 0.00% 0 0 69.58 33,828,691.20 0.32% 0.22%
+SIVRUS ABERDEEN STANDARD INVESTMENTS US0032641088 0.00% 0 15,612.00 30.27 03.10.2024 0.00% 0 0 69.58 48,856,015.45 0.46% 0.32%
+Toplam 26,422.00 82,684,706.65 0.78% 0.54%
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="GTZ",
+        report_date="2026-04-30",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert "ANA" not in by_code
+    assert by_code["GMSTR.F"]["asset_type"] == "fund"
+    assert by_code["GMSTR.F"]["weight"] == pytest.approx(0.57)
+    assert by_code["GMSTR.F"]["market_value"] == pytest.approx(86_612_500.0)
+    assert by_code["SIVRUS"]["asset_type"] == "foreign_fund"
+    assert by_code["SIVRUS"]["asset_region"] == "foreign"
+    assert by_code["SIVRUS"]["provider_symbol"] == "SIVR"
+    assert by_code["SIVRUS"]["detail_clickable"] is False
+    assert by_code["SIVRUS"]["weight"] == pytest.approx(0.54)
+    assert by_code["SIVRUS"]["market_value"] == pytest.approx(82_684_706.65)
+
+
+def test_kap_holdings_parser_uses_known_foreign_etf_names_for_gtz() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+c.YABANCI SERMAYE PİYASASI ARAÇLARI
+BORSA YATIRIM FONLARI
+ZSIGEUSW SWISSCANTO FONcSgEITUNG AG CH0183135992 0.00% 0 1.00 0 0 0 0 2,499,057,068.78 16.34%
+SVUSASW UBS FUNc MANAGEMENT(SWITZERgAN CH0118929048 0.00% 0 1.00 0 0 0 0 2,189,418,481.25 14.34%
+HUZCN HORİZONS ETFS MANAGEMENT CANAc CA37964K1012 0.00% 0 1.00 0 0 0 0 302,340,570.63 1.98%
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="GTZ",
+        report_date="2026-04-30",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert by_code["ZSIGEUSW"]["asset_name"] == "Swisscanto (CH) Silver ETF"
+    assert by_code["ZSIGEUSW"]["provider_symbol"] == "ZSIGEU.SW"
+    assert by_code["SVUSASW"]["asset_name"] == "UBS Silver ETF USD acc"
+    assert by_code["SVUSASW"]["provider_symbol"] == "SVUSA.SW"
+    assert by_code["HUZCN"]["asset_name"] == "Global X Silver ETF"
+    assert by_code["HUZCN"]["provider_symbol"] == "HUZ.TO"
+
+
+def _pps_foreign_holdings_text(
+    *,
+    xom_weight: float = 16.59,
+    ovv_weight: float = 8.84,
+    aem_weight: float = 6.38,
+    b_weight: float = 5.33,
+    aa_weight: float = 4.93,
+    fcx_weight: float = 0.78,
+    ewz_weight: float = 9.79,
+    sqqq_weight: float = 4.23,
+    pjl_weight: float = 18.74,
+    ptn_weight: float = 5.74,
+) -> str:
+    return f"""
+III-FON PORTFOY DEGERI TABLOSU
+Hisse Senedi Yabanci
+AA US EQUITY UNITED
+STATAES
+OF
+AMERICA
+34.500,000 75,660000 30/04/26 75,660000 89.101.014,30 1,35 {aa_weight:.2f}US0138721065
+AEM US EQUITY AGNICO-
+EAGLE
+MINES
+LIMITED
+CMN
+14.950,000 179,560000 30/04/26 179,560000 91.980.683,85 1,39 {aem_weight:.2f}CA0084741085
+B US EQUITY BARRICK
+MINING
+CORP
+60.000,000 42,240000 30/04/26 42,240000 86.753.088,00 1,31 {b_weight:.2f}CA06849F1080
+FCX US EQUITY FREEPORT
+-
+MCMORAN
+INC
+6.000,000 65,350000 30/04/26 65,350000 13.416.798,00 0,20 {fcx_weight:.2f}US35671D8570
+OVV US EQUITY OVINTIV
+INC
+64.000,000 55,860000 30/04/26 55,860000 122.462.784,00 1,85 {ovv_weight:.2f}US69047Q1022
+XOM US EQUITY EXXON
+MOBIL
+CORP
+47.550,000 147,190000 30/04/26 147,190000 239.585.281,35 3,62 {xom_weight:.2f}US30231G1022
+V-AY ICINDE YAPILAN GIDERLER
+ACIKLAMA TUTAR ORAN%
+Satimlarda Odenen Komisyonlar 359.188,88 0,1776 %
+IV-FON TOPLAM DEGERI TABLOSU
+DIGER
+Borsa Y.Fonu Yabanci
+EWZ US EQUITY ISHARES MSCI BRAZIL ETF 102.875,000 36,370000 30/04/26 36,370000 128.117.496,88 1,94 {ewz_weight:.2f}US4642864007
+SQQQ US EQUITY PROSHARES ULTRAPRO SHORT QQQ 32.500,000 38,320000 30/04/26 38,320000 42.665.480,00 0,65 {sqqq_weight:.2f}US74347G4322
+Y.Fonu Turk
+PJL PHILLIP PORTFOY PARA PIYASASI FONU 1.250.000,000 4,742700 30/04/26 4,742700 5.928.375,00 0,09 {pjl_weight:.2f}TRYPHPY00016
+PTN PHILLIP PORTFOY ALTIN FONU 540.000,000 1,618300 30/04/26 1,618300 873.882,00 0,01 {ptn_weight:.2f}TRYPHPY00107
+Doviz
+USD FED 7.855.647,60 44,758437 30/04/26 44,969200 353.262.188,05 0,00 0,00USD 17,86USD
+VI-ALIM SATIM ISLEMLERI
+"""
+
+
+def test_kap_holdings_parser_handles_pps_foreign_equity_and_continued_sections() -> None:
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        _pps_foreign_holdings_text(),
+        fund_code="PPS",
+        report_date="2026-04-30",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert {"XOM", "OVV", "AEM", "B", "AA", "FCX", "EWZ", "SQQQ", "PJL", "PTN"}.issubset(by_code)
+    assert not {"CORP", "INC", "CMN", "AMERICA", "HOLDINGS", "MINERALS", "SATIMLARDA", "USD"}.intersection(by_code)
+    assert by_code["XOM"]["asset_type"] == "foreign_equity"
+    assert by_code["B"]["asset_type"] == "foreign_equity"
+    assert by_code["XOM"]["provider_symbol"] == "XOM"
+    assert by_code["B"]["provider_symbol"] == "B"
+    assert by_code["XOM"]["detail_clickable"] is False
+    assert by_code["EWZ"]["asset_type"] == "foreign_fund"
+    assert by_code["SQQQ"]["asset_type"] == "foreign_fund"
+    assert by_code["EWZ"]["provider_symbol"] == "EWZ"
+    assert by_code["PJL"]["asset_type"] == "fund"
+    assert by_code["PTN"]["asset_type"] == "fund"
+    assert by_code["XOM"]["weight"] == pytest.approx(16.59)
+    assert by_code["EWZ"]["weight"] == pytest.approx(9.79)
+    assert by_code["PJL"]["weight"] == pytest.approx(18.74)
+
+
+def test_kap_holdings_parser_keeps_foreign_symbol_split_from_isin() -> None:
+    text = """
+III-FON PORTFOY DEGERI TABLOSU
+Hisse Yabanci
+QCOM
+US7475251036
+QUALCOMM INC
+6.500,00 147,549223 24/04/26 178,445000 52.159.437,81 5,90 5,03USD 5,03US7475251036
+VI-ALIM SATIM ISLEMLERI
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="CPU",
+        report_date="2026-04-30",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert by_code["QCOM"]["asset_type"] == "foreign_equity"
+    assert by_code["QCOM"]["provider_symbol"] == "QCOM"
+    assert by_code["QCOM"]["asset_name"] == "QUALCOMM INC"
+    assert by_code["QCOM"]["weight"] == pytest.approx(5.03)
+    assert "US7475251036" not in by_code
+
+
+def test_kap_holdings_parser_merges_pps_previous_month_without_bogus_removed() -> None:
+    latest = fund_service_module._parse_kap_holdings_pdf_text(
+        _pps_foreign_holdings_text(),
+        fund_code="PPS",
+        report_date="2026-04-30",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+    previous = fund_service_module._parse_kap_holdings_pdf_text(
+        _pps_foreign_holdings_text(
+            xom_weight=13.61,
+            ovv_weight=6.67,
+            aem_weight=5.68,
+            b_weight=5.55,
+            aa_weight=3.83,
+            fcx_weight=0.52,
+            ewz_weight=3.44,
+            sqqq_weight=0.0,
+            pjl_weight=21.02,
+            ptn_weight=3.90,
+        ),
+        fund_code="PPS",
+        report_date="2026-03-31",
+        source_url="https://www.kap.org.tr/tr/Bildirim/2",
+    )
+
+    merged = fund_service_module._merge_holding_positions(
+        latest,
+        previous,
+        latest_report_date="2026-04-30",
+        previous_report_date="2026-03-31",
+    )
+
+    by_code = {position["asset_code"]: position for position in merged}
+    assert by_code["XOM"]["previous_weight"] == pytest.approx(13.61)
+    assert by_code["XOM"]["weight_change"] == pytest.approx(2.98)
+    assert by_code["XOM"]["change_status"] == "increased"
+    assert by_code["PJL"]["previous_weight"] == pytest.approx(21.02)
+    assert by_code["PJL"]["weight_change"] == pytest.approx(-2.28)
+    assert not {"CORP", "INC", "CMN", "AMERICA", "HOLDINGS", "MINERALS", "SATIMLARDA", "USD"}.intersection(by_code)
+
+
+def test_kap_holdings_normalizer_corrects_fund_code_ocr_with_reference_data(tmp_path: Any) -> None:
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "funds_latest.json").write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "fund_code": "GTL",
+                        "name": "GARANTİ PORTFÖY BİRİNCİ PARA PİYASASI (TL) FONU",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    positions = [
+        {
+            "fund_code": "GTZ",
+            "asset_code": "GTG",
+            "asset_name": "GARANTİ PORTFÖY BİRİNCİ PARA PİYASASI (TL) FONU",
+            "asset_type": "fund",
+            "weight": 2.73,
+        }
+    ]
+
+    normalized = fund_service_module._normalize_holding_positions_for_response(
+        tmp_path,
+        positions,
+        fund_code="GTZ",
+    )
+
+    assert normalized[0]["asset_code"] == "GTL"
+    assert normalized[0]["asset_name"] == "GARANTİ PORTFÖY BİRİNCİ PARA PİYASASI (TL) FONU"
 
 
 def test_api_fund_holdings_partial_when_pdf_not_parsed(

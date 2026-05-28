@@ -1473,9 +1473,10 @@ function MarketStockCard({
                     </div>
                 </div>
                 {!isLoading && (
-                    <span className={`stock-card-session-badge ${sessionStatusClass}`}>
-                        {sessionLabel}
-                    </span>
+                    <span 
+                        className={`stock-card-session-dot ${sessionStatusClass}`}
+                        title={sessionLabel}
+                    />
                 )}
             </div>
 

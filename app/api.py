@@ -75,7 +75,7 @@ _KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_KAP_SNAPSHOT_RESPO
 _FUND_YIELD_SUMMARY_CACHE_TTL = int(os.getenv("RAGFIN_FUND_YIELD_SUMMARY_CACHE_TTL_SECONDS", "900"))
 _FUND_HOLDINGS_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_CACHE_TTL_SECONDS", str(60 * 60)))
 _FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT_SECONDS", "120"))
-_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 3
+_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 5
 _FUND_HOLDING_SECTOR_MAP_CACHE_TTL = 6 * 60 * 60
 
 
@@ -1747,6 +1747,22 @@ _GEFAS_GYF_ALIAS_MAP: Dict[str, Dict[str, str]] = {
 }
 _GEFAS_GYF_QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
 _GEFAS_GYF_QUOTE_CACHE_TTL = 24 * 60 * 60
+_FOREIGN_HOLDING_QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
+_FOREIGN_HOLDING_QUOTE_CACHE_TTL = 15 * 60
+_FOREIGN_HOLDING_KNOWN_NAMES_BY_ISIN = {
+    "CH0183135992": "Swisscanto (CH) Silver ETF",
+    "CH0118929048": "UBS Silver ETF USD acc",
+    "CA37964K1012": "Global X Silver ETF",
+    "US0032641088": "abrdn Physical Silver Shares ETF",
+    "US46428Q1094": "iShares Silver Trust",
+}
+_FOREIGN_HOLDING_KNOWN_NAMES_BY_PROVIDER = {
+    "ZSIGEU.SW": "Swisscanto (CH) Silver ETF",
+    "SVUSA.SW": "UBS Silver ETF USD acc",
+    "HUZ.TO": "Global X Silver ETF",
+    "SIVR": "abrdn Physical Silver Shares ETF",
+    "SLV": "iShares Silver Trust",
+}
 
 
 def _gefas_gyf_config(symbol: str) -> Optional[Dict[str, str]]:
@@ -1868,11 +1884,109 @@ def _quote_map_for_holding_stocks(symbols: List[str]) -> Dict[str, Dict[str, Any
     return quotes
 
 
+def _foreign_holding_provider_symbol(position: Dict[str, Any]) -> str:
+    symbol = str(
+        position.get("provider_symbol")
+        or position.get("logo_symbol")
+        or position.get("asset_code")
+        or ""
+    ).strip().upper()
+    return symbol
+
+
+def _quote_map_for_foreign_holdings(positions: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    symbols: List[str] = []
+    seen: set[str] = set()
+    for position in positions:
+        if _holding_type(position) not in {"foreign_equity", "foreign_fund"}:
+            continue
+        symbol = _foreign_holding_provider_symbol(position)
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+    if not symbols:
+        return {}
+
+    now = time.time()
+    quotes: Dict[str, Dict[str, Any]] = {}
+    for symbol in symbols:
+        cached = _FOREIGN_HOLDING_QUOTE_CACHE.get(symbol)
+        if cached and now - float(cached.get("_ts") or 0.0) < _FOREIGN_HOLDING_QUOTE_CACHE_TTL:
+            data = dict(cached.get("data") or {})
+            if data:
+                quotes[symbol] = data
+            continue
+        cache_key = f"api:funds:foreign-holding-quote:{re.sub(r'[^A-Z0-9_.-]+', '_', symbol)}:v4"
+        shared_cached = _shared_cache_get_dict(cache_key)
+        if shared_cached is not None:
+            _FOREIGN_HOLDING_QUOTE_CACHE[symbol] = {"_ts": now, "data": shared_cached}
+            if shared_cached:
+                quotes[symbol] = dict(shared_cached)
+            continue
+
+        raw_quote = _fetch_yahoo_quote(symbol)
+        data: Dict[str, Any] = {}
+        if raw_quote.get("ok") and (
+            _api_number(raw_quote.get("price")) is not None
+            or _api_number(raw_quote.get("change_pct")) is not None
+        ):
+            data = {
+                "price": _api_number(raw_quote.get("price")),
+                "currency": raw_quote.get("currency"),
+                "change_pct": _api_number(raw_quote.get("change_pct")),
+                "as_of": raw_quote.get("as_of"),
+                "source": "yahoo_finance_chart",
+                "provider_symbol": symbol,
+                "short_name": raw_quote.get("short_name"),
+                "long_name": raw_quote.get("long_name"),
+            }
+            quotes[symbol] = data
+        _FOREIGN_HOLDING_QUOTE_CACHE[symbol] = {"_ts": now, "data": data}
+        _shared_cache_set(cache_key, data, ttl_seconds=_FOREIGN_HOLDING_QUOTE_CACHE_TTL)
+    return quotes
+
+
+def _foreign_holding_provider_name(quote: Dict[str, Any]) -> Optional[str]:
+    for key in ("long_name", "short_name"):
+        value = str(quote.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _foreign_holding_known_name(position: Dict[str, Any]) -> Optional[str]:
+    isin = str(position.get("isin") or "").strip().upper()
+    if isin and isin in _FOREIGN_HOLDING_KNOWN_NAMES_BY_ISIN:
+        return _FOREIGN_HOLDING_KNOWN_NAMES_BY_ISIN[isin]
+    provider_symbol = _foreign_holding_provider_symbol(position)
+    if provider_symbol and provider_symbol in _FOREIGN_HOLDING_KNOWN_NAMES_BY_PROVIDER:
+        return _FOREIGN_HOLDING_KNOWN_NAMES_BY_PROVIDER[provider_symbol]
+    return None
+
+
+def _foreign_holding_should_use_provider_name(position: Dict[str, Any], provider_name: str) -> bool:
+    current = str(position.get("asset_name") or "").strip()
+    if not provider_name or not current:
+        return bool(provider_name and not current)
+    code = _holding_code(position)
+    provider_symbol = _foreign_holding_provider_symbol(position)
+    normalized_current = re.sub(r"[^A-Z0-9]+", "", current.upper())
+    if normalized_current in {code, re.sub(r"[^A-Z0-9]+", "", provider_symbol.upper())}:
+        return True
+    current_norm = current.upper()
+    if " EQUITY" in current_norm or current_norm in {"CORP", "INC", "CMN", "AMERICA", "HOLDINGS", "MINERALS"}:
+        return True
+    letters = [char for char in current if char.isalpha()]
+    return bool(letters and current == current.upper() and len(current) > 8)
+
+
 def _position_daily_market_fields(
     position: Dict[str, Any],
     *,
     stock_quotes: Dict[str, Dict[str, Any]],
     gefas_quotes: Dict[str, Dict[str, Any]],
+    foreign_quotes: Dict[str, Dict[str, Any]],
     fund_rows: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
     code = _holding_code(position)
@@ -1913,6 +2027,16 @@ def _position_daily_market_fields(
             "return_source": "tefasfon_funds" if row else None,
             "return_as_of": row.get("as_of"),
         }
+    if asset_type in {"foreign_equity", "foreign_fund"}:
+        provider_symbol = _foreign_holding_provider_symbol(position)
+        quote = foreign_quotes.get(provider_symbol) or {}
+        return {
+            "price": _api_number(quote.get("price")) if quote else _api_number(position.get("price")),
+            "price_currency": quote.get("currency") if quote else None,
+            "return_pct": _api_number(quote.get("change_pct")) if quote else None,
+            "return_source": "yahoo_finance_chart" if quote else None,
+            "return_as_of": quote.get("as_of") if quote else None,
+        }
     return {
         "price": _api_number(position.get("price")),
         "price_currency": None,
@@ -1929,13 +2053,31 @@ def _holding_weight_scale_context(positions: List[Dict[str, Any]]) -> Dict[str, 
         if weight is not None and weight > 0
     ]
     total = sum(weights)
-    if len(weights) >= 3 and 9000 <= total <= 11000 and max(weights) <= 10000:
+    if not weights:
+        return {"action": "none", "factor": 1.0, "reason": None}
+    max_weight = max(weights)
+    if len(weights) >= 3 and 9000 <= total <= 11000 and max_weight <= 10000:
         return {
             "action": "basis_points_to_percent",
             "factor": 0.01,
             "reason": "positive weights sum near 10000 basis points",
         }
+    # Fractional weights (0..1) reported instead of percents.
+    if max_weight <= 1.05 and total <= 1.05 and len(weights) >= 2:
+        return {
+            "action": "fraction_to_percent",
+            "factor": 100.0,
+            "reason": "positive weights look like fractions of one",
+        }
     return {"action": "none", "factor": 1.0, "reason": None}
+
+
+def _per_position_basis_points_threshold() -> float:
+    # Anything above 1000% is far beyond plausible leverage and almost
+    # certainly reported in basis points.  Using a relatively conservative
+    # threshold keeps real leveraged positions (<= a few hundred percent)
+    # untouched.
+    return 1000.0
 
 
 def _validated_holding_weight(raw_value: Any, scale_factor: float) -> Dict[str, Any]:
@@ -1944,6 +2086,12 @@ def _validated_holding_weight(raw_value: Any, scale_factor: float) -> Dict[str, 
         return {"weight": None, "raw_weight": None, "quality": "missing"}
     weight = raw_number * scale_factor
     quality = "normalized" if scale_factor != 1.0 else "ok"
+    # Per-position safety net: a single row well past 1000% with the rest of
+    # the portfolio in normal percent territory is almost always a basis-point
+    # leak.  Divide it down individually so other rows stay untouched.
+    if scale_factor == 1.0 and abs(raw_number) > _per_position_basis_points_threshold() and abs(raw_number) <= 11000:
+        weight = raw_number / 100.0
+        quality = "normalized"
     return {
         "weight": round(weight, 6),
         "raw_weight": raw_number if quality == "normalized" else None,
@@ -1999,8 +2147,12 @@ def _validate_fund_holding_weights(positions: List[Dict[str, Any]]) -> tuple[Lis
 
         validated.append(row)
 
+    status = "ok"
+    if adjusted_positive_total > 100.5:
+        status = "gross_exposure"
+
     quality = {
-        "status": "ok",
+        "status": status,
         "normalized_position_count": normalized_count,
         "raw_total_weight": round(raw_positive_total, 6),
         "adjusted_total_weight": round(adjusted_positive_total, 6),
@@ -2047,6 +2199,7 @@ def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_c
             if quote.get("_cache_hit"):
                 gefas_quote_cache_hits += 1
             gefas_quotes[code] = quote
+    foreign_quotes = _quote_map_for_foreign_holdings(positions)
     sector_map, sector_meta = _fund_holding_sector_map()
 
     enriched_positions: List[Dict[str, Any]] = []
@@ -2058,11 +2211,64 @@ def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_c
 
     for position in positions:
         row = dict(position)
-        sector_info = sector_map.get(_holding_code(row)) if _holding_type(row) == "local_equity" else None
+        row_type = _holding_type(row)
+        if row_type in {"foreign_equity", "foreign_fund"}:
+            provider_symbol = _foreign_holding_provider_symbol(row)
+            row["asset_region"] = "foreign"
+            row["provider_symbol"] = provider_symbol or None
+            row["logo_symbol"] = row.get("logo_symbol") or provider_symbol or row.get("asset_code")
+            row["detail_clickable"] = False
+            quote = foreign_quotes.get(provider_symbol) if provider_symbol else None
+            provider_name = _foreign_holding_provider_name(quote or {}) or _foreign_holding_known_name(row)
+            if provider_name:
+                row["provider_name"] = provider_name
+                row["asset_name"] = provider_name
+        elif row_type == "local_equity":
+            row["asset_region"] = row.get("asset_region") or "TR"
+            row["detail_clickable"] = True if row.get("detail_clickable") is not False else False
+        elif row_type == "fund":
+            row["asset_region"] = row.get("asset_region") or "TR"
+            holding_code = _holding_code(row)
+            fund_row = fund_rows.get(holding_code) or {}
+            provider_name = str(
+                row.get("provider_name")
+                or fund_row.get("founder_company")
+                or fund_row.get("manager_company")
+                or ""
+            ).strip()
+            if provider_name:
+                row["provider_name"] = provider_name
+                row["logo_symbol"] = row.get("logo_symbol") or provider_name
+            if not row.get("logo_url") and fund_row.get("logo_url"):
+                row["logo_url"] = fund_row.get("logo_url")
+                row["logo_source"] = fund_row.get("logo_source")
+
+        sector_info = sector_map.get(_holding_code(row)) if row_type == "local_equity" else None
         row["sector_code"] = sector_info.get("sector_code") if sector_info else None
         row["sector_label"] = sector_info.get("sector_label") if sector_info else None
-        daily_fields = _position_daily_market_fields(row, stock_quotes=stock_quotes, gefas_quotes=gefas_quotes, fund_rows=fund_rows)
+        daily_fields = _position_daily_market_fields(
+            row,
+            stock_quotes=stock_quotes,
+            gefas_quotes=gefas_quotes,
+            foreign_quotes=foreign_quotes,
+            fund_rows=fund_rows,
+        )
         row.update(daily_fields)
+        # Mark fund-type positions as TEFAS-tradable when they exist in the
+        # daily TEFAS funds snapshot (or have a GEFAS-GYF override).  The
+        # frontend uses this flag to decide whether the row is clickable.
+        if row_type == "fund":
+            holding_code = _holding_code(row)
+            row["tefas_tradable"] = bool(
+                holding_code
+                and (holding_code in fund_rows or _gefas_gyf_config(holding_code))
+            )
+            row["detail_clickable"] = bool(row["tefas_tradable"])
+        elif row_type == "foreign_fund":
+            row["tefas_tradable"] = False
+            row["detail_clickable"] = False
+        else:
+            row["tefas_tradable"] = None
 
         weight = _api_number(row.get("weight"))
         return_pct = _api_number(row.get("return_pct"))
@@ -2104,6 +2310,13 @@ def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_c
         "fund_snapshot_count": len(fund_rows),
         "gefas_gyf_quote_count": len(gefas_quotes),
         "gefas_gyf_quote_cache_hits": gefas_quote_cache_hits,
+        "foreign_quote_count": len(foreign_quotes),
+        "foreign_quote_missing_count": sum(
+            1
+            for position in positions
+            if _holding_type(position) in {"foreign_equity", "foreign_fund"}
+            and _foreign_holding_provider_symbol(position) not in foreign_quotes
+        ),
         "sector_symbol_count": sector_meta.get("symbol_count"),
         "sector_cache_hit": sector_meta.get("cache_hit"),
         "sector_source": sector_meta.get("source"),
@@ -2119,6 +2332,8 @@ def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_c
         "fund_daily_reference": "tefas_snapshot",
         "fund_daily_reference_cache_hit": bool(fund_rows_meta.get("cache_hit")),
         "gefas_gyf_cache_ttl_seconds": _GEFAS_GYF_QUOTE_CACHE_TTL,
+        "foreign_daily_reference": "yahoo_finance_chart",
+        "foreign_quote_count": len(foreign_quotes),
     }
     enriched_payload["source_metadata"] = metadata
     return enriched_payload
@@ -6103,6 +6318,8 @@ def _fetch_yahoo_quote(yahoo_symbol: str) -> Dict[str, Any]:
     price = meta.get("regularMarketPrice")
     prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
     currency = meta.get("currency")
+    short_name = meta.get("shortName")
+    long_name = meta.get("longName")
     market_state = meta.get("marketState", "")
     rmt = meta.get("regularMarketTime")
     high = meta.get("regularMarketDayHigh")
@@ -6136,6 +6353,8 @@ def _fetch_yahoo_quote(yahoo_symbol: str) -> Dict[str, Any]:
         "low": low,
         "volume": volume,
         "currency": currency,
+        "short_name": short_name,
+        "long_name": long_name,
         "market_state": market_state,
         "as_of": as_of,
     }

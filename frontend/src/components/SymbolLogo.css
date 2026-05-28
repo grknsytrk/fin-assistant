@@ -36,10 +36,13 @@
 
 .symbol-logo-fx-flag {
     position: absolute;
+    width: 68%;
+    height: 68%;
     border-radius: 9999px;
     object-fit: cover;
     background: var(--surface-color);
-    border: 1px solid color-mix(in srgb, var(--bg-color) 28%, #ffffff);
+    border: 1.5px solid var(--bg-color);
+    box-sizing: border-box;
 }
 
 .symbol-logo-fx-flag-back {
@@ -64,11 +67,6 @@
     font-size: 0.58rem;
 }
 
-.symbol-logo-xs.symbol-logo-fx-flags .symbol-logo-fx-flag {
-    width: 14px;
-    height: 14px;
-}
-
 .symbol-logo-sm {
     width: 28px;
     height: 28px;
@@ -76,11 +74,6 @@
 
 .symbol-logo-sm .symbol-logo-fallback {
     font-size: 0.62rem;
-}
-
-.symbol-logo-sm.symbol-logo-fx-flags .symbol-logo-fx-flag {
-    width: 18px;
-    height: 18px;
 }
 
 .symbol-logo-md {
@@ -92,11 +85,6 @@
     font-size: 0.74rem;
 }
 
-.symbol-logo-md.symbol-logo-fx-flags .symbol-logo-fx-flag {
-    width: 26px;
-    height: 26px;
-}
-
 .symbol-logo-lg {
     width: 64px;
     height: 64px;
@@ -105,9 +93,4 @@
 
 .symbol-logo-lg .symbol-logo-fallback {
     font-size: 1rem;
-}
-
-.symbol-logo-lg.symbol-logo-fx-flags .symbol-logo-fx-flag {
-    width: 42px;
-    height: 42px;
 }

@@ -4,6 +4,7 @@ import {
     useCallback,
     useDeferredValue,
     useEffect,
+    useLayoutEffect,
     useMemo,
     useRef,
     useState,
@@ -56,7 +57,8 @@ import type {
     MarketStockRow,
 } from '../api/types';
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
-import SymbolLogo from '../components/SymbolLogo';
+import SymbolLogo, { type SymbolLogoKind } from '../components/SymbolLogo';
+import { FinLoader } from '../components/FinLoader';
 import { STOCK_LOGO_DOMAIN_MAP } from '../components/symbolLogoMaps';
 import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useWatchlist } from '../hooks/useWatchlist';
@@ -115,7 +117,7 @@ const FUND_HISTORY_TABS: Array<{ key: FundHistorySubtab; label: string; icon: ty
     { key: 'allocation', label: 'Fon Dağılımı', icon: BriefcaseBusiness },
 ];
 
-type FundHoldingAssetCategory = 'local_equity' | 'fund';
+type FundHoldingAssetCategory = 'local_equity' | 'foreign_equity' | 'fund' | 'etf';
 type FundHoldingCategoryFilter = 'all' | FundHoldingAssetCategory;
 type FundHoldingChangeFilter = 'all' | 'increased' | 'decreased' | 'new' | 'removed';
 type FundHoldingSortKey =
@@ -141,12 +143,16 @@ const FUND_HOLDING_SORT_COLUMNS: Array<{ key: FundHoldingSortKey; label: string 
 const FUND_HOLDING_CATEGORY_FILTERS: Array<{ key: FundHoldingCategoryFilter; label: string }> = [
     { key: 'all', label: 'Tümü' },
     { key: 'local_equity', label: 'Hisseler' },
+    { key: 'foreign_equity', label: 'Yabancı' },
     { key: 'fund', label: 'Fonlar/BYF' },
+    { key: 'etf', label: 'ETF' },
 ];
 
 const FUND_HOLDING_GROUPS: Array<{ key: FundHoldingAssetCategory; label: string }> = [
     { key: 'local_equity', label: 'Hisseler' },
-    { key: 'fund', label: 'Fonlar/BYF' },
+    { key: 'fund', label: 'BYF / Fonlar' },
+    { key: 'foreign_equity', label: 'Yabancı Hisseler' },
+    { key: 'etf', label: 'ETF' },
 ];
 
 const FUND_HOLDING_CHANGE_FILTERS: Array<{ key: FundHoldingChangeFilter; label: string }> = [
@@ -912,10 +918,14 @@ function normalizeHoldingAssetType(
     value: string | null | undefined,
     assetCode?: string | null | undefined,
     assetName?: string | null | undefined,
+    assetRegion?: string | null | undefined,
 ): FundHoldingAssetCategory | null {
     const normalized = String(value || '').trim().toLowerCase();
+    const region = String(assetRegion || '').trim().toLowerCase();
     const symbol = normalizeCompareSymbol(assetCode);
     const name = normalizeCompareSearch(assetName);
+    if (normalized === 'foreign_fund' || (region === 'foreign' && (normalized.includes('fund') || normalized.includes('fon')))) return 'etf';
+    if (normalized === 'foreign_equity' || region === 'foreign' || normalized.includes('yabanci') || normalized.includes('yabancı')) return 'foreign_equity';
     if (symbol && STOCK_LOGO_DOMAIN_MAP[symbol]) return 'local_equity';
     if (/\b(YATIRIM FONU|BORSA YATIRIM FONU|BYF|FONU)\b/.test(name)) return 'fund';
     if (normalized === 'local_equity' || normalized.includes('hisse')) return 'local_equity';
@@ -924,11 +934,38 @@ function normalizeHoldingAssetType(
 }
 
 function holdingAssetCategory(position: FundPortfolioPosition): FundHoldingAssetCategory | null {
-    return normalizeHoldingAssetType(position.asset_type, position.asset_code, position.asset_name);
+    return normalizeHoldingAssetType(position.asset_type, position.asset_code, position.asset_name, position.asset_region);
 }
 
 function holdingCategoryLabel(position: FundPortfolioPosition): string {
-    return holdingAssetCategory(position) === 'fund' ? 'Fonlar/BYF' : 'Hisseler';
+    const category = holdingAssetCategory(position);
+    if (category === 'fund') return 'Fonlar/BYF';
+    if (category === 'etf') return 'ETF';
+    if (category === 'foreign_equity') return 'Yabancı Hisseler';
+    return 'Hisseler';
+}
+
+function holdingLogoSymbol(position: FundPortfolioPosition): string {
+    return String(position.logo_symbol || position.provider_symbol || position.asset_code || position.asset_name || '');
+}
+
+function holdingLogoName(position: FundPortfolioPosition): string {
+    const category = holdingAssetCategory(position);
+    if (category === 'fund') {
+        return String(position.provider_name || position.logo_symbol || position.asset_name || '');
+    }
+    return String(position.provider_name || position.asset_name || '');
+}
+
+function holdingDisplayCode(position: FundPortfolioPosition): string {
+    const category = holdingAssetCategory(position);
+    const providerSymbol = String(position.provider_symbol || '').trim().toUpperCase();
+    if ((category === 'foreign_equity' || category === 'etf') && providerSymbol) return providerSymbol;
+    return String(position.asset_code || '').trim() || '-';
+}
+
+function holdingLogoKind(category: FundHoldingAssetCategory): SymbolLogoKind {
+    return category === 'fund' ? 'fund' : 'stock';
 }
 
 function holdingChangeStatus(position: FundPortfolioPosition): FundHoldingChangeFilter | 'unchanged' {
@@ -1865,7 +1902,7 @@ function FundAllocationSummary({
         <section className="fund-allocation-panel">
             <h2>Varlık Dağılımı</h2>
             {loading ? (
-                <div className="funds-state">Dağılım verisi yükleniyor...</div>
+                <FinLoader message="Dağılım verisi yükleniyor" />
             ) : positiveAllocations.length ? (
                 <>
                     <div className="fund-allocation-donut-wrap" onPointerLeave={() => setActiveIndex(null)}>
@@ -2229,7 +2266,7 @@ function FundAllocationHistoryPanel({
                 <h3>Varlık Dağılımı Geçmişi</h3>
             </div>
             {loading ? (
-                <div className="funds-state">Dağılım geçmişi TEFAS üzerinden yükleniyor...</div>
+                <FinLoader message="Dağılım geçmişi yükleniyor" />
             ) : error ? (
                 <div className="funds-state funds-state-error">{error}</div>
             ) : trends.length ? (
@@ -2336,8 +2373,9 @@ function FundHoldingsHighlightCard({ title, positions }: FundHoldingsHighlightCa
                                 <span className="fund-holdings-highlight-symbol">
                                     <SymbolLogo
                                         symbol={symbol}
-                                        name={position.asset_name}
+                                        name={holdingLogoName(position)}
                                         kind={category === 'fund' ? 'fund' : 'stock'}
+                                        logoUrl={position.logo_url}
                                         size="sm"
                                     />
                                     <strong>{position.asset_code || '-'}</strong>
@@ -2533,11 +2571,11 @@ function FundOverviewHoldingsSection({
     const reportDate = latestReport?.report_date || holdings?.source_metadata?.as_of || positions.find((position) => position.report_date)?.report_date || null;
     const reportUrl = latestReport?.source_url || positions.find((position) => position.source_report_url)?.source_report_url || null;
 
-    if (loading && !holdings) {
-        return <div className="funds-state">KAP fon içeriği yükleniyor...</div>;
-    }
     if (error) {
         return <div className="funds-state">{error}</div>;
+    }
+    if (loading || (!holdings && !error)) {
+        return <FinLoader message="KAP fon içeriği yükleniyor" />;
     }
     if (!positions.length) {
         return null;
@@ -2596,6 +2634,7 @@ type FundHoldingsPanelProps = {
     onCategoryFilterChange: (filter: FundHoldingCategoryFilter) => void;
     onChangeFilterChange: (filter: FundHoldingChangeFilter) => void;
     onOpenTicker?: (ticker: string) => void;
+    onOpenFund?: (fundCode: string, tab?: FundTab) => void;
 };
 
 function FundHoldingsPanel({
@@ -2607,6 +2646,7 @@ function FundHoldingsPanel({
     onCategoryFilterChange,
     onChangeFilterChange,
     onOpenTicker,
+    onOpenFund,
 }: FundHoldingsPanelProps) {
     const positions = holdings?.positions || [];
     const [holdingSort, setHoldingSort] = useState<{ key: FundHoldingSortKey; direction: FundHoldingSortDirection }>({
@@ -2675,6 +2715,14 @@ function FundHoldingsPanel({
             holdingWeightValue(position, 'previous_weight') || 0,
         ]),
     );
+    const totalCurrentRankingWeight = rankingPositions.reduce((sum, position) => {
+        const weight = holdingWeightValue(position) || 0;
+        return weight > 0 ? sum + weight : sum;
+    }, 0);
+    const totalPreviousRankingWeight = rankingPositions.reduce((sum, position) => {
+        const weight = holdingWeightValue(position, 'previous_weight') || 0;
+        return weight > 0 ? sum + weight : sum;
+    }, 0);
     const previousRankByKey = useMemo(() => {
         const map = new Map<string, number>();
         sortHoldingPositions(
@@ -2709,10 +2757,16 @@ function FundHoldingsPanel({
         'ÖNCEKİ',
     );
     const normalizedCount = finiteNumber(holdingsQuality?.normalized_position_count);
+    const adjustedTotalWeight = finiteNumber(holdingsQuality?.adjusted_total_weight);
+    const isGrossExposure = (holdingsQuality?.status === 'gross_exposure')
+        || (adjustedTotalWeight != null && adjustedTotalWeight > 100.5);
     const qualityWarning = normalizedCount != null && normalizedCount > 0
         ? `${normalizedCount} ağırlık ölçek hatası nedeniyle normalize edildi.`
         : null;
-    const hasPartialWarning = Boolean(holdings && displayablePositions.length && (holdings.status !== 'ok' || qualityWarning));
+    const grossExposureWarning = isGrossExposure
+        ? `Raporlanan toplam ağırlık ${formatAllocationWeight(adjustedTotalWeight)}. Brüt pozisyon (kaldıraç ya da KAP formatı) görünüyor; çubuklar oransal, yüzdeler ham değer.`
+        : null;
+    const hasPartialWarning = Boolean(holdings && displayablePositions.length && (holdings.status !== 'ok' || qualityWarning || grossExposureWarning));
 
     return (
         <section className="fund-holdings-panel" aria-label="Fon içeriği">
@@ -2728,13 +2782,13 @@ function FundHoldingsPanel({
 
             {error ? (
                 <div className="funds-state">{error}</div>
-            ) : loading && !holdings ? (
-                <div className="funds-state">KAP fon içeriği yükleniyor...</div>
+            ) : loading || (!holdings && !error) ? (
+                <FinLoader message="KAP fon içeriği yükleniyor" />
             ) : displayablePositions.length ? (
                 <>
                     {hasPartialWarning && (
                         <div className="fund-holdings-warning">
-                            {qualityWarning || 'KAP raporu kısmi parse edildi; bazı satırlar eksik olabilir.'}
+                            {grossExposureWarning || qualityWarning || 'KAP raporu kısmi parse edildi; bazı satırlar eksik olabilir.'}
                         </div>
                     )}
                     {portfolioEffect && (
@@ -2796,15 +2850,28 @@ function FundHoldingsPanel({
                                 <span>Önceki Sıra</span>
                             </div>
                             {rankingPositions.map((position, index) => {
-                                const symbol = position.asset_code || position.asset_name;
                                 const category = holdingAssetCategory(position) || 'local_equity';
-                                const logoKind = category === 'fund' ? 'fund' : 'stock';
+                                const symbol = holdingLogoSymbol(position);
+                                const logoKind = holdingLogoKind(category);
+                                const detailClickable = position.detail_clickable !== false;
                                 const stockTicker = category === 'local_equity' ? normalizeCompareSymbol(position.asset_code) : '';
-                                const canOpenStock = Boolean(onOpenTicker && stockTicker);
+                                const canOpenStock = Boolean(onOpenTicker && stockTicker && detailClickable);
+                                const fundCode = category === 'fund' ? normalizeCompareSymbol(position.asset_code) : '';
+                                const canOpenFund = Boolean(onOpenFund && fundCode && position.tefas_tradable && detailClickable);
                                 const weight = holdingWeightValue(position) || 0;
                                 const previousWeight = holdingWeightValue(position, 'previous_weight') || 0;
-                                const widthPct = maxRankingWeight > 0 && weight > 0 ? Math.max(3, (weight / maxRankingWeight) * 100) : 0;
-                                const previousWidthPct = maxRankingWeight > 0 && previousWeight > 0 ? Math.max(3, (previousWeight / maxRankingWeight) * 100) : 0;
+                                const currentDenominator = isGrossExposure && totalCurrentRankingWeight > 0
+                                    ? totalCurrentRankingWeight
+                                    : maxRankingWeight;
+                                const previousDenominator = isGrossExposure && totalPreviousRankingWeight > 0
+                                    ? totalPreviousRankingWeight
+                                    : maxRankingWeight;
+                                const widthPct = currentDenominator > 0 && weight > 0
+                                    ? Math.max(3, Math.min(100, (weight / currentDenominator) * 100))
+                                    : 0;
+                                const previousWidthPct = previousDenominator > 0 && previousWeight > 0
+                                    ? Math.max(3, Math.min(100, (previousWeight / previousDenominator) * 100))
+                                    : 0;
                                 const previousRank = previousRankByKey.get(holdingPositionKey(position));
                                 const rankDelta = previousRank == null ? null : previousRank - (index + 1);
                                 const rankTrend = rankDelta == null ? '' : rankDelta > 0 ? '▲' : rankDelta < 0 ? '▼' : '—';
@@ -2819,12 +2886,12 @@ function FundHoldingsPanel({
                                     <>
                                         <SymbolLogo
                                             symbol={symbol}
-                                            name={position.asset_name}
+                                            name={holdingLogoName(position)}
                                             kind={logoKind}
-                                            logoUrl={category === 'local_equity' ? position.logo_url : null}
+                                            logoUrl={position.logo_url}
                                             size="sm"
                                         />
-                                        <strong>{position.asset_code || '-'}</strong>
+                                        <strong>{holdingDisplayCode(position)}</strong>
                                     </>
                                 );
                                 return (
@@ -2839,6 +2906,15 @@ function FundHoldingsPanel({
                                                 className="fund-holdings-rank-symbol fund-holdings-rank-symbol-link"
                                                 onClick={() => onOpenTicker?.(stockTicker)}
                                                 aria-label={`${stockTicker} hisse sayfasını aç`}
+                                            >
+                                                {rankSymbolContent}
+                                            </button>
+                                        ) : canOpenFund ? (
+                                            <button
+                                                type="button"
+                                                className="fund-holdings-rank-symbol fund-holdings-rank-symbol-link"
+                                                onClick={() => onOpenFund?.(fundCode, 'overview')}
+                                                aria-label={`${fundCode} fonunu aç`}
                                             >
                                                 {rankSymbolContent}
                                             </button>
@@ -2949,23 +3025,26 @@ function FundHoldingsPanel({
                                             </td>
                                         </tr>
                                         {group.positions.map((position) => {
-                                            const symbol = position.asset_code || position.asset_name;
                                             const category = holdingAssetCategory(position) || group.key;
-                                            const logoKind = category === 'fund' ? 'fund' : 'stock';
+                                            const symbol = holdingLogoSymbol(position);
+                                            const logoKind = holdingLogoKind(category);
+                                            const detailClickable = position.detail_clickable !== false;
                                             const stockTicker = category === 'local_equity' ? normalizeCompareSymbol(position.asset_code) : '';
-                                            const canOpenStock = Boolean(onOpenTicker && stockTicker);
+                                            const canOpenStock = Boolean(onOpenTicker && stockTicker && detailClickable);
+                                            const fundCode = category === 'fund' ? normalizeCompareSymbol(position.asset_code) : '';
+                                            const canOpenFund = Boolean(onOpenFund && fundCode && position.tefas_tradable && detailClickable);
                                             const rowKey = `${position.asset_code || position.asset_name}-${position.report_date || ''}-${position.change_status || ''}`;
                                             const assetContent = (
                                                 <>
                                                     <SymbolLogo
                                                         symbol={symbol}
-                                                        name={position.asset_name}
+                                                        name={holdingLogoName(position)}
                                                         kind={logoKind}
-                                                        logoUrl={category === 'local_equity' ? position.logo_url : null}
+                                                        logoUrl={position.logo_url}
                                                         size="sm"
                                                     />
                                                     <span>
-                                                        <strong title={position.asset_code || undefined}>{position.asset_code || '-'}</strong>
+                                                        <strong title={position.asset_code || undefined}>{holdingDisplayCode(position)}</strong>
                                                         <small title={position.asset_name}>{position.asset_name}</small>
                                                         <em>{holdingCategoryLabel(position)}</em>
                                                     </span>
@@ -2980,6 +3059,15 @@ function FundHoldingsPanel({
                                                                 className="fund-holding-asset fund-holding-asset-link"
                                                                 onClick={() => onOpenTicker?.(stockTicker)}
                                                                 aria-label={`${stockTicker} hisse sayfasını aç`}
+                                                            >
+                                                                {assetContent}
+                                                            </button>
+                                                        ) : canOpenFund ? (
+                                                            <button
+                                                                type="button"
+                                                                className="fund-holding-asset fund-holding-asset-link"
+                                                                onClick={() => onOpenFund?.(fundCode, 'overview')}
+                                                                aria-label={`${fundCode} fonunu aç`}
                                                             >
                                                                 {assetContent}
                                                             </button>
@@ -4880,7 +4968,7 @@ export default function FundsPage({
     const [performanceLoading, setPerformanceLoading] = useState(false);
     const [yieldLoading, setYieldLoading] = useState(false);
     const [allocationLoading, setAllocationLoading] = useState(false);
-    const [holdingsLoading, setHoldingsLoading] = useState(false);
+    const [holdingsLoading, setHoldingsLoading] = useState(() => Boolean(fundCode));
     const [error, setError] = useState<string | null>(null);
     const [refreshError, setRefreshError] = useState<string | null>(null);
     const [detailError, setDetailError] = useState<string | null>(null);
@@ -4908,6 +4996,7 @@ export default function FundsPage({
     const autoRefreshAttemptedRef = useRef(false);
     const allocationRefreshAttemptedRef = useRef(new Set<string>());
     const comparisonPanelRef = useRef<HTMLDivElement | null>(null);
+    const fundsPageRef = useRef<HTMLDivElement | null>(null);
     const heatmapFetchKeyRef = useRef<string | null>(null);
     const [comparisonHistory, setComparisonHistory] = useState<MarketComparisonHistoryResponse | null>(null);
     const [comparisonHistoryLoading, setComparisonHistoryLoading] = useState(false);
@@ -4924,6 +5013,16 @@ export default function FundsPage({
             mountedRef.current = false;
         };
     }, []);
+
+    useLayoutEffect(() => {
+        const resetScroll = () => {
+            fundsPageRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+            window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+            document.documentElement.scrollTop = 0;
+            document.body.scrollTop = 0;
+        };
+        resetScroll();
+    }, [fundCode, activeTab, view]);
 
     useEffect(() => {
         holdingsRef.current = holdings;
@@ -4950,8 +5049,12 @@ export default function FundsPage({
         normalizedCode: string,
         options: { silent?: boolean; force?: boolean } = {},
     ) => {
-        if (!normalizedCode || holdingsRefreshInFlightRef.current) return;
+        if (!normalizedCode) return;
         const silent = Boolean(options.silent);
+        if (holdingsRefreshInFlightRef.current) {
+            if (!silent) setHoldingsLoading(true);
+            return;
+        }
         holdingsRefreshInFlightRef.current = true;
         holdingsFetchAttemptedRef.current.add(normalizedCode);
         if (!silent) setHoldingsLoading(true);
@@ -5057,7 +5160,7 @@ export default function FundsPage({
         heatmapFetchKeyRef.current = null;
         setHoldings(null);
         setHoldingsError(null);
-        setHoldingsLoading(false);
+        setHoldingsLoading(true);
         setHoldingCategoryFilter('all');
         setHoldingChangeFilter('all');
         holdingsFetchAttemptedRef.current.clear();
@@ -5204,7 +5307,13 @@ export default function FundsPage({
         }
         if (activeTab !== 'overview' && activeTab !== 'allocation') return;
         const normalizedCode = fundCode.trim().toUpperCase();
-        if (holdings?.fund_code === normalizedCode || holdingsFetchAttemptedRef.current.has(normalizedCode)) {
+        if (holdings?.fund_code === normalizedCode) {
+            return;
+        }
+        if (holdingsFetchAttemptedRef.current.has(normalizedCode)) {
+            if (holdingsRefreshInFlightRef.current) {
+                setHoldingsLoading(true);
+            }
             return;
         }
         void loadHoldings(normalizedCode);
@@ -5537,7 +5646,7 @@ export default function FundsPage({
                 onSelectFund={(nextFundCode) => onOpenFund(nextFundCode, 'overview')}
             />
             <div className="funds-workspace">
-                <div className="funds-page">
+                <div className="funds-page" ref={fundsPageRef}>
                     {view === 'compare' ? (
                         <FundComparisonPage
                             funds={funds}
@@ -5638,7 +5747,7 @@ export default function FundsPage({
                                 </div>
 
                                 {loading ? (
-                                    <div className="funds-state">Fon listesi yükleniyor...</div>
+                                    <FinLoader message="Fon listesi yükleniyor" />
                                 ) : error ? (
                                     <div className="funds-state funds-state-error">{error}</div>
                                 ) : filteredFunds.length === 0 ? (
@@ -5657,7 +5766,7 @@ export default function FundsPage({
                     ) : (
                         <section className="fund-detail">
                             {detailLoading ? (
-                                <div className="funds-state">Fon detayı yükleniyor...</div>
+                                <FinLoader message="Fon detayı yükleniyor" />
                             ) : detailError ? (
                                 <div className="funds-state funds-state-error">{detailError}</div>
                             ) : selectedFund ? (
@@ -5801,7 +5910,7 @@ export default function FundsPage({
                                                 containerRef={comparisonPanelRef}
                                             />
                                             {yieldLoading && !yieldSummary && (
-                                                <div className="funds-state">Getiri kartları TEFAS üzerinden yükleniyor...</div>
+                                                <FinLoader message="Getiri kartları yükleniyor" />
                                             )}
                                             <FundMonthlyHeatmap monthlyReturns={monthlyReturns} />
                                         </div>
@@ -5843,9 +5952,11 @@ export default function FundsPage({
                                                         </div>
                                                     </div>
                                                 ) : (
-                                                    <div className="funds-state">
-                                                        {allocationLoading ? 'Dağılım verisi yükleniyor...' : 'TEFAS dağılım verisi bu fon için yok.'}
-                                                    </div>
+                                                    allocationLoading ? (
+                                                        <FinLoader message="Dağılım verisi yükleniyor" />
+                                                    ) : (
+                                                        <div className="funds-state">TEFAS dağılım verisi bu fon için yok.</div>
+                                                    )
                                                 )}
                                                 <FundHoldingsPanel
                                                     holdings={holdings}
@@ -5856,6 +5967,7 @@ export default function FundsPage({
                                                     onCategoryFilterChange={setHoldingCategoryFilter}
                                                     onChangeFilterChange={setHoldingChangeFilter}
                                                     onOpenTicker={onOpenTicker}
+                                                    onOpenFund={onOpenFund}
                                                 />
                                             </div>
                                         </div>
@@ -5886,7 +5998,7 @@ export default function FundsPage({
                                             </div>
                                             {historySubtab === 'prices' ? (
                                                 performanceLoading && !performancePoints.length ? (
-                                                    <div className="funds-state">Geçmiş fiyat verisi TEFAS üzerinden yükleniyor...</div>
+                                                    <FinLoader message="Geçmiş fiyat verisi yükleniyor" />
                                                 ) : performanceError ? (
                                                     <div className="funds-state funds-state-error">{performanceError}</div>
                                                 ) : performancePoints.length ? (

@@ -1557,6 +1557,93 @@ def _read_daily_fund_price_points(
     )
 
 
+# Maximum allowed gap (in days) between the latest snapshot point and the
+# previous local close when back-filling a missing daily_return.  Keeps weekend
+# / holiday transitions usable while filtering out long-stale points.
+_DAILY_RETURN_LOCAL_FALLBACK_MAX_GAP_DAYS = int(
+    os.getenv("RAGFIN_DAILY_RETURN_LOCAL_FALLBACK_MAX_GAP_DAYS", "5")
+)
+
+
+def _backfill_daily_returns_from_local_prices(
+    processed_dir: Path,
+    rows: List[Dict[str, Any]],
+    *,
+    max_gap_days: int = _DAILY_RETURN_LOCAL_FALLBACK_MAX_GAP_DAYS,
+) -> int:
+    """Fallback: when TEFAS does not publish a daily return for a fund (e.g.
+    qualified-investor / TEFAS-closed funds), compute it from the last two
+    locally cached price points if they are close enough in time.
+
+    Mutates ``rows`` in place.  Only fills rows whose ``daily_return`` and
+    ``gunlukGetiri`` are both ``None``; existing values are preserved.
+    Returns the number of rows that were back-filled.
+    """
+
+    if not rows or max_gap_days <= 0:
+        return 0
+    filled = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        existing_daily = row.get("daily_return")
+        if existing_daily is None:
+            existing_daily = row.get("gunlukGetiri")
+        if _coerce_float(existing_daily) is not None:
+            continue
+
+        code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        if not code:
+            continue
+        as_of_text = _first_text(row, "as_of", "tarih", "TARIH", "date")
+        as_of_iso = _fund_date(as_of_text) if as_of_text else None
+        if not as_of_iso:
+            continue
+        try:
+            as_of = date.fromisoformat(as_of_iso)
+        except ValueError:
+            continue
+
+        points = read_fund_price_points(
+            processed_dir,
+            code,
+            start_date=as_of - timedelta(days=max(1, max_gap_days)),
+            end_date=as_of,
+            sources=_DAILY_PRICE_SOURCES,
+        )
+        if len(points) < 2:
+            continue
+        latest = points[-1]
+        previous = points[-2]
+        latest_iso = _fund_date(latest.get("date"))
+        previous_iso = _fund_date(previous.get("date"))
+        if not latest_iso or not previous_iso:
+            continue
+        try:
+            latest_date = date.fromisoformat(latest_iso)
+            previous_date = date.fromisoformat(previous_iso)
+        except ValueError:
+            continue
+        if latest_date != as_of:
+            # Local cache is missing today's point; skip rather than guess.
+            continue
+        gap = (latest_date - previous_date).days
+        if gap < 1 or gap > max_gap_days:
+            continue
+        latest_price = _coerce_float(latest.get("price"))
+        previous_price = _coerce_float(previous.get("price"))
+        computed = _return_between(latest_price, previous_price)
+        if computed is None:
+            continue
+        rounded = round(computed, 4)
+        row["daily_return"] = rounded
+        row["gunlukGetiri"] = rounded
+        row["daily_return_source"] = "local_price_diff"
+        row["daily_return_basis_date"] = previous_date.isoformat()
+        filled += 1
+    return filled
+
+
 def _normalize_allocation_row(row: Dict[str, Any], fallback_code: str | None = None) -> List[Dict[str, Any]]:
     fund_code = normalize_fund_code(_first_text(row, "fonKodu", "fonKod", "FONKODU", "fund_code") or fallback_code)
     if not fund_code:
@@ -3425,6 +3512,10 @@ def refresh_funds_snapshot(processed_dir: Path, *, lookback_days: int = 10) -> D
         source=TEFASFON_FUNDS_SOURCE,
         fetched_at=str(snapshot.get("fetched_at") or _utc_now_iso()),
     )
+    backfilled = _backfill_daily_returns_from_local_prices(processed_dir, snapshot["rows"])
+    if backfilled:
+        meta = snapshot.setdefault("source_metadata", {})
+        meta["daily_return_local_fallback_count"] = backfilled
     snapshot["source_metadata"]["reference_data"] = _upsert_fund_reference_data(processed_dir, snapshot["rows"])
     _write_json(_snapshot_path(processed_dir), snapshot)
     return snapshot
@@ -3526,6 +3617,9 @@ def collect_daily_fund_prices(
     snapshot["source_metadata"]["source_policy"] = FUND_HISTORY_SOURCE_POLICY
     snapshot["source_metadata"]["fallback_used"] = fallback_attempted
     if snapshot_rows:
+        backfilled = _backfill_daily_returns_from_local_prices(processed_dir, snapshot["rows"])
+        if backfilled:
+            snapshot["source_metadata"]["daily_return_local_fallback_count"] = backfilled
         snapshot["source_metadata"]["reference_data"] = _upsert_fund_reference_data(processed_dir, snapshot_rows)
         _write_json(_snapshot_path(processed_dir), snapshot)
 
@@ -5246,14 +5340,16 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
 
 
 KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
-KAP_HOLDINGS_PARSE_VERSION = 9
-_KAP_NUMBER_PATTERN = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d+|-?\d+,\d+")
+KAP_HOLDINGS_PARSE_VERSION = 12
+_KAP_NUMBER_PATTERN = re.compile(
+    r"-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?(?!\d)|\d+[.,]\d+|\d+)(?:\s*%)?"
+)
 _KAP_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{2,4}\b")
 # A trailing ISIN may be glued directly to a borsa/sözleşme code that is
 # itself glued to the currency token (e.g. ``14,41TL 80100511TRABTCIM91F5``),
 # so we tolerate an optional numeric prefix between the currency and the ISIN.
 _KAP_ISIN_TAIL_PATTERN = re.compile(
-    r"(?P<weight>-?\d{1,3}(?:[,.]\d{1,6}))\s*(?:TL|TRY|USD|EUR|JPY|GBP)?\s*\d*[A-Z]{2}[A-Z0-9]{6,}\s*$",
+    r"(?P<weight>-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?))\s*%?\s*(?:TL|TRY|USD|EUR|JPY|GBP)?\s*\d*[A-Z]{2}[A-Z0-9]{6,}\s*$",
     flags=re.IGNORECASE,
 )
 # Lines that introduce continuation rows for an already-listed position
@@ -5284,6 +5380,9 @@ _KAP_NON_HOLDING_CONTEXT_TOKENS = (
     "TEMINAT",
     "VIOP",
     "KIRA SERTIFIKA",
+    "VARANT",
+    "DIGER VARLIK",
+    "DIGER VAR",
 )
 _KAP_POSITION_STOPWORDS = {
     "AÇIKLAMA",
@@ -5329,7 +5428,47 @@ _KAP_POSITION_STOPWORDS = {
     "TUTAR",
     "VADE",
 }
-_KAP_INCLUDED_HOLDING_TYPES = {"local_equity", "fund"}
+_KAP_INCLUDED_HOLDING_TYPES = {"local_equity", "fund", "foreign_equity", "foreign_fund"}
+_KAP_FOREIGN_ISIN_PROVIDER_SYMBOLS = {
+    "US0032641088": "SIVR",
+    "US46428Q1094": "SLV",
+}
+_KAP_FOREIGN_ISIN_PROVIDER_NAMES = {
+    "US0032641088": "abrdn Physical Silver Shares ETF",
+    "US46428Q1094": "iShares Silver Trust",
+    "CH0183135992": "Swisscanto (CH) Silver ETF",
+    "CH0118929048": "UBS Silver ETF USD acc",
+    "CA37964K1012": "Global X Silver ETF",
+}
+_KAP_FOREIGN_SYMBOL_STOPWORDS = {
+    "AMERICA",
+    "CMN",
+    "CORP",
+    "CORPORATION",
+    "EQUITY",
+    "HOLDINGS",
+    "INC",
+    "LIMITED",
+    "MINERALS",
+    "OF",
+    "SE",
+}
+_KAP_FOREIGN_EXCHANGE_SUFFIXES = {
+    "US": "",
+    "FP": ".PA",
+    "PA": ".PA",
+    "SW": ".SW",
+    "LN": ".L",
+    "CN": ".TO",
+    "GY": ".DE",
+    "GR": ".DE",
+    "NA": ".AS",
+    "AS": ".AS",
+}
+_KAP_FOREIGN_EQUITY_PREFIX_PATTERN = re.compile(
+    r"^(?P<symbol>[A-Z0-9]{1,12})\s+(?P<exchange>US|FP|PA|SW|LN|CN|GY|GR|NA|AS)\s+EQUITY\b",
+    flags=re.IGNORECASE,
+)
 _KAP_EXTRA_STOCK_SYMBOLS = {
     # Keep the parser tolerant of very recent KAP rows before the bundled
     # BIST universe fallback is refreshed.
@@ -5757,7 +5896,118 @@ def _kap_number_matches(block: str) -> List[re.Match[str]]:
     def inside_date(span: Tuple[int, int]) -> bool:
         return any(span[0] >= start and span[1] <= end for start, end in date_spans)
 
-    return [match for match in _KAP_NUMBER_PATTERN.finditer(block) if not inside_date(match.span())]
+    def embedded_in_symbol(match: re.Match[str]) -> bool:
+        start, _end = match.span()
+        if start <= 0:
+            return False
+        previous = str(block or "")[start - 1 : start]
+        return bool(previous and previous.isalnum())
+
+    return [
+        match
+        for match in _KAP_NUMBER_PATTERN.finditer(block)
+        if not inside_date(match.span()) and not embedded_in_symbol(match)
+    ]
+
+
+def _coerce_kap_number_text(raw: Any) -> Optional[float]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    text = text.replace("\xa0", "").replace(" ", "").replace("%", "").strip()
+    if not text or text in {"-", "+", "."}:
+        return None
+    sign = ""
+    if text[:1] in {"+", "-"}:
+        sign = text[:1]
+        text = text[1:]
+    if not text:
+        return None
+    comma_count = text.count(",")
+    dot_count = text.count(".")
+    if comma_count and dot_count:
+        decimal_sep = "," if text.rfind(",") > text.rfind(".") else "."
+        thousands_sep = "." if decimal_sep == "," else ","
+        text = text.replace(thousands_sep, "").replace(decimal_sep, ".")
+    elif comma_count:
+        parts = text.split(",")
+        if comma_count > 1:
+            text = "".join(parts)
+        elif len(parts[-1]) == 3 and parts[0] != "0":
+            text = "".join(parts)
+        else:
+            text = text.replace(",", ".")
+    elif dot_count:
+        parts = text.split(".")
+        if dot_count > 1:
+            text = "".join(parts)
+        elif len(parts[-1]) == 3 and parts[0] != "0":
+            text = "".join(parts)
+    try:
+        result = float(f"{sign}{text}")
+        return result if result == result else None
+    except ValueError:
+        return None
+
+
+def _kap_number_tokens(block: str) -> List[Dict[str, Any]]:
+    tokens: List[Dict[str, Any]] = []
+    for match in _kap_number_matches(block):
+        raw = match.group(0)
+        value = _coerce_kap_number_text(raw)
+        if value is None:
+            continue
+        tokens.append(
+            {
+                "match": match,
+                "text": raw,
+                "value": value,
+                "is_percent": "%" in raw,
+                "start": match.start(),
+                "end": match.end(),
+            }
+        )
+    return tokens
+
+
+def _kap_extract_isin(compact: str) -> Optional[str]:
+    candidates = [
+        match.group(1)
+        for match in re.finditer(
+            r"(?<![A-Z])([A-Z]{2}[A-Z0-9]{9}[0-9])(?![A-Z0-9])",
+            str(compact or "").upper(),
+        )
+    ]
+    return candidates[-1] if candidates else None
+
+
+def _kap_foreign_provider_symbol_for_exchange(symbol: Any, exchange: Any) -> Optional[str]:
+    base = normalize_fund_code(symbol).replace(".", "")
+    exchange_code = normalize_fund_code(exchange).replace(".", "")
+    if not base or base in _KAP_FOREIGN_SYMBOL_STOPWORDS or base in _KAP_POSITION_STOPWORDS:
+        return None
+    suffix = _KAP_FOREIGN_EXCHANGE_SUFFIXES.get(exchange_code)
+    if suffix is None:
+        return None
+    return f"{base}{suffix}"
+
+
+def _kap_foreign_prefixed_security(compact: str) -> Optional[Dict[str, Any]]:
+    text = " ".join(str(compact or "").replace("\xa0", " ").split())
+    match = _KAP_FOREIGN_EQUITY_PREFIX_PATTERN.match(text)
+    if not match:
+        return None
+    symbol = normalize_fund_code(match.group("symbol")).replace(".", "")
+    exchange = normalize_fund_code(match.group("exchange")).replace(".", "")
+    provider_symbol = _kap_foreign_provider_symbol_for_exchange(symbol, exchange)
+    if not provider_symbol:
+        return None
+    return {
+        "code": symbol,
+        "exchange": exchange,
+        "provider_symbol": provider_symbol,
+        "prefix_end": match.end(),
+    }
 
 
 def _kap_stock_symbol_set() -> set[str]:
@@ -5828,13 +6078,41 @@ def _kap_looks_like_fund_symbol(code: str) -> bool:
     return bool(re.fullmatch(r"[A-Z0-9]{3,6}", symbol))
 
 
+def _kap_looks_like_foreign_symbol(code: str) -> bool:
+    symbol = normalize_fund_code(code).replace(".", "")
+    if not symbol or symbol in _KAP_POSITION_STOPWORDS or symbol in _KAP_FOREIGN_SYMBOL_STOPWORDS:
+        return False
+    if symbol.startswith(("TRT", "TRF", "TRB", "TRD", "TRY")):
+        return False
+    return bool(re.fullmatch(r"[A-Z0-9]{1,12}", symbol))
+
+
 def _kap_is_included_holding_type(asset_type: Any) -> bool:
     return str(asset_type or "").strip().lower() in _KAP_INCLUDED_HOLDING_TYPES
 
 
 def _kap_is_included_holding_context(context: str) -> bool:
     norm = _normalize_match_text(context)
-    return any(token in norm for token in ("HISSE", "Y.FONU", "YATIRIM FONU", "BORSA Y", "BYF", "FON SEPETI"))
+    return any(token in norm for token in ("HISSE", "Y.FONU", "YATIRIM FONU", "BORSA Y", "BYF", "FON SEPETI", "YABANCI"))
+
+
+def _kap_context_is_foreign(context: str) -> bool:
+    norm = _normalize_match_text(context)
+    return any(token in norm for token in ("YABANCI", "YABANC", "YURT DISI", "YURTDISI", "YP "))
+
+
+def _kap_with_foreign_context(marker: Optional[str], current_category: str = "") -> Optional[str]:
+    if not marker:
+        return marker
+    if _kap_context_is_foreign(marker):
+        return marker
+    current_norm = _normalize_match_text(current_category)
+    marker_norm = _normalize_match_text(marker)
+    if not current_norm.startswith("YABANCI"):
+        return marker
+    if not any(token in marker_norm for token in ("BORSA", "HISSE")):
+        return marker
+    return f"Yabancı {marker}"
 
 
 def _kap_asset_type_from_context(context: str, code: str, name: str) -> str:
@@ -5842,9 +6120,12 @@ def _kap_asset_type_from_context(context: str, code: str, name: str) -> str:
     name_norm = _normalize_match_text(name)
     haystack = _normalize_match_text(f"{context} {code} {name}")
     symbol = normalize_fund_code(code)
+    is_foreign_context = _kap_context_is_foreign(context_norm)
     has_equity_context = any(token in context_norm for token in ("HISSE SENEDI", "HISSE SENETLERI", "HISSE"))
     has_fund_context = any(token in context_norm for token in ("Y.FONU", "YATIRIM FONU", "BORSA Y", "BYF", "FON SEPETI"))
     has_excluded_context = any(token in context_norm for token in _KAP_NON_HOLDING_CONTEXT_TOKENS)
+    if symbol in {"USD", "EUR", "JPY", "GBP"}:
+        return "cash_fx"
     # When the table section explicitly belongs to a non-holding instrument
     # type (REPO, mevduat, borçlanma, etc.) we must never classify the row
     # as a stock/fund holding even if the leading token happens to match a
@@ -5857,35 +6138,91 @@ def _kap_asset_type_from_context(context: str, code: str, name: str) -> str:
         if any(token in haystack for token in ("DOVIZ", "NAKIT", "MEVDUAT", "TEMINAT")):
             return "cash_fx"
         return "other"
-    if has_fund_context and _kap_looks_like_fund_symbol(symbol):
-        return "fund"
-    if not has_excluded_context and _kap_looks_like_fund_symbol(symbol) and any(token in name_norm for token in ("YATIRIM FONU", "PORTFOY", "BYF", "FON")):
-        return "fund"
+    if has_fund_context and (is_foreign_context and _kap_looks_like_foreign_symbol(symbol) or _kap_looks_like_fund_symbol(symbol)):
+        return "foreign_fund" if is_foreign_context else "fund"
+    if not has_excluded_context and _kap_looks_like_fund_symbol(symbol) and any(token in name_norm for token in ("YATIRIM FONU", "PORTFOY", "BYF", "FON", "ETF")):
+        return "foreign_fund" if is_foreign_context else "fund"
     if _kap_is_stock_symbol(symbol):
         return "local_equity"
     if has_equity_context and _kap_looks_like_equity_symbol(symbol):
-        return "local_equity"
+        return "foreign_equity" if is_foreign_context else "local_equity"
+    if is_foreign_context and has_fund_context and _kap_looks_like_foreign_symbol(symbol):
+        return "foreign_fund"
+    if is_foreign_context and _kap_looks_like_foreign_symbol(symbol):
+        return "foreign_equity"
     if any(token in haystack for token in ("REPO", "TAHVIL", "BONO", "BORCLANMA", "HAZINE", "KIRA SERTIFIKASI")):
         return "debt"
-    if symbol in {"USD", "EUR", "JPY", "GBP"} or any(token in haystack for token in ("DOVIZ", "NAKIT", "MEVDUAT", "TEMINAT")):
+    if any(token in haystack for token in ("DOVIZ", "NAKIT", "MEVDUAT", "TEMINAT")):
         return "cash_fx"
     if symbol.startswith(("TRT", "TRF", "TRB")):
         return "debt"
     return "other"
 
 
+def _kap_foreign_provider_symbol(
+    code: Any,
+    isin: Any = None,
+    name: Any = None,
+    exchange: Any = None,
+) -> Optional[str]:
+    isin_text = str(isin or "").strip().upper()
+    if isin_text and isin_text in _KAP_FOREIGN_ISIN_PROVIDER_SYMBOLS:
+        return _KAP_FOREIGN_ISIN_PROVIDER_SYMBOLS[isin_text]
+    exchange_symbol = _kap_foreign_provider_symbol_for_exchange(code, exchange)
+    if exchange_symbol:
+        return exchange_symbol
+    symbol = normalize_fund_code(code).replace(".", "")
+    if not symbol or symbol in _KAP_POSITION_STOPWORDS or symbol in _KAP_FOREIGN_SYMBOL_STOPWORDS:
+        return None
+    suffix_map = (
+        ("US", ""),
+        ("CN", ".TO"),
+        ("SW", ".SW"),
+        ("LN", ".L"),
+        ("NA", ".AS"),
+        ("AS", ".AS"),
+        ("GY", ".DE"),
+        ("GR", ".DE"),
+        ("FP", ".PA"),
+        ("PA", ".PA"),
+    )
+    for suffix, exchange_suffix in suffix_map:
+        if symbol.endswith(suffix) and len(symbol) > len(suffix) + 1:
+            base = symbol[: -len(suffix)]
+            if base:
+                return f"{base}{exchange_suffix}"
+    return symbol
+
+
 def _kap_category_marker(line: str) -> Optional[str]:
     norm = _normalize_match_text(line)
     if not norm or len(norm) > 80:
         return None
-    if norm in {"HISSE", "HISSE SENEDI", "HISSE SENETLERI"}:
-        return "Hisse Senedi"
-    if norm in {"Y.FONU", "YATIRIM FONU", "BORSA Y.FONU", "BYF"}:
-        return "Yatırım Fonu/BYF"
-    if norm in {"T.REPO", "REPO", "BORCLANMA SENETLERI", "KIRA SERTIFIKALARI"}:
+    norm = re.sub(r"^[A-Z]\s*[\).:-]\s*", "", norm).strip()
+    if norm == "DOVIZ" and str(line or "").strip() == str(line or "").strip().upper():
+        return None
+    if "YABANCI" in norm and any(token in norm for token in ("SERMAYE", "MENKUL KIYMET", "PIYASASI")):
+        return "Yabancı"
+    if norm in {"HISSE", "HISSE SENEDI", "HISSE SENETLERI", "PAY", "PAYLAR", "A.PAY", "YP HISSE", "YABANCI HISSE"}:
+        return "Yabancı Hisse Senedi" if "YP " in norm or "YABANCI" in norm else "Hisse Senedi"
+    if any(token in norm for token in ("HISSE SENEDI", "HISSE SENETLERI")):
+        return "Yabancı Hisse Senedi" if "YABANCI" in norm else "Hisse Senedi"
+    if norm in {"Y.FONU", "YATIRIM FONU", "BYF"}:
+        return "Yabancı Yatırım Fonu/BYF" if "YABANCI" in norm else "Yatırım Fonu/BYF"
+    if norm in {"BORSA Y.FONU", "BORSA YATIRIM FONU"} or (
+        "FON" in norm and any(token in norm for token in ("YATIRIM", "BORSA Y", "BYF"))
+    ):
+        return "Yabancı Borsa Yatırım Fonu/BYF" if "YABANCI" in norm else "Borsa Yatırım Fonu/BYF"
+    if "REPO" in norm and any(token in norm for token in ("TEM", "TUTAR")):
+        return None
+    if norm in {"T.REPO", "REPO", "BORCLANMA SENETLERI", "KIRA SERTIFIKALARI"} or (
+        "REPO" in norm and "TEMINAT" not in norm and "TMNT" not in norm
+    ):
         return "Borçlanma"
-    if norm in {"MEVDUAT", "NAKIT", "DOVIZ/NAKIT", "DOVIZ NAKIT"}:
+    if norm in {"MEVDUAT", "NAKIT", "DOVIZ", "DOVIZ/NAKIT", "DOVIZ NAKIT"} or ("MEV" in norm and "UAT" in norm):
         return "Döviz/Nakit"
+    if "VARANT" in norm or "DIGER VAR" in norm:
+        return "Diğer"
     return None
 
 
@@ -5905,6 +6242,8 @@ def _kap_strip_inline_category(line: str) -> Tuple[str, Optional[str]]:
             stripped = text[match.end():].strip()
             if _normalize_match_text(stripped) in {"TURK", "YABANCI"}:
                 stripped = ""
+            if marker and re.search(r"Yabanc.|Yabanci|Yabancı", text[: match.end()], flags=re.IGNORECASE):
+                marker = f"Yabancı {marker}"
             return stripped, marker
     return text, None
 
@@ -5932,6 +6271,8 @@ def _kap_line_starts_position(line: str) -> bool:
     text = str(line or "").strip()
     if not text:
         return False
+    if _kap_foreign_prefixed_security(text):
+        return True
     norm = _normalize_match_text(text)
     if not _kap_number_matches(text) and "PORTFOY" in norm and "FON" in norm:
         return False
@@ -5950,8 +6291,10 @@ def _kap_row_complete(block: str) -> bool:
     compact = " ".join(str(block or "").split())
     if _KAP_ISIN_TAIL_PATTERN.search(compact):
         return True
-    numbers = _kap_number_matches(compact)
-    if len(numbers) < 4:
+    tokens = _kap_number_tokens(compact)
+    if len([token for token in tokens if token.get("is_percent")]) >= 2:
+        return True
+    if len(tokens) < 4:
         return False
     return any(token in compact.upper() for token in (" TL", "TRY", "USD", "EUR", "JPY", "GBP"))
 
@@ -5959,6 +6302,8 @@ def _kap_row_complete(block: str) -> bool:
 def _kap_buffer_is_header_noise(buffer: List[str]) -> bool:
     compact = " ".join(str(part or "").strip() for part in buffer if str(part or "").strip())
     if not compact or _kap_number_matches(compact):
+        return False
+    if _kap_foreign_prefixed_security(compact):
         return False
     norm = _normalize_match_text(compact)
     header_terms = (
@@ -6003,6 +6348,18 @@ def _kap_buffer_starts_with_fund_symbol(buffer: List[str], context: str) -> bool
     return _kap_looks_like_fund_symbol(candidate)
 
 
+def _kap_buffer_starts_with_foreign_symbol(buffer: List[str], context: str) -> bool:
+    if not _kap_context_is_foreign(context):
+        return False
+    first_line = str(buffer[0] if buffer else "").strip()
+    first = first_line.split()[0].strip(":-,;()") if first_line.split() else ""
+    candidate = normalize_fund_code(first).replace(".", "")
+    if len(candidate) < 2 or not _kap_looks_like_foreign_symbol(candidate):
+        return False
+    compact = " ".join(str(part or "").strip() for part in buffer if str(part or "").strip())
+    return bool(compact and len(compact.split()) <= 4)
+
+
 def _parse_kap_holding_block(
     block: str,
     *,
@@ -6010,54 +6367,92 @@ def _parse_kap_holding_block(
     category_context: str,
     report_date: Optional[str],
     source_url: Optional[str],
+    continuation_marker: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     compact = " ".join(str(block or "").replace("\xa0", " ").split())
     norm = _normalize_match_text(compact)
-    if not compact or "GRUP TOPLAMI" in norm or "TOPLAM" == norm:
+    if not compact or re.match(r"^(?:ANA\s+GRUP|GRUP\s+TOPLAMI|TOPLAM)\b", norm) or "GRUP TOPLAMI" in norm:
         return None
 
-    code_match = re.match(r"(?P<code>[A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9._-]{1,15})\b", compact, flags=re.IGNORECASE)
-    if not code_match:
-        return None
-    code = code_match.group("code").strip().upper()
-    if "-" in code:
-        left, right = code.split("-", 1)
-        if _kap_looks_like_fund_symbol(left):
-            code = left
-            compact = f"{left} {right} {compact[code_match.end():]}".strip()
-            code_match = re.match(r"(?P<code>[A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9._-]{1,15})\b", compact, flags=re.IGNORECASE)
-            if not code_match:
-                return None
+    foreign_prefix = _kap_foreign_prefixed_security(compact)
+    if foreign_prefix:
+        code = str(foreign_prefix.get("code") or "").strip().upper()
+        code_end = int(foreign_prefix.get("prefix_end") or 0)
+    else:
+        code_match = re.match(r"(?P<code>[A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9._-]{1,15})\b", compact, flags=re.IGNORECASE)
+        if not code_match:
+            return None
+        code = code_match.group("code").strip().upper()
+        code_end = code_match.end()
+        if "-" in code:
+            left, right = code.split("-", 1)
+            if _kap_looks_like_fund_symbol(left):
+                code = left
+                compact = f"{left} {right} {compact[code_match.end():]}".strip()
+                code_match = re.match(r"(?P<code>[A-ZÇĞİÖŞÜ0-9][A-ZÇĞİÖŞÜ0-9._-]{1,15})\b", compact, flags=re.IGNORECASE)
+                if not code_match:
+                    return None
+                code_end = code_match.end()
     if code in _KAP_POSITION_STOPWORDS:
         return None
 
-    number_matches = _kap_number_matches(compact)
-    if len(number_matches) < 3:
+    number_tokens = _kap_number_tokens(compact)
+    if len(number_tokens) < 3:
         return None
 
-    first_number_start = number_matches[0].start()
-    raw_name = compact[code_match.end():first_number_start].strip(" -")
+    first_number_start = int(number_tokens[0]["start"])
+    raw_name = compact[code_end:first_number_start].strip(" -")
     raw_name = _KAP_DATE_PATTERN.sub(" ", raw_name)
+    raw_name = re.sub(r"\s*/\s*", " ", raw_name)
+    raw_name = re.sub(r"\s+-\s+", " ", raw_name)
     asset_name = " ".join(raw_name.split()) or code
     tail = _KAP_ISIN_TAIL_PATTERN.search(compact)
-    weight = _coerce_float(tail.group("weight")) if tail else None
-    parsed_numbers = [_coerce_float(match.group(0)) for match in number_matches]
-    numbers = [value for value in parsed_numbers if value is not None]
+    isin = _kap_extract_isin(compact)
+    if isin:
+        asset_name = " ".join(re.sub(rf"\b{re.escape(isin)}\b", " ", asset_name, flags=re.IGNORECASE).split()) or code
+    percent_tokens = [token for token in number_tokens if token.get("is_percent")]
+    weight_token = percent_tokens[-1] if percent_tokens else None
+    weight = float(weight_token["value"]) if weight_token else None
     if weight is None:
-        small_values = [value for value in numbers[-4:] if abs(value) <= 100]
-        weight = small_values[-1] if small_values else None
+        weight = _coerce_kap_number_text(tail.group("weight")) if tail else None
+        if tail:
+            weight_token = {"start": tail.start("weight"), "end": tail.end("weight"), "value": weight}
+    numbers = [float(token["value"]) for token in number_tokens]
+    if weight is None:
+        small_tokens = [token for token in number_tokens[-6:] if abs(float(token["value"])) <= 100]
+        if small_tokens:
+            weight_token = small_tokens[-1]
+            weight = float(weight_token["value"])
     if weight is None:
         return None
 
     amount = numbers[0] if numbers else None
-    values_before_weight = numbers[:-1] if numbers and abs(numbers[-1] - float(weight)) < 0.0001 else numbers
+    weight_start = int(weight_token.get("start")) if isinstance(weight_token, dict) and weight_token.get("start") is not None else None
+    values_before_weight = [
+        float(token["value"])
+        for token in number_tokens
+        if weight_start is None or int(token["start"]) < weight_start
+    ]
     market_value = next((value for value in reversed(values_before_weight) if abs(value) > 100), None)
     asset_type = _kap_asset_type_from_context(category_context, code, asset_name)
+    is_foreign = asset_type.startswith("foreign_")
+    provider_symbol = (
+        _kap_foreign_provider_symbol(code, isin, asset_name, foreign_prefix.get("exchange") if foreign_prefix else None)
+        if is_foreign
+        else None
+    )
+    if is_foreign and isin and isin in _KAP_FOREIGN_ISIN_PROVIDER_NAMES:
+        asset_name = _KAP_FOREIGN_ISIN_PROVIDER_NAMES[isin]
     return {
         "fund_code": fund_code,
         "asset_code": code,
         "asset_name": asset_name,
         "asset_type": asset_type,
+        "asset_region": "foreign" if is_foreign else "TR",
+        "isin": isin,
+        "provider_symbol": provider_symbol,
+        "logo_symbol": provider_symbol or code,
+        "detail_clickable": False if is_foreign else None,
         "weight": round(float(weight), 6),
         "previous_weight": None,
         "weight_change": None,
@@ -6070,7 +6465,52 @@ def _parse_kap_holding_block(
         "source_report_url": source_url,
         "source_type": "kap_pdf",
         "parse_confidence": 0.82,
+        "continuation_marker": continuation_marker,
     }
+
+
+def _kap_aggregation_key(position: Dict[str, Any]) -> str:
+    code = normalize_fund_code(position.get("asset_code") or position.get("asset_name")).replace(".", "")
+    asset_type = str(position.get("asset_type") or "").strip().lower()
+    isin = str(position.get("isin") or "").strip().upper()
+    return "|".join(part for part in (asset_type, code, isin) if part)
+
+
+def _kap_should_sum_duplicate_lots(position: Dict[str, Any]) -> bool:
+    asset_type = str(position.get("asset_type") or "").strip().lower()
+    return asset_type in _KAP_INCLUDED_HOLDING_TYPES and not position.get("continuation_marker")
+
+
+def _kap_sum_optional_number(left: Any, right: Any, *, digits: int) -> Optional[float]:
+    left_number = _coerce_float(left)
+    right_number = _coerce_float(right)
+    if left_number is None and right_number is None:
+        return None
+    return round(float(left_number or 0.0) + float(right_number or 0.0), digits)
+
+
+def _kap_deduplicate_positions(positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged_by_key: Dict[str, Dict[str, Any]] = {}
+    for position in positions:
+        key = _kap_aggregation_key(position)
+        if not key:
+            continue
+        existing = merged_by_key.get(key)
+        if not existing:
+            merged_by_key[key] = dict(position)
+            continue
+        if _kap_should_sum_duplicate_lots(existing) and _kap_should_sum_duplicate_lots(position):
+            existing["weight"] = _kap_sum_optional_number(existing.get("weight"), position.get("weight"), digits=6)
+            existing["amount"] = _kap_sum_optional_number(existing.get("amount"), position.get("amount"), digits=6)
+            existing["market_value"] = _kap_sum_optional_number(existing.get("market_value"), position.get("market_value"), digits=2)
+            existing["parse_confidence"] = min(
+                float(existing.get("parse_confidence") or 0.0),
+                float(position.get("parse_confidence") or 0.0),
+            )
+            continue
+        if abs(float(position.get("weight") or 0)) > abs(float(existing.get("weight") or 0)):
+            merged_by_key[key] = dict(position)
+    return sorted(merged_by_key.values(), key=lambda row: abs(float(row.get("weight") or 0)), reverse=True)
 
 
 def _parse_kap_holdings_pdf_text(
@@ -6081,7 +6521,7 @@ def _parse_kap_holdings_pdf_text(
     source_url: Optional[str],
 ) -> List[Dict[str, Any]]:
     raw_text = str(text or "")
-    start_match = re.search(r"(?:III\s*[-–]\s*)?FON\s+PORTF[ÖO]Y\s+DE[ĞG]ER[İI]", raw_text, flags=re.IGNORECASE)
+    start_match = re.search(r"(?:III\s*[-–]\s*)?FON\s+PORTF[ÖO]Y\s+[DC]E[ĞG]ER[İI]", raw_text, flags=re.IGNORECASE)
     if start_match:
         raw_text = raw_text[start_match.start():]
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
@@ -6089,9 +6529,12 @@ def _parse_kap_holdings_pdf_text(
     current_category = ""
     buffer: List[str] = []
     buffer_category = ""
+    buffer_continuation_marker: Optional[str] = None
+    skip_auxiliary_section = False
+    auxiliary_seen_portfolio_header = False
 
     def flush() -> None:
-        nonlocal buffer, buffer_category
+        nonlocal buffer, buffer_category, buffer_continuation_marker
         if not buffer:
             return
         parsed = _parse_kap_holding_block(
@@ -6100,15 +6543,38 @@ def _parse_kap_holdings_pdf_text(
             category_context=buffer_category,
             report_date=report_date,
             source_url=source_url,
+            continuation_marker=buffer_continuation_marker,
         )
         if parsed and _kap_is_included_holding_type(parsed.get("asset_type")):
             positions.append(parsed)
         buffer = []
         buffer_category = ""
+        buffer_continuation_marker = None
 
     for line in lines:
         original_line = line
         norm = _normalize_match_text(line)
+        line_continuation_marker: Optional[str] = None
+        section_match = re.match(r"^(?P<section>IV|VI|VII|VIII|IX|V)\s*[-–]\s*", norm)
+        if section_match:
+            flush()
+            if section_match.group("section") in {"IV", "V"}:
+                skip_auxiliary_section = True
+                auxiliary_seen_portfolio_header = False
+                continue
+            break
+        if skip_auxiliary_section:
+            if "ISIN KODU" in norm:
+                auxiliary_seen_portfolio_header = True
+                continue
+            preview_line, preview_inline_marker = _kap_strip_inline_category(line)
+            preview_marker = _kap_with_foreign_context(_kap_category_marker(line), current_category)
+            if preview_inline_marker:
+                preview_marker = _kap_with_foreign_context(preview_inline_marker, current_category) or preview_marker
+            if preview_marker or (auxiliary_seen_portfolio_header and _kap_line_starts_position(preview_line or line)):
+                skip_auxiliary_section = False
+            else:
+                continue
         if current_category and "FON PORTFOY DEGERI" in norm and "TABLOSU" not in norm:
             if _kap_number_matches(line):
                 flush()
@@ -6120,12 +6586,14 @@ def _parse_kap_holdings_pdf_text(
         stripped_line, _continuation_marker = _kap_strip_continuation_prefix(line)
         if stripped_line != line:
             line = stripped_line
+            line_continuation_marker = _continuation_marker
             if not line:
                 continue
         first_token = line.split()[0].strip(":-,;()") if line.split() else ""
         if "-" in first_token and normalize_fund_code(first_token.split("-", 1)[0]) == normalize_fund_code(fund_code):
             buffer = []
             buffer_category = ""
+            buffer_continuation_marker = None
             continue
         line, inline_marker = _kap_strip_inline_category(line)
         if (
@@ -6140,18 +6608,24 @@ def _parse_kap_holdings_pdf_text(
         if inline_marker and buffer and not _kap_row_complete(" ".join(buffer)):
             buffer = []
             buffer_category = ""
+            buffer_continuation_marker = None
         if inline_marker:
             if buffer:
                 flush()
-            current_category = inline_marker
+            current_category = _kap_with_foreign_context(inline_marker, current_category) or inline_marker
             if not line:
                 continue
         norm = _normalize_match_text(line)
-        marker = _kap_category_marker(line)
+        marker = _kap_with_foreign_context(_kap_category_marker(line), current_category)
         if marker and len(_kap_number_matches(line)) < 2 and buffer and not _kap_row_complete(" ".join(buffer)):
-            if _kap_buffer_is_header_noise(buffer) and not _kap_buffer_starts_with_fund_symbol(buffer, buffer_category):
+            if (
+                _kap_buffer_is_header_noise(buffer)
+                and not _kap_buffer_starts_with_fund_symbol(buffer, buffer_category)
+                and not _kap_buffer_starts_with_foreign_symbol(buffer, buffer_category)
+            ):
                 buffer = []
                 buffer_category = ""
+                buffer_continuation_marker = None
             else:
                 marker = None
         if marker and len(_kap_number_matches(line)) < 2 and (not buffer or _kap_row_complete(" ".join(buffer))):
@@ -6165,33 +6639,44 @@ def _parse_kap_holdings_pdf_text(
             flush()
             continue
         if buffer and _kap_line_starts_position(line) and not _kap_row_complete(" ".join(buffer)):
-            if _kap_buffer_is_header_noise(buffer) and not _kap_buffer_starts_with_fund_symbol(buffer, buffer_category):
+            if (
+                _kap_buffer_is_header_noise(buffer)
+                and not _kap_buffer_starts_with_fund_symbol(buffer, buffer_category)
+                and not _kap_buffer_starts_with_foreign_symbol(buffer, buffer_category)
+            ):
                 buffer = []
                 buffer_category = ""
+                buffer_continuation_marker = None
         if not buffer and not _kap_line_starts_position(line):
             continue
         if buffer and _kap_line_starts_position(line) and _kap_row_complete(" ".join(buffer)):
             flush()
         if not buffer:
             buffer_category = current_category
+            buffer_continuation_marker = line_continuation_marker
         buffer.append(line)
         if _kap_row_complete(" ".join(buffer)):
             flush()
     flush()
 
-    best_by_key: Dict[str, Dict[str, Any]] = {}
-    for position in positions:
-        key = normalize_fund_code(position.get("asset_code") or position.get("asset_name"))
-        if not key:
-            continue
-        existing = best_by_key.get(key)
-        if not existing or abs(float(position.get("weight") or 0)) > abs(float(existing.get("weight") or 0)):
-            best_by_key[key] = position
-    return sorted(best_by_key.values(), key=lambda row: abs(float(row.get("weight") or 0)), reverse=True)
+    return _kap_deduplicate_positions(positions)
 
 
 def _position_key(position: Dict[str, Any]) -> str:
-    return normalize_fund_code(position.get("asset_code") or position.get("asset_name"))
+    return normalize_fund_code(position.get("asset_code") or position.get("asset_name")).replace(".", "")
+
+
+def _kap_resolve_fund_code_ocr_variant(code: str, fund_names: Dict[str, str]) -> str:
+    normalized = normalize_fund_code(code).replace(".", "")
+    if not normalized or fund_names.get(normalized):
+        return normalized
+    for index, char in enumerate(normalized):
+        if char != "G":
+            continue
+        candidate = f"{normalized[:index]}L{normalized[index + 1:]}"
+        if fund_names.get(candidate):
+            return candidate
+    return normalized
 
 
 def _normalize_holding_positions_for_response(
@@ -6215,11 +6700,18 @@ def _normalize_holding_positions_for_response(
                 code = left
         if code == current_fund_code:
             continue
+        row_type = str(position.get("asset_type") or "").strip().lower()
+        if row_type == "fund":
+            code = _kap_resolve_fund_code_ocr_variant(code, fund_names)
+            if code == current_fund_code:
+                continue
+        if row_type in {"foreign_equity", "foreign_fund"}:
+            candidates.append((position, code, row_type))
+            continue
         if _kap_is_stock_symbol(code):
             candidates.append((position, code, "local_equity"))
             stock_codes.append(code)
             continue
-        row_type = str(position.get("asset_type") or "").strip().lower()
         name_norm = _normalize_match_text(position.get("asset_name") or "")
         looks_like_named_fund = any(token in name_norm for token in ("YATIRIM FONU", "BORSA YATIRIM FONU", " FONU", "FON ", "BYF"))
         if not _kap_looks_like_fund_symbol(code) or not (row_type == "fund" or looks_like_named_fund or fund_names.get(code)):
@@ -6233,8 +6725,11 @@ def _normalize_holding_positions_for_response(
     for position, code, asset_type in candidates:
         row = dict(position)
         row["asset_code"] = code
+        row.pop("continuation_marker", None)
         if asset_type == "local_equity":
             row["asset_type"] = "local_equity"
+            row["asset_region"] = "TR"
+            row["detail_clickable"] = True
             instrument = stock_instruments.get(code)
             row["asset_name"] = (
                 str((instrument or {}).get("name") or "").strip()
@@ -6245,15 +6740,38 @@ def _normalize_holding_positions_for_response(
             if instrument and instrument.get("logo_url"):
                 row["logo_url"] = instrument.get("logo_url")
                 row["logo_source"] = instrument.get("logo_source")
-        else:
+        elif asset_type == "fund":
             row["asset_type"] = "fund"
+            row["asset_region"] = "TR"
+            row["detail_clickable"] = True
             instrument = fund_instruments.get(code)
+            instrument_meta = (instrument or {}).get("metadata") if isinstance((instrument or {}).get("metadata"), dict) else {}
+            provider_name = (
+                str(instrument_meta.get("founder_company") or instrument_meta.get("manager_company") or "").strip()
+                if isinstance(instrument_meta, dict)
+                else ""
+            )
+            if provider_name:
+                row["provider_name"] = provider_name
+                row["logo_symbol"] = row.get("logo_symbol") or provider_name
+            if instrument and instrument.get("logo_url"):
+                row["logo_url"] = instrument.get("logo_url")
+                row["logo_source"] = instrument.get("logo_source")
             row["asset_name"] = (
                 str((instrument or {}).get("name") or "").strip()
                 or fund_names.get(code)
                 or str(row.get("asset_name") or code).strip()
                 or code
             )
+        else:
+            row["asset_type"] = asset_type
+            row["asset_region"] = "foreign"
+            row["detail_clickable"] = False
+            row["tefas_tradable"] = False if asset_type == "foreign_fund" else None
+            provider_symbol = row.get("provider_symbol") or _kap_foreign_provider_symbol(code, row.get("isin"), row.get("asset_name"))
+            row["provider_symbol"] = provider_symbol
+            row["logo_symbol"] = row.get("logo_symbol") or provider_symbol or code
+            row["asset_name"] = str(row.get("asset_name") or code).strip() or code
         normalized_rows.append(row)
     return normalized_rows
 

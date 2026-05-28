@@ -400,7 +400,7 @@ function FundDetailRoute() {
 
   return (
     <FundsPage
-      key={`${normalizedFundCode}-${normalizedTab}`}
+      key={normalizedFundCode}
       fundCode={normalizedFundCode}
       activeTab={normalizedTab}
       onOpenFund={(nextFundCode, nextTab = DEFAULT_FUND_TAB) => navigate(toFundDetail(nextFundCode, nextTab))}

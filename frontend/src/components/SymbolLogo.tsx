@@ -16,8 +16,8 @@ import './SymbolLogo.css';
 
 export type { SymbolLogoKind };
 
-const LOGO_SUCCESS_CACHE_KEY = 'ragfin.logo.success.v4';
-const LOGO_FAILED_CACHE_KEY = 'ragfin.logo.failed.v4';
+const LOGO_SUCCESS_CACHE_KEY = 'ragfin.logo.success.v5';
+const LOGO_FAILED_CACHE_KEY = 'ragfin.logo.failed.v5';
 const LOGO_SUCCESS_TTL_MS = 24 * 60 * 60 * 1000;
 const LOGO_FAILED_TTL_MS = 60 * 60 * 1000;
 const logoSuccessMemory = new Map<string, { url: string; ts: number }>();
@@ -175,8 +175,8 @@ function buildCandidates({
     }
 
     if (kind === 'stock') {
-        candidates.push(...fintablesLogoUrlsForSymbol(normalized));
         candidates.push(...explicitLogoUrlsForSymbol(normalized));
+        candidates.push(...fintablesLogoUrlsForSymbol(normalized));
 
         const mappedTradingViewUrl = tradingViewLogoUrl(normalized, { force: true, requireMappedSlug: true });
         if (mappedTradingViewUrl) {

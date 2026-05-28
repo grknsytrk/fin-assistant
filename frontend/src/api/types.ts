@@ -391,6 +391,12 @@ export interface FundPortfolioPosition {
   asset_code: string | null;
   asset_name: string;
   asset_type: string | null;
+  asset_region?: string | null;
+  provider_symbol?: string | null;
+  provider_name?: string | null;
+  logo_symbol?: string | null;
+  detail_clickable?: boolean | null;
+  isin?: string | null;
   weight: number | null;
   raw_weight?: number | null;
   weight_quality?: 'ok' | 'normalized' | 'missing' | string | null;
@@ -416,6 +422,7 @@ export interface FundPortfolioPosition {
   estimated_exposure_value?: number | null;
   estimated_pnl_value?: number | null;
   estimated_fund_return_contribution_pct?: number | null;
+  tefas_tradable?: boolean | null;
   report_date: string | null;
   previous_report_date?: string | null;
   source_report_url: string | null;

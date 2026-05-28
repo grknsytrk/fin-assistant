@@ -25,8 +25,11 @@
 .funds-page {
     flex: 1;
     min-width: 0;
+    min-height: 0;
     height: 100%;
     overflow-y: auto;
+    overflow-x: hidden;
+    overflow-anchor: none;
     padding: 1rem 1.15rem 1.75rem;
     color: var(--text-primary);
 }
@@ -2228,7 +2231,8 @@
 .fund-allocation-table-wrap,
 .fund-holdings-table-wrap,
 .fund-history-table-wrap {
-    overflow: auto;
+    overflow-x: auto;
+    overflow-y: visible;
     border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
     border-radius: 8px;
 }
