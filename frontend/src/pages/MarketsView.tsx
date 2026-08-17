@@ -313,13 +313,17 @@ function isPreviousIstanbulDate(iso: string | null | undefined): boolean {
     if (!iso) return false;
     const dt = new Date(iso);
     if (Number.isNaN(dt.getTime())) return false;
-    const format = new Intl.DateTimeFormat('en-CA', {
+    return istanbulDateKey(dt) < istanbulDateKey(new Date());
+}
+
+function istanbulDateKey(date: Date): string {
+    if (Number.isNaN(date.getTime())) return '';
+    return new Intl.DateTimeFormat('en-CA', {
         timeZone: 'Europe/Istanbul',
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
-    });
-    return format.format(dt) < format.format(new Date());
+    }).format(date);
 }
 
 function formatDateTime(iso: string | null | undefined): string {
@@ -941,10 +945,11 @@ function StockCardMiniChart({
         const d = new Date(validPoints[0].time);
         const start = new Date(d); start.setHours(10, 0, 0, 0);
         const end = new Date(d);
-        if (isLive) {
+        const lastPointDate = new Date(validPoints[validPoints.length - 1].time);
+        const hasTodayPoint = istanbulDateKey(lastPointDate) === istanbulDateKey(new Date());
+        if (isLive || hasTodayPoint) {
             end.setHours(18, 0, 0, 0);
         } else {
-            const lastPointDate = new Date(validPoints[validPoints.length - 1].time);
             const lastMinutes = lastPointDate.getHours() * 60 + lastPointDate.getMinutes();
             const roundedEndHour = Math.min(18, Math.max(13, Math.ceil(lastMinutes / 60)));
             end.setHours(roundedEndHour, 0, 0, 0);

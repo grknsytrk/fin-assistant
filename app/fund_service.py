@@ -13,6 +13,7 @@ import threading
 import time
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -71,6 +72,9 @@ TEFAS_FUNDS_LIST_ENDPOINT = os.getenv(
 )
 TEFAS_FUNDS_LIST_PAGE_SIZE = int(os.getenv("RAGFIN_TEFAS_FUNDS_LIST_PAGE_SIZE", "5000"))
 TEFAS_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_TEFAS_TIMEOUT_SECONDS", "60"))
+TEFAS_HTTP_RETRY_ATTEMPTS = int(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_ATTEMPTS", "5"))
+TEFAS_HTTP_RETRY_BASE_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_BASE_SECONDS", "5"))
+TEFAS_HTTP_RETRY_MAX_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_MAX_SECONDS", "45"))
 TEFASFON_SOURCE_URL = os.getenv("RAGFIN_TEFASFON_SOURCE_URL", "https://pypi.org/project/tefasfon/")
 TEFASFON_FUNDS_SOURCE = "tefasfon_funds"
 TEFASFON_RETURNS_SOURCE = "tefasfon_returns"
@@ -112,6 +116,7 @@ FUNDS_AUTO_FETCH_NEGATIVE_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_AUTO_FETCH_N
 FUNDS_OVERVIEW_METRIC_MONTHS = int(os.getenv("RAGFIN_FUNDS_OVERVIEW_METRIC_MONTHS", "6"))
 FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS", "10"))
 FUNDS_FAST_LONG_RANGE_DAYS = int(os.getenv("RAGFIN_FUNDS_FAST_LONG_RANGE_DAYS", "120"))
+FUNDS_RECENT_DETAIL_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_RECENT_DETAIL_LOOKBACK_DAYS", "35"))
 FUNDS_FULL_HISTORY_START_DATE = os.getenv("RAGFIN_FUNDS_FULL_HISTORY_START_DATE", "2000-01-01").strip() or "2000-01-01"
 FUNDS_LIST_MIN_AUM = float(os.getenv("RAGFIN_FUNDS_LIST_MIN_AUM", "300000000"))
 FUND_PRICES_DB_FILENAME = os.getenv("RAGFIN_FUND_PRICES_DB_FILENAME", "fund_prices.sqlite3")
@@ -221,6 +226,12 @@ class FintablesFormatError(FintablesUpstreamError):
 
 class TefasUpstreamError(FundUpstreamError):
     pass
+
+
+class TefasRateLimitError(TefasUpstreamError):
+    def __init__(self, message: str, *, retry_after_seconds: Optional[float] = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class TefasFormatError(TefasUpstreamError):
@@ -427,6 +438,10 @@ def _daily_snapshot_cache_is_fresh(payload: Dict[str, Any], as_of: date) -> bool
     rows = payload.get("rows")
     if not isinstance(rows, list):
         return False
+    if not rows:
+        fetched_at = payload.get("fetched_at") or (payload.get("source_metadata") or {}).get("fetched_at")
+        age = _cache_age_seconds(fetched_at)
+        return age is not None and age <= max(1, FUNDS_ALLOCATION_EMPTY_TTL_SECONDS)
     target_date = _latest_fund_snapshot_target_date()
     if as_of < target_date:
         return True
@@ -439,10 +454,12 @@ def _cached_daily_funds_snapshot(
     processed_dir: Path,
     client: "TefasFonClient",
     as_of: date,
+    *,
+    force_refresh: bool = False,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     path = _fund_daily_snapshot_path(processed_dir, as_of)
     cached = _read_json(path) or {}
-    if cached and _daily_snapshot_cache_is_fresh(cached, as_of):
+    if not force_refresh and cached and _daily_snapshot_cache_is_fresh(cached, as_of):
         rows = [row for row in list(cached.get("rows") or []) if isinstance(row, dict)]
         return rows, True
 
@@ -892,6 +909,11 @@ def _decode_tefas_json_response(
     content_type = str(headers.get("content-type") or headers.get("Content-Type") or "").lower()
     text = body.decode("utf-8", errors="replace").strip()
     if status_code >= 400:
+        if status_code == 429:
+            raise TefasRateLimitError(
+                f"{context} HTTP 429",
+                retry_after_seconds=_tefas_retry_after_seconds(headers),
+            )
         raise TefasUpstreamError(f"{context} HTTP {status_code}")
     if not text:
         raise TefasFormatError(f"{context} empty response")
@@ -904,6 +926,35 @@ def _decode_tefas_json_response(
     if not isinstance(payload, dict):
         raise TefasFormatError(f"{context} response is not an object")
     return payload
+
+
+def _tefas_retry_after_seconds(headers: Dict[str, str]) -> Optional[float]:
+    raw_value = str(headers.get("retry-after") or headers.get("Retry-After") or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return max(0.0, float(raw_value))
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(raw_value)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+
+
+def _tefas_retry_delay_seconds(attempt: int, retry_after_seconds: Optional[float] = None) -> float:
+    if retry_after_seconds is not None:
+        return min(max(0.0, retry_after_seconds), max(0.0, TEFAS_HTTP_RETRY_MAX_SECONDS))
+    base = max(0.0, TEFAS_HTTP_RETRY_BASE_SECONDS)
+    delay = base * (2 ** max(0, attempt - 1))
+    return min(delay, max(0.0, TEFAS_HTTP_RETRY_MAX_SECONDS))
+
+
+def _is_tefas_rate_limit(exc: BaseException) -> bool:
+    return isinstance(exc, TefasRateLimitError) or "http 429" in str(exc).lower()
 
 
 def _normalize_tefas_fund_list_payload(payload: Dict[str, Any], *, source_url: str) -> List[Dict[str, Any]]:
@@ -2542,7 +2593,12 @@ def _yield_periods_from_return_row(
 
 def _is_tefasfon_adapter_unavailable(exc: BaseException) -> bool:
     message = str(exc).lower()
-    return "timed out" in message or "not installed" in message or "cannot be imported" in message
+    return (
+        "timed out" in message
+        or "not installed" in message
+        or "cannot be imported" in message
+        or "getter internals are unavailable" in message
+    )
 
 
 class TefasFonClient:
@@ -2616,7 +2672,27 @@ class TefasFonClient:
             }
             if codes:
                 kwargs["fund_codes"] = codes
-            records = self._call_dataframe("get_funds", context="tefasfon get_funds", **kwargs)
+            try:
+                records = self._call_dataframe("get_funds", context="tefasfon get_funds", **kwargs)
+            except TefasUpstreamError as exc:
+                if codes and _is_tefasfon_adapter_unavailable(exc):
+                    fallback = TefasClient().fetch_fund_history(
+                        fund_codes=codes,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                    rows.extend(fallback)
+                    continue
+                raise
+            if codes and not records:
+                fallback = TefasClient().fetch_fund_history(
+                    fund_codes=codes,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if fallback:
+                    rows.extend(fallback)
+                    continue
             rows.extend(_tefasfon_rows(records, source=TEFASFON_FUNDS_SOURCE, fund_type=fund_type))
         return rows
 
@@ -2691,6 +2767,18 @@ class TefasFonClient:
                 direct_errors.append(str(exc))
         if rows:
             return rows
+        try:
+            fallback_rows = TefasClient().fetch_fund_list_snapshot(target_date=as_of)
+        except TefasUpstreamError as exc:
+            if direct_errors:
+                direct_errors.append(str(exc))
+            elif _is_tefasfon_adapter_unavailable(exc):
+                raise
+            else:
+                return []
+        else:
+            if fallback_rows:
+                return fallback_rows
         if direct_errors:
             raise TefasUpstreamError("; ".join(direct_errors))
         return []
@@ -2936,6 +3024,16 @@ class TefasFonClient:
 
         day_span = (end_date - start_date).days
         if day_span <= 120:
+            try:
+                direct_rows = TefasClient().fetch_fund_history(
+                    fund_codes=[normalized],
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            except TefasUpstreamError:
+                direct_rows = []
+            if direct_rows:
+                return matching_rows(direct_rows)
             return matching_rows(self.fetch_funds(start_date=start_date, end_date=end_date, fund_codes=[normalized]))
 
         rows_by_date: Dict[str, Dict[str, Any]] = {}
@@ -3146,43 +3244,138 @@ class TefasClient:
             "User-Agent": FINTABLES_USER_AGENT,
         }
 
-    def _fund_list_body(self, *, target_date: date, start_row: int = 1, end_row: int = TEFAS_FUNDS_LIST_PAGE_SIZE) -> Dict[str, Any]:
-        tefas_date = target_date.strftime("%Y%m%d")
+    def _fund_list_body(
+        self,
+        *,
+        target_date: Optional[date] = None,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        fund_code: Optional[str] = None,
+        start_row: int = 1,
+        end_row: int = TEFAS_FUNDS_LIST_PAGE_SIZE,
+    ) -> Dict[str, Any]:
+        effective_start = start_date or target_date
+        effective_end = end_date or target_date or effective_start
+        if effective_start is None or effective_end is None:
+            raise ValueError("target_date or start/end date is required")
         return {
             "fonTipi": "YAT",
-            "fonKod": None,
-            "fonGrup": 0,
-            "basTarih": tefas_date,
-            "bitTarih": tefas_date,
+            "fonKodu": normalize_fund_code(fund_code) or None,
+            "aramaMetni": normalize_fund_code(fund_code) or None,
+            "fonGrubu": None,
+            "basTarih": effective_start.strftime("%Y%m%d"),
+            "bitTarih": effective_end.strftime("%Y%m%d"),
             "fonTurKod": None,
-            "fonUnvanTip": None,
             "sfonTurKod": None,
             "basSira": start_row,
             "bitSira": end_row,
             "fonTurAciklama": None,
             "dil": "TR",
             "kurucuKod": None,
-            "sira": None,
-            "yon": None,
         }
 
+    def _post_fund_list(self, *, body: Dict[str, Any], context: str) -> Dict[str, Any]:
+        attempts = max(1, TEFAS_HTTP_RETRY_ATTEMPTS)
+        with httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
+            for attempt in range(1, attempts + 1):
+                try:
+                    response = client.post(
+                        self.funds_list_endpoint,
+                        json=body,
+                        headers=self._headers(),
+                    )
+                except httpx.HTTPError as exc:
+                    if attempt >= attempts:
+                        raise TefasUpstreamError(f"{context} request failed: {exc}") from exc
+                    delay = _tefas_retry_delay_seconds(attempt)
+                    if delay > 0:
+                        time.sleep(delay)
+                    continue
+                try:
+                    return _decode_tefas_json_response(
+                        response.status_code,
+                        dict(response.headers),
+                        response.content,
+                        context=context,
+                    )
+                except TefasRateLimitError as exc:
+                    if attempt >= attempts:
+                        raise
+                    delay = _tefas_retry_delay_seconds(attempt, exc.retry_after_seconds)
+                    if delay > 0:
+                        time.sleep(delay)
+                    continue
+        raise TefasUpstreamError(f"{context} request failed")
+
     def fetch_fund_list_snapshot(self, *, target_date: date) -> List[Dict[str, Any]]:
-        try:
-            with httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
-                response = client.post(
-                    self.funds_list_endpoint,
-                    json=self._fund_list_body(target_date=target_date),
-                    headers=self._headers(),
-                )
-        except httpx.HTTPError as exc:
-            raise TefasUpstreamError(f"TEFAS fund list request failed: {exc}") from exc
-        payload = _decode_tefas_json_response(
-            response.status_code,
-            dict(response.headers),
-            response.content,
+        payload = self._post_fund_list(
+            body=self._fund_list_body(target_date=target_date),
             context="TEFAS fund list",
         )
         return _normalize_tefas_fund_list_payload(payload, source_url=self.funds_list_endpoint)
+
+    def fetch_fund_range(self, *, fund_code: str, start_date: date, end_date: date) -> List[Dict[str, Any]]:
+        normalized_code = normalize_fund_code(fund_code)
+        if not normalized_code or start_date > end_date:
+            return []
+        payload = self._post_fund_list(
+            body=self._fund_list_body(
+                start_date=start_date,
+                end_date=end_date,
+                fund_code=normalized_code,
+            ),
+            context="TEFAS fund range",
+        )
+        rows = _normalize_tefas_fund_list_payload(payload, source_url=self.funds_list_endpoint)
+        result = []
+        for row in rows:
+            code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+            if code == normalized_code:
+                normalized = dict(row)
+                normalized["source"] = TEFASFON_FUNDS_SOURCE
+                result.append(normalized)
+        return result
+
+    def fetch_fund_history(
+        self,
+        *,
+        fund_codes: Iterable[str],
+        start_date: date,
+        end_date: date,
+    ) -> List[Dict[str, Any]]:
+        codes = {normalize_fund_code(code) for code in list(fund_codes or []) if normalize_fund_code(code)}
+        if not codes or start_date > end_date:
+            return []
+        if len(codes) == 1:
+            try:
+                range_rows = self.fetch_fund_range(
+                    fund_code=next(iter(codes)),
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if range_rows:
+                    return range_rows
+            except TefasRateLimitError:
+                raise
+            except TefasUpstreamError:
+                pass
+        rows: List[Dict[str, Any]] = []
+        current = start_date
+        while current <= end_date:
+            if current.weekday() >= 5:
+                current += timedelta(days=1)
+                continue
+            snapshot_rows = self.fetch_fund_list_snapshot(target_date=current)
+            for row in snapshot_rows:
+                code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+                if code in codes:
+                    normalized = dict(row)
+                    normalized["source"] = TEFASFON_FUNDS_SOURCE
+                    rows.append(normalized)
+            if FUNDS_WEB_HISTORY_SLEEP_SECONDS > 0:
+                time.sleep(FUNDS_WEB_HISTORY_SLEEP_SECONDS)
+            current += timedelta(days=1)
+        return rows
 
     def fetch_latest_fund_list_snapshot(self, *, as_of: date, lookback_days: int = 10) -> Tuple[List[Dict[str, Any]], List[str]]:
         warnings: List[str] = []
@@ -4112,6 +4305,7 @@ def _fund_performance_payload_from_points(
     backfill_used: bool = False,
     fallback_used: bool = False,
     fallback_reason: Optional[str] = None,
+    recent_detail_backfill: Optional[Dict[str, Any]] = None,
     overview_metric_backfill: Optional[Dict[str, Any]] = None,
     full_history_requested: bool = False,
 ) -> Dict[str, Any]:
@@ -4180,6 +4374,8 @@ def _fund_performance_payload_from_points(
             "skipped_count": storage_result.get("skipped_count"),
             "warning_count": storage_result.get("warning_count"),
         }
+    if recent_detail_backfill is not None:
+        metadata["recent_detail_backfill"] = recent_detail_backfill
     if overview_metric_backfill is not None:
         metadata["overview_metric_backfill"] = overview_metric_backfill
 
@@ -4450,6 +4646,158 @@ def _has_overview_metrics(point: Optional[Dict[str, Any]]) -> bool:
     aum = _coerce_float(point.get("aum"))
     investor_count = _coerce_int(point.get("investor_count"))
     return aum is not None and aum > 0 and investor_count is not None
+
+
+def _recent_detail_window(
+    points: List[Dict[str, Any]],
+    *,
+    start_date: date,
+    end_date: date,
+) -> Optional[Tuple[date, date]]:
+    if not points:
+        return None
+    latest = _latest_fund_point_date(points)
+    if latest is None:
+        return None
+    window_end = min(end_date, latest)
+    lookback_days = max(1, FUNDS_RECENT_DETAIL_LOOKBACK_DAYS)
+    window_start = max(start_date, window_end - timedelta(days=lookback_days - 1))
+    if window_start > window_end:
+        return None
+    return window_start, window_end
+
+
+def _recent_detail_missing_count(
+    points: List[Dict[str, Any]],
+    *,
+    start_date: date,
+    end_date: date,
+) -> int:
+    missing_count = 0
+    for point in points:
+        point_date = _fund_point_date(point)
+        if point_date is None or point_date < start_date or point_date > end_date:
+            continue
+        source = _normalize_price_source(str(point.get("source") or ""))
+        if source != TEFASFON_FUNDS_SOURCE and not _has_overview_metrics(point):
+            missing_count += 1
+    return missing_count
+
+
+def _fetch_recent_detail_rows(
+    fund_code: str,
+    *,
+    start_date: date,
+    end_date: date,
+    client: TefasFonClient,
+    processed_dir: Optional[Path] = None,
+    missing_dates: Optional[set[str]] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    normalized = normalize_fund_code(fund_code)
+    warnings: List[str] = []
+    rows: List[Dict[str, Any]] = []
+    tefas_range_rate_limited = False
+    try:
+        rows = TefasClient().fetch_fund_history(
+            fund_codes=[normalized],
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except TefasUpstreamError as exc:
+        tefas_range_rate_limited = _is_tefas_rate_limit(exc)
+        warnings.append(f"tefas_fund_list recent detail range fallback failed: {exc}")
+    else:
+        if rows:
+            valid_rows = [
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or row.get("FONKODU") or "")) == normalized
+            ]
+            return valid_rows, warnings
+    if tefas_range_rate_limited:
+        warnings.append("tefas_fund_list recent detail skipped secondary fallbacks after rate limit")
+        return [], warnings
+
+    use_daily_snapshot_fallback = False
+    if processed_dir is not None and hasattr(client, "_module"):
+        try:
+            client._module()
+        except TefasUpstreamError as exc:
+            use_daily_snapshot_fallback = True
+            warnings.append(f"tefasfon_funds recent detail range backfill failed: {exc}")
+    if not use_daily_snapshot_fallback:
+        try:
+            rows = client.fetch_history(normalized, start_date, end_date)
+        except TefasUpstreamError as exc:
+            rows = []
+            warnings.append(f"tefasfon_funds recent detail range backfill failed: {exc}")
+    if not rows and processed_dir is not None and hasattr(client, "fetch_daily_funds_snapshot"):
+        snapshot_rows: List[Dict[str, Any]] = []
+        daily_warnings: List[str] = []
+        target_dates = set(missing_dates or [])
+        current = start_date
+        while current <= end_date:
+            if current.weekday() >= 5 or (target_dates and current.isoformat() not in target_dates):
+                current += timedelta(days=1)
+                continue
+            try:
+                day_rows, _cache_hit = _cached_daily_funds_snapshot(processed_dir, client, current)
+            except TefasUpstreamError as exc:
+                daily_warnings.append(f"tefasfon_funds recent detail daily snapshot failed for {current.isoformat()}: {exc}")
+                current += timedelta(days=1)
+                continue
+            if not day_rows:
+                if FUNDS_WEB_HISTORY_SLEEP_SECONDS > 0:
+                    time.sleep(FUNDS_WEB_HISTORY_SLEEP_SECONDS)
+                try:
+                    day_rows, _cache_hit = _cached_daily_funds_snapshot(
+                        processed_dir,
+                        client,
+                        current,
+                        force_refresh=True,
+                    )
+                except TefasUpstreamError as exc:
+                    daily_warnings.append(f"tefasfon_funds recent detail daily snapshot retry failed for {current.isoformat()}: {exc}")
+                    current += timedelta(days=1)
+                    continue
+            if not day_rows:
+                daily_warnings.append(f"tefasfon_funds recent detail daily snapshot returned no rows for {current.isoformat()}")
+                current += timedelta(days=1)
+                continue
+            match = next(
+                (
+                    row
+                    for row in day_rows
+                    if normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or row.get("FONKODU") or "")) == normalized
+                ),
+                None,
+            )
+            if match:
+                normalized_match = dict(match)
+                normalized_match["source"] = TEFASFON_FUNDS_SOURCE
+                snapshot_rows.append(normalized_match)
+            if not _cache_hit and FUNDS_WEB_HISTORY_SLEEP_SECONDS > 0:
+                time.sleep(FUNDS_WEB_HISTORY_SLEEP_SECONDS)
+            current += timedelta(days=1)
+        if snapshot_rows:
+            rows = snapshot_rows
+            warnings.append("tefasfon_funds recent detail used daily snapshot fallback")
+            warnings.extend(daily_warnings[:20])
+        else:
+            warnings.extend(daily_warnings[:20])
+    valid_rows = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or row.get("FONKODU") or "")) == normalized
+    ]
+    if not valid_rows:
+        warnings.append(
+            f"tefasfon_funds recent detail backfill returned no rows for {normalized} "
+            f"between {start_date.isoformat()} and {end_date.isoformat()}"
+        )
+    return valid_rows, warnings
 
 
 def _missing_overview_metric_targets(
@@ -4774,6 +5122,138 @@ def _auto_refresh_fund_overview_metrics(
             event.set()
 
 
+def _auto_refresh_fund_recent_details(
+    processed_dir: Path,
+    fund_code: str,
+    *,
+    points: List[Dict[str, Any]],
+    start_date: date,
+    end_date: date,
+) -> Dict[str, Any]:
+    normalized = normalize_fund_code(fund_code)
+    window = _recent_detail_window(points, start_date=start_date, end_date=end_date)
+    window_start, window_end = window if window else (None, None)
+    missing_count = (
+        _recent_detail_missing_count(points, start_date=window_start, end_date=window_end)
+        if window_start is not None and window_end is not None
+        else 0
+    )
+    metadata: Dict[str, Any] = {
+        "attempted": False,
+        "start_date": window_start.isoformat() if window_start else None,
+        "end_date": window_end.isoformat() if window_end else None,
+        "lookback_days": max(1, FUNDS_RECENT_DETAIL_LOOKBACK_DAYS),
+        "missing_count": missing_count,
+        "fetched_point_count": 0,
+        "upserted_count": 0,
+        "skipped_count": 0,
+        "warning_count": 0,
+        "warnings": [],
+    }
+    if not normalized or window_start is None or window_end is None or missing_count <= 0:
+        return metadata
+
+    client = TefasFonClient()
+    if not hasattr(client, "fetch_history"):
+        metadata["skipped_unavailable"] = True
+        return metadata
+
+    key = _auto_fetch_key(
+        processed_dir,
+        normalized,
+        window_start,
+        window_end,
+        namespace="recent-details",
+    )
+    recent_failure = _recent_auto_fetch_failure(key)
+    if recent_failure:
+        metadata["warnings"] = [f"fund recent detail backfill skipped after recent failure: {recent_failure}"]
+        metadata["warning_count"] = 1
+        metadata["skipped_recent_failure"] = True
+        return metadata
+
+    owner = False
+    with _AUTO_FETCH_LOCK:
+        event = _AUTO_FETCH_IN_FLIGHT.get(key)
+        if event is None:
+            event = threading.Event()
+            _AUTO_FETCH_IN_FLIGHT[key] = event
+            owner = True
+
+    if not owner:
+        waited = event.wait(timeout=max(1.0, TEFAS_TIMEOUT_SECONDS + 5.0))
+        if not waited:
+            metadata["warnings"] = ["fund recent detail backfill already in progress"]
+            metadata["warning_count"] = 1
+            return metadata
+        recent_failure = _recent_auto_fetch_failure(key)
+        if recent_failure:
+            metadata["warnings"] = [f"fund recent detail backfill skipped after recent failure: {recent_failure}"]
+            metadata["warning_count"] = 1
+        return metadata
+
+    try:
+        metadata["attempted"] = True
+        missing_dates = {
+            point["date"]
+            for point in points
+            if isinstance(point.get("date"), str)
+            and (window_start.isoformat() <= str(point.get("date")) <= window_end.isoformat())
+            and _normalize_price_source(str(point.get("source") or "")) != TEFASFON_FUNDS_SOURCE
+            and not _has_overview_metrics(point)
+        }
+        rows, warnings = _fetch_recent_detail_rows(
+            normalized,
+            start_date=window_start,
+            end_date=window_end,
+            client=client,
+            processed_dir=processed_dir,
+            missing_dates=missing_dates,
+        )
+        storage_result: Dict[str, Any] = {
+            "upserted_count": 0,
+            "skipped_count": 0,
+            "warnings": [],
+        }
+        if rows:
+            storage_result = upsert_fund_price_points(
+                processed_dir,
+                rows,
+                source=TEFASFON_FUNDS_SOURCE,
+                fallback_code=normalized,
+            )
+        storage_warnings = [
+            str(item.get("warning") or "invalid_price_row")
+            for item in list(storage_result.get("warnings") or [])
+        ]
+        all_warnings = warnings + storage_warnings
+        metadata.update(
+            {
+                "fetched_point_count": len(rows),
+                "upserted_count": storage_result.get("upserted_count", 0),
+                "skipped_count": storage_result.get("skipped_count", 0),
+                "warning_count": len(all_warnings),
+                "warnings": all_warnings,
+            }
+        )
+        if not rows:
+            _remember_auto_fetch_failure(key, "recent detail snapshots returned no matching fund rows")
+        return metadata
+    except FundUpstreamError as exc:
+        error = str(exc)
+        _remember_auto_fetch_failure(key, error)
+        metadata["attempted"] = True
+        metadata["warnings"] = [f"fund recent detail backfill failed: {error}"]
+        metadata["warning_count"] = 1
+        return metadata
+    finally:
+        with _AUTO_FETCH_LOCK:
+            current = _AUTO_FETCH_IN_FLIGHT.get(key)
+            if current is event:
+                _AUTO_FETCH_IN_FLIGHT.pop(key, None)
+            event.set()
+
+
 def _long_range_metric_targets(start_date: date, end_date: date) -> List[Dict[str, Any]]:
     return [
         target
@@ -4804,6 +5284,17 @@ def _fetch_fast_long_fund_history(
             points.extend(price_points)
     except FintablesUpstreamError as exc:
         warnings.append(f"fintables_udf_history fast bootstrap failed: {exc}")
+
+    recent_start = max(start_date, end_date - timedelta(days=max(1, FUNDS_RECENT_DETAIL_LOOKBACK_DAYS) - 1))
+    recent_rows, recent_warnings = _fetch_recent_detail_rows(
+        normalized,
+        start_date=recent_start,
+        end_date=end_date,
+        client=client,
+        processed_dir=processed_dir,
+    )
+    points.extend(recent_rows)
+    warnings.extend(recent_warnings)
 
     metric_targets = _long_range_metric_targets(start_date, end_date)
     if metric_targets:
@@ -4984,6 +5475,25 @@ def get_fund_performance_payload(
                 end_date=query_end,
             )
 
+    recent_detail_backfill: Optional[Dict[str, Any]] = None
+    recent_detail_backfill_attempted = False
+    if points:
+        recent_detail_backfill = _auto_refresh_fund_recent_details(
+            processed_dir,
+            normalized,
+            points=points,
+            start_date=effective_start,
+            end_date=effective_end,
+        )
+        recent_detail_backfill_attempted = bool(recent_detail_backfill.get("attempted"))
+        if recent_detail_backfill_attempted:
+            points = _read_daily_fund_price_points(
+                processed_dir,
+                normalized,
+                start_date=query_start,
+                end_date=query_end,
+            )
+
     overview_metric_backfill: Optional[Dict[str, Any]] = None
     overview_metric_backfill_attempted = False
     if points and not (auto_fetch_attempted and not full_history_requested):
@@ -5045,34 +5555,44 @@ def get_fund_performance_payload(
                 "requested_start_date": effective_start.isoformat(),
                 "requested_end_date": effective_end.isoformat(),
                 "auto_fetch_attempted": auto_fetch_attempted,
+                "recent_detail_backfill": recent_detail_backfill,
                 "overview_metric_backfill": overview_metric_backfill,
             },
         }
     dominant_source = _dominant_price_source(points)
     cached_fallback_is_primary = dominant_source == FINTABLES_UDF_HISTORY_SOURCE
+    recent_detail_warnings = list((recent_detail_backfill or {}).get("warnings") or [])
+    effective_backfill_used = (
+        auto_fetch_attempted
+        or recent_detail_backfill_attempted
+        or overview_metric_backfill_attempted
+    )
     return _fund_performance_payload_from_points(
         processed_dir,
         normalized,
         points,
         start_date=effective_start,
         end_date=effective_end,
-        cache_hit=not auto_fetch_attempted and not overview_metric_backfill_attempted,
-        stale=False if (auto_fetch_attempted or overview_metric_backfill_attempted) and not auto_warnings else None,
+        cache_hit=not effective_backfill_used,
+        stale=False if effective_backfill_used and not auto_warnings and not recent_detail_warnings else None,
         parse_status=(
             "ok_fund_history_auto"
             if auto_fetch_attempted and not auto_warnings
+            else "ok_fund_history_recent_detail_auto"
+            if recent_detail_backfill_attempted and not recent_detail_warnings
             else "ok_fund_history_overview_metrics_auto"
             if overview_metric_backfill_attempted and not auto_warnings
             else None
         ),
-        warnings=auto_warnings,
-        backfill_used=auto_fetch_attempted or overview_metric_backfill_attempted,
+        warnings=auto_warnings + recent_detail_warnings,
+        backfill_used=effective_backfill_used,
         fallback_used=cached_fallback_is_primary,
         fallback_reason=(
             "cached_fintables_points_primary"
             if cached_fallback_is_primary
             else None
         ),
+        recent_detail_backfill=recent_detail_backfill,
         overview_metric_backfill=overview_metric_backfill,
         full_history_requested=full_history_requested,
     )
@@ -5340,7 +5860,7 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
 
 
 KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
-KAP_HOLDINGS_PARSE_VERSION = 12
+KAP_HOLDINGS_PARSE_VERSION = 13
 _KAP_NUMBER_PATTERN = re.compile(
     r"-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?(?!\d)|\d+[.,]\d+|\d+)(?:\s*%)?"
 )
@@ -6532,6 +7052,7 @@ def _parse_kap_holdings_pdf_text(
     buffer_continuation_marker: Optional[str] = None
     skip_auxiliary_section = False
     auxiliary_seen_portfolio_header = False
+    auxiliary_requires_portfolio_header = False
 
     def flush() -> None:
         nonlocal buffer, buffer_category, buffer_continuation_marker
@@ -6558,21 +7079,33 @@ def _parse_kap_holdings_pdf_text(
         section_match = re.match(r"^(?P<section>IV|VI|VII|VIII|IX|V)\s*[-–]\s*", norm)
         if section_match:
             flush()
-            if section_match.group("section") in {"IV", "V"}:
+            section = section_match.group("section")
+            if section in {"IV", "V"}:
                 skip_auxiliary_section = True
                 auxiliary_seen_portfolio_header = False
                 continue
+            if section == "VI":
+                skip_auxiliary_section = True
+                auxiliary_seen_portfolio_header = False
+                auxiliary_requires_portfolio_header = True
+                continue
             break
         if skip_auxiliary_section:
-            if "ISIN KODU" in norm:
+            if "ISIN KODU" in norm or ("FON PORTFOY DEGERI" in norm and "TABLOSU" in norm):
                 auxiliary_seen_portfolio_header = True
                 continue
             preview_line, preview_inline_marker = _kap_strip_inline_category(line)
             preview_marker = _kap_with_foreign_context(_kap_category_marker(line), current_category)
             if preview_inline_marker:
                 preview_marker = _kap_with_foreign_context(preview_inline_marker, current_category) or preview_marker
-            if preview_marker or (auxiliary_seen_portfolio_header and _kap_line_starts_position(preview_line or line)):
+            can_resume = preview_marker or (
+                auxiliary_seen_portfolio_header and _kap_line_starts_position(preview_line or line)
+            )
+            if auxiliary_requires_portfolio_header and not auxiliary_seen_portfolio_header:
+                continue
+            if can_resume:
                 skip_auxiliary_section = False
+                auxiliary_requires_portfolio_header = False
             else:
                 continue
         if current_category and "FON PORTFOY DEGERI" in norm and "TABLOSU" not in norm:

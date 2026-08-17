@@ -559,6 +559,28 @@ function rangeStartDate(range: FundChartRange, endDateIso: string, customStartDa
     return start.toISOString().slice(0, 10);
 }
 
+function finitePeriodReturn(value: number | null | undefined): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function mergePeriodReturnSources(
+    ...sources: Array<FundSummary['period_returns'] | undefined>
+): FundSummary['period_returns'] {
+    return DETAIL_RETURN_PERIODS.reduce<FundSummary['period_returns']>((returns, period) => {
+        for (const source of sources) {
+            const value = finitePeriodReturn(source?.[period.key]);
+            if (value != null) {
+                returns[period.key] = value;
+                break;
+            }
+        }
+        if (!(period.key in returns)) {
+            returns[period.key] = null;
+        }
+        return returns;
+    }, {});
+}
+
 function filterPointsForRange(
     points: FundPricePoint[],
     range: FundChartRange,
@@ -572,15 +594,32 @@ function filterPointsForRange(
     const startTs = new Date(startIso).getTime();
     const endTs = new Date(effectiveEndIso).getTime();
     if (!Number.isFinite(startTs) || !Number.isFinite(endTs)) return points;
-    return points.filter((point) => {
+    const inRange = points.filter((point) => {
         const ts = new Date(point.date).getTime();
         return Number.isFinite(ts) && ts >= startTs && ts <= endTs;
     });
+    if (!inRange.length || points[0]?.date >= startIso) return inRange;
+
+    let anchor: FundPricePoint | null = null;
+    for (const point of points) {
+        const ts = new Date(point.date).getTime();
+        if (!Number.isFinite(ts) || ts > startTs) break;
+        anchor = point;
+    }
+    if (!anchor || anchor.date === inRange[0]?.date) return inRange;
+    return [anchor, ...inRange];
 }
 
 function hasUsableRangeCoverage(points: FundPricePoint[], startIso: string, endIso: string): boolean {
     const filtered = points.filter((point) => point.date >= startIso && point.date <= endIso);
     if (filtered.length < 2) return false;
+    const earliest = filtered[0];
+    const earliestTs = new Date(earliest.date).getTime();
+    const startTs = new Date(startIso).getTime();
+    const startToleranceMs = 10 * 24 * 60 * 60 * 1000;
+    if (!Number.isFinite(earliestTs) || !Number.isFinite(startTs) || earliestTs > startTs + startToleranceMs) {
+        return false;
+    }
     const latest = filtered[filtered.length - 1];
     const latestTs = new Date(latest.date).getTime();
     const endTs = new Date(endIso).getTime();
@@ -711,12 +750,12 @@ function monthlyMetricPointsFromFundPoints(
 }
 
 function estimateCashFlow(current: FundPricePoint, previous: FundPricePoint): number | null {
-    const currentAum = Number(current.aum);
-    const previousAum = Number(previous.aum);
-    if (!Number.isFinite(currentAum) || !Number.isFinite(previousAum)) return null;
-    const currentPrice = Number(current.price);
-    const previousPrice = Number(previous.price);
-    if (Number.isFinite(currentPrice) && currentPrice > 0 && Number.isFinite(previousPrice) && previousPrice > 0) {
+    const currentAum = finiteNumber(current.aum);
+    const previousAum = finiteNumber(previous.aum);
+    if (currentAum == null || previousAum == null) return null;
+    const currentPrice = finiteNumber(current.price);
+    const previousPrice = finiteNumber(previous.price);
+    if (currentPrice != null && currentPrice > 0 && previousPrice != null && previousPrice > 0) {
         return currentAum - previousAum * (currentPrice / previousPrice);
     }
     return currentAum - previousAum;
@@ -790,6 +829,30 @@ function periodReturnsFromYieldSummary(
     const periodKeys = ['1w', '1m', '3m', '6m', 'ytd', '1y'] as const;
     return periodKeys.reduce<FundSummary['period_returns']>((returns, key) => {
         returns[key] = returnBetween(latestPrice, summary.periods[key]?.prev_close);
+        return returns;
+    }, {});
+}
+
+function pointOnOrBefore(points: FundPricePoint[], targetDate: string): FundPricePoint | null {
+    let match: FundPricePoint | null = null;
+    for (const point of points) {
+        if (point.date > targetDate) break;
+        match = point;
+    }
+    return match;
+}
+
+function periodReturnsFromPerformancePoints(points: FundPricePoint[]): FundSummary['period_returns'] {
+    const ordered = sortFundPoints(points);
+    const latest = ordered[ordered.length - 1];
+    const latestPrice = Number(latest?.price);
+    if (!latest || !Number.isFinite(latestPrice) || latestPrice <= 0) {
+        return {};
+    }
+    return DETAIL_RETURN_PERIODS.reduce<FundSummary['period_returns']>((returns, period) => {
+        const startDate = rangeStartDate(period.key, latest.date, '');
+        const basePoint = pointOnOrBefore(ordered, startDate);
+        returns[period.key] = returnBetween(latestPrice, Number(basePoint?.price));
         return returns;
     }, {});
 }
@@ -5395,9 +5458,10 @@ export default function FundsPage({
     const detailPeriodReturns = useMemo(
         () => {
             const fromSummary = periodReturnsFromYieldSummary(yieldSummary, detailLatestPrice);
-            return Object.keys(fromSummary).length ? fromSummary : selectedFund?.period_returns || {};
+            const fromPerformance = periodReturnsFromPerformancePoints(performancePoints);
+            return mergePeriodReturnSources(fromSummary, selectedFund?.period_returns, fromPerformance);
         },
-        [detailLatestPrice, selectedFund, yieldSummary],
+        [detailLatestPrice, performancePoints, selectedFund, yieldSummary],
     );
     const fundsDocumentTitle = useMemo(() => {
         if (fundCode || selectedFund) {
@@ -5612,7 +5676,7 @@ export default function FundsPage({
         setPerformanceError(null);
         setPerformanceLoading(true);
         apiClient
-            .refreshFundPerformance(normalizedCode, startIso, endIso)
+            .fundPerformance(normalizedCode, { startDate: startIso, endDate: endIso })
             .then((payload) => {
                 setPerformance(payload);
             })

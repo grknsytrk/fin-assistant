@@ -14,6 +14,93 @@ def test_fintables_defaults_match_current_history_contract() -> None:
     assert fund_service.FINTABLES_YIELD_SUMMARY_ENDPOINT.endswith("/barbar/server/yield")
 
 
+def test_tefas_client_fetch_fund_range_retries_rate_limit(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code, headers, payload):
+            self.status_code = status_code
+            self.headers = headers
+            self.content = payload
+
+    class FakeHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def post(self, url, **kwargs):
+            calls.append(kwargs.get("json"))
+            if len(calls) == 1:
+                return FakeResponse(429, {"Retry-After": "0"}, b"")
+            return FakeResponse(
+                200,
+                {"content-type": "application/json"},
+                json.dumps(
+                    {
+                        "data": [
+                            {
+                                "fonKodu": "TLY",
+                                "tarih": "2026-06-24",
+                                "fiyat": 6686.9308,
+                                "portfoyBuyukluk": 188_308_204_646.0,
+                                "kisiSayisi": 90_110,
+                                "tedPaySayisi": 28_160_633,
+                            }
+                        ]
+                    }
+                ).encode("utf-8"),
+            )
+
+    monkeypatch.setattr(fund_service.httpx, "Client", FakeHttpClient)
+    monkeypatch.setattr(fund_service, "TEFAS_HTTP_RETRY_ATTEMPTS", 2)
+    monkeypatch.setattr(fund_service, "TEFAS_HTTP_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(fund_service, "TEFAS_HTTP_RETRY_MAX_SECONDS", 0.0)
+
+    rows = fund_service.TefasClient().fetch_fund_range(
+        fund_code="TLY",
+        start_date=date(2026, 6, 24),
+        end_date=date(2026, 6, 24),
+    )
+
+    assert len(calls) == 2
+    assert rows[0]["source"] == "tefasfon_funds"
+    assert rows[0]["aum"] == 188_308_204_646.0
+    assert rows[0]["investor_count"] == 90_110
+
+
+def test_tefas_client_history_does_not_daily_fanout_after_rate_limit(monkeypatch) -> None:
+    client = fund_service.TefasClient()
+
+    def fake_range(**kwargs):
+        raise fund_service.TefasRateLimitError("TEFAS fund range HTTP 429")
+
+    def fail_snapshot(**kwargs):
+        raise AssertionError("rate-limited range should not fan out into daily snapshots")
+
+    monkeypatch.setattr(client, "fetch_fund_range", fake_range)
+    monkeypatch.setattr(client, "fetch_fund_list_snapshot", fail_snapshot)
+
+    with pytest.raises(fund_service.TefasRateLimitError):
+        client.fetch_fund_history(
+            fund_codes=["TLY"],
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 25),
+        )
+
+
+def _stub_direct_tefas_empty(monkeypatch) -> None:
+    class FakeDirectTefasClient:
+        def fetch_fund_history(self, **kwargs):
+            return []
+
+    monkeypatch.setattr(fund_service, "TefasClient", lambda: FakeDirectTefasClient())
+
+
 def test_fund_prices_db_uses_wal_and_updated_index(tmp_path) -> None:
     with fund_service._connect_fund_prices_db(tmp_path) as conn:
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
@@ -1182,7 +1269,25 @@ def test_get_fund_performance_payload_fast_bootstraps_long_partial_range(monkeyp
     class FakeTefasFonClient:
         def fetch_history(self, fund_code, start_date, end_date):
             history_calls.append((fund_code, start_date, end_date))
-            raise AssertionError("long partial ranges should use fast bootstrap")
+            rows = []
+            current = start_date
+            price = 2.0
+            while current <= end_date:
+                if current.weekday() < 5:
+                    rows.append(
+                        {
+                            "fonKodu": fund_code,
+                            "tarih": current.isoformat(),
+                            "fiyat": price,
+                            "portfoyBuyukluk": 1_000_000_000 + len(rows),
+                            "kisiSayisi": 10_000 + len(rows),
+                            "tedPaySayisi": 500_000 + len(rows),
+                            "source": "tefasfon_funds",
+                        }
+                    )
+                    price += 0.01
+                current += timedelta(days=1)
+            return rows
 
         def fetch_daily_funds_snapshot(self, as_of):
             snapshot_calls.append(as_of.isoformat())
@@ -1221,6 +1326,7 @@ def test_get_fund_performance_payload_fast_bootstraps_long_partial_range(monkeyp
     monkeypatch.setattr(fund_service, "date", FixedDate)
     monkeypatch.setattr(fund_service, "fetch_fintables_udf_history", fake_fintables_history)
     monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    _stub_direct_tefas_empty(monkeypatch)
 
     payload = fund_service.get_fund_performance_payload(
         tmp_path,
@@ -1230,14 +1336,16 @@ def test_get_fund_performance_payload_fast_bootstraps_long_partial_range(monkeyp
     )
     by_date = {point["date"]: point for point in payload["points"]}
 
-    assert history_calls == []
+    assert history_calls == [("KHA", date(2026, 4, 17), date(2026, 5, 21))]
     assert "2026-04-30" in snapshot_calls
     assert "2026-05-21" in snapshot_calls
     assert by_date["2026-04-30"]["aum"] == 1_000_000_000
     assert by_date["2026-05-21"]["investor_count"] == 11_000
+    assert by_date["2026-05-20"]["aum"] is not None
     assert fund_service.read_fund_price_points(tmp_path, "DGR")[0]["investor_count"] == 20_000
     assert payload["source_metadata"]["full_history_requested"] is False
     assert payload["source_metadata"]["cached_fallback_points_present"] is True
+    assert payload["source_metadata"]["recent_detail_backfill"]["attempted"] is False
 
     snapshot_calls.clear()
     second_payload = fund_service.get_fund_performance_payload(
@@ -1248,6 +1356,7 @@ def test_get_fund_performance_payload_fast_bootstraps_long_partial_range(monkeyp
     )
 
     assert snapshot_calls == []
+    assert len(history_calls) == 1
     assert second_payload["source_metadata"]["full_history_requested"] is False
 
 
@@ -1379,10 +1488,27 @@ def test_get_fund_performance_payload_backfills_partial_range_overview_metrics(m
         "2026-05-21": (700_000_000.0, 7_000),
     }
     calls = []
+    history_calls = []
 
     class FakeTefasFonClient:
         def fetch_history(self, fund_code, start_date, end_date):
-            raise AssertionError("price coverage is already cached")
+            history_calls.append((fund_code, start_date, end_date))
+            rows = []
+            current = start_date
+            while current <= end_date:
+                if current.weekday() < 5:
+                    rows.append(
+                        {
+                            "fonKodu": fund_code,
+                            "tarih": current.isoformat(),
+                            "fiyat": 1.0,
+                            "portfoyBuyukluk": 800_000_000.0,
+                            "kisiSayisi": 8_000,
+                            "source": "tefasfon_funds",
+                        }
+                    )
+                current += timedelta(days=1)
+            return rows
 
         def fetch_daily_funds_snapshot(self, as_of):
             calls.append(as_of.isoformat())
@@ -1403,6 +1529,7 @@ def test_get_fund_performance_payload_backfills_partial_range_overview_metrics(m
 
     monkeypatch.setattr(fund_service, "date", FixedDate)
     monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    _stub_direct_tefas_empty(monkeypatch)
 
     payload = fund_service.get_fund_performance_payload(
         tmp_path,
@@ -1416,8 +1543,103 @@ def test_get_fund_performance_payload_backfills_partial_range_overview_metrics(m
     assert "2026-03-31" in calls
     assert by_date["2026-02-27"]["aum"] == 400_000_000.0
     assert by_date["2026-03-31"]["investor_count"] == 5_000
+    assert by_date["2026-05-20"]["aum"] == 800_000_000.0
+    assert history_calls == [("PBR", date(2026, 4, 17), date(2026, 5, 21))]
+    assert payload["source_metadata"]["recent_detail_backfill"]["attempted"] is True
     assert payload["source_metadata"]["overview_metric_backfill"]["attempted"] is True
     assert payload["source_metadata"]["full_history_requested"] is False
+
+
+def test_get_fund_performance_payload_backfills_recent_details_from_cache(monkeypatch, tmp_path) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    current = date(2026, 5, 4)
+    price = 100.0
+    price_only_points = []
+    while current <= date(2026, 5, 21):
+        if current.weekday() < 5:
+            price_only_points.append(
+                {
+                    "fund_code": "RDT",
+                    "date": current.isoformat(),
+                    "price": price,
+                    "source": "fintables_udf_history",
+                }
+            )
+            price += 1.0
+        current += timedelta(days=1)
+    fund_service.upsert_fund_price_points(tmp_path, price_only_points, source="fintables_udf_history")
+
+    history_calls = []
+
+    class FakeTefasFonClient:
+        def fetch_history(self, fund_code, start_date, end_date):
+            history_calls.append((fund_code, start_date, end_date))
+            rows = []
+            current = start_date
+            while current <= end_date:
+                if current.weekday() < 5:
+                    rows.append(
+                        {
+                            "fonKodu": fund_code,
+                            "tarih": current.isoformat(),
+                            "fiyat": 100.0,
+                            "portfoyBuyukluk": 900_000_000.0,
+                            "kisiSayisi": 9_000,
+                            "tedPaySayisi": 1_000_000,
+                            "source": "tefasfon_funds",
+                        }
+                    )
+                current += timedelta(days=1)
+            return rows
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    _stub_direct_tefas_empty(monkeypatch)
+
+    payload = fund_service.get_fund_performance_payload(
+        tmp_path,
+        "RDT",
+        start_date=date(2026, 5, 4),
+        end_date=date(2026, 5, 21),
+    )
+    by_date = {point["date"]: point for point in payload["points"]}
+
+    assert history_calls == [("RDT", date(2026, 5, 4), date(2026, 5, 21))]
+    assert by_date["2026-05-20"]["aum"] == 900_000_000.0
+    assert by_date["2026-05-20"]["investor_count"] == 9_000
+    assert by_date["2026-05-20"]["source"] == "tefasfon_funds"
+    assert payload["source_metadata"]["cache_hit"] is False
+    assert payload["source_metadata"]["recent_detail_backfill"]["attempted"] is True
+
+
+def test_get_fund_performance_payload_recent_detail_failure_keeps_prices(monkeypatch, tmp_path) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "RDF", "date": "2026-05-20", "price": 100.0, "source": "fintables_udf_history"},
+            {"fund_code": "RDF", "date": "2026-05-21", "price": 101.0, "source": "fintables_udf_history"},
+        ],
+        source="fintables_udf_history",
+    )
+
+    class FakeTefasFonClient:
+        def fetch_history(self, fund_code, start_date, end_date):
+            raise fund_service.TefasUpstreamError("blocked")
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    _stub_direct_tefas_empty(monkeypatch)
+
+    payload = fund_service.get_fund_performance_payload(
+        tmp_path,
+        "RDF",
+        start_date=date(2026, 5, 20),
+        end_date=date(2026, 5, 21),
+    )
+
+    assert [point["date"] for point in payload["points"]] == ["2026-05-20", "2026-05-21"]
+    assert payload["source_metadata"]["recent_detail_backfill"]["attempted"] is True
+    assert payload["source_metadata"]["recent_detail_backfill"]["warning_count"] == 2
+    assert "recent detail range backfill failed" in payload["source_metadata"]["warnings"][0]
 
 
 def test_overview_metric_backfill_negative_cache_skips_repeat(monkeypatch, tmp_path) -> None:

@@ -1579,6 +1579,64 @@ HISSE TÜRK
     assert "OBAMS" not in by_code
 
 
+def test_kap_holdings_parser_resumes_repeated_table_after_vi_section() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+Hisse Türk
+DSTKF DESTEK FAKTORİNG A.Ş.
+10.414.435,00 799,526624 30/03/26 1.882,000000 19.599.966.670,00 33,07 20,29TL 80100517 20,43TREDSTF00012
+VI-A-GEÇEN AY İÇİNDE RÜÇHAN HAKKI KULLANIMI
+Sirketin Unvani BDL-BDZ Tarihi Nominal Değeriİşlem Tipi TUTAR
+V-AY İÇİNDE YAPILAN GİDERLER
+AÇIKLAMA TUTAR ORAN%
+IV-FON TOPLAM DEĞERİ TABLOSU
+A-)FON PORTFÖY DEĞERİ
+96.581.119.176,39
+FON PORTFÖY DEĞERİ TABLOSU
+TOPLAM
+(FPD
+GÖRE)
+GRUP
+(%)TOPLAM DEĞERGÜNLÜK BR
+DEĞER
+ISIN KODU
+DİĞER
+Y.Fonu Türk
+TPKGY TERA
+Portföy A.Ş
+49.559,00 117.828,44326
+6
+23/03/26 175.774,06000
+0
+8.711.186.639,54 82,52 9,02TL 9,08TRYTALP00036
+TPKGY TERA
+Portföy A.Ş
+01/04/26 1 8,00 174.000,00000
+0
+30/03/26 175.774,06000
+0
+1.406.192,48 0,01 0,00TL 0,00TRYTALP00036
+96.581.119.176,39FON PORTFÖY DEĞERİ 100,00
+VII-PORTFÖYDEN SATIŞLAR
+A) HİSSE SENETLERİ(SATIŞLAR)
+HISSE TÜRK
+06/04/26 30.072,00OBAMS 8,480 255.010,56OBA MAKARNACILIK SANAYI VE TICARET A.Ş.
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="TLY",
+        report_date="2026-03-31",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1583104",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert by_code["DSTKF"]["asset_type"] == "local_equity"
+    assert by_code["TPKGY"]["asset_type"] == "fund"
+    assert by_code["TPKGY"]["weight"] == pytest.approx(9.08)
+    assert "OBAMS" not in by_code
+
+
 def test_kap_holdings_parser_drops_orphan_page_header_before_position() -> None:
     text = """
 III-FON PORTFÖY DEĞERİ TABLOSU
