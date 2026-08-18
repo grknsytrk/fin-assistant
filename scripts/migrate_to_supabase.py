@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 from app.database import connect_postgres, database_enabled, ensure_json_cache_schema, write_json_cache
 from app.fund_service import _init_fund_prices_schema
 from app.reference_data import _init_schema
+from src.config import load_dotenv_file
 
 
 PROCESSED_DIR = ROOT / "data" / "processed"
@@ -132,6 +133,7 @@ def main() -> None:
     parser.add_argument("--skip-json", action="store_true", help="do not copy JSON cache documents")
     parser.add_argument("--skip-sqlite", action="store_true", help="do not copy SQLite tables")
     args = parser.parse_args()
+    load_dotenv_file(ROOT / ".env")
     if not database_enabled():
         raise SystemExit("RAGFIN_DATABASE_URL must be set in the environment")
 
