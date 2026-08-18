@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 
+from starlette.middleware.gzip import GZipMiddleware
 import uvicorn
 
 os.environ.setdefault("RAGFIN_FUND_COLLECTOR_ENABLED", "0")
@@ -25,6 +26,9 @@ except ImportError:  # pragma: no cover - only the HF Gradio runtime provides th
 
 if gr is not None and spaces is not None:
     demo = gr.Server()
+    # The API router is mounted into Gradio's FastAPI server on Spaces, so
+    # middleware registered on app.api does not wrap these requests.
+    demo.add_middleware(GZipMiddleware, minimum_size=1024)
     demo.include_router(api_app.router)
 
     @spaces.GPU
