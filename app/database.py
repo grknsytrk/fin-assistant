@@ -62,7 +62,8 @@ class PostgresConnection:
 
     def executemany(self, query: str, params_seq: Any) -> Any:
         normalized = re.sub(r"\?", "%s", query)
-        return self._connection.executemany(normalized, params_seq)
+        with self._connection.cursor() as cursor:
+            return cursor.executemany(normalized, params_seq)
 
     def commit(self) -> None:
         self._connection.commit()
