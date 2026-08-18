@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState, useTransition, type KeyboardEvent } from 'react';
 import { Search, X } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { FundSummary, KapCompanySearchItem, MarketStockRow } from '../api/types';
@@ -18,7 +18,16 @@ type SearchResult = {
   changePct: number | null;
   logoUrl?: string | null;
   logoName?: string | null;
+  searchFields?: SearchField[];
 };
+
+type SearchField = {
+  text: string;
+  compact: string;
+  noVowels: string;
+};
+
+type SearchTerms = SearchField;
 
 interface GlobalTickerSearchProps {
   currentTicker?: string | null;
@@ -69,14 +78,6 @@ function normalizeSearchText(value: string | null | undefined): string {
     .trim();
 }
 
-function compactSearchText(value: string | null | undefined): string {
-  return normalizeSearchText(value).replace(/\s+/g, '');
-}
-
-function searchWithoutVowels(value: string | null | undefined): string {
-  return compactSearchText(value).replace(/[AEIOU]/g, '');
-}
-
 function getStockAliases(symbol: string, sourceSymbol?: string | null): string[] {
   const aliases = new Set<string>([symbol]);
   const rawSymbol = normalizeSymbol(sourceSymbol);
@@ -115,10 +116,28 @@ function readRecentSearches(): SearchResult[] {
 function writeRecentSearches(items: SearchResult[]): void {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(items.slice(0, MAX_RECENT_SEARCHES)));
+    const persisted = items.slice(0, MAX_RECENT_SEARCHES).map((item) => {
+      const copy = { ...item };
+      delete copy.searchFields;
+      return copy;
+    });
+    window.localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(persisted));
   } catch {
     // Ignore storage failures; the modal still works without persisted recents.
   }
+}
+
+function prepareSearchResult(result: SearchResult): SearchResult {
+  const values = [result.symbol, result.title, result.subtitle, ...(result.aliases || [])]
+    .filter(Boolean);
+  return {
+    ...result,
+    searchFields: values.map((value) => {
+      const text = normalizeSearchText(value);
+      const compact = text.replace(/\s+/g, '');
+      return { text, compact, noVowels: compact.replace(/[AEIOU]/g, '') };
+    }),
+  };
 }
 
 function stockRowToResult(row: MarketStockRow): SearchResult {
@@ -217,26 +236,26 @@ function changeClass(value: number | null | undefined): string {
   return 'flat';
 }
 
-function resultMatches(result: SearchResult, query: string): boolean {
-  if (!query) return true;
-  const queryText = normalizeSearchText(query);
-  const queryCompact = compactSearchText(query);
-  const queryNoVowels = searchWithoutVowels(query);
-  const haystacks = [result.symbol, result.title, result.subtitle, ...(result.aliases || [])];
-  return haystacks.some((item) => {
-    const text = normalizeSearchText(item);
-    const compact = compactSearchText(item);
-    if (text.includes(queryText) || compact.includes(queryCompact)) return true;
-    return queryNoVowels.length >= 3 && searchWithoutVowels(item).includes(queryNoVowels);
-  });
+function searchTerms(value: string): SearchTerms {
+  const text = normalizeSearchText(value);
+  const compact = text.replace(/\s+/g, '');
+  return { text, compact, noVowels: compact.replace(/[AEIOU]/g, '') };
 }
 
-function resultStartsWith(result: SearchResult, query: string): boolean {
-  const queryCompact = compactSearchText(query);
-  if (!queryCompact) return false;
-  return [result.symbol, result.title, result.subtitle, ...(result.aliases || [])].some((item) =>
-    compactSearchText(item).startsWith(queryCompact),
-  );
+function resultMatches(result: SearchResult, terms: SearchTerms): boolean {
+  if (!terms.text) return true;
+  const fields = result.searchFields || prepareSearchResult(result).searchFields || [];
+  return fields.some((field) => (
+    field.text.includes(terms.text)
+    || field.compact.includes(terms.compact)
+    || (terms.noVowels.length >= 3 && field.noVowels.includes(terms.noVowels))
+  ));
+}
+
+function resultStartsWith(result: SearchResult, terms: SearchTerms): boolean {
+  if (!terms.compact) return false;
+  const fields = result.searchFields || prepareSearchResult(result).searchFields || [];
+  return fields.some((field) => field.compact.startsWith(terms.compact));
 }
 
 export default function GlobalTickerSearch({
@@ -257,10 +276,12 @@ export default function GlobalTickerSearch({
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const [recentSearches, setRecentSearches] = useState<SearchResult[]>(() => readRecentSearches());
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const [, startTransition] = useTransition();
 
   const deferredQuery = useDeferredValue(query);
   const trimmedQuery = deferredQuery.trim();
   const normalizedQuery = normalizeSearchText(trimmedQuery);
+  const queryTerms = useMemo(() => searchTerms(normalizedQuery), [normalizedQuery]);
   const normalizedSymbolQuery = normalizeSymbol(query.trim());
 
   useEffect(() => {
@@ -271,9 +292,11 @@ export default function GlobalTickerSearch({
       .then((payload) => {
         if (!active) return;
         const companies = [...(payload.companies || [])].map(normalizeSymbol).filter(Boolean);
-        setCompanyCodes(companies);
-        setCompanyItems(payload.items || []);
-        setStocksLoaded(true);
+        startTransition(() => {
+          setCompanyCodes(companies);
+          setCompanyItems(payload.items || []);
+          setStocksLoaded(true);
+        });
       })
       .catch(() => {
         if (!active) return;
@@ -292,18 +315,21 @@ export default function GlobalTickerSearch({
   useEffect(() => {
     if (!isOpen || stockQuotesLoaded) return;
     let active = true;
-    apiClient
-      .marketStocks({ index: 'XUTUM' })
-      .then((payload) => {
-        if (!active) return;
-        setStockRows(payload.rows || []);
-        setStockQuotesLoaded(true);
-      })
-      .catch(() => {
-        // Quotes are optional; the search still works without live prices.
-      });
+    const timer = window.setTimeout(() => {
+      apiClient
+        .marketStocks({ index: 'XUTUM' })
+        .then((payload) => {
+          if (!active) return;
+          setStockRows(payload.rows || []);
+          setStockQuotesLoaded(true);
+        })
+        .catch(() => {
+          // Quotes are optional; the search still works without live prices.
+        });
+    }, 250);
     return () => {
       active = false;
+      window.clearTimeout(timer);
     };
   }, [isOpen, stockQuotesLoaded]);
 
@@ -355,14 +381,14 @@ export default function GlobalTickerSearch({
   }, [isOpen]);
 
   const stockBaseResults = useMemo(() => {
-    const rowResults = stockRows.map(stockRowToResult);
+    const rowResults = stockRows.map(stockRowToResult).map(prepareSearchResult);
     const resultMap = new Map<string, SearchResult>();
     for (const result of rowResults) {
       resultMap.set(result.symbol, result);
     }
 
     for (const item of companyItems) {
-      const result = companySearchItemToResult(item);
+      const result = prepareSearchResult(companySearchItemToResult(item));
       if (!resultMap.has(result.symbol)) {
         resultMap.set(result.symbol, result);
       }
@@ -371,7 +397,8 @@ export default function GlobalTickerSearch({
     const rowSymbols = new Set(resultMap.keys());
     const fallbackResults = companyCodes
       .filter((code) => !rowSymbols.has(normalizeStockSymbol(code)))
-      .map(companyCodeToResult);
+      .map(companyCodeToResult)
+      .map(prepareSearchResult);
     for (const result of fallbackResults) {
       resultMap.set(result.symbol, result);
     }
@@ -381,18 +408,20 @@ export default function GlobalTickerSearch({
   const stockResults = useMemo(() => {
     return stockBaseResults
       .filter((item) => item.symbol !== normalizeSymbol(currentTicker))
-      .filter((item) => resultMatches(item, normalizedQuery))
-      .sort((a, b) => {
-        const aStarts = resultStartsWith(a, normalizedQuery) ? 0 : 1;
-        const bStarts = resultStartsWith(b, normalizedQuery) ? 0 : 1;
-        return aStarts - bStarts || a.symbol.localeCompare(b.symbol, 'tr');
-      })
-      .slice(0, 10);
-  }, [currentTicker, normalizedQuery, stockBaseResults]);
+      .filter((item) => resultMatches(item, queryTerms))
+      .map((item) => ({ item, starts: resultStartsWith(item, queryTerms) ? 0 : 1 }))
+      .sort((a, b) => a.starts - b.starts || a.item.symbol.localeCompare(b.item.symbol, 'tr'))
+      .slice(0, 10)
+      .map(({ item }) => item);
+  }, [currentTicker, queryTerms, stockBaseResults]);
 
   const fundResults = useMemo(() => {
-    return fundRows.map(fundRowToResult).filter((item) => resultMatches(item, normalizedQuery)).slice(0, 10);
-  }, [fundRows, normalizedQuery]);
+    return fundRows
+      .map(fundRowToResult)
+      .map(prepareSearchResult)
+      .filter((item) => resultMatches(item, queryTerms))
+      .slice(0, 10);
+  }, [fundRows, queryTerms]);
 
   const visibleResults = useMemo(() => {
     if (!normalizedQuery) {

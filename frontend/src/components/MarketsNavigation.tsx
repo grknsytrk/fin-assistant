@@ -100,6 +100,14 @@ export default function MarketsNavigation({
                                 setFundsExpanded(true);
                                 return;
                             }
+                            if (window.matchMedia('(max-width: 760px)').matches) {
+                                if (onFundSectionChange) {
+                                    onFundSectionChange('investment');
+                                } else {
+                                    onSectionChange('funds');
+                                }
+                                return;
+                            }
                             setFundsExpanded((prev) => !prev);
                         }}
                     >

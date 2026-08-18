@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, ArrowUpDown, Clock, BarChart3, FileText, Wallet, Star, FolderPlus, Search, X, Pencil, Trash2, GripVertical } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Clock, BarChart3, FileText, Wallet, Star, FolderPlus, Search, X, Pencil, Trash2, GripVertical } from 'lucide-react';
 import { apiClient } from '../api/client';
 import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
 import type {
@@ -50,6 +50,8 @@ interface MarketWatchRailProps {
     xu100Rows: MarketUniverseRow[];
     onSelectTicker: (ticker: string) => void;
     onSelectFund: (fundCode: string) => void;
+    mobilePanelOpen?: boolean;
+    onMobilePanelOpenChange?: (open: boolean) => void;
 }
 
 const RAIL_TABS: Array<{ id: RailTab; label: string }> = [
@@ -220,8 +222,17 @@ function FlashRailRow({
     return <div className={className}>{children}</div>;
 }
 
-export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFund }: MarketWatchRailProps) {
-    const [isCollapsed, setIsCollapsed] = useState(false);
+export default function MarketWatchRail({
+    xu100Rows,
+    onSelectTicker,
+    onSelectFund,
+    mobilePanelOpen,
+    onMobilePanelOpenChange,
+}: MarketWatchRailProps) {
+    const [isCollapsed, setIsCollapsed] = useState(() => (
+        typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
+    ));
+    const panelCollapsed = mobilePanelOpen === undefined ? isCollapsed : !mobilePanelOpen;
     const [activeTool, setActiveTool] = useState<'markets' | 'watchlist' | 'news' | 'history' | 'portfolio'>('markets');
     const [activeTab, setActiveTab] = useState<RailTab>('global');
     const [sort, setSort] = useState<{ key: RailSortKey | null; direction: RailSortDirection | null }>({
@@ -315,6 +326,11 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
 
     const [watchlistEditMode, setWatchlistEditMode] = useState(false);
     const [draggedWatchlistKey, setDraggedWatchlistKey] = useState<string | null>(null);
+
+    const updateCollapsed = useCallback((next: boolean) => {
+        setIsCollapsed(next);
+        onMobilePanelOpenChange?.(!next);
+    }, [onMobilePanelOpenChange]);
 
     const handleDragStart = (e: React.DragEvent<HTMLDivElement>, item: WatchlistItem) => {
         setDraggedWatchlistKey(watchlistItemKey(item));
@@ -529,7 +545,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
     }, [xutumPayload?.rows?.length, xu030Payload?.rows?.length, xu100Payload?.rows?.length, xu100Rows.length]);
 
     useEffect(() => {
-        if (isCollapsed || activeTool !== 'markets') return;
+        if (panelCollapsed || activeTool !== 'markets') return;
 
         if (activeTab === 'global' && !globalPayload) {
             loadGlobalRows();
@@ -558,7 +574,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
         commodityRows,
         fxRows,
         globalPayload,
-        isCollapsed,
+        panelCollapsed,
         loadCommodityRows,
         loadFxRows,
         loadGlobalRows,
@@ -571,7 +587,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
 
     // Tüm sekmeler için 3 saniyelik canlı polling döngüsü.
     useEffect(() => {
-        if (isCollapsed || activeTool !== 'markets') return;
+        if (panelCollapsed || activeTool !== 'markets') return;
 
         const timer = window.setInterval(() => {
             if (activeTab === 'global') {
@@ -585,7 +601,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
             }
         }, LIVE_RAIL_REFRESH_MS);
         return () => window.clearInterval(timer);
-    }, [activeTab, activeTool, isCollapsed, loadCommodityRows, loadFxRows, loadGlobalRows, loadStockTab]);
+    }, [activeTab, activeTool, panelCollapsed, loadCommodityRows, loadFxRows, loadGlobalRows, loadStockTab]);
 
     const rawRows = useMemo<RailRow[]>(() => {
         let mapped: RailRow[] = [];
@@ -628,11 +644,11 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
     const tabLoading = Boolean(loading[activeTab]);
     const tabError = errors[activeTab];
     return (
-        <div className={`mwr-shell${isCollapsed ? ' mwr-shell-collapsed' : ''}`}>
+        <div className={`mwr-shell${panelCollapsed ? ' mwr-shell-collapsed' : ''}`}>
             <aside
-                className={`mwr-panel${isCollapsed ? ' is-collapsed' : ''}`}
+                className={`mwr-panel${panelCollapsed ? ' is-collapsed' : ''}`}
                 aria-label="İzleme listesi"
-                aria-hidden={isCollapsed}
+                aria-hidden={panelCollapsed}
             >
                 <div className="mwr-head">
                     <div className="mwr-head-row">
@@ -938,13 +954,13 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
             <nav className="mwr-dock" aria-label="Market araç menüsü">
                 <button
                     type="button"
-                    className={`mwr-dock-button${activeTool === 'watchlist' && !isCollapsed ? ' is-active' : ''}`}
+                    className={`mwr-dock-button${activeTool === 'watchlist' && !panelCollapsed ? ' is-active' : ''}`}
                     onClick={() => {
                         if (activeTool === 'watchlist') {
-                            setIsCollapsed((v) => !v);
+                            updateCollapsed(!panelCollapsed);
                         } else {
                             setActiveTool('watchlist');
-                            setIsCollapsed(false);
+                            updateCollapsed(false);
                         }
                     }}
                     aria-label="İzleme Listem"
@@ -955,13 +971,13 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
 
                 <button
                     type="button"
-                    className={`mwr-dock-button${activeTool === 'markets' && !isCollapsed ? ' is-active' : ''}`}
+                    className={`mwr-dock-button${activeTool === 'markets' && !panelCollapsed ? ' is-active' : ''}`}
                     onClick={() => {
                         if (activeTool === 'markets') {
-                            setIsCollapsed((v) => !v);
+                            updateCollapsed(!panelCollapsed);
                         } else {
                             setActiveTool('markets');
-                            setIsCollapsed(false);
+                            updateCollapsed(false);
                         }
                     }}
                     aria-label="Piyasalar"
@@ -977,7 +993,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
                     className={`mwr-dock-button${activeTool === 'news' ? ' is-active' : ''}`}
                     onClick={() => {
                         setActiveTool('news');
-                        setIsCollapsed(true); // Close watchlist if we move to another tool
+                        updateCollapsed(true); // Close watchlist if we move to another tool
                     }}
                     aria-label="Haber Akışı"
                     title="Haber Akışı"
@@ -989,7 +1005,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
                     className={`mwr-dock-button${activeTool === 'history' ? ' is-active' : ''}`}
                     onClick={() => {
                         setActiveTool('history');
-                        setIsCollapsed(true);
+                        updateCollapsed(true);
                     }}
                     aria-label="Geçmiş/Alarm"
                     title="Geçmiş/Alarm"
@@ -1001,7 +1017,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
                     className={`mwr-dock-button${activeTool === 'portfolio' ? ' is-active' : ''}`}
                     onClick={() => {
                         setActiveTool('portfolio');
-                        setIsCollapsed(true);
+                        updateCollapsed(true);
                     }}
                     aria-label="Portföyüm"
                     title="Portföyüm"
@@ -1009,6 +1025,16 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
                     <Wallet size={18} aria-hidden="true" />
                 </button>
             </nav>
+
+            <button
+                type="button"
+                className="mwr-mobile-toggle"
+                onClick={() => updateCollapsed(!panelCollapsed)}
+                aria-label={panelCollapsed ? 'Piyasalar panelini aç' : 'Piyasalar panelini kapat'}
+                title={panelCollapsed ? 'Piyasalar panelini aç' : 'Piyasalar panelini kapat'}
+            >
+                {panelCollapsed ? <ChevronLeft size={18} aria-hidden="true" /> : <ChevronRight size={18} aria-hidden="true" />}
+            </button>
         </div>
     );
 }

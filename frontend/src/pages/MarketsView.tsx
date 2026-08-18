@@ -18,6 +18,8 @@ import type {
     MarketStockRow,
     MarketStocksResponse,
     MarketUniverseResponse,
+    MarketUniverseRow,
+    FundDetail,
 } from '../api/types';
 import { DEFAULT_STOCK_RETURN_MODE } from '../routing/routes';
 import type { StockReturnMode } from '../routing/routes';
@@ -27,6 +29,7 @@ import MarketWatchStrip from '../components/MarketWatchStrip';
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo from '../components/SymbolLogo';
 import { buildDocumentTitle, formatTitleNumber, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
+import { normalizeWatchlistSymbol, useWatchlist, type WatchlistItem } from '../hooks/useWatchlist';
 import './MarketsView.css';
 
 type MarketSection = MarketsNavigationSection;
@@ -381,6 +384,140 @@ function readStoredStockCards(): string[] {
     } catch {
         return [];
     }
+}
+
+function mobileSparklinePath(points: MarketIndexLinePoint[]): string {
+    const valid = points.filter((point) => Number.isFinite(point.close));
+    if (valid.length < 2) return '';
+    const sampled = valid.length > 36
+        ? valid.filter((_, index) => index % Math.ceil(valid.length / 36) === 0)
+        : valid;
+    const values = sampled.map((point) => point.close);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = Math.max(max - min, Math.abs(max) * 0.001, 0.0001);
+    return sampled
+        .map((point, index) => {
+            const x = (index / (sampled.length - 1)) * 220;
+            const y = 46 - ((point.close - min) / span) * 38;
+            return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+        })
+        .join(' ');
+}
+
+function MobileMarketOverview({
+    index,
+    rows,
+    watchlistItems,
+    fundRows,
+    onSelectTicker,
+    onOpenFund,
+    onOpenMarketsPanel,
+}: {
+    index: MarketIndexDetailResponse | null;
+    rows: MarketUniverseRow[];
+    watchlistItems: WatchlistItem[];
+    fundRows: Record<string, FundDetail | null>;
+    onSelectTicker: (ticker: string) => void;
+    onOpenFund?: (fundCode: string) => void;
+    onOpenMarketsPanel: () => void;
+}) {
+    const rowBySymbol = new Map(rows.map((row) => [normalizeWatchlistSymbol(row.company), row]));
+    const visibleWatchlist = watchlistItems.slice(0, 6).map((item) => ({
+        item,
+        row: item.kind === 'stock' ? rowBySymbol.get(normalizeWatchlistSymbol(item.symbol)) || null : null,
+    }));
+    const sparkline = mobileSparklinePath(index?.line_points || []);
+
+    return (
+        <section className="mobile-market-overview" aria-label="Mobil piyasa özeti">
+            <div className="mobile-market-index-card">
+                <div className="mobile-market-index-head">
+                    <div className="mobile-market-index-identity">
+                        <SymbolLogo symbol="XU100" name="BIST 100" kind="index" size="md" />
+                        <div>
+                            <strong>XU100</strong>
+                            <span>BIST 100</span>
+                            <small>{formatUpdateTime(index?.as_of)}</small>
+                        </div>
+                    </div>
+                    <div className="mobile-market-index-quote">
+                        <span>G</span>
+                        <strong>{formatIndexPrice(index?.price ?? null)}</strong>
+                        <b className={getTableChangeClass(index?.change_pct ?? null)}>
+                            {formatTablePct(index?.change_pct ?? null)}
+                        </b>
+                    </div>
+                </div>
+                <div className={`mobile-market-index-chart ${getTableChangeClass(index?.change_pct ?? null)}`} aria-hidden="true">
+                    {sparkline ? (
+                        <svg viewBox="0 0 220 52" preserveAspectRatio="none">
+                            <path d={sparkline} />
+                        </svg>
+                    ) : (
+                        <span />
+                    )}
+                </div>
+            </div>
+
+            <div className="mobile-market-watchlist">
+                <div className="mobile-market-watchlist-head">
+                    <div>
+                        <h2>İzleme listesi</h2>
+                        <span>Favori hisselerini hızlıca takip et</span>
+                    </div>
+                </div>
+
+                {visibleWatchlist.length ? (
+                    <div className="mobile-market-watchlist-list">
+                        {visibleWatchlist.map(({ item, row }) => {
+                            const symbol = normalizeWatchlistSymbol(item.symbol);
+                            const fundRow = item.kind === 'fund' ? fundRows[symbol] : null;
+                            const price = row?.price ?? fundRow?.price ?? null;
+                            const changePct = row?.change_pct ?? fundRow?.daily_return ?? null;
+                            const asOf = row?.price_as_of ?? fundRow?.as_of ?? null;
+                            return (
+                                <button
+                                    key={`${item.kind}:${symbol}`}
+                                    type="button"
+                                    className="mobile-market-watchlist-row"
+                                    onClick={() => item.kind === 'fund' ? onOpenFund?.(symbol) : onSelectTicker(symbol)}
+                                >
+                                    <SymbolLogo
+                                        symbol={symbol}
+                                        name={item.label || row?.company || fundRow?.name || symbol}
+                                        kind={item.kind}
+                                        logoUrl={row?.logo_url}
+                                        size="sm"
+                                    />
+                                    <span className="mobile-market-watchlist-symbol">
+                                        <strong>{symbol}</strong>
+                                        <small>{formatUpdateTime(asOf)}</small>
+                                    </span>
+                                    <span className="mobile-market-watchlist-price">
+                                        <small>G</small>
+                                        {formatIndexPrice(price)}
+                                    </span>
+                                    <span className={`mobile-market-watchlist-change ${getTableChangeClass(changePct)}`}>
+                                        {formatTablePct(changePct)}
+                                    </span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                ) : (
+                    <div className="mobile-market-watchlist-empty">
+                        İzleme listene hisse veya fon eklemek için Piyasalar panelini aç.
+                    </div>
+                )}
+
+                <button type="button" className="mobile-market-watchlist-add" onClick={onOpenMarketsPanel}>
+                    <Plus size={20} aria-hidden="true" />
+                    Sembol ekle
+                </button>
+            </div>
+        </section>
+    );
 }
 
 type MarketUniverseMemoryCache = { data: MarketUniverseResponse; fetchedAt: number };
@@ -1917,6 +2054,12 @@ export default function MarketsView({
     const [stockCardSearchTerm, setStockCardSearchTerm] = useState('');
     const [navCollapsed, setNavCollapsed] = useState(false);
     const [activeSection, setActiveSection] = useState<MarketSection>(routeSection);
+    const [isMobileViewport, setIsMobileViewport] = useState(() => (
+        typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
+    ));
+    const [mobileMarketPanelOpen, setMobileMarketPanelOpen] = useState(false);
+    const [mobileIndexDetail, setMobileIndexDetail] = useState<MarketIndexDetailResponse | null>(null);
+    const [mobileWatchlistFundRows, setMobileWatchlistFundRows] = useState<Record<string, FundDetail | null>>({});
     const [selectedIndex, setSelectedIndex] = useState<MarketIndexCode | null>(routeSelectedIndex);
     const [stockIndex, setStockIndex] = useState<MarketStockIndex>(routeStockIndex);
     const [returnMode, setReturnMode] = useState<StockReturnMode>(routeReturnMode);
@@ -1959,9 +2102,78 @@ export default function MarketsView({
     const draggingStockCardSymbolRef = useRef<string | null>(null);
     const [draggingStockCardSymbol, setDraggingStockCardSymbol] = useState<string | null>(null);
     const stockCardSymbolsKey = stockCardSymbols.join(',');
+    const watchlist = useWatchlist();
+    const mobileWatchlistFundCodes = useMemo(
+        () => watchlist.items
+            .filter((item) => item.kind === 'fund')
+            .map((item) => normalizeWatchlistSymbol(item.symbol)),
+        [watchlist.items],
+    );
+
+    useEffect(() => {
+        const mediaQuery = window.matchMedia('(max-width: 767px)');
+        const updateViewport = () => setIsMobileViewport(mediaQuery.matches);
+        updateViewport();
+        mediaQuery.addEventListener('change', updateViewport);
+        return () => mediaQuery.removeEventListener('change', updateViewport);
+    }, []);
+
+    useEffect(() => {
+        if (activeSection !== 'markets' || !isMobileViewport) return;
+        let alive = true;
+        const loadMobileIndex = () => {
+            apiClient
+                .marketIndexDetail('XU100')
+                .then((payload) => {
+                    if (alive) setMobileIndexDetail(payload);
+                })
+                .catch(() => {
+                    if (alive) setMobileIndexDetail(null);
+                });
+        };
+        loadMobileIndex();
+        const intervalId = window.setInterval(loadMobileIndex, 10000);
+        return () => {
+            alive = false;
+            window.clearInterval(intervalId);
+        };
+    }, [activeSection, isMobileViewport]);
+
+    useEffect(() => {
+        if (activeSection !== 'markets' || !isMobileViewport) return;
+        const missingCodes = mobileWatchlistFundCodes.filter(
+            (code) => !(code in mobileWatchlistFundRows),
+        );
+        if (missingCodes.length === 0) return;
+
+        let cancelled = false;
+        Promise.all(
+            missingCodes.map((code) => apiClient
+                .fundDetail(code)
+                .then((detail) => [code, detail] as const)
+                .catch(() => [code, null] as const)),
+        ).then((entries) => {
+            if (cancelled) return;
+            setMobileWatchlistFundRows((current) => {
+                const next = { ...current };
+                for (const [code, detail] of entries) next[code] = detail;
+                return next;
+            });
+        });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [
+        activeSection,
+        isMobileViewport,
+        mobileWatchlistFundCodes,
+        mobileWatchlistFundRows,
+    ]);
 
     useEffect(() => {
         setActiveSection(routeSection);
+        if (routeSection !== 'markets') setMobileMarketPanelOpen(false);
     }, [routeSection]);
 
     useEffect(() => {
@@ -2049,9 +2261,12 @@ export default function MarketsView({
 
     useEffect(() => {
         if (activeSection !== 'markets') return;
-        const intervalId = window.setInterval(() => setTerminalNow(new Date()), 1000);
+        const intervalId = window.setInterval(
+            () => setTerminalNow(new Date()),
+            isMobileViewport ? 10000 : 1000,
+        );
         return () => window.clearInterval(intervalId);
-    }, [activeSection]);
+    }, [activeSection, isMobileViewport]);
 
     useEffect(() => {
         if (activeSection !== 'markets') return;
@@ -2076,7 +2291,7 @@ export default function MarketsView({
     }, [activeSection, stockIndex]);
 
     useEffect(() => {
-        if (activeSection !== 'markets') return;
+        if (activeSection !== 'markets' || isMobileViewport) return;
         if (stockCardSymbols.length === 0) {
             setStockCards(null);
             setStockCardsError(null);
@@ -2099,7 +2314,7 @@ export default function MarketsView({
             loadStockCards(true, false, stockCardSymbols);
         }, LIVE_MARKET_REFRESH_MS);
         return () => window.clearInterval(intervalId);
-    }, [activeSection, stockCardSymbols, stockCardSymbolsKey]);
+    }, [activeSection, isMobileViewport, stockCardSymbols, stockCardSymbolsKey]);
 
     useEffect(() => {
         if (activeSection !== 'indices') return;
@@ -2686,6 +2901,16 @@ export default function MarketsView({
             {activeSection === 'markets' && !loading && !error && market && (
                 <div className="market-content market-content-terminal">
                     <div className="market-main-column">
+                        <MobileMarketOverview
+                            index={mobileIndexDetail}
+                            rows={market.rows}
+                            watchlistItems={watchlist.items}
+                            fundRows={mobileWatchlistFundRows}
+                            onSelectTicker={onCompanyClick}
+                            onOpenFund={onOpenFund}
+                            onOpenMarketsPanel={() => setMobileMarketPanelOpen(true)}
+                        />
+                        {!isMobileViewport && (
                         <section className="panel stock-cards-panel">
                             <div className="stock-cards-toolbar">
                                 <div className="stock-cards-title-row">
@@ -2841,6 +3066,7 @@ export default function MarketsView({
                                 </div>
                             )}
                         </section>
+                        )}
                     </div>
                 </div>
             )}
@@ -3411,6 +3637,8 @@ export default function MarketsView({
                         xu100Rows={market.rows}
                         onSelectTicker={onCompanyClick}
                         onSelectFund={(fundCode) => onOpenFund?.(fundCode)}
+                        mobilePanelOpen={isMobileViewport ? mobileMarketPanelOpen : undefined}
+                        onMobilePanelOpenChange={isMobileViewport ? setMobileMarketPanelOpen : undefined}
                     />
                 )}
             </div>

@@ -255,6 +255,32 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
     return debounced;
 }
 
+const FundsSearchInput = memo(function FundsSearchInput({
+    value,
+    onChange,
+}: {
+    value: string;
+    onChange: (value: string) => void;
+}) {
+    const [draft, setDraft] = useState(value);
+    const debouncedDraft = useDebouncedValue(draft, 160);
+
+    useEffect(() => {
+        if (debouncedDraft !== value) onChange(debouncedDraft);
+    }, [debouncedDraft, onChange, value]);
+
+    return (
+        <label className="funds-search">
+            <Search size={16} aria-hidden="true" />
+            <input
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder="Fon kodu, ad veya kurucu ara"
+            />
+        </label>
+    );
+});
+
 function formatDate(value: string | null | undefined): string {
     if (!value) return '-';
     const date = new Date(value);
@@ -3973,14 +3999,16 @@ function FundComparisonPage({
             return;
         }
         let alive = true;
+        const controller = new AbortController();
         setSearchLoading(true);
         const timer = window.setTimeout(() => {
             apiClient
-                .fundSearch(trimmed, 12)
+                .fundSearch(trimmed, 12, { signal: controller.signal })
                 .then((payload) => {
                     if (alive) setSearchRows(payload.rows || []);
                 })
-                .catch(() => {
+                .catch((error) => {
+                    if ((error as Error)?.name === 'AbortError') return;
                     if (alive) setSearchRows([]);
                 })
                 .finally(() => {
@@ -3990,6 +4018,7 @@ function FundComparisonPage({
         return () => {
             alive = false;
             window.clearTimeout(timer);
+            controller.abort();
         };
     }, [query, searchOpen]);
 
@@ -4526,14 +4555,16 @@ function useFundComparisonState({
             return;
         }
         let alive = true;
+        const controller = new AbortController();
         setFundSearchLoading(true);
         const timer = window.setTimeout(() => {
             apiClient
-                .fundSearch(trimmed, 10)
+                .fundSearch(trimmed, 10, { signal: controller.signal })
                 .then((payload) => {
                     if (alive) setFundSearchRows(payload.rows || []);
                 })
-                .catch(() => {
+                .catch((error) => {
+                    if ((error as Error)?.name === 'AbortError') return;
                     if (alive) setFundSearchRows([]);
                 })
                 .finally(() => {
@@ -4543,6 +4574,7 @@ function useFundComparisonState({
         return () => {
             alive = false;
             window.clearTimeout(timer);
+            controller.abort();
         };
     }, [query, searchOpen]);
 
@@ -5112,8 +5144,7 @@ export default function FundsPage({
     const [riskFilter, setRiskFilter] = useState('');
     const [sortKey, setSortKey] = useState<FundSortKey>('fund_code');
     const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
-    const debouncedSearchTerm = useDebouncedValue(searchTerm, 160);
-    const deferredSearchTerm = useDeferredValue(debouncedSearchTerm);
+    const deferredSearchTerm = useDeferredValue(searchTerm);
     const mountedRef = useRef(false);
     const holdingsRef = useRef<FundHoldingsResponse | null>(null);
     const activeFundCodeRef = useRef('');
@@ -5483,21 +5514,27 @@ export default function FundsPage({
         };
     }, [fundCode, activeTab, loadHoldingsLive]);
 
+    const fundSearchIndex = useMemo(() => (funds?.rows || []).map((row) => ({
+        row,
+        haystack: `${row.fund_code} ${row.name} ${row.fund_type || ''} ${row.founder_company || ''} ${row.manager_company || ''}`
+            .toLocaleLowerCase('tr-TR'),
+    })), [funds]);
+
     const filteredFunds = useMemo(() => {
-        const rows = [...(funds?.rows || [])];
         const needle = deferredSearchTerm.trim().toLocaleLowerCase('tr-TR');
-        const filtered = rows.filter((row) => {
+        const filtered = fundSearchIndex
+            .filter(({ row, haystack }) => {
             if (needle) {
-                const haystack = `${row.fund_code} ${row.name} ${row.fund_type || ''} ${row.founder_company || ''}`.toLocaleLowerCase('tr-TR');
                 if (!haystack.includes(needle)) return false;
             }
             if (fundTypeFilter && row.fund_type !== fundTypeFilter) return false;
             if (riskFilter && String(row.risk_value ?? '') !== riskFilter) return false;
             return true;
-        });
+            })
+            .map(({ row }) => row);
         filtered.sort((a, b) => compareFundRows(a, b, sortKey, sortOrder));
         return filtered;
-    }, [funds, deferredSearchTerm, fundTypeFilter, riskFilter, sortKey, sortOrder]);
+    }, [deferredSearchTerm, fundSearchIndex, fundTypeFilter, riskFilter, sortKey, sortOrder]);
 
     const selectedFund = detail || filteredFunds.find((row) => row.fund_code === fundCode) || null;
     const performancePoints = useMemo(() => sortFundPoints(performance?.points), [performance]);
@@ -5854,14 +5891,7 @@ export default function FundsPage({
 
                             <section className="funds-panel">
                                 <div className="funds-toolbar">
-                                    <label className="funds-search">
-                                        <Search size={16} aria-hidden="true" />
-                                        <input
-                                            value={searchTerm}
-                                            onChange={(event) => setSearchTerm(event.target.value)}
-                                            placeholder="Fon kodu, ad veya kurucu ara"
-                                        />
-                                    </label>
+                                    <FundsSearchInput value={searchTerm} onChange={setSearchTerm} />
                                     <div className="funds-filter">
                                         <SlidersHorizontal size={16} aria-hidden="true" />
                                         <select value={fundTypeFilter} onChange={(event) => setFundTypeFilter(event.target.value)}>

@@ -3608,7 +3608,9 @@
 
 @media (max-width: 640px) {
     .mn-layout {
-        --mn-sidebar-width: 60px;
+        --mn-sidebar-width: 0px;
+        padding-left: 0;
+        padding-bottom: calc(66px + env(safe-area-inset-bottom));
     }
 
     .funds-page {
@@ -3690,12 +3692,22 @@
     }
 
     .fund-comparison-chart {
-        height: 282px;
+        width: 560px;
+        min-width: 560px;
+        height: 300px;
     }
 
     .fund-comparison-chart-wrap {
-        min-height: 282px;
+        min-height: 300px;
+        margin: 0 -0.2rem;
+        padding: 0 0.2rem 0.35rem;
         overflow-x: auto;
+    }
+
+    .fund-comparison-period select {
+        min-width: 108px;
+        height: 44px;
+        font-size: 1rem;
     }
 
     .fund-compare-chart-panel {

@@ -618,41 +618,87 @@
 
 @media (max-width: 760px) {
     .mn-sidebar {
-        width: 60px;
+        width: 100%;
+        height: calc(66px + env(safe-area-inset-bottom));
+        min-height: calc(66px + env(safe-area-inset-bottom));
+        top: auto;
+        right: 0;
+        bottom: 0;
+        flex-direction: row;
+        align-items: stretch;
+        padding: 0 0 env(safe-area-inset-bottom);
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        border-right: 0;
+        overflow-x: hidden;
+        overflow-y: hidden;
+        box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.2);
     }
 
-    .mn-menu-group {
-        padding: 0 0.35rem;
+    .mn-header,
+    .mn-sidebar-search,
+    .mn-divider,
+    .mn-spacer,
+    .mn-auth-actions {
+        display: none;
+    }
+
+    .mn-menu-group,
+    .mn-menu-subtree {
+        display: contents;
+    }
+
+    .mn-submenu,
+    .mn-menu-item:disabled,
+    .mn-chevron,
+    .mn-external-icon {
+        display: none;
     }
 
     .mn-menu-item {
+        flex: 1 1 0;
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        height: 66px;
+        padding: 0.45rem 0.2rem 0.3rem;
+        border-radius: 0;
+        flex-direction: column;
         justify-content: center;
-        padding: 0.7rem 0;
+        gap: 0.2rem;
     }
 
     .mn-item-main {
+        width: 100%;
+        flex-direction: column;
+        align-items: center;
         justify-content: center;
+        gap: 0.2rem;
     }
 
-    .mn-header {
-        justify-content: center;
-        padding: 0.95rem 0.5rem 0.85rem;
+    .mn-icon {
+        width: 18px;
+        height: 18px;
     }
 
-    .mn-logo {
-        justify-content: center;
-        width: 40px;
-        height: 36px;
+    .mn-text {
+        display: block;
+        overflow: hidden;
+        max-width: 100%;
+        color: #94a3b8;
+        font-size: 0.6rem;
+        font-weight: 700;
+        line-height: 1.1;
+        text-align: center;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
-    .mn-sidebar-search,
-    .mn-logo-text,
-    .mn-sidebar-toggle,
-    .mn-text,
-    .mn-chevron,
-    .mn-external-icon,
-    .mn-submenu,
-    .mn-auth-actions {
-        display: none;
+    .mn-menu-item.active {
+        background: rgba(59, 130, 246, 0.12);
+    }
+
+    .mn-menu-item.active .mn-icon,
+    .mn-menu-item.active .mn-text {
+        color: #e2e8f0;
     }
 }
