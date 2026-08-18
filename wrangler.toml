@@ -1,0 +1,7 @@
+name = "fin-assistant"
+compatibility_date = "2026-08-18"
+workers_dev = true
+
+[assets]
+directory = "./frontend/dist"
+not_found_handling = "single-page-application"
