@@ -14,7 +14,7 @@ import uvicorn
 
 os.environ.setdefault("RAGFIN_FUND_COLLECTOR_ENABLED", "0")
 
-from app.api import app as api_app
+from app.api import app as api_app, bootstrap_application_storage
 
 try:
     import gradio as gr
@@ -43,6 +43,9 @@ else:
 
 def main() -> None:
     port = int(os.getenv("PORT", "7860"))
+    # ``include_router`` does not run api_app's FastAPI lifespan on Gradio
+    # Spaces. Run the same schema/cache bootstrap before serving routes.
+    bootstrap_application_storage()
     if demo is not None:
         demo.launch(
             server_name="0.0.0.0",

@@ -21,6 +21,9 @@ LOGGER = logging.getLogger(__name__)
 
 _SCHEMA_LOCK = threading.Lock()
 _JSON_SCHEMA_READY = False
+_POOL_LOCK = threading.Lock()
+_POSTGRES_POOL: Any = None
+_POSTGRES_POOL_URL = ""
 
 
 def database_url() -> str:
@@ -50,45 +53,118 @@ class PostgresConnection:
 
     is_postgres = True
 
-    def __init__(self, connection: Any) -> None:
-        self._connection = connection
+    def __init__(self, resource: Any) -> None:
+        # ``resource`` is either a psycopg connection or a pool connection
+        # context manager.  Keeping the context manager here lets callers use
+        # the existing ``with connect_postgres()`` contract while returning a
+        # pooled connection to psycopg-pool on exit.
+        self._resource = resource
+        self._connection: Any = None
+        self._entered = False
+
+    def _active_connection(self) -> Any:
+        if self._connection is not None:
+            return self._connection
+        # Preserve the old direct-connection behavior for small maintenance
+        # scripts that instantiate the wrapper without ``with``.  Pooled
+        # resources don't expose ``execute`` until they are entered.
+        if hasattr(self._resource, "execute"):
+            return self._resource
+        raise RuntimeError("PostgreSQL connection must be used as a context manager")
 
     def execute(self, query: str, params: tuple[Any, ...] | list[Any] = ()) -> Any:
         # Existing local SQL uses SQLite's ``?`` placeholders.  The SQL used
         # by the application has no literal question marks, so this simple
         # conversion keeps both backends on the same query definitions.
         normalized = re.sub(r"\?", "%s", query)
-        return self._connection.execute(normalized, params)
+        return self._active_connection().execute(normalized, params)
 
     def executemany(self, query: str, params_seq: Any) -> Any:
         normalized = re.sub(r"\?", "%s", query)
-        with self._connection.cursor() as cursor:
+        with self._active_connection().cursor() as cursor:
             return cursor.executemany(normalized, params_seq)
 
     def commit(self) -> None:
-        self._connection.commit()
+        self._active_connection().commit()
 
     def rollback(self) -> None:
-        self._connection.rollback()
+        self._active_connection().rollback()
 
     def close(self) -> None:
-        self._connection.close()
+        if self._entered:
+            self.__exit__(None, None, None)
+            return
+        close = getattr(self._resource, "close", None)
+        if close:
+            close()
 
     def __enter__(self) -> "PostgresConnection":
-        self._connection.__enter__()
+        if not self._entered:
+            self._connection = self._resource.__enter__()
+            self._entered = True
         return self
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> Any:
-        return self._connection.__exit__(exc_type, exc_value, traceback)
+        if not self._entered:
+            return None
+        try:
+            return self._resource.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._connection = None
+            self._entered = False
 
 
-def connect_postgres() -> PostgresConnection:
+def _postgres_pool() -> Any:
+    """Return the process-local psycopg pool used by the deployed API."""
+
+    global _POSTGRES_POOL, _POSTGRES_POOL_URL
     url = database_url()
     if not url:
         raise RuntimeError("RAGFIN_DATABASE_URL is not configured")
-    psycopg, dict_row = _require_psycopg()
-    connection = psycopg.connect(url, row_factory=dict_row)
-    return PostgresConnection(connection)
+    try:
+        from psycopg_pool import ConnectionPool
+    except ImportError as exc:  # pragma: no cover - deployment dependency guard
+        raise RuntimeError(
+            "RAGFIN_DATABASE_URL is set but psycopg-pool is not installed; "
+            "install the project requirements"
+        ) from exc
+
+    with _POOL_LOCK:
+        if _POSTGRES_POOL is not None and _POSTGRES_POOL_URL == url:
+            return _POSTGRES_POOL
+        if _POSTGRES_POOL is not None:
+            _POSTGRES_POOL.close()
+        max_size = max(1, int(os.getenv("RAGFIN_DATABASE_POOL_MAX_SIZE", "4")))
+        timeout = max(1.0, float(os.getenv("RAGFIN_DATABASE_POOL_TIMEOUT_SECONDS", "10")))
+        _POSTGRES_POOL = ConnectionPool(
+            conninfo=url,
+            min_size=1,
+            max_size=max_size,
+            timeout=timeout,
+            kwargs={
+                "row_factory": _require_psycopg()[1],
+                # Safe for both Supavisor session mode and transaction mode.
+                "prepare_threshold": None,
+            },
+            open=True,
+        )
+        _POSTGRES_POOL_URL = url
+        return _POSTGRES_POOL
+
+
+def connect_postgres() -> PostgresConnection:
+    return PostgresConnection(_postgres_pool().connection())
+
+
+def close_postgres_pool() -> None:
+    """Close the process-local pool, primarily for tests and graceful shutdown."""
+
+    global _POSTGRES_POOL, _POSTGRES_POOL_URL
+    with _POOL_LOCK:
+        if _POSTGRES_POOL is not None:
+            _POSTGRES_POOL.close()
+        _POSTGRES_POOL = None
+        _POSTGRES_POOL_URL = ""
 
 
 def _cache_key(path: Path) -> str:
@@ -217,4 +293,5 @@ def hydrate_json_cache(processed_dir: Path) -> int:
 
 def reset_database_state_for_tests() -> None:
     global _JSON_SCHEMA_READY
+    close_postgres_pool()
     _JSON_SCHEMA_READY = False

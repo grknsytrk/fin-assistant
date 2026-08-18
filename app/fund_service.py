@@ -155,6 +155,8 @@ KAP_HOLDINGS_ATTACHMENT_TEXT_CACHE_VERSION = 1
 
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
 _SNAPSHOT_REFRESH_LOCK = threading.Lock()
+_FUND_PRICES_SCHEMA_LOCK = threading.Lock()
+_FUND_PRICES_SCHEMA_READY = False
 _AUTO_FETCH_LOCK = threading.Lock()
 _AUTO_FETCH_IN_FLIGHT: Dict[str, threading.Event] = {}
 _AUTO_FETCH_NEGATIVE_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -366,9 +368,7 @@ def _safe_json_loads(raw: Any, fallback: Any) -> Any:
 
 def _connect_fund_prices_db(processed_dir: Path) -> Any:
     if database_enabled():
-        conn = connect_postgres()
-        _init_fund_prices_schema(conn)
-        return conn
+        return connect_postgres()
     path = _fund_prices_db_path(processed_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
@@ -435,6 +435,21 @@ def _init_fund_prices_schema(conn: Any) -> None:
         """
     )
     conn.commit()
+
+
+def ensure_fund_prices_schema(processed_dir: Path) -> None:
+    """Create the remote fund-price schema once during app bootstrap."""
+
+    del processed_dir  # The Postgres schema is shared; the path is SQLite-only.
+    global _FUND_PRICES_SCHEMA_READY
+    if not database_enabled() or _FUND_PRICES_SCHEMA_READY:
+        return
+    with _FUND_PRICES_SCHEMA_LOCK:
+        if _FUND_PRICES_SCHEMA_READY:
+            return
+        with connect_postgres() as conn:
+            _init_fund_prices_schema(conn)
+        _FUND_PRICES_SCHEMA_READY = True
 
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:

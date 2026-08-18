@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -51,6 +52,8 @@ _MANUAL_INSTRUMENTS: List[Dict[str, Any]] = [
 
 _SEEDED_PROCESSED_DIRS: set[str] = set()
 _BOOTSTRAPPED_PROCESSED_DIRS: set[str] = set()
+_REFERENCE_SCHEMA_LOCK = threading.Lock()
+_REFERENCE_SCHEMA_READY = False
 
 
 def reference_data_db_path(processed_dir: Path) -> Path:
@@ -99,9 +102,7 @@ def _source_priority(source: Any) -> int:
 
 def _connect(processed_dir: Path) -> Any:
     if database_enabled():
-        conn = connect_postgres()
-        _init_schema(conn)
-        return conn
+        return connect_postgres()
     path = reference_data_db_path(processed_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
@@ -164,6 +165,21 @@ def _init_schema(conn: Any) -> None:
         """
     )
     conn.commit()
+
+
+def ensure_reference_data_schema(processed_dir: Path) -> None:
+    """Create the remote reference-data schema once during app bootstrap."""
+
+    del processed_dir  # The Postgres schema is shared; the path is SQLite-only.
+    global _REFERENCE_SCHEMA_READY
+    if not database_enabled() or _REFERENCE_SCHEMA_READY:
+        return
+    with _REFERENCE_SCHEMA_LOCK:
+        if _REFERENCE_SCHEMA_READY:
+            return
+        with connect_postgres() as conn:
+            _init_schema(conn)
+        _REFERENCE_SCHEMA_READY = True
 
 
 def _normalize_record(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -422,8 +438,10 @@ def get_instrument_names(processed_dir: Path, kind: str) -> Dict[str, str]:
 
 
 def reset_reference_data_state_for_tests() -> None:
+    global _REFERENCE_SCHEMA_READY
     _SEEDED_PROCESSED_DIRS.clear()
     _BOOTSTRAPPED_PROCESSED_DIRS.clear()
+    _REFERENCE_SCHEMA_READY = False
 
 
 def _read_json_dict(path: Path) -> Optional[Dict[str, Any]]:

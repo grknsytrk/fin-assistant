@@ -34,8 +34,14 @@ from app.cache import cached as _cached_response
 from app.cache import get_cache as _get_cache
 from app.cache import get_json_dict as _cache_get_dict
 from app.cache import set_json as _cache_set_json
-from app.database import hydrate_json_cache
+from app.database import (
+    close_postgres_pool,
+    database_enabled,
+    ensure_json_cache_schema,
+    hydrate_json_cache,
+)
 from app.reference_data import (
+    ensure_reference_data_schema,
     get_instruments,
     get_instrument_names,
     sync_reference_data_from_caches,
@@ -114,18 +120,38 @@ async def _stop_fund_price_collector() -> None:
         pass
 
 
+def bootstrap_application_storage() -> None:
+    """Prepare persistent schemas before serving the first request.
+
+    Gradio Spaces include this router without running the FastAPI app
+    lifespan, so the HF entrypoint calls this function explicitly as well.
+    Keeping all DDL here prevents normal API requests from racing on schema
+    creation or waiting on Supabase statement timeouts.
+    """
+
+    ensure_json_cache_schema()
+    ensure_reference_data_schema(CONFIG.paths.processed_dir)
+    from app.fund_service import ensure_fund_prices_schema
+
+    ensure_fund_prices_schema(CONFIG.paths.processed_dir)
+    hydrate_json_cache(CONFIG.paths.processed_dir)
+    sync_reference_data_from_caches(CONFIG.paths.processed_dir)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     try:
-        await asyncio.to_thread(hydrate_json_cache, CONFIG.paths.processed_dir)
-        await asyncio.to_thread(sync_reference_data_from_caches, CONFIG.paths.processed_dir)
+        await asyncio.to_thread(bootstrap_application_storage)
     except Exception:
-        LOGGER.debug("reference data bootstrap failed", exc_info=True)
+        LOGGER.exception("application storage bootstrap failed")
+        if database_enabled():
+            raise
     await _start_fund_price_collector()
     try:
         yield
     finally:
         await _stop_fund_price_collector()
+        close_postgres_pool()
 
 
 app = FastAPI(title="RAG-Fin API", version="0.10.0", lifespan=_lifespan)
