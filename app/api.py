@@ -37,7 +37,7 @@ from app.cache import set_json as _cache_set_json
 from app.database import hydrate_json_cache
 from app.reference_data import (
     get_instruments,
-    get_instrument_name,
+    get_instrument_names,
     sync_reference_data_from_caches,
     upsert_instrument,
 )
@@ -224,6 +224,11 @@ def _latest_quarter_label(quarters: List[str]) -> Optional[str]:
 
 _KAP_MARKET_METADATA_CACHE: Dict[str, Any] = {}
 _KAP_MARKET_METADATA_CACHE_TTL = 6 * 60 * 60
+_KAP_COMPANIES_RESPONSE_CACHE: Dict[str, Any] = {}
+_KAP_COMPANIES_RESPONSE_CACHE_TTL = int(
+    os.getenv("RAGFIN_KAP_COMPANIES_RESPONSE_CACHE_TTL_SECONDS", str(60 * 60))
+)
+_KAP_COMPANIES_RESPONSE_CACHE_KEY = "api:kap:companies:v2"
 
 
 def _load_cached_kap_market_metadata(cache_dir: Path, symbol: str) -> Dict[str, Any]:
@@ -3045,15 +3050,27 @@ def market_flow(
 def kap_companies() -> Dict[str, Any]:
     from app.kap_service import get_kap_companies
 
+    now_ts = time.time()
+    cached = _KAP_COMPANIES_RESPONSE_CACHE.get("data")
+    if cached and now_ts - float(_KAP_COMPANIES_RESPONSE_CACHE.get("_ts", 0)) < _KAP_COMPANIES_RESPONSE_CACHE_TTL:
+        return cached
+
+    shared_cached = _shared_cache_get_dict(_KAP_COMPANIES_RESPONSE_CACHE_KEY)
+    if shared_cached and isinstance(shared_cached.get("companies"), list):
+        _KAP_COMPANIES_RESPONSE_CACHE["_ts"] = now_ts
+        _KAP_COMPANIES_RESPONSE_CACHE["data"] = shared_cached
+        return shared_cached
+
     companies = get_kap_companies()
     cache_dir = CONFIG.paths.processed_dir / "kap_cache"
+    instrument_names = get_instrument_names(CONFIG.paths.processed_dir, "stock")
     items: List[Dict[str, Any]] = []
     for symbol in companies:
         normalized = str(symbol or "").strip().upper()
         if not normalized:
             continue
         cached_meta = _load_cached_kap_market_metadata(cache_dir, normalized)
-        title = str(get_instrument_name(CONFIG.paths.processed_dir, "stock", normalized) or cached_meta.get("company_title") or "").strip()
+        title = str(instrument_names.get(normalized) or cached_meta.get("company_title") or "").strip()
         company_code = str(cached_meta.get("company") or normalized).strip().upper()
         aliases = [normalized]
         if company_code and company_code != normalized:
@@ -3069,7 +3086,15 @@ def kap_companies() -> Dict[str, Any]:
                 "has_kap_cache": bool(cached_meta.get("has_kap_cache")),
             }
         )
-    return {"companies": companies, "items": items}
+    payload = {"companies": companies, "items": items}
+    _KAP_COMPANIES_RESPONSE_CACHE["_ts"] = now_ts
+    _KAP_COMPANIES_RESPONSE_CACHE["data"] = payload
+    _shared_cache_set(
+        _KAP_COMPANIES_RESPONSE_CACHE_KEY,
+        payload,
+        ttl_seconds=_KAP_COMPANIES_RESPONSE_CACHE_TTL,
+    )
+    return payload
 
 
 def _kap_snapshot_response_cache_key(company: str, max_quarters: int) -> str:

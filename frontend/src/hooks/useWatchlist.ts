@@ -9,6 +9,7 @@ export interface WatchlistItem {
 }
 
 export const WATCHLIST_STORAGE_KEY = 'mwr_watchlist';
+export const MAX_WATCHLIST_ITEMS = 5;
 const WATCHLIST_EVENT = 'ragfin:watchlist-changed';
 
 type WatchlistEventDetail = {
@@ -59,7 +60,7 @@ export function normalizeWatchlistItems(value: unknown): WatchlistItem[] {
         items.push(item);
     }
 
-    return items;
+    return items.slice(0, MAX_WATCHLIST_ITEMS);
 }
 
 export function readWatchlistItems(): WatchlistItem[] {

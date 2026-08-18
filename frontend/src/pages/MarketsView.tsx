@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import { CalendarDays, GripHorizontal, Plus, Search, X } from 'lucide-react';
+import { CalendarDays, GripHorizontal, Plus, Search, Trash2, X } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type {
+    KapCompanySearchItem,
     MarketIndexCode,
     MarketIndexConstituent,
     MarketIndexDetailResponse,
@@ -29,7 +30,7 @@ import MarketWatchStrip from '../components/MarketWatchStrip';
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo from '../components/SymbolLogo';
 import { buildDocumentTitle, formatTitleNumber, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
-import { normalizeWatchlistSymbol, useWatchlist, type WatchlistItem } from '../hooks/useWatchlist';
+import { MAX_WATCHLIST_ITEMS, normalizeWatchlistSymbol, useWatchlist, type WatchlistItem } from '../hooks/useWatchlist';
 import './MarketsView.css';
 
 type MarketSection = MarketsNavigationSection;
@@ -411,27 +412,132 @@ function MobileMarketOverview({
     watchlistItems,
     fundRows,
     onSelectTicker,
+    onSelectIndex,
     onOpenFund,
-    onOpenMarketsPanel,
+    onAddStock,
+    onRemoveWatchlistItem,
 }: {
     index: MarketIndexDetailResponse | null;
     rows: MarketUniverseRow[];
     watchlistItems: WatchlistItem[];
     fundRows: Record<string, FundDetail | null>;
     onSelectTicker: (ticker: string) => void;
+    onSelectIndex: (index: MarketIndexCode) => void;
     onOpenFund?: (fundCode: string) => void;
-    onOpenMarketsPanel: () => void;
+    onAddStock: (symbol: string) => void;
+    onRemoveWatchlistItem: (item: WatchlistItem) => void;
 }) {
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [searchTerm, setSearchTerm] = useState('');
+    const [companySearchItems, setCompanySearchItems] = useState<KapCompanySearchItem[]>([]);
+    const [companySearchLoaded, setCompanySearchLoaded] = useState(false);
+    const [companySearchLoading, setCompanySearchLoading] = useState(false);
+    const [swipedWatchlistKey, setSwipedWatchlistKey] = useState<string | null>(null);
+    const swipeStartRef = useRef<{ key: string; x: number; y: number } | null>(null);
+    const suppressRowClickRef = useRef(false);
     const rowBySymbol = new Map(rows.map((row) => [normalizeWatchlistSymbol(row.company), row]));
-    const visibleWatchlist = watchlistItems.slice(0, 6).map((item) => ({
+    const savedStockSymbols = new Set(
+        watchlistItems
+            .filter((item) => item.kind === 'stock')
+            .map((item) => normalizeWatchlistSymbol(item.symbol)),
+    );
+    const isWatchlistFull = watchlistItems.length >= MAX_WATCHLIST_ITEMS;
+    const normalizedSearch = searchTerm.trim().toUpperCase();
+    useEffect(() => {
+        if (!searchOpen || companySearchLoaded || companySearchLoading) return;
+        let active = true;
+        setCompanySearchLoading(true);
+        apiClient.kapCompanies()
+            .then((payload) => {
+                if (!active) return;
+                if (payload.items?.length) {
+                    setCompanySearchItems(payload.items);
+                } else {
+                    setCompanySearchItems((payload.companies || []).map((symbol) => ({
+                        symbol,
+                        title: null,
+                    })));
+                }
+            })
+            .catch(() => {
+                if (active) setCompanySearchItems([]);
+            })
+            .finally(() => {
+                if (active) {
+                    setCompanySearchLoading(false);
+                    setCompanySearchLoaded(true);
+                }
+            });
+        return () => {
+            active = false;
+        };
+    }, [companySearchLoaded, companySearchLoading, searchOpen]);
+
+    const searchCandidates = new Map<string, { symbol: string; name: string; logoUrl?: string | null }>();
+    for (const row of rows) {
+        const symbol = normalizeWatchlistSymbol(row.company);
+        searchCandidates.set(symbol, { symbol, name: row.company, logoUrl: row.logo_url });
+    }
+    for (const item of companySearchItems) {
+        const symbol = normalizeWatchlistSymbol(item.symbol);
+        if (!symbol || searchCandidates.has(symbol)) continue;
+        searchCandidates.set(symbol, { symbol, name: item.title || symbol });
+    }
+    const searchResults = normalizedSearch
+        ? [...searchCandidates.values()]
+            .filter((item) => !savedStockSymbols.has(item.symbol))
+            .filter((item) => (
+                item.symbol.includes(normalizedSearch)
+                || item.name.toLocaleUpperCase('tr-TR').includes(normalizedSearch)
+            ))
+            .slice(0, 8)
+        : [];
+    const visibleWatchlist = watchlistItems.slice(0, 5).map((item) => ({
         item,
         row: item.kind === 'stock' ? rowBySymbol.get(normalizeWatchlistSymbol(item.symbol)) || null : null,
     }));
     const sparkline = mobileSparklinePath(index?.line_points || []);
 
+    const handleWatchlistPointerDown = (event: ReactPointerEvent<HTMLButtonElement>, key: string) => {
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        swipeStartRef.current = { key, x: event.clientX, y: event.clientY };
+    };
+
+    const handleWatchlistPointerUp = (event: ReactPointerEvent<HTMLButtonElement>, key: string) => {
+        const start = swipeStartRef.current;
+        swipeStartRef.current = null;
+        if (!start || start.key !== key) return;
+
+        const deltaX = event.clientX - start.x;
+        const deltaY = event.clientY - start.y;
+        if (Math.abs(deltaX) < 45 || Math.abs(deltaX) <= Math.abs(deltaY)) return;
+
+        suppressRowClickRef.current = true;
+        setSwipedWatchlistKey(deltaX < 0 ? key : null);
+        window.setTimeout(() => {
+            suppressRowClickRef.current = false;
+        }, 0);
+    };
+
+    const handleWatchlistRowClick = (item: WatchlistItem, symbol: string) => {
+        if (suppressRowClickRef.current) return;
+        if (swipedWatchlistKey) {
+            setSwipedWatchlistKey(null);
+            return;
+        }
+        if (item.kind === 'fund') onOpenFund?.(symbol);
+        else onSelectTicker(symbol);
+    };
+
     return (
         <section className="mobile-market-overview" aria-label="Mobil piyasa özeti">
-            <div className="mobile-market-index-card">
+            <button
+                type="button"
+                className="mobile-market-index-card"
+                onClick={() => onSelectIndex('XU100')}
+                aria-label="XU100 endeks detayını aç"
+            >
                 <div className="mobile-market-index-head">
                     <div className="mobile-market-index-identity">
                         <SymbolLogo symbol="XU100" name="BIST 100" kind="index" size="md" />
@@ -458,7 +564,7 @@ function MobileMarketOverview({
                         <span />
                     )}
                 </div>
-            </div>
+            </button>
 
             <div className="mobile-market-watchlist">
                 <div className="mobile-market-watchlist-head">
@@ -472,49 +578,130 @@ function MobileMarketOverview({
                     <div className="mobile-market-watchlist-list">
                         {visibleWatchlist.map(({ item, row }) => {
                             const symbol = normalizeWatchlistSymbol(item.symbol);
+                            const itemKey = `${item.kind}:${symbol}`;
                             const fundRow = item.kind === 'fund' ? fundRows[symbol] : null;
                             const price = row?.price ?? fundRow?.price ?? null;
                             const changePct = row?.change_pct ?? fundRow?.daily_return ?? null;
                             const asOf = row?.price_as_of ?? fundRow?.as_of ?? null;
                             return (
-                                <button
-                                    key={`${item.kind}:${symbol}`}
-                                    type="button"
-                                    className="mobile-market-watchlist-row"
-                                    onClick={() => item.kind === 'fund' ? onOpenFund?.(symbol) : onSelectTicker(symbol)}
+                                <div
+                                    key={itemKey}
+                                    className={`mobile-market-watchlist-row-shell${swipedWatchlistKey === itemKey ? ' is-swiped' : ''}`}
                                 >
-                                    <SymbolLogo
-                                        symbol={symbol}
-                                        name={item.label || row?.company || fundRow?.name || symbol}
-                                        kind={item.kind}
-                                        logoUrl={row?.logo_url}
-                                        size="sm"
-                                    />
-                                    <span className="mobile-market-watchlist-symbol">
-                                        <strong>{symbol}</strong>
-                                        <small>{formatUpdateTime(asOf)}</small>
-                                    </span>
-                                    <span className="mobile-market-watchlist-price">
-                                        <small>G</small>
-                                        {formatIndexPrice(price)}
-                                    </span>
-                                    <span className={`mobile-market-watchlist-change ${getTableChangeClass(changePct)}`}>
-                                        {formatTablePct(changePct)}
-                                    </span>
-                                </button>
+                                    <button
+                                        type="button"
+                                        className="mobile-market-watchlist-row"
+                                        onClick={() => handleWatchlistRowClick(item, symbol)}
+                                        onPointerDown={(event) => handleWatchlistPointerDown(event, itemKey)}
+                                        onPointerUp={(event) => handleWatchlistPointerUp(event, itemKey)}
+                                        onPointerCancel={() => { swipeStartRef.current = null; }}
+                                    >
+                                        <SymbolLogo
+                                            symbol={symbol}
+                                            name={item.label || row?.company || fundRow?.name || symbol}
+                                            kind={item.kind}
+                                            logoUrl={row?.logo_url}
+                                            size="sm"
+                                        />
+                                        <span className="mobile-market-watchlist-symbol">
+                                            <strong>{symbol}</strong>
+                                            <small>{formatUpdateTime(asOf)}</small>
+                                        </span>
+                                        <span className="mobile-market-watchlist-price">
+                                            <small>G</small>
+                                            {formatIndexPrice(price)}
+                                        </span>
+                                        <span className={`mobile-market-watchlist-change ${getTableChangeClass(changePct)}`}>
+                                            {formatTablePct(changePct)}
+                                        </span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="mobile-market-watchlist-delete"
+                                        onClick={() => {
+                                            onRemoveWatchlistItem(item);
+                                            setSwipedWatchlistKey(null);
+                                        }}
+                                        aria-label={`${symbol} izleme listesinden sil`}
+                                        title="İzleme listesinden sil"
+                                    >
+                                        <Trash2 size={19} aria-hidden="true" />
+                                    </button>
+                                </div>
                             );
                         })}
                     </div>
                 ) : (
                     <div className="mobile-market-watchlist-empty">
-                        İzleme listene hisse veya fon eklemek için Piyasalar panelini aç.
+                        İzleme listene hisse veya fon eklemek için Sembol ekle butonuna dokun.
                     </div>
                 )}
 
-                <button type="button" className="mobile-market-watchlist-add" onClick={onOpenMarketsPanel}>
-                    <Plus size={20} aria-hidden="true" />
-                    Sembol ekle
-                </button>
+                {searchOpen ? (
+                    <div className="mobile-market-watchlist-search-area">
+                        <div className="mobile-market-watchlist-search">
+                            <Search size={18} aria-hidden="true" />
+                            <input
+                                type="search"
+                                autoFocus
+                                value={searchTerm}
+                                onChange={(event) => setSearchTerm(event.target.value)}
+                                placeholder="Hisse kodu ara..."
+                                aria-label="İzleme listesine eklenecek hisseyi ara"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setSearchOpen(false);
+                                    setSearchTerm('');
+                                }}
+                                aria-label="Aramayı kapat"
+                                title="Kapat"
+                            >
+                                <X size={17} aria-hidden="true" />
+                            </button>
+                        </div>
+                        {searchTerm.trim() && (
+                            <div className="mobile-market-watchlist-search-results">
+                                {companySearchLoading && searchResults.length === 0 ? (
+                                    <span className="mobile-market-watchlist-search-empty">Hisseler yükleniyor...</span>
+                                ) : searchResults.length > 0 ? searchResults.map((result) => (
+                                    <button
+                                        key={result.symbol}
+                                        type="button"
+                                        onClick={() => {
+                                            onAddStock(result.symbol);
+                                            setSearchTerm('');
+                                            setSearchOpen(false);
+                                        }}
+                                    >
+                                        <SymbolLogo
+                                            symbol={result.symbol}
+                                            name={result.name}
+                                            kind="stock"
+                                            logoUrl={result.logoUrl}
+                                            size="sm"
+                                        />
+                                        <strong>{result.symbol}</strong>
+                                        <span>Ekle</span>
+                                    </button>
+                                )) : (
+                                    <span className="mobile-market-watchlist-search-empty">Sonuç bulunamadı.</span>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                ) : (
+                    <button
+                        type="button"
+                        className="mobile-market-watchlist-add"
+                        onClick={() => setSearchOpen(true)}
+                        disabled={isWatchlistFull}
+                    >
+                        <Plus size={20} aria-hidden="true" />
+                        {isWatchlistFull ? `İzleme listesi dolu (${MAX_WATCHLIST_ITEMS}/${MAX_WATCHLIST_ITEMS})` : 'Sembol ekle'}
+                    </button>
+                )}
             </div>
         </section>
     );
@@ -2173,7 +2360,9 @@ export default function MarketsView({
 
     useEffect(() => {
         setActiveSection(routeSection);
-        if (routeSection !== 'markets') setMobileMarketPanelOpen(false);
+        if (routeSection !== 'markets') {
+            setMobileMarketPanelOpen(false);
+        }
     }, [routeSection]);
 
     useEffect(() => {
@@ -2907,8 +3096,10 @@ export default function MarketsView({
                             watchlistItems={watchlist.items}
                             fundRows={mobileWatchlistFundRows}
                             onSelectTicker={onCompanyClick}
+                            onSelectIndex={handleSelectIndex}
                             onOpenFund={onOpenFund}
-                            onOpenMarketsPanel={() => setMobileMarketPanelOpen(true)}
+                            onAddStock={(symbol) => watchlist.addItem({ kind: 'stock', symbol })}
+                            onRemoveWatchlistItem={(item) => watchlist.removeItem(item.kind, item.symbol)}
                         />
                         {!isMobileViewport && (
                         <section className="panel stock-cards-panel">
@@ -3609,16 +3800,16 @@ export default function MarketsView({
                                                             <span>{row.symbol}</span>
                                                         </span>
                                                     </td>
-                                                    <td className="stocks-cell-right stocks-price-cell">{constituentPrice(row)}</td>
-                                                    <td className={`stocks-cell-right ${getTableChangeClass(row.change_pct)}`}>
+                                                    <td data-label="Fiyat" className="stocks-cell-right stocks-price-cell">{constituentPrice(row)}</td>
+                                                    <td data-label="Değişim" className={`stocks-cell-right ${getTableChangeClass(row.change_pct)}`}>
                                                         {formatTablePct(row.change_pct)}
                                                     </td>
-                                                    <td className="stocks-cell-right stocks-volume-cell">{formatVolume(row.volume)}</td>
-                                                    <td className="stocks-cell-right">{formatWeight(row.weight_pct)}</td>
-                                                    <td className={`stocks-cell-right ${getTableChangeClass(row.point_effect)}`}>
+                                                    <td data-label="Hacim" className="stocks-cell-right stocks-volume-cell">{formatVolume(row.volume)}</td>
+                                                    <td data-label="Ağırlık" className="stocks-cell-right">{formatWeight(row.weight_pct)}</td>
+                                                    <td data-label="Puan" className={`stocks-cell-right ${getTableChangeClass(row.point_effect)}`}>
                                                         {formatPointEffect(row.point_effect)}
                                                     </td>
-                                                    <td className={`stocks-cell-right ${getTableChangeClass(getImpactPct(row, indexImpactLevel))}`}>
+                                                    <td data-label="Endeks etkisi" className={`stocks-cell-right ${getTableChangeClass(getImpactPct(row, indexImpactLevel))}`}>
                                                         {formatImpactPct(getImpactPct(row, indexImpactLevel))}
                                                     </td>
                                                 </tr>

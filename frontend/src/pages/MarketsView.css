@@ -2630,7 +2630,333 @@
     }
 
     .mobile-market-index-card {
+        display: block;
+        width: 100%;
+        margin: 0;
         padding: 1rem;
+        border: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
+        border-radius: 18px;
+        background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+        color: inherit;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+        -webkit-appearance: none;
+        appearance: none;
+    }
+
+    .mobile-market-index-card:active {
+        transform: scale(0.995);
+    }
+
+    .indices-view,
+    .indices-detail-view {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        overflow: visible;
+    }
+
+    .indices-breadcrumb {
+        min-height: 34px;
+        margin-bottom: 0.55rem;
+        gap: 0.35rem;
+        font-size: 0.72rem;
+    }
+
+    .indices-hero {
+        align-items: center;
+        flex-direction: row;
+        gap: 0.65rem;
+        padding: 0.8rem 0;
+    }
+
+    .indices-hero-main {
+        min-width: 0;
+        gap: 0.65rem;
+    }
+
+    .indices-logo {
+        width: 48px;
+        height: 48px;
+        flex-basis: 48px;
+    }
+
+    .indices-hero h2 {
+        font-size: 1.45rem;
+    }
+
+    .indices-hero p {
+        max-width: min(48vw, 210px);
+        margin-top: 0.22rem;
+        overflow: hidden;
+        font-size: 0.72rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .indices-hero-price {
+        min-width: 0;
+        align-items: flex-end;
+        gap: 0.12rem;
+    }
+
+    .indices-hero-price strong {
+        font-size: 1.2rem;
+    }
+
+    .indices-hero-price span {
+        font-size: 0.72rem;
+    }
+
+    .indices-hero-price small {
+        font-size: 0.62rem;
+    }
+
+    .indices-stat-row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.45rem;
+        padding: 0.7rem 0;
+        font-size: 0.68rem;
+    }
+
+    .indices-stat-row span {
+        min-width: 0;
+        padding: 0.5rem 0.55rem;
+        border: 1px solid color-mix(in srgb, var(--surface-border) 72%, transparent);
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--surface-color) 76%, var(--bg-color));
+        line-height: 1.25;
+    }
+
+    .indices-stat-row strong {
+        display: block;
+        margin-top: 0.12rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .indices-return-strip {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.4rem;
+        margin-bottom: 0.75rem;
+    }
+
+    .indices-return-card {
+        min-width: 0;
+        padding: 0.45rem 0.4rem;
+        border-radius: 8px;
+    }
+
+    .indices-return-card span {
+        overflow: hidden;
+        font-size: 0.61rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .indices-return-card strong {
+        overflow: hidden;
+        font-size: 0.7rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .indices-chart-panel {
+        margin-bottom: 0.75rem;
+    }
+
+    .indices-line-chart,
+    .indices-chart-empty {
+        min-height: 200px;
+    }
+
+    .indices-impact-panel {
+        border-radius: 12px;
+    }
+
+    .indices-impact-head {
+        gap: 0.45rem;
+        padding: 0.8rem;
+    }
+
+    .indices-impact-head h3 {
+        font-size: 0.84rem;
+        line-height: 1.3;
+    }
+
+    .indices-impact-head .panel-kicker {
+        font-size: 0.64rem;
+    }
+
+    .indices-weight-note {
+        margin: 0.7rem;
+        padding: 0.65rem 0.7rem;
+        font-size: 0.7rem;
+        line-height: 1.35;
+    }
+
+    .indices-treemap-scale {
+        width: calc(100% - 1.4rem);
+        margin: 0.6rem 0.7rem 0.45rem;
+        font-size: 0.64rem;
+    }
+
+    .indices-treemap {
+        height: 280px;
+        min-height: 0;
+    }
+
+    .indices-impact-summary {
+        padding: 0.7rem;
+        font-size: 0.68rem;
+    }
+
+    .indices-impact-counts {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.3rem;
+        font-size: 0.61rem;
+    }
+
+    .indices-impact-count {
+        min-width: 0;
+        gap: 0.22rem;
+        white-space: normal;
+    }
+
+    .indices-impact-count:nth-child(2),
+    .indices-impact-count:nth-child(3) {
+        justify-self: auto;
+    }
+
+    .indices-net-impact {
+        gap: 0.25rem;
+        margin-top: 0.55rem;
+        font-size: 0.66rem;
+    }
+
+    .indices-constituent-wrap {
+        max-height: none;
+        overflow: visible;
+    }
+
+    .indices-constituent-table,
+    .indices-constituent-table thead,
+    .indices-constituent-table tbody,
+    .indices-constituent-table tr,
+    .indices-constituent-table td {
+        display: block;
+    }
+
+    .indices-constituent-table {
+        width: 100%;
+        min-width: 0;
+        border-collapse: separate;
+        border-spacing: 0;
+    }
+
+    .indices-constituent-table thead {
+        display: none;
+    }
+
+    .indices-constituent-table tbody {
+        display: flex;
+        flex-direction: column;
+        gap: 0.45rem;
+        padding: 0.55rem;
+    }
+
+    .indices-constituent-table tbody tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.9fr) minmax(0, 0.9fr);
+        grid-template-areas:
+            'symbol price change'
+            'symbol volume weight'
+            'symbol point impact';
+        gap: 0.1rem 0.5rem;
+        min-height: 88px;
+        padding: 0.5rem 0.55rem;
+        border: 1px solid color-mix(in srgb, var(--surface-border) 78%, transparent);
+        border-radius: 9px;
+        background: color-mix(in srgb, var(--surface-color) 82%, var(--bg-color));
+    }
+
+    .indices-constituent-table tbody tr:hover {
+        background: color-mix(in srgb, var(--surface-color) 82%, var(--bg-color));
+    }
+
+    .indices-constituent-table td,
+    .indices-constituent-table td.stocks-cell-right {
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        align-items: flex-end;
+        justify-content: center;
+        padding: 0.08rem 0;
+        border: 0;
+        font-size: 0.66rem;
+        line-height: 1.1;
+        text-align: right;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .indices-constituent-table td::before {
+        content: attr(data-label);
+        margin-bottom: 0.1rem;
+        color: var(--text-secondary);
+        font-family: var(--font-family);
+        font-size: 0.56rem;
+        font-weight: 700;
+        line-height: 1;
+    }
+
+    .indices-constituent-table td:first-child {
+        grid-area: symbol;
+        align-items: flex-start;
+        justify-content: center;
+        padding-right: 0.2rem;
+        overflow: visible;
+        text-align: left;
+        white-space: normal;
+    }
+
+    .indices-constituent-table td:first-child::before {
+        display: none;
+    }
+
+    .indices-constituent-table td:nth-child(2) { grid-area: price; }
+    .indices-constituent-table td:nth-child(3) { grid-area: change; }
+    .indices-constituent-table td:nth-child(4) { grid-area: volume; }
+    .indices-constituent-table td:nth-child(5) { grid-area: weight; }
+    .indices-constituent-table td:nth-child(6) { grid-area: point; }
+    .indices-constituent-table td:nth-child(7) { grid-area: impact; }
+
+    .indices-constituent-table .stocks-symbol-main {
+        min-width: 0;
+        align-items: flex-start;
+    }
+
+    .indices-constituent-table .stocks-symbol-main > span:last-child {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .indices-detail-view > .error-message {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+    }
+
+    .indices-detail-view > .error-message button {
+        margin-left: 0 !important;
     }
 
     .mobile-market-index-head,
@@ -2765,7 +3091,15 @@
         flex-direction: column;
     }
 
+    .mobile-market-watchlist-row-shell {
+        position: relative;
+        overflow: hidden;
+        background: color-mix(in srgb, var(--surface-color) 96%, var(--bg-color));
+    }
+
     .mobile-market-watchlist-row {
+        position: relative;
+        z-index: 1;
         display: grid;
         grid-template-columns: auto minmax(0, 1fr) auto auto;
         align-items: center;
@@ -2775,9 +3109,40 @@
         padding: 0.45rem 0.15rem;
         border: 0;
         border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 48%, transparent);
-        background: transparent;
+        background: color-mix(in srgb, var(--surface-color) 96%, var(--bg-color));
         color: var(--text-primary);
         text-align: left;
+        transform: translateX(0);
+        transition: transform 0.2s ease;
+        touch-action: pan-y;
+    }
+
+    .mobile-market-watchlist-row-shell.is-swiped .mobile-market-watchlist-row {
+        transform: translateX(-68px);
+    }
+
+    .mobile-market-watchlist-delete {
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        display: grid;
+        place-items: center;
+        width: 68px;
+        padding: 0;
+        border: 0;
+        background: var(--danger-color);
+        color: #fff;
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+        transition: opacity 0.2s ease, visibility 0.2s ease;
+    }
+
+    .mobile-market-watchlist-row-shell.is-swiped .mobile-market-watchlist-delete {
+        opacity: 1;
+        visibility: visible;
+        pointer-events: auto;
     }
 
     .mobile-market-watchlist-symbol {
@@ -2831,6 +3196,105 @@
         line-height: 1.45;
     }
 
+    .mobile-market-watchlist-search-area {
+        margin-top: 0.75rem;
+    }
+
+    .mobile-market-watchlist-search {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        min-height: 46px;
+        padding: 0 0.7rem;
+        border: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
+        border-radius: 12px;
+        background: var(--bg-color);
+        color: var(--text-secondary);
+    }
+
+    .mobile-market-watchlist-search input {
+        flex: 1;
+        min-width: 0;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--text-primary);
+        font: inherit;
+        font-size: 0.82rem;
+    }
+
+    .mobile-market-watchlist-search input::placeholder {
+        color: var(--text-secondary);
+    }
+
+    .mobile-market-watchlist-search input[type='search']::-webkit-search-cancel-button,
+    .mobile-market-watchlist-search input[type='search']::-webkit-search-decoration {
+        display: none;
+        -webkit-appearance: none;
+        appearance: none;
+    }
+
+    .mobile-market-watchlist-search input[type='search']::-ms-clear {
+        display: none;
+    }
+
+    .mobile-market-watchlist-search > button {
+        display: grid;
+        place-items: center;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--text-secondary);
+    }
+
+    .mobile-market-watchlist-search-results {
+        display: flex;
+        flex-direction: column;
+        margin-top: 0.45rem;
+        overflow: hidden;
+        border: 1px solid color-mix(in srgb, var(--surface-border) 62%, transparent);
+        border-radius: 12px;
+        background: var(--bg-color);
+    }
+
+    .mobile-market-watchlist-search-results button {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        min-height: 48px;
+        padding: 0.4rem 0.65rem;
+        border: 0;
+        border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 42%, transparent);
+        background: transparent;
+        color: var(--text-primary);
+        text-align: left;
+    }
+
+    .mobile-market-watchlist-search-results button:last-child {
+        border-bottom: 0;
+    }
+
+    .mobile-market-watchlist-search-results button strong {
+        flex: 1;
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+    }
+
+    .mobile-market-watchlist-search-results button span {
+        color: var(--accent-color);
+        font-size: 0.74rem;
+        font-weight: 800;
+    }
+
+    .mobile-market-watchlist-search-empty {
+        padding: 0.75rem;
+        color: var(--text-secondary);
+        font-size: 0.78rem;
+    }
+
     .mobile-market-watchlist-add {
         display: inline-flex;
         align-items: center;
@@ -2845,6 +3309,11 @@
         color: var(--text-primary);
         font: inherit;
         font-weight: 900;
+    }
+
+    .mobile-market-watchlist-add:disabled {
+        cursor: not-allowed;
+        opacity: 0.58;
     }
 
     .mobile-market-overview + .stock-cards-panel {

@@ -359,6 +359,7 @@
 @media (max-width: 640px) {
     .stock-detail-page {
         padding: 0.75rem 0.75rem 1.25rem;
+        overflow-x: hidden;
     }
 
     .stock-market-breadcrumb {
