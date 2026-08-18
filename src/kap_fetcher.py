@@ -25,7 +25,7 @@ ATTACHMENT_DETAIL_ENDPOINT = "notification/attachment-detail"
 PDF_ENDPOINT = "BildirimPdf"
 DISCLOSURE_MEMBERS_BY_CRITERIA_ENDPOINT = "disclosure/members/byCriteria"
 FILE_DOWNLOAD_ENDPOINT = "file/download"
-KAP_CACHE_SCHEMA_VERSION = 14
+KAP_CACHE_SCHEMA_VERSION = 15
 KAP_LIVE_DISCLOSURE_CHECK_TTL_HOURS = 24.0
 KAP_INSURANCE_PREMIUM_CHECK_TTL_HOURS = 24.0
 
@@ -1541,13 +1541,38 @@ def _pick_metric_value(
     filtered: List[Dict[str, Any]] = []
 
     if metric_key == "net_kar":
-        explicit_net_rows = [
-            row
-            for row in rows
-            if "net donem kari veya zarari" in str(row.get("label_norm", ""))
+        # Consolidated KAP statements expose both the total consolidated net
+        # profit ("Net Dönem Karı veya Zararı") and the profit attributable to
+        # the parent ("Ana Ortaklık Payları").  The latter is the comparable
+        # net income used by market data screens.  Some reports repeat the
+        # parent-profit row in the comprehensive-income section; preserve the
+        # first occurrence for each column because it belongs to the income
+        # statement.  Previously the explicit total row won first, which made
+        # comparative YTD values wrong for companies such as BIMAS.
+        parent_rows = [
+            (index, row)
+            for index, row in enumerate(rows)
+            if "ana ortaklik paylari" in str(row.get("label_norm", ""))
+            and "kontrol gucu olmayan paylar" not in str(row.get("label_norm", ""))
         ]
-        if explicit_net_rows:
-            filtered = explicit_net_rows
+        if parent_rows:
+            first_parent_by_column: Dict[int, int] = {}
+            for index, row in parent_rows:
+                col_order = int(row.get("col_order", -1))
+                first_parent_by_column.setdefault(col_order, index)
+            filtered = [
+                row
+                for index, row in parent_rows
+                if first_parent_by_column.get(int(row.get("col_order", -1))) == index
+            ]
+        else:
+            explicit_net_rows = [
+                row
+                for row in rows
+                if "net donem kari veya zarari" in str(row.get("label_norm", ""))
+            ]
+            if explicit_net_rows:
+                filtered = explicit_net_rows
 
     for row in rows:
         label_norm = str(row.get("label_norm", ""))

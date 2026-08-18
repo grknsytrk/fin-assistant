@@ -1084,6 +1084,71 @@ def test_net_kar_prefers_parent_or_net_profit_rows() -> None:
     assert picked == 22_001_000_000.0
 
 
+def test_net_kar_uses_income_statement_parent_profit_for_comparative_ytd() -> None:
+    rows = [
+        {
+            "label_norm": "net donem kari veya zarari",
+            "body_index": 0,
+            "col_order": 4,
+            "value": 14_934_476_000.0,
+        },
+        {
+            "label_norm": "net donem kari veya zarari",
+            "body_index": 0,
+            "col_order": 5,
+            "value": 21_940_282_000.0,
+        },
+        # Income statement parent-profit row.
+        {
+            "label_norm": "ana ortaklik paylari",
+            "body_index": 1,
+            "col_order": 4,
+            "value": 14_934_476_000.0,
+        },
+        {
+            "label_norm": "ana ortaklik paylari",
+            "body_index": 1,
+            "col_order": 5,
+            "value": 7_346_117_000.0,
+        },
+        # The same label is repeated in comprehensive income and must not win
+        # merely because its absolute value is larger.
+        {
+            "label_norm": "ana ortaklik paylari",
+            "body_index": 1,
+            "col_order": 4,
+            "value": 14_614_766_000.0,
+        },
+        {
+            "label_norm": "ana ortaklik paylari",
+            "body_index": 1,
+            "col_order": 5,
+            "value": 8_077_415_000.0,
+        },
+    ]
+
+    assert (
+        _pick_metric_value(
+            "net_kar",
+            rows,
+            period=2,
+            prefer_income_statement_ytd=True,
+            comparison_mode="current",
+        )
+        == 14_934_476_000.0
+    )
+    assert (
+        _pick_metric_value(
+            "net_kar",
+            rows,
+            period=2,
+            prefer_income_statement_ytd=True,
+            comparison_mode="comparative",
+        )
+        == 7_346_117_000.0
+    )
+
+
 def test_net_kar_falls_back_when_only_continued_operations_exists() -> None:
     rows = [
         {
