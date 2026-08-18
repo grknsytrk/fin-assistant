@@ -550,7 +550,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
                     : activeTab === 'xu100'
                       ? Boolean((xu100Payload?.rows?.length || xu100Rows.length) > 0)
                       : Boolean(xu030Payload?.rows?.length);
-            loadStockTab(activeTab, { silent: hasCurrentRows, refresh: true });
+            loadStockTab(activeTab, { silent: hasCurrentRows, refresh: false });
         }
     }, [
         activeTab,
@@ -581,7 +581,7 @@ export default function MarketWatchRail({ xu100Rows, onSelectTicker, onSelectFun
             } else if (activeTab === 'fx') {
                 loadFxRows({ silent: true });
             } else if (activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030') {
-                loadStockTab(activeTab, { silent: true, refresh: true });
+                loadStockTab(activeTab, { silent: true, refresh: false });
             }
         }, LIVE_RAIL_REFRESH_MS);
         return () => window.clearInterval(timer);

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 if not ((3, 10) <= sys.version_info[:2] < (3, 13)):
@@ -181,6 +182,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# The fund catalogue contains every visible TEFAS fund and is intentionally
+# returned in one response for client-side filtering.  Compressing responses
+# keeps that catalogue cheap to transfer without changing its API contract.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 class MarketComparisonHistoryAsset(BaseModel):
@@ -3301,6 +3307,9 @@ _STOCKS_CACHE_TTL = 3
 _MARKET_STOCK_CARD_CHART_CACHE: Dict[str, Any] = {}
 _MARKET_STOCK_CARD_CHART_CACHE_TTL = 45
 _MARKET_STOCK_CARD_LIMIT = 12
+_MARKET_STOCK_CARDS_RESPONSE_CACHE_TTL = int(
+    os.getenv("RAGFIN_MARKET_STOCK_CARDS_RESPONSE_CACHE_TTL_SECONDS", "5")
+)
 _MARKET_STOCK_CARD_PREVIOUS_SESSION_LOOKBACK_DAYS = 10
 _STOCK_CARD_VALUATION_CACHE: Dict[str, Any] = {}
 _STOCK_CARD_VALUATION_CACHE_TTL = int(os.getenv("RAGFIN_STOCK_CARD_VALUATION_CACHE_TTL_SECONDS", str(6 * 60 * 60)))
@@ -4398,6 +4407,11 @@ def _fetch_stock_card_intraday(symbol: str, *, force_refresh: bool = False) -> D
     return dict(fallback)
 
 
+def _stock_cards_response_cache_key(symbols: List[str]) -> str:
+    normalized = ",".join(sorted(symbols))
+    return f"api:market:stock-cards:symbols={normalized}:v1"
+
+
 def _first_not_none(*values: Any) -> Any:
     for value in values:
         if value is not None:
@@ -4666,6 +4680,12 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
             "as_of": datetime.now(timezone.utc).isoformat(),
         }
 
+    response_cache_key = _stock_cards_response_cache_key(normalized_symbols)
+    if not force_refresh:
+        shared_cached = _shared_cache_get_dict(response_cache_key)
+        if shared_cached is not None:
+            return dict(shared_cached)
+
     cache_dir = CONFIG.paths.processed_dir / "kap_cache"
     price_map = _fetch_market_price_map(normalized_symbols)
     basic_summary_map = _fetch_isyatirim_basic_summary_map()
@@ -4731,11 +4751,17 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
         }
         items.append(item)
 
-    return {
+    data = {
         "items": items,
         "source": "infoyatirim_yahoo_chart",
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
+    _shared_cache_set(
+        response_cache_key,
+        data,
+        ttl_seconds=_MARKET_STOCK_CARDS_RESPONSE_CACHE_TTL,
+    )
+    return data
 
 
 def _strip_html_cell(raw: str) -> str:
@@ -6526,6 +6552,7 @@ _WATCH_COMMODITY_LABELS: Dict[str, str] = {
     "GUMUS": "Gümüş (Ons)",
     "DOGALGAZ": "Doğal Gaz",
 }
+_WATCH_RESPONSE_CACHE_KEY = "api:market:watch:v1"
 
 
 def _empty_watch_item(
@@ -6682,6 +6709,11 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
     cached = _WATCH_CACHE.get("payload")
     if cached and not force_refresh and now - cached.get("_ts", 0) < _WATCH_CACHE_TTL:
         return cached["data"]
+    if not force_refresh:
+        shared_cached = _shared_cache_get_dict(_WATCH_RESPONSE_CACHE_KEY)
+        if shared_cached is not None:
+            _WATCH_CACHE["payload"] = {"_ts": now, "data": shared_cached}
+            return dict(shared_cached)
 
     fx_payload = _market_fx_payload()
     commodity_payload = _market_commodities_payload()
@@ -6712,6 +6744,7 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
     _WATCH_CACHE["payload"] = {"_ts": now, "data": data}
+    _shared_cache_set(_WATCH_RESPONSE_CACHE_KEY, data, ttl_seconds=_WATCH_CACHE_TTL)
     return data
 
 

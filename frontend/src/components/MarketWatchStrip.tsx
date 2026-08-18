@@ -7,6 +7,7 @@ import './MarketWatchStrip.css';
 const PRIMARY_SYMBOLS = ['XUTUM', 'XU100', 'XU030', 'USD/TRY', 'EUR/TRY'] as const;
 const COMMODITY_SYMBOLS = ['BRENT', 'ALTIN', 'GUMUS', 'DOGALGAZ'] as const;
 const DEFAULT_DELAY_NOTE = 'Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).';
+let marketWatchMemoryCache: MarketWatchResponse | null = null;
 
 const FALLBACK_LABELS: Record<string, string> = {
     XUTUM: 'BIST Tüm',
@@ -140,8 +141,8 @@ interface MarketWatchStripProps {
 }
 
 export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStripProps) {
-    const [payload, setPayload] = useState<MarketWatchResponse | null>(null);
-    const [loading, setLoading] = useState(true);
+    const [payload, setPayload] = useState<MarketWatchResponse | null>(() => marketWatchMemoryCache);
+    const [loading, setLoading] = useState(() => !marketWatchMemoryCache);
     const [error, setError] = useState<string | null>(null);
     const inFlightRef = useRef(false);
 
@@ -155,6 +156,7 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
         }
         try {
             const response = await apiClient.marketWatch({ refresh: options?.refresh });
+            marketWatchMemoryCache = response;
             setPayload(response);
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'Borsa izleme verisi alınamadı.';
@@ -166,7 +168,7 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
     }, []);
 
     useEffect(() => {
-        void loadWatch();
+        void loadWatch(marketWatchMemoryCache ? { silent: true } : undefined);
         const timer = window.setInterval(() => {
             if (document.visibilityState === 'visible') {
                 void loadWatch({ silent: true });

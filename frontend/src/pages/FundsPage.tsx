@@ -523,6 +523,53 @@ function shouldRefreshSnapshot(payload: FundsResponse | null): boolean {
     );
 }
 
+type FundsCatalogPayload = {
+    funds: FundsResponse;
+    categories: FundCategoriesResponse;
+};
+
+type FundsCatalogMemoryCache = FundsCatalogPayload & { fetchedAt: number };
+
+const FUNDS_CATALOG_MEMORY_TTL_MS = 5 * 60 * 1000;
+let fundsCatalogMemoryCache: FundsCatalogMemoryCache | null = null;
+let fundsCatalogInFlight: Promise<FundsCatalogPayload> | null = null;
+
+async function fetchFundsCatalog(options: { refreshSnapshot?: boolean } = {}): Promise<FundsCatalogPayload> {
+    const refreshSnapshot = Boolean(options.refreshSnapshot);
+    const now = Date.now();
+    if (!refreshSnapshot && fundsCatalogMemoryCache && now - fundsCatalogMemoryCache.fetchedAt < FUNDS_CATALOG_MEMORY_TTL_MS) {
+        return {
+            funds: fundsCatalogMemoryCache.funds,
+            categories: fundsCatalogMemoryCache.categories,
+        };
+    }
+    if (!refreshSnapshot && fundsCatalogInFlight) return fundsCatalogInFlight;
+
+    const task = (async () => {
+        if (refreshSnapshot) {
+            await apiClient.refreshFundsSnapshot();
+        }
+
+        let fundPayload = await apiClient.funds();
+        if (!refreshSnapshot && shouldRefreshSnapshot(fundPayload)) {
+            await apiClient.refreshFundsSnapshot();
+            fundPayload = await apiClient.funds();
+        }
+        const categoryPayload = await apiClient.fundCategories();
+        const result = { funds: fundPayload, categories: categoryPayload };
+        fundsCatalogMemoryCache = { ...result, fetchedAt: Date.now() };
+        return result;
+    })();
+
+    if (!refreshSnapshot) {
+        fundsCatalogInFlight = task;
+        task.finally(() => {
+            if (fundsCatalogInFlight === task) fundsCatalogInFlight = null;
+        }).catch(() => undefined);
+    }
+    return task;
+}
+
 function compareFundRows(a: FundSummary, b: FundSummary, key: FundSortKey, order: 'asc' | 'desc'): number {
     const av = a[key];
     const bv = b[key];
@@ -5070,7 +5117,6 @@ export default function FundsPage({
     const mountedRef = useRef(false);
     const holdingsRef = useRef<FundHoldingsResponse | null>(null);
     const activeFundCodeRef = useRef('');
-    const autoRefreshAttemptedRef = useRef(false);
     const allocationRefreshAttemptedRef = useRef(new Set<string>());
     const comparisonPanelRef = useRef<HTMLDivElement | null>(null);
     const fundsPageRef = useRef<HTMLDivElement | null>(null);
@@ -5109,12 +5155,11 @@ export default function FundsPage({
         setRefreshing(true);
         setRefreshError(null);
         try {
-            // The refresh endpoint mutates the snapshot.  Always read the
-            // canonical list response afterwards so manual and initial loads
-            // use exactly the same filtering and metadata contract.
-            await apiClient.refreshFundsSnapshot();
-            const fundPayload = await apiClient.funds();
-            const categoryPayload = await apiClient.fundCategories();
+            // Always read the canonical list response after a refresh so
+            // manual and initial loads share the same data contract.
+            const { funds: fundPayload, categories: categoryPayload } = await fetchFundsCatalog({
+                refreshSnapshot: true,
+            });
             if (!mountedRef.current) return;
             setFunds(fundPayload);
             setCategories(categoryPayload);
@@ -5182,21 +5227,20 @@ export default function FundsPage({
         let alive = true;
         setError(null);
         setRefreshError(null);
-        setLoading(true);
+
+        const cachedCatalog = fundsCatalogMemoryCache;
+        const hasUsableCachedCatalog = Boolean(cachedCatalog && !shouldRefreshSnapshot(cachedCatalog.funds));
+        if (hasUsableCachedCatalog && cachedCatalog) {
+            setFunds(cachedCatalog.funds);
+            setCategories(cachedCatalog.categories);
+            setLoading(false);
+        } else {
+            setLoading(true);
+        }
 
         const loadInitialCatalog = async () => {
             try {
-                let fundPayload = await apiClient.funds();
-                let categoryPayload: FundCategoriesResponse;
-                if (shouldRefreshSnapshot(fundPayload) && !autoRefreshAttemptedRef.current) {
-                    autoRefreshAttemptedRef.current = true;
-                    const refreshed = await refreshSnapshot({ rethrow: true });
-                    if (!refreshed) return;
-                    fundPayload = refreshed.fundPayload;
-                    categoryPayload = refreshed.categoryPayload;
-                } else {
-                    categoryPayload = await apiClient.fundCategories();
-                }
+                const { funds: fundPayload, categories: categoryPayload } = await fetchFundsCatalog();
                 if (!alive) return;
                 setFunds(fundPayload);
                 setCategories(categoryPayload);
@@ -5204,15 +5248,20 @@ export default function FundsPage({
                 if (!alive) return;
                 setError(err instanceof Error ? err.message : 'Fon listesi alınamadı.');
             } finally {
-                if (alive) setLoading(false);
+                if (alive && !hasUsableCachedCatalog) setLoading(false);
             }
         };
 
-        void loadInitialCatalog();
+        const cacheIsFresh = Boolean(
+            cachedCatalog && Date.now() - cachedCatalog.fetchedAt < FUNDS_CATALOG_MEMORY_TTL_MS,
+        );
+        if (!cacheIsFresh || !hasUsableCachedCatalog) {
+            void loadInitialCatalog();
+        }
         return () => {
             alive = false;
         };
-    }, [refreshSnapshot]);
+    }, []);
 
     useEffect(() => {
         activeFundCodeRef.current = fundCode?.trim().toUpperCase() || '';

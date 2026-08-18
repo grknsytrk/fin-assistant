@@ -383,6 +383,19 @@ function readStoredStockCards(): string[] {
     }
 }
 
+type MarketUniverseMemoryCache = { data: MarketUniverseResponse; fetchedAt: number };
+type MarketStockCardsMemoryCache = { data: MarketStockCardsResponse; fetchedAt: number };
+
+// Keep the last visible market data while the user changes sections.  The
+// backend still refreshes in the background, so this is a stale-while-
+// revalidate UX cache rather than a replacement for server-side freshness.
+let marketUniverseMemoryCache: MarketUniverseMemoryCache | null = null;
+const marketStockCardsMemoryCache = new Map<string, MarketStockCardsMemoryCache>();
+
+function stockCardsMemoryKey(symbols: string[]): string {
+    return symbols.join(',');
+}
+
 function getTableChangeClass(value: number | null): string {
     if (value == null || value === 0) return 'stocks-flat';
     return value > 0 ? 'stocks-up' : 'stocks-down';
@@ -1888,11 +1901,11 @@ export default function MarketsView({
     onOpenTicker,
     onOpenFund,
 }: MarketsViewProps) {
-    const [market, setMarket] = useState<MarketUniverseResponse | null>(null);
+    const [market, setMarket] = useState<MarketUniverseResponse | null>(() => marketUniverseMemoryCache?.data || null);
     const [stocks, setStocks] = useState<MarketStocksResponse | null>(null);
     const [indices, setIndices] = useState<MarketIndicesResponse | null>(null);
     const [indexDetail, setIndexDetail] = useState<MarketIndexDetailResponse | null>(null);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(() => !marketUniverseMemoryCache);
     const [error, setError] = useState<string | null>(null);
     const [stocksLoading, setStocksLoading] = useState(false);
     const [stocksError, setStocksError] = useState<string | null>(null);
@@ -1909,7 +1922,10 @@ export default function MarketsView({
     const [returnMode, setReturnMode] = useState<StockReturnMode>(routeReturnMode);
     const [terminalNow, setTerminalNow] = useState(() => new Date());
     const [stockCardSymbols, setStockCardSymbols] = useState<string[]>(readStoredStockCards);
-    const [stockCards, setStockCards] = useState<MarketStockCardsResponse | null>(null);
+    const [stockCards, setStockCards] = useState<MarketStockCardsResponse | null>(() => {
+        const symbols = readStoredStockCards();
+        return marketStockCardsMemoryCache.get(stockCardsMemoryKey(symbols))?.data || null;
+    });
     const [stockCardsLoading, setStockCardsLoading] = useState(false);
     const [stockCardsError, setStockCardsError] = useState<string | null>(null);
     const [stockCardPendingSymbols, setStockCardPendingSymbols] = useState<string[]>(() => [...readStoredStockCards()]);
@@ -2052,9 +2068,9 @@ export default function MarketsView({
         if (activeSection !== 'stocks') return;
         setStocks(null);
         setStocksError(null);
-        loadStocks(false, true, stockIndex);
+        loadStocks(false, false, stockIndex);
         const intervalId = window.setInterval(() => {
-            loadStocks(true, true, stockIndex);
+            loadStocks(true, false, stockIndex);
         }, LIVE_MARKET_REFRESH_MS);
         return () => window.clearInterval(intervalId);
     }, [activeSection, stockIndex]);
@@ -2068,7 +2084,17 @@ export default function MarketsView({
             setStockCardPendingSymbols([]);
             return;
         }
-        loadStockCards(false, true, stockCardSymbols);
+        const cacheKey = stockCardsMemoryKey(stockCardSymbols);
+        const cached = marketStockCardsMemoryCache.get(cacheKey);
+        if (cached) {
+            setStockCards(cached.data);
+            setStockCardPendingSymbols((previous) => previous.filter(
+                (symbol) => !(cached.data.items || []).some((item) => item.symbol === symbol),
+            ));
+        } else {
+            setStockCards(null);
+        }
+        loadStockCards(Boolean(cached), false, stockCardSymbols);
         const intervalId = window.setInterval(() => {
             loadStockCards(true, false, stockCardSymbols);
         }, LIVE_MARKET_REFRESH_MS);
@@ -2077,9 +2103,9 @@ export default function MarketsView({
 
     useEffect(() => {
         if (activeSection !== 'indices') return;
-        loadIndices(false, true);
+        loadIndices(false, false);
         const intervalId = window.setInterval(() => {
-            loadIndices(true, true);
+            loadIndices(true, false);
         }, LIVE_MARKET_REFRESH_MS);
         return () => window.clearInterval(intervalId);
     }, [activeSection]);
@@ -2088,18 +2114,21 @@ export default function MarketsView({
         if (activeSection !== 'indices' || !selectedIndex) return;
         setIndexDetail(null);
         setIndexDetailError(null);
-        loadIndexDetail(false, true, selectedIndex);
+        loadIndexDetail(false, false, selectedIndex);
         const intervalId = window.setInterval(() => {
-            loadIndexDetail(true, true, selectedIndex);
+            loadIndexDetail(true, false, selectedIndex);
         }, LIVE_MARKET_REFRESH_MS);
         return () => window.clearInterval(intervalId);
     }, [activeSection, selectedIndex]);
 
     async function loadStats(silent = false) {
-        if (!silent) setLoading(true);
+        const cached = marketUniverseMemoryCache?.data;
+        if (cached) setMarket(cached);
+        if (!silent) setLoading(!cached);
         if (!silent) setError(null);
         try {
             const marketPayload = await apiClient.marketUniverse();
+            marketUniverseMemoryCache = { data: marketPayload, fetchedAt: Date.now() };
             setMarket(marketPayload);
         } catch (err: any) {
             if (!silent) setError(err.message || 'Veriler yüklenemedi.');
@@ -2142,6 +2171,7 @@ export default function MarketsView({
         try {
             const payload = await apiClient.marketStockCards({ symbols: requestedSymbols, refresh });
             if (latestStockCardSymbolsRef.current !== requestedKey) return;
+            marketStockCardsMemoryCache.set(requestedKey, { data: payload, fetchedAt: Date.now() });
             setStockCards(payload);
             setStockCardsError(null);
             const readySymbols = new Set(
