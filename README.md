@@ -21,6 +21,27 @@ Uygulama yapılandırılmış veri akışlarıyla çalışır:
 
 PDF ingest/indexleme, ChromaDB, sentence-transformers ve doğal dil rapor soru-cevap katmanı bu projede bulunmaz.
 
+## Canlı mimari
+
+Canlı ortamda frontend ve backend ayrı servisler olarak çalışır:
+
+```text
+Tarayıcı
+   │
+   ├── Cloudflare Worker (React/Vite statik frontend)
+   │       └── HF Space üzerinde çalışan FastAPI backend
+   │               ├── Supabase PostgreSQL (kalıcı veri)
+   │               ├── Upstash Redis (paylaşımlı cache ve distributed lock)
+   │               └── TEFAS / KAP / piyasa veri kaynakları
+```
+
+Canlı adresler:
+
+- Frontend: <https://fin-assistant.soyturkgurkan-61.workers.dev>
+- Backend: <https://grknsytrk-fin-api.hf.space>
+
+Frontend, `VITE_API_BASE_URL` üzerinden backend adresine bağlanır. Redis yalnızca cache ve kilitleme amacıyla kullanılır; kalıcı veri kaynağı Supabase'tir. Redis kullanılamazsa backend memory cache'e düşebilir.
+
 ## Çalıştırma
 
 Geliştirme ortamını hazırlayıp React ve FastAPI servislerini birlikte başlatmak için:
@@ -44,6 +65,28 @@ cd frontend
 npm install
 npm run build
 ```
+
+## Deploy
+
+Frontend Cloudflare Worker'a, backend ise Hugging Face Spaces'e deploy edilir. Cloudflare build ayarı:
+
+```text
+npm --prefix frontend ci && npm --prefix frontend run build && npx wrangler deploy
+```
+
+Backend Space güncellenirken yalnızca uygulama dosyaları ve bağımlılıklar yüklenir; runtime SQLite, WAL/SHM, cache ve log dosyaları deploy edilmez.
+
+Canlı servislerde gizli değişkenler platformların secret/variable alanlarında tutulmalıdır:
+
+- Hugging Face: `RAGFIN_DATABASE_URL`, `RAGFIN_REDIS_URL` ve KAP/API anahtarları secret olarak.
+- Hugging Face: `RAGFIN_CACHE_BACKEND=redis` variable olarak.
+- Cloudflare: `VITE_API_BASE_URL` build variable olarak.
+
+Redis bağlantı URL'si, Supabase database şifresi ve API token'ları GitHub'a, frontend bundle'ına veya README'ye yazılmamalıdır.
+
+## Performans ve cache
+
+Fon, KAP ve piyasa endpoint'lerinde önce mevcut cache okunur; pahalı dış kaynak yenilemeleri cache miss durumunda yapılır. Upstash Redis kullanıldığında birden fazla backend instance'ı aynı cache'i paylaşır ve aynı verinin eşzamanlı olarak tekrar çekilmesi önlenir. Frontend tarafında da sayfa geçişlerinde tekrar istekleri azaltan cache-first/stale-while-revalidate akışı kullanılır.
 
 ## API yüzeyi
 
