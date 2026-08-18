@@ -1286,7 +1286,7 @@ def funds(
 
 @_cached_response(
     key_fn=lambda *, q, fund_type, founder, manager, risk, sort, order: (
-        "api:funds:"
+        "api:funds:v2:"
         f"q={q or ''}|type={fund_type or ''}|founder={founder or ''}|manager={manager or ''}"
         f"|risk={risk or ''}|sort={sort}|order={order}"
     ),
@@ -1313,7 +1313,10 @@ def _funds_listing_payload(
         risk=risk,
         sort=sort,
         order=order,
-        auto_refresh=True,
+        # Keep the catalog read fast.  A cold/empty snapshot is recovered by
+        # the explicit refresh flow so the ordinary list request cannot spend
+        # its whole frontend timeout inside TEFAS.
+        auto_refresh=False,
     )
 
 
@@ -1351,7 +1354,7 @@ def funds_categories() -> Dict[str, Any]:
     return _funds_categories_payload()
 
 
-@_cached_response(key_fn=lambda: "api:funds-categories", ttl_seconds=300)
+@_cached_response(key_fn=lambda: "api:funds-categories:v2", ttl_seconds=300)
 def _funds_categories_payload() -> Dict[str, Any]:
     from app.fund_service import get_fund_categories_payload
 
@@ -2384,14 +2387,22 @@ def _fund_detail_payload(*, normalized: str) -> Dict[str, Any]:
 
 @app.post("/admin/funds/refresh-snapshot")
 def admin_refresh_funds_snapshot(lookback_days: int = Query(10, ge=1, le=45)) -> Dict[str, Any]:
-    from app.fund_service import FundUpstreamError, refresh_funds_snapshot
+    from app.fund_service import FundUpstreamError, get_funds_payload, refresh_funds_snapshot
 
     try:
-        result = refresh_funds_snapshot(CONFIG.paths.processed_dir, lookback_days=lookback_days)
+        refresh_funds_snapshot(CONFIG.paths.processed_dir, lookback_days=lookback_days)
     except FundUpstreamError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     _invalidate_fund_response_cache()
-    return result
+    # Keep the admin refresh contract identical to GET /funds.  The raw
+    # snapshot is an internal storage shape and must not bypass list filters
+    # or metadata normalization in clients.
+    return get_funds_payload(
+        CONFIG.paths.processed_dir,
+        sort="fund_code",
+        order="asc",
+        auto_refresh=False,
+    )
 
 
 def _invalidate_fund_response_cache() -> None:
@@ -2414,6 +2425,10 @@ def _invalidate_fund_response_cache() -> None:
             continue
     try:
         backend.delete("api:funds-categories")
+    except Exception:
+        pass
+    try:
+        backend.delete("api:funds-categories:v2")
     except Exception:
         pass
 

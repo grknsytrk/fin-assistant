@@ -1,23 +1,8 @@
 import type { KapQuarter } from '../../../api/types';
 import { 
     _resolveMetricValue, _resolveMetricDisplay, intSafe, _periodLabel,
-    FLOW_METRICS, INVERSE_METRICS
+    FLOW_METRICS, INVERSE_METRICS, KAP_FINANCIAL_TABLE_KEYS
 } from '../../../utils/formatters';
-
-const TABLE_KEYS = [
-    'net_kar',
-    'satis_gelirleri',
-    'brut_kar',
-    'favok',
-    'ozkaynaklar',
-    'donen_varliklar',
-    'kisa_vadeli_yukumlulukler',
-    'toplam_varliklar',
-    'finansal_borclar',
-    'net_borc',
-    'faaliyet_nakit_akisi',
-    'serbest_nakit_akisi',
-];
 
 export default function StockFinancials({
     quarters,
@@ -46,7 +31,7 @@ export default function StockFinancials({
                             </tr>
                         </thead>
                         <tbody>
-                            {TABLE_KEYS.map((key) => {
+                            {KAP_FINANCIAL_TABLE_KEYS.map((key) => {
                                 const asQuarterlyFlow = FLOW_METRICS.has(key);
                                 const hasAny = quarters.some(
                                     (_, idx) => _resolveMetricValue(quarters, idx, key, asQuarterlyFlow) !== null,

@@ -907,6 +907,7 @@ export interface KapSnapshotResponse {
   company: string;
   company_title: string;
   stock_code: string;
+  company_kind?: 'generic' | 'bank' | 'insurance';
   fetched_at: string;
   cache_hit: boolean;
   cache_stale?: boolean;

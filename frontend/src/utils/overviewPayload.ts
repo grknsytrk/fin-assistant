@@ -15,8 +15,9 @@ import {
     _pctText,
     intSafe,
     _periodLabel,
-    BANK_TICKERS,
     FLOW_METRICS,
+    classifyKapCompanyKind,
+    type CompanyKind,
 } from './formatters';
 
 export type OverviewSummaryConfigRow = {
@@ -85,6 +86,7 @@ export const DEFAULT_BALANCE_SUMMARY_ROWS: OverviewSummaryConfigRow[] = [
     { key: 'donen_varliklar', label: 'Dönen Varlıklar' },
     { key: 'duran_varliklar', label: 'Duran Varlıklar' },
     { key: 'toplam_varliklar', label: 'Toplam Varlıklar' },
+    { key: 'nakit_ve_nakit_benzerleri', label: 'Nakit ve Nakit Benzerleri' },
     { key: 'finansal_borclar', label: 'Finansal Borçlar' },
     { key: 'net_borc', label: 'Net Borç' },
     { key: 'ozkaynaklar', label: 'Özkaynaklar' },
@@ -124,31 +126,20 @@ export const INSURANCE_BALANCE_SUMMARY_ROWS: OverviewSummaryConfigRow[] = [
 
 function companyKind(
     snapshot: KapSnapshotResponse,
-    quarters: KapQuarter[],
-): { isBankLike: boolean; isInsuranceLike: boolean; kind: OverviewAiHistoryContext['company_kind'] } {
-    const stockCodeNorm = (snapshot?.stock_code || '').toUpperCase();
-    const companyTitleNorm = (snapshot?.company_title || '').toUpperCase();
-    const hasAnyMetric = (metricKey: string, asQuarterlyFlow = FLOW_METRICS.has(metricKey)) =>
-        quarters.some((_, idx) => _resolveMetricValue(quarters, idx, metricKey, asQuarterlyFlow) !== null);
-
-    const isBankLike = BANK_TICKERS.has(stockCodeNorm) || companyTitleNorm.includes('BANK');
-    const isInsuranceLike =
-        !isBankLike &&
-        (companyTitleNorm.includes('SIGORTA') ||
-            hasAnyMetric('prim_uretimi', true) ||
-            hasAnyMetric('teknik_denge', true) ||
-            hasAnyMetric('esas_faaliyetlerden_alacaklar', false) ||
-            hasAnyMetric('teknik_karsiliklar', false));
+): { isBankLike: boolean; isInsuranceLike: boolean; kind: CompanyKind } {
+    const kind = classifyKapCompanyKind(snapshot);
+    const isBankLike = kind === 'bank';
+    const isInsuranceLike = kind === 'insurance';
 
     return {
         isBankLike,
         isInsuranceLike,
-        kind: isBankLike ? 'bank' : isInsuranceLike ? 'insurance' : 'generic',
+        kind,
     };
 }
 
-export function getOverviewSummaryRows(snapshot: KapSnapshotResponse, quarters: KapQuarter[]) {
-    const { isBankLike, isInsuranceLike } = companyKind(snapshot, quarters);
+export function getOverviewSummaryRows(snapshot: KapSnapshotResponse) {
+    const { isBankLike, isInsuranceLike } = companyKind(snapshot);
     return {
         incomeSummaryRows: isBankLike
             ? BANK_INCOME_SUMMARY_ROWS
@@ -167,7 +158,7 @@ export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters
     if (!quarters.length) return [];
     const window = windowQuarters ?? CHART_WINDOW_QUARTERS;
 
-    const { isBankLike, isInsuranceLike } = companyKind(snapshot, quarters);
+    const { isBankLike, isInsuranceLike } = companyKind(snapshot);
     let barCharts: OverviewChartGroup[];
 
     if (isBankLike) {
@@ -326,7 +317,7 @@ export function buildOverviewHistoryContext(
     snapshot: KapSnapshotResponse,
     quarters: KapQuarter[],
 ): OverviewAiHistoryContext {
-    const { kind } = companyKind(snapshot, quarters);
+    const { kind } = companyKind(snapshot);
     const historyRows: OverviewAiHistoryQuarter[] = [];
     const startIdx = Math.max(0, quarters.length - 12);
 
@@ -395,7 +386,7 @@ export function buildOverviewAiPayload(snapshot: KapSnapshotResponse, quarters: 
         )
         : -1;
     const prevYearSameQuarter = prevYearSameQuarterIdx >= 0 ? quarters[prevYearSameQuarterIdx] : null;
-    const { incomeSummaryRows, balanceSummaryRows } = getOverviewSummaryRows(snapshot, quarters);
+    const { incomeSummaryRows, balanceSummaryRows } = getOverviewSummaryRows(snapshot);
     const currentPeriod = latestQuarter ? _periodLabel(intSafe(latestQuarter.year), intSafe(latestQuarter.period), latestQuarter.quarter) : '';
     const incomeBasePeriod = prevYearSameQuarter
         ? _periodLabel(intSafe(prevYearSameQuarter.year), intSafe(prevYearSameQuarter.period), prevYearSameQuarter.quarter)

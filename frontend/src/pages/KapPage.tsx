@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, ChevronUp, ChevronDown } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { KapQuarter, KapSnapshotResponse } from '../api/types';
+import { classifyKapCompanyKind, KAP_FINANCIAL_TABLE_KEYS } from '../utils/formatters';
 import './KapPage.css';
 
 /* ── Yahoo Finance Price Ticker ── */
@@ -178,21 +179,6 @@ function MultiplesRow({ snapshot, quarters }: { snapshot: KapSnapshotResponse; q
     );
 }
 
-const TABLE_KEYS = [
-    'net_kar',
-    'satis_gelirleri',
-    'brut_kar',
-    'favok',
-    'ozkaynaklar',
-    'donen_varliklar',
-    'kisa_vadeli_yukumlulukler',
-    'toplam_varliklar',
-    'finansal_borclar',
-    'net_borc',
-    'faaliyet_nakit_akisi',
-    'serbest_nakit_akisi',
-];
-
 const DEFAULT_INCOME_SUMMARY_ROWS = [
     { key: 'satis_gelirleri', label: 'Satışlar' },
     { key: 'brut_kar', label: 'Brüt Kar' },
@@ -206,6 +192,7 @@ const DEFAULT_BALANCE_SUMMARY_ROWS = [
     { key: 'donen_varliklar', label: 'Dönen Varlıklar' },
     { key: 'duran_varliklar', label: 'Duran Varlıklar' },
     { key: 'toplam_varliklar', label: 'Toplam Varlıklar' },
+    { key: 'nakit_ve_nakit_benzerleri', label: 'Nakit ve Nakit Benzerleri' },
     { key: 'finansal_borclar', label: 'Finansal Borçlar' },
     { key: 'net_borc', label: 'Net Borç' },
     { key: 'ozkaynaklar', label: 'Özkaynaklar' },
@@ -243,8 +230,6 @@ const INSURANCE_BALANCE_SUMMARY_ROWS = [
     { key: 'ozkaynaklar', label: 'Özkaynaklar' },
 ];
 
-const BANK_TICKERS = new Set(['AKBNK', 'GARAN', 'HALKB', 'ISCTR', 'TSKB', 'VAKBN', 'YKBNK']);
-
 const FLOW_METRICS = new Set([
     'satis_gelirleri',
     'brut_kar',
@@ -258,6 +243,7 @@ const FLOW_METRICS = new Set([
     'net_ucret_komisyon_gelirleri',
     'net_faaliyet_kari',
     'esas_faaliyet_kari',
+    'amortisman_itfa_gideri',
     'prim_uretimi',
     'alinan_net_primler',
     'teknik_gelirler',
@@ -1042,23 +1028,9 @@ export default function KapPage() {
         : -1;
     const prevYearSameQuarter = prevYearSameQuarterIdx >= 0 ? orderedQuarters[prevYearSameQuarterIdx] : null;
 
-    const stockCodeNorm = _normText(snapshot?.stock_code || selectedCompany);
-    const companyTitleNorm = _normText(snapshot?.company_title || '');
-    const hasAnyMetric = (metricKey: string, asQuarterlyFlow = FLOW_METRICS.has(metricKey)) =>
-        orderedQuarters.some((_, idx) => _resolveMetricValue(orderedQuarters, idx, metricKey, asQuarterlyFlow) !== null);
-
-    const isBankByIdentity = BANK_TICKERS.has(stockCodeNorm) || companyTitleNorm.includes('BANK');
-    // Bank profile must be identity-based. Heuristic detection misclassifies
-    // industrial companies (e.g. CCOLA) due to generic finance rows.
-    const isBankLike = isBankByIdentity;
-
-    const isInsuranceLike =
-        !isBankLike &&
-        (companyTitleNorm.includes('SIGORTA') ||
-            hasAnyMetric('prim_uretimi', true) ||
-            hasAnyMetric('teknik_denge', true) ||
-            hasAnyMetric('esas_faaliyetlerden_alacaklar', false) ||
-            hasAnyMetric('teknik_karsiliklar', false));
+    const companyKind = classifyKapCompanyKind(snapshot || { company: selectedCompany });
+    const isBankLike = companyKind === 'bank';
+    const isInsuranceLike = companyKind === 'insurance';
 
     const incomeSummaryRows = isBankLike
         ? BANK_INCOME_SUMMARY_ROWS
@@ -1427,7 +1399,7 @@ export default function KapPage() {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {TABLE_KEYS.map((key) => {
+                                        {KAP_FINANCIAL_TABLE_KEYS.map((key) => {
                                             const asQuarterlyFlow = FLOW_METRICS.has(key);
                                             const hasAny = orderedQuarters.some(
                                                 (_, idx) => _resolveMetricValue(orderedQuarters, idx, key, asQuarterlyFlow) !== null,

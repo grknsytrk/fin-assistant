@@ -93,6 +93,90 @@ def test_tefas_client_history_does_not_daily_fanout_after_rate_limit(monkeypatch
         )
 
 
+def test_direct_tefas_adapter_fetches_all_supported_payload_families(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload):
+            self.content = json.dumps(payload).encode("utf-8")
+
+    class FakeHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def get(self, url, **kwargs):
+            calls.append(("GET", url, kwargs))
+            return FakeResponse({})
+
+        def post(self, url, **kwargs):
+            payload = kwargs["json"]
+            calls.append(("POST", url, payload))
+            if url.endswith("fonGnlBlgSiraliGetir"):
+                body = {
+                    "fonKodu": "TLY",
+                    "fonUnvan": "TERA PORTFÖY TEST FONU",
+                    "tarih": "2026-06-24",
+                    "fiyat": 3.17,
+                    "portfoyBuyukluk": 100.0,
+                }
+            elif url.endswith("fonGetiriBazliBilgiGetir"):
+                body = {"fonKodu": "TLY", "getiri1h": "1,25", "getiriOrani": "1,25"}
+            elif url.endswith("fonYonetimBazliBilgiGetir"):
+                body = {"fonKodu": "TLY", "uygulananYu1Y": "2,10", "fonTopGiderKesoran": "2,40"}
+            elif url.endswith("dagilimSiraliGetirT"):
+                body = {"fonKodu": "TLY", "tarih": "2026-06-24", "hs": 42.0}
+            else:
+                raise AssertionError(f"unexpected endpoint: {url}")
+            return FakeResponse({"resultList": [body], "toplamSayfa": 1})
+
+    monkeypatch.setattr(fund_service.httpx, "Client", FakeHttpClient)
+    monkeypatch.setattr(fund_service, "TEFAS_DIRECT_PAGE_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(fund_service, "TEFAS_DIRECT_CHUNK_DELAY_SECONDS", 0.0)
+
+    client = fund_service.TefasClient()
+    funds = client.fetch_funds_direct(
+        start_date=date(2026, 6, 24),
+        end_date=date(2026, 6, 24),
+        fund_codes=["TLY"],
+    )
+    returns = client.fetch_returns_direct(
+        basis="RB",
+        fund_codes=["TLY"],
+        start_date=date(2026, 6, 24),
+        end_date=date(2026, 6, 24),
+    )
+    fees = client.fetch_management_fees_direct(
+        fund_codes=["TLY"],
+        as_of=date(2026, 6, 24),
+        lookback_days=7,
+    )
+    portfolio = client.fetch_portfolio_direct(
+        fund_code="TLY",
+        start_date=date(2026, 6, 24),
+        end_date=date(2026, 6, 24),
+    )
+
+    assert funds[0]["fonKodu"] == "TLY"
+    assert funds[0]["source"] == fund_service.TEFAS_DIRECT_FUNDS_SOURCE
+    assert returns[0]["getiriOrani"] == "1,25"
+    assert fees[0]["uygulananYu1Y"] == "2,10"
+    assert portfolio[0]["hs"] == 42.0
+    posted_endpoints = [url for method, url, _payload in calls if method == "POST"]
+    assert any(url.endswith("fonGnlBlgSiraliGetir") for url in posted_endpoints)
+    assert any(url.endswith("fonGetiriBazliBilgiGetir") for url in posted_endpoints)
+    assert any(url.endswith("fonYonetimBazliBilgiGetir") for url in posted_endpoints)
+    assert any(url.endswith("dagilimSiraliGetirT") for url in posted_endpoints)
+
+
 def _stub_direct_tefas_empty(monkeypatch) -> None:
     class FakeDirectTefasClient:
         def fetch_fund_history(self, **kwargs):
@@ -330,7 +414,7 @@ def test_funds_payload_reads_stale_first_snapshot(tmp_path) -> None:
     assert payload["source_metadata"]["cache_hit"] is True
 
 
-def test_funds_payload_lists_all_managers_above_min_aum(tmp_path) -> None:
+def test_funds_payload_lists_all_open_funds_without_aum_threshold(tmp_path) -> None:
     snapshot = {
         "status": "ok",
         "rows": [
@@ -352,6 +436,14 @@ def test_funds_payload_lists_all_managers_above_min_aum(tmp_path) -> None:
                 "as_of": "2026-05-20",
                 "source": "tefasfon_funds",
             },
+            {
+                "fund_code": "MISSING",
+                "name": "TERA PORTFOY AUM BILGISIZ FON",
+                "founder_company": "TERA PORTFOY",
+                "price": 1.0,
+                "as_of": "2026-05-20",
+                "source": "tefasfon_funds",
+            },
         ],
         "source": "tefasfon_funds",
         "source_url": "https://pypi.org/project/tefasfon/",
@@ -369,9 +461,123 @@ def test_funds_payload_lists_all_managers_above_min_aum(tmp_path) -> None:
     payload = fund_service.get_funds_payload(tmp_path, sort="fund_code", order="asc")
     search_payload = fund_service.get_funds_payload(tmp_path, sort="fund_code", order="asc", min_aum=None)
 
+    assert [row["fund_code"] for row in payload["rows"]] == ["BIG", "LOW", "MISSING"]
+    assert payload["source_metadata"]["list_min_aum"] == 0
+    assert [row["fund_code"] for row in search_payload["rows"]] == ["BIG", "LOW", "MISSING"]
+
+
+def test_funds_payload_keeps_explicit_aum_threshold(tmp_path) -> None:
+    snapshot = {
+        "status": "ok",
+        "rows": [
+            {"fund_code": "BIG", "name": "BUYUK FON", "aum": 500_000_000, "source": "tefasfon_funds"},
+            {"fund_code": "LOW", "name": "KUCUK FON", "aum": 100_000_000, "source": "tefasfon_funds"},
+        ],
+        "source": "tefasfon_funds",
+        "fetched_at": "2026-05-20T09:00:00+00:00",
+        "stale": False,
+        "degraded": False,
+        "warnings": [],
+        "source_metadata": {"source": "tefasfon_funds"},
+    }
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    payload = fund_service.get_funds_payload(
+        tmp_path,
+        sort="fund_code",
+        order="asc",
+        min_aum=300_000_000,
+    )
+
     assert [row["fund_code"] for row in payload["rows"]] == ["BIG"]
     assert payload["source_metadata"]["list_min_aum"] == 300_000_000
-    assert [row["fund_code"] for row in search_payload["rows"]] == ["BIG", "LOW"]
+
+
+def test_fund_public_daily_return_uses_previous_business_day_price(tmp_path) -> None:
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "TLY", "date": "2026-08-14", "price": 8591.591231, "source": "tefasfon_funds"},
+            {"fund_code": "TLY", "date": "2026-08-17", "price": 8611.792448, "source": "tefasfon_funds"},
+        ],
+        source="tefasfon_funds",
+    )
+    snapshot = {
+        "status": "ok",
+        "rows": [
+            {
+                "fund_code": "TLY",
+                "name": "TERA PORTFOY BIRINCI SERBEST FON",
+                "price": 8611.792448,
+                "daily_return": 1.8110046568,
+                "tefas_open": True,
+                "as_of": "2026-08-17",
+                "source": "tefas_list_snapshot",
+            }
+        ],
+        "source": "tefasfon_funds",
+        "as_of": "2026-08-17",
+        "fetched_at": "2026-08-17T14:44:39+00:00",
+        "stale": False,
+        "degraded": False,
+        "warnings": [],
+        "source_metadata": {"source": "tefasfon_funds"},
+    }
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    list_payload = fund_service.get_funds_payload(tmp_path, min_aum=None)
+    detail_payload = fund_service.get_fund_detail_payload(tmp_path, "TLY")
+
+    assert list_payload["rows"][0]["daily_return"] == pytest.approx(0.2351, abs=0.0001)
+    assert detail_payload["daily_return"] == pytest.approx(0.2351, abs=0.0001)
+
+
+def test_fund_categories_use_same_open_fund_visibility_rule(tmp_path) -> None:
+    snapshot = {
+        "status": "ok",
+        "rows": [
+            {
+                "fund_code": "OPEN",
+                "name": "ACIK FON",
+                "fund_type": "Hisse Senedi",
+                "founder_company": "ACIK PORTFOY",
+                "manager_company": "ACIK PORTFOY",
+                "tefas_open": True,
+                "risk_value": 5,
+                "source": "tefasfon_funds",
+            },
+            {
+                "fund_code": "CLOSED",
+                "name": "KAPALI FON",
+                "fund_type": "Serbest Fon",
+                "founder_company": "KAPALI PORTFOY",
+                "manager_company": "KAPALI PORTFOY",
+                "tefas_open": False,
+                "risk_value": 7,
+                "source": "tefasfon_funds",
+            },
+        ],
+        "source": "tefasfon_funds",
+        "fetched_at": "2026-05-20T09:00:00+00:00",
+        "stale": False,
+        "degraded": False,
+        "warnings": [],
+        "source_metadata": {"source": "tefasfon_funds"},
+    }
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    payload = fund_service.get_fund_categories_payload(tmp_path)
+
+    assert payload["fund_types"] == ["Hisse Senedi"]
+    assert payload["founder_companies"] == ["ACIK PORTFOY"]
+    assert payload["risk_values"] == [5]
+    assert payload["source_metadata"]["list_min_aum"] == 0
 
 
 def test_funds_payload_auto_refreshes_stale_tefas_snapshot(monkeypatch, tmp_path) -> None:
@@ -1911,6 +2117,9 @@ def test_tefasfon_portfolio_filters_requested_fund_code() -> None:
         def __init__(self) -> None:
             self.fund_types = ("SEC",)
 
+        def _fetch_portfolio_direct_request(self, fund_code, start_date, end_date, *, fund_type):
+            raise fund_service.TefasUpstreamError("direct request path disabled in test")
+
         def _fetch_portfolio_direct(self, fund_code, start_date, end_date, *, fund_type):
             raise fund_service.TefasUpstreamError("direct path disabled in test")
 
@@ -1928,6 +2137,53 @@ def test_tefasfon_portfolio_filters_requested_fund_code() -> None:
     )
 
     assert [row["fonKodu"] for row in rows] == ["TLY"]
+
+
+def test_tefasfon_portfolio_prefers_direct_request_before_package_fallback() -> None:
+    class FakeTefasFonClient(fund_service.TefasFonClient):
+        def __init__(self) -> None:
+            self.fund_types = ("SEC",)
+
+        def _fetch_portfolio_direct_request(self, fund_code, start_date, end_date, *, fund_type):
+            return [
+                {
+                    "fonKodu": fund_code,
+                    "tarih": "2026-04-30",
+                    "hs": 58.0,
+                    "source": fund_service.TEFAS_DIRECT_PORTFOLIO_SOURCE,
+                }
+            ]
+
+        def _fetch_portfolio_direct(self, fund_code, start_date, end_date, *, fund_type):
+            raise AssertionError("tefasfon getter fallback should not be called")
+
+    rows = FakeTefasFonClient().fetch_portfolio(
+        fund_code="TLY",
+        start_date=date(2026, 4, 30),
+        end_date=date(2026, 4, 30),
+    )
+
+    assert rows[0]["hs"] == 58.0
+    assert rows[0]["source"] == fund_service.TEFAS_DIRECT_PORTFOLIO_SOURCE
+
+
+def test_tefasfon_portfolio_stops_on_direct_rate_limit_without_package_retry() -> None:
+    class FakeTefasFonClient(fund_service.TefasFonClient):
+        def __init__(self) -> None:
+            self.fund_types = ("SEC",)
+
+        def _fetch_portfolio_direct_request(self, fund_code, start_date, end_date, *, fund_type):
+            raise fund_service.TefasRateLimitError("direct portfolio HTTP 429")
+
+        def _fetch_portfolio_direct(self, fund_code, start_date, end_date, *, fund_type):
+            raise AssertionError("rate-limited direct request must not immediately retry through tefasfon")
+
+    with pytest.raises(fund_service.TefasRateLimitError):
+        FakeTefasFonClient().fetch_portfolio(
+            fund_code="TLY",
+            start_date=date(2026, 4, 30),
+            end_date=date(2026, 4, 30),
+        )
 
 
 def test_get_fund_allocations_payload_hides_legacy_cache(tmp_path) -> None:
@@ -2226,8 +2482,8 @@ def test_get_fund_detail_payload_includes_category_rankings(tmp_path) -> None:
 
     rankings = payload["category_rankings"]
     assert rankings["category"] == "Hisse Senedi Şemsiye Fonu"
-    assert rankings["category_total"] == 4
+    assert rankings["category_total"] == 5
     monthly = next(item for item in rankings["items"] if item["key"] == "1m")
-    assert monthly["rank"] == 3
-    assert monthly["total"] == 4
-    assert monthly["top_percentile"] == 50
+    assert monthly["rank"] == 4
+    assert monthly["total"] == 5
+    assert monthly["top_percentile"] == 40

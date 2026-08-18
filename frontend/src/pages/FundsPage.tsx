@@ -513,8 +513,14 @@ function comparisonLogoKind(kind: ComparisonAssetKind): 'fund' | 'stock' | 'inde
 
 function shouldRefreshSnapshot(payload: FundsResponse | null): boolean {
     if (!payload) return false;
-    const total = payload.total_count ?? payload.count ?? 0;
-    return total === 0 && (payload.degraded || payload.stale || payload.status === 'unavailable');
+    const visibleCount = payload.count ?? payload.rows?.length ?? 0;
+    const snapshotCount = payload.total_count ?? 0;
+    return visibleCount === 0 && (
+        snapshotCount === 0 ||
+        payload.degraded ||
+        payload.stale ||
+        payload.status === 'unavailable'
+    );
 }
 
 function compareFundRows(a: FundSummary, b: FundSummary, key: FundSortKey, order: 'asc' | 'desc'): number {
@@ -5099,18 +5105,27 @@ export default function FundsPage({
         holdingsRef.current = holdings;
     }, [holdings]);
 
-    const refreshSnapshot = useCallback(async () => {
+    const refreshSnapshot = useCallback(async (options: { rethrow?: boolean } = {}) => {
         setRefreshing(true);
         setRefreshError(null);
         try {
-            const fundPayload = await apiClient.refreshFundsSnapshot();
+            // The refresh endpoint mutates the snapshot.  Always read the
+            // canonical list response afterwards so manual and initial loads
+            // use exactly the same filtering and metadata contract.
+            await apiClient.refreshFundsSnapshot();
+            const fundPayload = await apiClient.funds();
             const categoryPayload = await apiClient.fundCategories();
             if (!mountedRef.current) return;
             setFunds(fundPayload);
             setCategories(categoryPayload);
+            return { fundPayload, categoryPayload };
         } catch (err) {
             if (!mountedRef.current) return;
-            setRefreshError(err instanceof Error ? err.message : 'Fon listesi yenilenemedi.');
+            const message = err instanceof Error ? err.message : 'Fon listesi yenilenemedi.';
+            setRefreshError(message);
+            if (options.rethrow) {
+                throw err instanceof Error ? err : new Error(message);
+            }
         } finally {
             if (mountedRef.current) setRefreshing(false);
         }
@@ -5165,26 +5180,35 @@ export default function FundsPage({
 
     useEffect(() => {
         let alive = true;
-        setLoading(true);
         setError(null);
         setRefreshError(null);
-        Promise.all([apiClient.funds(), apiClient.fundCategories()])
-            .then(([fundPayload, categoryPayload]) => {
+        setLoading(true);
+
+        const loadInitialCatalog = async () => {
+            try {
+                let fundPayload = await apiClient.funds();
+                let categoryPayload: FundCategoriesResponse;
+                if (shouldRefreshSnapshot(fundPayload) && !autoRefreshAttemptedRef.current) {
+                    autoRefreshAttemptedRef.current = true;
+                    const refreshed = await refreshSnapshot({ rethrow: true });
+                    if (!refreshed) return;
+                    fundPayload = refreshed.fundPayload;
+                    categoryPayload = refreshed.categoryPayload;
+                } else {
+                    categoryPayload = await apiClient.fundCategories();
+                }
                 if (!alive) return;
                 setFunds(fundPayload);
                 setCategories(categoryPayload);
-                if (shouldRefreshSnapshot(fundPayload) && !autoRefreshAttemptedRef.current) {
-                    autoRefreshAttemptedRef.current = true;
-                    void refreshSnapshot();
-                }
-            })
-            .catch((err) => {
+            } catch (err) {
                 if (!alive) return;
                 setError(err instanceof Error ? err.message : 'Fon listesi alınamadı.');
-            })
-            .finally(() => {
+            } finally {
                 if (alive) setLoading(false);
-            });
+            }
+        };
+
+        void loadInitialCatalog();
         return () => {
             alive = false;
         };
@@ -5769,7 +5793,7 @@ export default function FundsPage({
                                     <button
                                         type="button"
                                         className="funds-refresh-button"
-                                        onClick={refreshSnapshot}
+                                        onClick={() => { void refreshSnapshot(); }}
                                         disabled={refreshing}
                                         title="Fon listesini yenile"
                                     >

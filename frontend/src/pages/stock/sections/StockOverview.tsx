@@ -535,8 +535,8 @@ export default function StockOverview({ snapshot, quarters }: { snapshot: KapSna
     const prevYearSameQuarter = prevYearSameQuarterIdx >= 0 ? quarters[prevYearSameQuarterIdx] : null;
 
     const { incomeSummaryRows, balanceSummaryRows } = useMemo(
-        () => getOverviewSummaryRows(snapshot, quarters),
-        [snapshot, quarters],
+        () => getOverviewSummaryRows(snapshot),
+        [snapshot],
     );
     const premiumRows = useMemo(
         () => [...(snapshot.insurance_premium_disclosures || [])].sort(

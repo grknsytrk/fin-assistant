@@ -110,8 +110,25 @@ def test_kap_snapshot_response_cache_uses_schema_and_refresh_bypasses(
     assert f"schema={KAP_CACHE_SCHEMA_VERSION}" in api_module._kap_snapshot_response_cache_key("AKBNK", 20)
 
 
+def test_kap_snapshot_normalization_exposes_identity_company_kind() -> None:
+    payload = kap_service_module.normalize_snapshot_for_frontend(
+        {
+            "ok": True,
+            "company": "TUPRS",
+            "stock_code": "TUPRS",
+            "company_title": "TÜPRAŞ-TÜRKİYE PETROL RAFİNERİLERİ A.Ş.",
+            "quarters": [],
+        }
+    )
+
+    assert payload["company_kind"] == "generic"
+
+
 def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_kwargs: Dict[str, Any] = {}
+
     def fake_get_funds_payload(processed_dir: Any, **kwargs: Any) -> Dict[str, Any]:
+        seen_kwargs.update(kwargs)
         return {
             "status": "ok",
             "rows": [
@@ -148,6 +165,7 @@ def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = response.json()
     assert payload["rows"][0]["fund_code"] == "YAC"
     assert payload["source"] == "tefasfon_funds"
+    assert seen_kwargs["auto_refresh"] is False
 
 
 def test_api_funds_search_keeps_full_universe(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -241,8 +259,10 @@ def test_api_fund_holdings_reuses_static_response_cache(monkeypatch: pytest.Monk
 def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = cache_module.get_cache()
     backend.set("api:funds:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc", {"stale": True}, ttl_seconds=60)
+    backend.set("api:funds:v2:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc", {"stale": True}, ttl_seconds=60)
     backend.set("api:funds-search:q=", {"stale": True}, ttl_seconds=60)
     backend.set("api:funds-categories", {"stale": True}, ttl_seconds=60)
+    backend.set("api:funds-categories:v2", {"stale": True}, ttl_seconds=60)
     backend.set("api:fund-yield-summary:TLY", {"stale": True}, ttl_seconds=60)
     backend.set("api:fund-holdings:TLY", {"stale": True}, ttl_seconds=60)
 
@@ -251,14 +271,35 @@ def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.Mon
         "refresh_funds_snapshot",
         lambda _processed_dir, *, lookback_days: {"status": "ok", "lookback_days": lookback_days},
     )
+    monkeypatch.setattr(
+        fund_service_module,
+        "get_funds_payload",
+        lambda _processed_dir, **kwargs: {
+            "status": "ok",
+            "rows": [{"fund_code": "TLY"}],
+            "count": 1,
+            "total_count": 1,
+            "source": "tefasfon_funds",
+            "as_of": "2026-05-20",
+            "fetched_at": "2026-05-20T09:00:00+00:00",
+            "stale": False,
+            "degraded": False,
+            "warnings": [],
+            "source_metadata": {"source": "tefasfon_funds", "list_min_aum": 0},
+        },
+    )
     client = TestClient(app)
 
     response = client.post("/admin/funds/refresh-snapshot", params={"lookback_days": 1})
 
     assert response.status_code == 200
+    assert response.json()["rows"][0]["fund_code"] == "TLY"
+    assert response.json()["source_metadata"]["list_min_aum"] == 0
     assert backend.get("api:funds:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc") is None
+    assert backend.get("api:funds:v2:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc") is None
     assert backend.get("api:funds-search:q=") is None
     assert backend.get("api:funds-categories") is None
+    assert backend.get("api:funds-categories:v2") is None
     assert backend.get("api:fund-yield-summary:TLY") is None
     assert backend.get("api:fund-holdings:TLY") is None
 

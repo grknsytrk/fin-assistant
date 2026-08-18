@@ -23,7 +23,7 @@ ATTACHMENT_DETAIL_ENDPOINT = "notification/attachment-detail"
 PDF_ENDPOINT = "BildirimPdf"
 DISCLOSURE_MEMBERS_BY_CRITERIA_ENDPOINT = "disclosure/members/byCriteria"
 FILE_DOWNLOAD_ENDPOINT = "file/download"
-KAP_CACHE_SCHEMA_VERSION = 13
+KAP_CACHE_SCHEMA_VERSION = 14
 KAP_LIVE_DISCLOSURE_CHECK_TTL_HOURS = 24.0
 KAP_INSURANCE_PREMIUM_CHECK_TTL_HOURS = 24.0
 
@@ -43,6 +43,16 @@ _KAP_BANK_TICKER_HINTS = frozenset(
         "TSKB",
         "VAKBN",
         "YKBNK",
+    }
+)
+_KAP_INSURANCE_TICKER_HINTS = frozenset(
+    {
+        "AGESA",
+        "ANHYT",
+        "AKGRT",
+        "ANSGR",
+        "RAYSG",
+        "TURSG",
     }
 )
 KAP_INSURANCE_PREMIUM_CACHE_VERSION = 8
@@ -232,6 +242,27 @@ def _normalize(text: str) -> str:
     lowered = unicodedata.normalize("NFKD", lowered)
     lowered = "".join(ch for ch in lowered if not unicodedata.combining(ch))
     return " ".join(lowered.split())
+
+
+def classify_kap_company_kind(company: Any = "", company_title: Any = "") -> str:
+    """Classify a KAP issuer from identity only, never from parsed metrics."""
+    company_norm = re.sub(r"[^A-Z0-9]", "", str(company or "").upper())
+    title_norm = _normalize(str(company_title or ""))
+    title_tokens = set(title_norm.split())
+
+    if (
+        company_norm in _KAP_BANK_TICKER_HINTS
+        or "bankasi" in title_tokens
+        or "bank" in title_tokens
+    ):
+        return "bank"
+    if (
+        company_norm in _KAP_INSURANCE_TICKER_HINTS
+        or "sigorta" in title_norm
+        or "emeklilik" in title_norm
+    ):
+        return "insurance"
+    return "generic"
 
 
 def _clean_html_text(raw: str) -> str:
@@ -1924,6 +1955,7 @@ def _extract_disclosure_metrics(
     prefer_income_statement_ytd: bool = False,
     comparison_mode: str = "current",
     is_bank: bool = False,
+    is_insurance: bool = False,
 ) -> Tuple[Dict[str, Optional[float]], Dict[str, Any]]:
     disclosure_body = detail_payload.get("disclosureBody", [])
     if not isinstance(disclosure_body, list):
@@ -2024,35 +2056,35 @@ def _extract_disclosure_metrics(
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
             comparison_mode=comparison_mode,
-        ),
+        ) if is_insurance else None,
         "alinan_net_primler": _pick_metric_value(
             "alinan_net_primler",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
             comparison_mode=comparison_mode,
-        ),
+        ) if is_insurance else None,
         "teknik_gelirler": _pick_metric_value(
             "teknik_gelirler",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
             comparison_mode=comparison_mode,
-        ),
+        ) if is_insurance else None,
         "teknik_denge": _pick_metric_value(
             "teknik_denge",
             all_rows,
             period=period,
             prefer_income_statement_ytd=prefer_income_statement_ytd,
             comparison_mode=comparison_mode,
-        ),
+        ) if is_insurance else None,
         "faaliyet_nakit_akisi": _pick_metric_value("faaliyet_nakit_akisi", all_rows, period=period, comparison_mode=comparison_mode),
         "capex": _pick_metric_value("capex", all_rows, period=period, comparison_mode=comparison_mode),
         "nakit_ve_nakit_benzerleri": _pick_metric_value("nakit_ve_nakit_benzerleri", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
-        "finansal_varliklar_sigortacilik": _pick_metric_value("finansal_varliklar_sigortacilik", all_rows, period=period, comparison_mode=comparison_mode),
-        "esas_faaliyetlerden_alacaklar": _pick_metric_value("esas_faaliyetlerden_alacaklar", all_rows, period=period, comparison_mode=comparison_mode),
-        "teknik_karsiliklar": _pick_metric_value("teknik_karsiliklar", all_rows, period=period, comparison_mode=comparison_mode),
-        "esas_faaliyetlerden_borclar": _pick_metric_value("esas_faaliyetlerden_borclar", all_rows, period=period, comparison_mode=comparison_mode),
+        "finansal_varliklar_sigortacilik": _pick_metric_value("finansal_varliklar_sigortacilik", all_rows, period=period, comparison_mode=comparison_mode) if is_insurance else None,
+        "esas_faaliyetlerden_alacaklar": _pick_metric_value("esas_faaliyetlerden_alacaklar", all_rows, period=period, comparison_mode=comparison_mode) if is_insurance else None,
+        "teknik_karsiliklar": _pick_metric_value("teknik_karsiliklar", all_rows, period=period, comparison_mode=comparison_mode) if is_insurance else None,
+        "esas_faaliyetlerden_borclar": _pick_metric_value("esas_faaliyetlerden_borclar", all_rows, period=period, comparison_mode=comparison_mode) if is_insurance else None,
         "donen_varliklar": _pick_metric_value("donen_varliklar", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
         "duran_varliklar": _pick_metric_value("duran_varliklar", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
         "toplam_varliklar": _pick_metric_value("toplam_varliklar", all_rows, period=period, comparison_mode=comparison_mode, prefer_consolidated_balance=is_bank),
@@ -2111,38 +2143,17 @@ def _fetch_attachment_detail(disclosure_index: int, cfg: KapConfig) -> Optional[
 
 
 def _is_insurance_like_payload(payload: Optional[Dict[str, Any]], member: Optional[Dict[str, Any]] = None) -> bool:
-    title = " ".join(
-        str(value or "")
-        for value in (
-            (member or {}).get("title"),
-            (payload or {}).get("company_title") if isinstance(payload, dict) else "",
-            (payload or {}).get("company") if isinstance(payload, dict) else "",
-        )
+    payload_dict = payload if isinstance(payload, dict) else {}
+    company = (
+        str((member or {}).get("company_code") or "").strip()
+        or str(payload_dict.get("stock_code") or payload_dict.get("company") or "").strip()
     )
-    title_norm = _normalize(title)
-    if "sigorta" in title_norm or "emeklilik" in title_norm:
-        return True
-
-    quarters = (payload or {}).get("quarters") if isinstance(payload, dict) else []
-    if not isinstance(quarters, list):
-        return False
-    insurance_keys = {
-        "prim_uretimi",
-        "alinan_net_primler",
-        "teknik_gelirler",
-        "teknik_denge",
-        "teknik_karsiliklar",
-    }
-    for quarter in quarters:
-        if not isinstance(quarter, dict):
-            continue
-        for bucket in ("metrics", "metrics_quarterly", "metrics_ytd"):
-            metrics = quarter.get(bucket)
-            if not isinstance(metrics, dict):
-                continue
-            if any(metrics.get(key) is not None for key in insurance_keys):
-                return True
-    return False
+    title = str(
+        (member or {}).get("title")
+        or payload_dict.get("company_title")
+        or ""
+    ).strip()
+    return classify_kap_company_kind(company, title) == "insurance"
 
 
 def _is_insurance_premium_check_fresh(payload: Dict[str, Any]) -> bool:
@@ -3025,6 +3036,7 @@ def _fetch_premium_only_snapshot(
         "company": company_norm,
         "company_title": title,
         "stock_code": str((member or {}).get("company_code") or company_norm).strip().upper(),
+        "company_kind": classify_kap_company_kind(company_norm, title),
         "member_oid": member_oid,
         "source_url": (
             f"https://www.kap.org.tr/tr/sirket-bilgileri/ozet/{(member or {}).get('permalink', '')}"
@@ -3180,12 +3192,10 @@ def fetch_kap_company_snapshot(
         # KAP banka raporları solo + konsolide sütunları yan yana basıyor.
         # BIST'teki yatırımcı ve veri sağlayıcılar konsolide rakamı kullanıyor;
         # bilanço kalemlerini bankada konsolide sütunundan seçiyoruz.
-        member_title_norm = _normalize(str(member.get("title") or ""))
-        is_bank = bool(
-            company_norm in _KAP_BANK_TICKER_HINTS
-            or "bankasi" in member_title_norm
-            or "bank" in member_title_norm.split()
-        )
+        member_title = str(member.get("title") or "").strip()
+        company_kind = classify_kap_company_kind(company_norm, member_title)
+        is_bank = company_kind == "bank"
+        is_insurance = company_kind == "insurance"
 
         disclosures = _list_company_disclosures(
             member_oid=member["mkk_member_oid"],
@@ -3221,6 +3231,7 @@ def fetch_kap_company_snapshot(
                 prefer_income_statement_ytd=False,
                 comparison_mode="current",
                 is_bank=is_bank,
+                is_insurance=is_insurance,
             )
             metrics_ytd, _ = _extract_disclosure_metrics(
                 detail,
@@ -3228,6 +3239,7 @@ def fetch_kap_company_snapshot(
                 prefer_income_statement_ytd=True,
                 comparison_mode="current",
                 is_bank=is_bank,
+                is_insurance=is_insurance,
             )
             metrics_comparative, _ = _extract_disclosure_metrics(
                 detail,
@@ -3235,6 +3247,7 @@ def fetch_kap_company_snapshot(
                 prefer_income_statement_ytd=False,
                 comparison_mode="comparative",
                 is_bank=is_bank,
+                is_insurance=is_insurance,
             )
             metrics_ytd_comparative, _ = _extract_disclosure_metrics(
                 detail,
@@ -3242,6 +3255,7 @@ def fetch_kap_company_snapshot(
                 prefer_income_statement_ytd=True,
                 comparison_mode="comparative",
                 is_bank=is_bank,
+                is_insurance=is_insurance,
             )
             quarter_rows.append(
                 {
@@ -3281,6 +3295,7 @@ def fetch_kap_company_snapshot(
             "company": str(quarter_rows[0].get("stock_code", "") or company_norm).strip().upper(),
             "company_title": str(member.get("title", "")).strip(),
             "stock_code": str(quarter_rows[0].get("stock_code", "")).strip(),
+            "company_kind": company_kind,
             "member_oid": str(member.get("mkk_member_oid", "")).strip(),
             "source_url": f"https://www.kap.org.tr/tr/sirket-bilgileri/ozet/{member.get('permalink', '')}",
             "fetched_at": _utc_now().isoformat(),

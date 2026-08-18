@@ -1,18 +1,64 @@
-import type { KapQuarter } from '../api/types';
+import type { KapQuarter, KapSnapshotResponse } from '../api/types';
 
 export const FLOW_METRICS = new Set([
     'satis_gelirleri', 'brut_kar', 'favok', 'net_kar', 'faaliyet_nakit_akisi',
     'capex', 'serbest_nakit_akisi', 'faiz_gelirleri', 'faiz_giderleri',
     'net_ucret_komisyon_gelirleri', 'net_faaliyet_kari', 'esas_faaliyet_kari',
-    'prim_uretimi', 'alinan_net_primler', 'teknik_gelirler', 'teknik_denge',
+    'amortisman_itfa_gideri', 'prim_uretimi', 'alinan_net_primler', 'teknik_gelirler', 'teknik_denge',
 ]);
 
-export const BANK_TICKERS = new Set(['AKBNK', 'GARAN', 'HALKB', 'ISCTR', 'TSKB', 'VAKBN', 'YKBNK']);
+export type CompanyKind = 'generic' | 'bank' | 'insurance';
+
+export const BANK_TICKERS = new Set([
+    'AKBNK', 'ALBRK', 'GARAN', 'HALKB', 'ICBCT', 'ISCTR', 'QNBFB',
+    'SKBNK', 'TSKB', 'VAKBN', 'YKBNK',
+]);
+
+export const INSURANCE_TICKERS = new Set(['AGESA', 'ANHYT', 'AKGRT', 'ANSGR', 'RAYSG', 'TURSG']);
 
 export const INVERSE_METRICS = new Set([
     'net_borc', 'finansal_borclar', 'faiz_giderleri', 'kisa_vadeli_yukumlulukler',
     'beklenen_zarar_karsiliklari', 'teknik_karsiliklar', 'esas_faaliyetlerden_borclar',
 ]);
+
+// Keep the established core order, then append additional non-empty metrics.
+export const KAP_FINANCIAL_TABLE_KEYS = [
+    'net_kar',
+    'satis_gelirleri',
+    'brut_kar',
+    'favok',
+    'ozkaynaklar',
+    'donen_varliklar',
+    'kisa_vadeli_yukumlulukler',
+    'toplam_varliklar',
+    'finansal_borclar',
+    'net_borc',
+    'faaliyet_nakit_akisi',
+    'serbest_nakit_akisi',
+    'esas_faaliyet_kari',
+    'net_faaliyet_kari',
+    'duran_varliklar',
+    'nakit_ve_nakit_benzerleri',
+    'finansal_varliklar_net',
+    'faiz_gelirleri',
+    'faiz_giderleri',
+    'net_ucret_komisyon_gelirleri',
+    'krediler',
+    'mevduatlar',
+    'beklenen_zarar_karsiliklari',
+    'prim_uretimi',
+    'alinan_net_primler',
+    'teknik_gelirler',
+    'teknik_denge',
+    'teknik_karsiliklar',
+    'esas_faaliyetlerden_alacaklar',
+    'esas_faaliyetlerden_borclar',
+    'finansal_varliklar_sigortacilik',
+    'amortisman_itfa_gideri',
+    'capex',
+    'odenmis_sermaye',
+    'cikarilmis_sermaye',
+];
 
 export function intSafe(value: unknown): number {
     const parsed = Number(value);
@@ -50,6 +96,25 @@ export function _normText(value: unknown): string {
         .replaceAll('Ü', 'U').replaceAll('Ö', 'O').replaceAll('Ç', 'C')
         .replaceAll('ı', 'I').replaceAll('ş', 'S').replaceAll('ğ', 'G')
         .replaceAll('ü', 'U').replaceAll('ö', 'O').replaceAll('ç', 'C');
+}
+
+export function classifyKapCompanyKind(
+    snapshot: Partial<Pick<KapSnapshotResponse, 'company_kind' | 'company' | 'stock_code' | 'company_title'>>,
+): CompanyKind {
+    if (snapshot.company_kind === 'bank' || snapshot.company_kind === 'insurance' || snapshot.company_kind === 'generic') {
+        return snapshot.company_kind;
+    }
+
+    const stockCodeNorm = _normText(snapshot.stock_code || snapshot.company);
+    const companyTitleNorm = _normText(snapshot.company_title);
+    const titleTokens = new Set(companyTitleNorm.split(/\s+/).filter(Boolean));
+    if (BANK_TICKERS.has(stockCodeNorm) || titleTokens.has('BANK') || titleTokens.has('BANKASI')) {
+        return 'bank';
+    }
+    if (INSURANCE_TICKERS.has(stockCodeNorm) || companyTitleNorm.includes('SIGORTA') || companyTitleNorm.includes('EMEKLILIK')) {
+        return 'insurance';
+    }
+    return 'generic';
 }
 
 export function _formatRatio(value: number, suffix = '%'): string {

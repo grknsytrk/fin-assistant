@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from src.config import KapConfig
-from src.kap_fetcher import fetch_kap_company_snapshot
+from src.kap_fetcher import classify_kap_company_kind, fetch_kap_company_snapshot
 
 # Static BIST100 universe snapshot used by the market terminal.
 # Source basis: current XU100 constituent pages cross-checked against the
@@ -740,11 +740,14 @@ def _sanitize_comparative_against_filed(
 
 def normalize_snapshot_for_frontend(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Flatten raw snapshot into a frontend-friendly shape."""
+    company = raw.get("stock_code") or raw.get("company") or ""
+    company_title = raw.get("company_title") or ""
     result: Dict[str, Any] = {
         "ok": raw.get("ok", False),
         "company": raw.get("company", ""),
-        "company_title": raw.get("company_title", ""),
+        "company_title": company_title,
         "stock_code": raw.get("stock_code", ""),
+        "company_kind": raw.get("company_kind") or classify_kap_company_kind(company, company_title),
         "fetched_at": raw.get("fetched_at", ""),
         "cache_hit": raw.get("cache_hit", False),
         "cache_stale": raw.get("cache_stale", False),

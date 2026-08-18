@@ -70,15 +70,38 @@ TEFAS_FUNDS_LIST_ENDPOINT = os.getenv(
     "RAGFIN_TEFAS_FUNDS_LIST_ENDPOINT",
     f"{TEFAS_BASE_URL}/api/funds/fonGnlBlgSiraliGetir",
 )
+TEFAS_PORTFOLIO_ENDPOINT = os.getenv(
+    "RAGFIN_TEFAS_PORTFOLIO_ENDPOINT",
+    f"{TEFAS_BASE_URL}/api/funds/dagilimSiraliGetirT",
+)
+TEFAS_RETURNS_RB_ENDPOINT = os.getenv(
+    "RAGFIN_TEFAS_RETURNS_RB_ENDPOINT",
+    f"{TEFAS_BASE_URL}/api/funds/fonGetiriBazliBilgiGetir",
+)
+TEFAS_RETURNS_SB_ENDPOINT = os.getenv(
+    "RAGFIN_TEFAS_RETURNS_SB_ENDPOINT",
+    f"{TEFAS_BASE_URL}/api/funds/fonBuyuklukBazliBilgiGetir",
+)
+TEFAS_RETURNS_MB_ENDPOINT = os.getenv(
+    "RAGFIN_TEFAS_RETURNS_MB_ENDPOINT",
+    f"{TEFAS_BASE_URL}/api/funds/fonYonetimBazliBilgiGetir",
+)
 TEFAS_FUNDS_LIST_PAGE_SIZE = int(os.getenv("RAGFIN_TEFAS_FUNDS_LIST_PAGE_SIZE", "5000"))
 TEFAS_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_TEFAS_TIMEOUT_SECONDS", "60"))
 TEFAS_HTTP_RETRY_ATTEMPTS = int(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_ATTEMPTS", "5"))
 TEFAS_HTTP_RETRY_BASE_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_BASE_SECONDS", "5"))
 TEFAS_HTTP_RETRY_MAX_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_MAX_SECONDS", "45"))
+TEFAS_DIRECT_PAGE_SIZE = int(os.getenv("RAGFIN_TEFAS_DIRECT_PAGE_SIZE", "1000"))
+TEFAS_DIRECT_PAGE_DELAY_SECONDS = float(os.getenv("RAGFIN_TEFAS_DIRECT_PAGE_DELAY_SECONDS", "1"))
+TEFAS_DIRECT_CHUNK_DELAY_SECONDS = float(os.getenv("RAGFIN_TEFAS_DIRECT_CHUNK_DELAY_SECONDS", "2"))
 TEFASFON_SOURCE_URL = os.getenv("RAGFIN_TEFASFON_SOURCE_URL", "https://pypi.org/project/tefasfon/")
 TEFASFON_FUNDS_SOURCE = "tefasfon_funds"
 TEFASFON_RETURNS_SOURCE = "tefasfon_returns"
 TEFASFON_PORTFOLIO_SOURCE = "tefasfon_portfolio"
+TEFAS_LIST_SNAPSHOT_SOURCE = "tefas_list_snapshot"
+TEFAS_DIRECT_FUNDS_SOURCE = "tefas_direct_funds"
+TEFAS_DIRECT_RETURNS_SOURCE = "tefas_direct_returns"
+TEFAS_DIRECT_PORTFOLIO_SOURCE = "tefas_direct_portfolio"
 FINTABLES_UDF_HISTORY_SOURCE = "fintables_udf_history"
 FINTABLES_YIELD_SUMMARY_SOURCE = "fintables_yield_summary"
 FUND_HISTORY_SOURCE_POLICY = "tefasfon_primary_fintables_fallback"
@@ -118,7 +141,7 @@ FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_OVERVIEW_METRI
 FUNDS_FAST_LONG_RANGE_DAYS = int(os.getenv("RAGFIN_FUNDS_FAST_LONG_RANGE_DAYS", "120"))
 FUNDS_RECENT_DETAIL_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_RECENT_DETAIL_LOOKBACK_DAYS", "35"))
 FUNDS_FULL_HISTORY_START_DATE = os.getenv("RAGFIN_FUNDS_FULL_HISTORY_START_DATE", "2000-01-01").strip() or "2000-01-01"
-FUNDS_LIST_MIN_AUM = float(os.getenv("RAGFIN_FUNDS_LIST_MIN_AUM", "300000000"))
+FUNDS_LIST_MIN_AUM = float(os.getenv("RAGFIN_FUNDS_LIST_MIN_AUM", "0"))
 FUND_PRICES_DB_FILENAME = os.getenv("RAGFIN_FUND_PRICES_DB_FILENAME", "fund_prices.sqlite3")
 KAP_BASE_URL = os.getenv("RAGFIN_KAP_BASE_URL", "https://www.kap.org.tr").rstrip("/")
 KAP_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_KAP_TIMEOUT_SECONDS", "20"))
@@ -973,7 +996,7 @@ def _normalize_tefas_fund_list_payload(payload: Dict[str, Any], *, source_url: s
         point = _normalize_history_row(raw)
         if not point:
             continue
-        point["source"] = "tefas_list_snapshot"
+        point["source"] = TEFAS_LIST_SNAPSHOT_SOURCE
         point["source_url"] = source_url
         rows.append(point)
     return rows
@@ -1576,6 +1599,144 @@ def read_fund_price_points(
     return points
 
 
+def _daily_return_reconciliation_candidates(rows: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+    """Return fund/date pairs whose snapshot return may use a stale range.
+
+    The TEFAS list snapshot can contain a ``getiriOrani`` value calculated for
+    a wider range than the previous market business day.  Those rows are
+    marked either by the list-snapshot source or by the returns merge that
+    supplied the value.  A normal official ``gunlukGetiri`` is left intact.
+    """
+
+    candidates: Dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        source = _normalize_price_source(str(row.get("source") or ""))
+        return_source = _normalize_price_source(str(row.get("daily_return_source") or ""))
+        if source != TEFAS_LIST_SNAPSHOT_SOURCE and return_source != TEFASFON_RETURNS_SOURCE:
+            continue
+        code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        point_date = _fund_date(row.get("as_of") or row.get("date") or row.get("tarih"))
+        if code and point_date:
+            candidates[code] = point_date
+    return candidates
+
+
+def _daily_return_overrides_from_price_history(
+    processed_dir: Path,
+    rows: Iterable[Dict[str, Any]],
+    *,
+    max_gap_days: Optional[int] = None,
+) -> Dict[Tuple[str, str], float]:
+    """Compute previous-market-business-day returns for flagged snapshots."""
+
+    effective_max_gap_days = (
+        _DAILY_RETURN_LOCAL_FALLBACK_MAX_GAP_DAYS
+        if max_gap_days is None
+        else max_gap_days
+    )
+    candidates = _daily_return_reconciliation_candidates(rows)
+    if not candidates or effective_max_gap_days <= 0:
+        return {}
+    candidate_dates = [date.fromisoformat(value) for value in candidates.values()]
+    start_date = min(candidate_dates) - timedelta(days=effective_max_gap_days)
+    end_date = max(candidate_dates)
+    normalized_sources = tuple(_DAILY_PRICE_SOURCES)
+    placeholders = ", ".join("?" for _ in candidates)
+    source_placeholders = ", ".join("?" for _ in normalized_sources)
+    query = (
+        "SELECT fund_code, date, source, price, updated_at FROM fund_prices "
+        f"WHERE fund_code IN ({placeholders}) "
+        f"AND date >= ? AND date <= ? AND source IN ({source_placeholders}) AND price > 0 "
+        "ORDER BY fund_code, date ASC, updated_at DESC"
+    )
+    params: List[Any] = [*candidates.keys(), start_date.isoformat(), end_date.isoformat(), *normalized_sources]
+
+    selected: Dict[Tuple[str, str], sqlite3.Row] = {}
+    with _connect_fund_prices_db(processed_dir) as conn:
+        for row in conn.execute(query, params):
+            key = (str(row["fund_code"]), str(row["date"]))
+            existing = selected.get(key)
+            if existing is None:
+                selected[key] = row
+                continue
+            row_rank = (
+                _FUND_PRICE_SOURCE_PRIORITY.get(str(row["source"] or ""), 0),
+                str(row["updated_at"] or ""),
+            )
+            existing_rank = (
+                _FUND_PRICE_SOURCE_PRIORITY.get(str(existing["source"] or ""), 0),
+                str(existing["updated_at"] or ""),
+            )
+            if row_rank > existing_rank:
+                selected[key] = row
+
+    by_code: Dict[str, List[Tuple[str, float]]] = {}
+    for (code, point_date), row in selected.items():
+        price = _coerce_float(row["price"])
+        if price is not None and price > 0:
+            by_code.setdefault(code, []).append((point_date, price))
+
+    overrides: Dict[Tuple[str, str], float] = {}
+    for code, target_date in candidates.items():
+        points = sorted(by_code.get(code) or [], key=lambda item: item[0])
+        current = next((price for point_date, price in points if point_date == target_date), None)
+        previous = next(
+            ((point_date, price) for point_date, price in reversed(points) if point_date < target_date),
+            None,
+        )
+        if current is None or previous is None:
+            continue
+        previous_date, previous_price = previous
+        gap = (date.fromisoformat(target_date) - date.fromisoformat(previous_date)).days
+        if gap < 1 or gap > effective_max_gap_days:
+            continue
+        computed = _return_between(current, previous_price)
+        if computed is not None:
+            overrides[(code, target_date)] = round(computed, 4)
+    return overrides
+
+
+def _apply_daily_return_overrides(
+    processed_dir: Path,
+    rows: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    materialized = [dict(row) for row in rows if isinstance(row, dict)]
+    overrides = _daily_return_overrides_from_price_history(processed_dir, materialized)
+    if not overrides:
+        return materialized
+    for row in materialized:
+        code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        point_date = _fund_date(row.get("as_of") or row.get("date") or row.get("tarih"))
+        override = overrides.get((code, point_date or ""))
+        if override is not None:
+            row["daily_return"] = override
+    return materialized
+
+
+def _persist_daily_return_overrides(
+    processed_dir: Path,
+    overrides: Dict[Tuple[str, str], float],
+) -> None:
+    if not overrides:
+        return
+    source_placeholders = ", ".join("?" for _ in _DAILY_PRICE_SOURCES)
+    query = (
+        "UPDATE fund_prices SET daily_return = ?, updated_at = ? "
+        "WHERE fund_code = ? AND date = ? "
+        f"AND source IN ({source_placeholders})"
+    )
+    now = _utc_now_iso()
+    with _connect_fund_prices_db(processed_dir) as conn:
+        for (code, point_date), value in overrides.items():
+            conn.execute(
+                query,
+                [value, now, code, point_date, *_DAILY_PRICE_SOURCES],
+            )
+        conn.commit()
+
+
 def _read_fintables_udf_price_points(
     processed_dir: Path,
     fund_code: str,
@@ -2005,6 +2166,9 @@ def _summary_from_points(fund_code: str, points: List[Dict[str, Any]]) -> Option
         for key in ("1w", "1m", "3m", "6m", "ytd", "1y")
     }
     raw_daily_return = _coerce_float(_first_present(raw, "gunlukGetiri", "daily_return"))
+    daily_return_source = _first_text(raw, "daily_return_source")
+    if raw.get("range_returns_source"):
+        daily_return_source = TEFASFON_RETURNS_SOURCE
     management_fee_applied = (
         latest.get("management_fee_applied")
         if latest.get("management_fee_applied") is not None
@@ -2039,6 +2203,7 @@ def _summary_from_points(fund_code: str, points: List[Dict[str, Any]]) -> Option
         "tefas_open": latest.get("tefas_open"),
         "price": latest.get("price"),
         "daily_return": raw_daily_return if raw_daily_return is not None else _return_between(latest.get("price"), previous.get("price") if previous else None),
+        "daily_return_source": daily_return_source,
         "period_returns": period_returns,
         "risk_value": latest.get("risk_value"),
         "currency": "TRY",
@@ -2794,6 +2959,30 @@ class TefasFonClient:
         if not normalized or start_date > end_date:
             return []
         rows: List[Dict[str, Any]] = []
+        direct_rate_limit_error: Optional[BaseException] = None
+        for fund_type in self.fund_types:
+            try:
+                rows.extend(
+                    self._fetch_portfolio_direct_request(
+                        normalized,
+                        start_date,
+                        end_date,
+                        fund_type=fund_type,
+                    )
+                )
+            except TefasRateLimitError as exc:
+                direct_rate_limit_error = exc
+                break
+            except TefasUpstreamError:
+                continue
+        if rows:
+            return rows
+        if direct_rate_limit_error is not None:
+            raise direct_rate_limit_error
+
+        # Keep the package's getter implementation as a compatibility fallback.
+        # TEFAS occasionally changes the public payload contract; this prevents a
+        # direct-client change from turning a temporary mismatch into empty UI data.
         direct_errors: List[str] = []
         for fund_type in self.fund_types:
             try:
@@ -2820,6 +3009,25 @@ class TefasFonClient:
                 rows.extend(row for row, code in coded_rows if code == normalized)
             else:
                 rows.extend(normalized_rows)
+        return rows
+
+    def _fetch_portfolio_direct_request(
+        self,
+        fund_code: str,
+        start_date: date,
+        end_date: date,
+        *,
+        fund_type: str,
+    ) -> List[Dict[str, Any]]:
+        rows = TefasClient().fetch_portfolio_direct(
+            fund_code=fund_code,
+            start_date=start_date,
+            end_date=end_date,
+            fund_type=fund_type,
+        )
+        for row in rows:
+            if isinstance(row, dict):
+                row.setdefault("adapter_used", "direct_tefas_request")
         return rows
 
     def _fetch_funds_snapshot_direct(
@@ -3146,7 +3354,7 @@ class TefasFonClient:
                 rows = self.fetch_portfolio(fund_code=fund_code, start_date=target_date, end_date=target_date)
             except TefasUpstreamError as exc:
                 warnings.append(f"tefasfon_portfolio failed for {target_date.isoformat()}: {exc}")
-                if _is_tefasfon_adapter_unavailable(exc):
+                if _is_tefasfon_adapter_unavailable(exc) or _is_tefas_rate_limit(exc):
                     break
                 continue
             if rows:
@@ -3234,19 +3442,62 @@ class TefasClient:
         self.funds_list_endpoint = funds_list_endpoint
         self.timeout_seconds = timeout_seconds
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self, *, referer: Optional[str] = None) -> Dict[str, str]:
         return {
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
             "Content-Type": "application/json",
             "Origin": TEFAS_BASE_URL,
-            "Referer": f"{TEFAS_BASE_URL}/fon-karsilastirma",
+            "Referer": referer or f"{TEFAS_BASE_URL}/fon-karsilastirma",
             "User-Agent": FINTABLES_USER_AGENT,
         }
+
+    def _post_json(
+        self,
+        client: httpx.Client,
+        *,
+        endpoint: str,
+        body: Dict[str, Any],
+        context: str,
+        referer: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """POST one TEFAS JSON page with shared retry/rate-limit handling."""
+
+        attempts = max(1, TEFAS_HTTP_RETRY_ATTEMPTS)
+        for attempt in range(1, attempts + 1):
+            try:
+                response = client.post(
+                    endpoint,
+                    json=body,
+                    headers=self._headers(referer=referer),
+                )
+            except httpx.HTTPError as exc:
+                if attempt >= attempts:
+                    raise TefasUpstreamError(f"{context} request failed: {exc}") from exc
+                delay = _tefas_retry_delay_seconds(attempt)
+                if delay > 0:
+                    time.sleep(delay)
+                continue
+            try:
+                return _decode_tefas_json_response(
+                    response.status_code,
+                    dict(response.headers),
+                    response.content,
+                    context=context,
+                )
+            except TefasRateLimitError as exc:
+                if attempt >= attempts:
+                    raise
+                delay = _tefas_retry_delay_seconds(attempt, exc.retry_after_seconds)
+                if delay > 0:
+                    time.sleep(delay)
+                continue
+        raise TefasUpstreamError(f"{context} request failed")
 
     def _fund_list_body(
         self,
         *,
+        fund_type: str = "YAT",
         target_date: Optional[date] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
@@ -3259,7 +3510,7 @@ class TefasClient:
         if effective_start is None or effective_end is None:
             raise ValueError("target_date or start/end date is required")
         return {
-            "fonTipi": "YAT",
+            "fonTipi": fund_type,
             "fonKodu": normalize_fund_code(fund_code) or None,
             "aramaMetni": normalize_fund_code(fund_code) or None,
             "fonGrubu": None,
@@ -3275,37 +3526,437 @@ class TefasClient:
         }
 
     def _post_fund_list(self, *, body: Dict[str, Any], context: str) -> Dict[str, Any]:
-        attempts = max(1, TEFAS_HTTP_RETRY_ATTEMPTS)
         with httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
-            for attempt in range(1, attempts + 1):
-                try:
-                    response = client.post(
-                        self.funds_list_endpoint,
-                        json=body,
-                        headers=self._headers(),
+            return self._post_json(
+                client,
+                endpoint=self.funds_list_endpoint,
+                body=body,
+                context=context,
+            )
+
+    @staticmethod
+    def _direct_fund_config(fund_type: str) -> Tuple[str, str, Optional[str]]:
+        configs = {
+            "SEC": (
+                "YAT",
+                f"{TEFAS_BASE_URL}/tr/fon-verileri",
+                "YAT",
+            ),
+            "PEN": (
+                "EMK",
+                f"{TEFAS_BASE_URL}/tr/fon-verileri",
+                "EMK",
+            ),
+            "ETF": (
+                "BYF",
+                f"{TEFAS_BASE_URL}/tr/fon-verileri",
+                "BYF",
+            ),
+            "RE": (
+                "GYF",
+                f"{TEFAS_BASE_URL}/tr/gayrimenkul-fonlari",
+                None,
+            ),
+            "VC": (
+                "GSYF",
+                f"{TEFAS_BASE_URL}/tr/girisim-sermayesi-fonlari",
+                None,
+            ),
+        }
+        normalized = str(fund_type or "").strip().upper()
+        if normalized not in configs:
+            raise TefasFormatError(f"unsupported direct TEFAS fund type: {fund_type}")
+        return configs[normalized]
+
+    @staticmethod
+    def _direct_monthly_chunks(start_date: date, end_date: date) -> List[Tuple[date, date]]:
+        chunks: List[Tuple[date, date]] = []
+        current = date(start_date.year, start_date.month, 1)
+        while current <= end_date:
+            next_month = (
+                date(current.year + 1, 1, 1)
+                if current.month == 12
+                else date(current.year, current.month + 1, 1)
+            )
+            chunks.append((max(start_date, current), min(end_date, next_month - timedelta(days=1))))
+            current = next_month
+        return chunks
+
+    @staticmethod
+    def _direct_payload_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        for key in ("resultList", "data", "Data", "result", "Result", "rows", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+        return []
+
+    @staticmethod
+    def _direct_payload_page_count(payload: Dict[str, Any]) -> Optional[int]:
+        for key in ("toplamSayfa", "totalPages", "totalPage", "pageCount"):
+            value = payload.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return max(1, int(float(value)))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _prime_direct_session(
+        self,
+        client: httpx.Client,
+        *,
+        portal_url: str,
+        fund_url_param: Optional[str],
+        start_date: Optional[date],
+        end_date: Optional[date],
+    ) -> None:
+        params: Dict[str, str] = {}
+        if fund_url_param:
+            params["fundType"] = fund_url_param
+        if start_date:
+            params["startDate"] = start_date.isoformat()
+        if end_date:
+            params["endDate"] = end_date.isoformat()
+        try:
+            client.get(
+                portal_url,
+                params=params,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "User-Agent": FINTABLES_USER_AGENT,
+                },
+            )
+        except httpx.HTTPError:
+            # The portal GET is only used to establish the normal TEFAS session.
+            # The JSON endpoint can still be usable when the HTML page is slow.
+            return
+
+    def _fetch_direct_pages(
+        self,
+        client: httpx.Client,
+        *,
+        endpoint: str,
+        base_payload: Dict[str, Any],
+        referer: str,
+        context: str,
+    ) -> List[Dict[str, Any]]:
+        page_size = max(1, TEFAS_DIRECT_PAGE_SIZE)
+        start_row = 1
+        page_number = 0
+        total_pages: Optional[int] = None
+        all_rows: List[Dict[str, Any]] = []
+
+        while page_number < 1000:
+            payload = dict(base_payload)
+            payload["basSira"] = start_row
+            payload["bitSira"] = start_row + page_size - 1
+            response = self._post_json(
+                client,
+                endpoint=endpoint,
+                body=payload,
+                context=f"{context} page {page_number + 1}",
+                referer=referer,
+            )
+            rows = self._direct_payload_rows(response)
+            if not rows:
+                break
+            all_rows.extend(rows)
+            page_number += 1
+            total_pages = total_pages or self._direct_payload_page_count(response)
+            if (total_pages is not None and page_number >= total_pages) or len(rows) < page_size:
+                break
+            start_row += page_size
+            if TEFAS_DIRECT_PAGE_DELAY_SECONDS > 0:
+                time.sleep(TEFAS_DIRECT_PAGE_DELAY_SECONDS)
+        return all_rows
+
+    @staticmethod
+    def _tag_direct_rows(
+        rows: Iterable[Dict[str, Any]],
+        *,
+        source: str,
+        source_url: str,
+        fund_type: str,
+    ) -> List[Dict[str, Any]]:
+        tagged: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            point = dict(row)
+            point["source"] = source
+            point["source_url"] = source_url
+            point.setdefault("fund_type_code", fund_type)
+            tagged.append(point)
+        return tagged
+
+    @staticmethod
+    def _filter_direct_codes(rows: Iterable[Dict[str, Any]], codes: Iterable[str]) -> List[Dict[str, Any]]:
+        normalized_codes = {
+            normalize_fund_code(code)
+            for code in codes
+            if normalize_fund_code(code)
+        }
+        if not normalized_codes:
+            return list(rows)
+        materialized = list(rows)
+        coded_rows = [
+            (
+                row,
+                normalize_fund_code(str(row.get("fonKodu") or row.get("fund_code") or row.get("FONKODU") or "")),
+            )
+            for row in materialized
+            if isinstance(row, dict)
+        ]
+        if not any(code for _row, code in coded_rows):
+            return materialized
+        return [row for row, code in coded_rows if code in normalized_codes]
+
+    def fetch_funds_direct(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        fund_type: str = "SEC",
+        fund_codes: Optional[Iterable[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch TEFAS general-information rows without importing tefasfon."""
+
+        if start_date > end_date:
+            return []
+        fund_type_code, portal_url, fund_url_param = self._direct_fund_config(fund_type)
+        codes = sorted({normalize_fund_code(code) for code in list(fund_codes or []) if normalize_fund_code(code)})
+        endpoint = self.funds_list_endpoint
+        rows: List[Dict[str, Any]] = []
+        chunks = self._direct_monthly_chunks(start_date, end_date)
+        with httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
+            for chunk_index, (chunk_start, chunk_end) in enumerate(chunks):
+                self._prime_direct_session(
+                    client,
+                    portal_url=portal_url,
+                    fund_url_param=fund_url_param,
+                    start_date=chunk_start,
+                    end_date=chunk_end,
+                )
+                code = codes[0] if len(codes) == 1 else None
+                base_payload = self._fund_list_body(
+                    fund_type=fund_type_code,
+                    start_date=chunk_start,
+                    end_date=chunk_end,
+                    fund_code=code,
+                    end_row=TEFAS_DIRECT_PAGE_SIZE,
+                )
+                referer = f"{portal_url}?startDate={chunk_start.isoformat()}&endDate={chunk_end.isoformat()}"
+                rows.extend(
+                    self._fetch_direct_pages(
+                        client,
+                        endpoint=endpoint,
+                        base_payload=base_payload,
+                        referer=referer,
+                        context=f"direct TEFAS funds {fund_type_code} {chunk_start.isoformat()} {chunk_end.isoformat()}",
                     )
-                except httpx.HTTPError as exc:
-                    if attempt >= attempts:
-                        raise TefasUpstreamError(f"{context} request failed: {exc}") from exc
-                    delay = _tefas_retry_delay_seconds(attempt)
-                    if delay > 0:
-                        time.sleep(delay)
-                    continue
-                try:
-                    return _decode_tefas_json_response(
-                        response.status_code,
-                        dict(response.headers),
-                        response.content,
-                        context=context,
+                )
+                if chunk_index < len(chunks) - 1 and TEFAS_DIRECT_CHUNK_DELAY_SECONDS > 0:
+                    time.sleep(TEFAS_DIRECT_CHUNK_DELAY_SECONDS)
+        filtered = self._filter_direct_codes(rows, codes)
+        return self._tag_direct_rows(
+            filtered,
+            source=TEFAS_DIRECT_FUNDS_SOURCE,
+            source_url=endpoint,
+            fund_type=fund_type_code,
+        )
+
+    def fetch_returns_direct(
+        self,
+        *,
+        basis: str = "RB",
+        fund_type: str = "SEC",
+        fund_codes: Optional[Iterable[str]] = None,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch RB/SB/MB return data directly from TEFAS JSON endpoints."""
+
+        normalized_basis = str(basis or "RB").strip().upper()
+        if normalized_basis not in {"RB", "SB", "MB"}:
+            raise TefasFormatError(f"unsupported direct TEFAS returns basis: {basis}")
+        if (start_date is None) != (end_date is None):
+            raise TefasFormatError("direct TEFAS returns requires both start_date and end_date")
+        if start_date and end_date and start_date > end_date:
+            return []
+        fund_type_code, portal_url, fund_url_param = self._direct_fund_config(fund_type)
+        codes = sorted({normalize_fund_code(code) for code in list(fund_codes or []) if normalize_fund_code(code)})
+        endpoint = {
+            "RB": TEFAS_RETURNS_RB_ENDPOINT,
+            "SB": TEFAS_RETURNS_SB_ENDPOINT,
+            "MB": TEFAS_RETURNS_MB_ENDPOINT,
+        }[normalized_basis]
+
+        if normalized_basis == "RB" and start_date is None:
+            chunks: List[Tuple[Optional[date], Optional[date]]] = [(None, None)]
+        elif normalized_basis == "RB":
+            chunks = [(start_date, end_date)]  # type: ignore[list-item]
+        else:
+            chunks = [
+                (chunk_start, chunk_end)
+                for chunk_start, chunk_end in self._direct_monthly_chunks(start_date, end_date)  # type: ignore[arg-type]
+            ]
+
+        rows: List[Dict[str, Any]] = []
+        with httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
+            for chunk_index, (chunk_start, chunk_end) in enumerate(chunks):
+                prime_start = chunk_start or date.today()
+                prime_end = chunk_end or prime_start
+                self._prime_direct_session(
+                    client,
+                    portal_url=portal_url,
+                    fund_url_param=fund_url_param,
+                    start_date=prime_start,
+                    end_date=prime_end,
+                )
+                if normalized_basis == "RB":
+                    if chunk_start is None:
+                        base_payload = {
+                            "dil": "TR",
+                            "fonTipi": fund_type_code,
+                            "kurucuKodu": None,
+                            "sfonTurKod": None,
+                            "fonTurAciklama": None,
+                            "islem": 1,
+                            "fonTurKod": None,
+                            "fonGrubu": None,
+                            "donemGetiri1a": "1",
+                            "donemGetiri3a": "1",
+                            "donemGetiri6a": "1",
+                            "donemGetiri1y": "1",
+                            "donemGetiriyb": "1",
+                            "donemGetiri3y": "1",
+                            "donemGetiri5y": "1",
+                            "basTarih": None,
+                            "bitTarih": None,
+                            "calismaTipi": 2,
+                            "getiriOrani": "1",
+                        }
+                    else:
+                        base_payload = {
+                            "dil": "TR",
+                            "fonTipi": fund_type_code,
+                            "kurucuKodu": None,
+                            "sfonTurKod": None,
+                            "fonTurAciklama": None,
+                            "islem": 1,
+                            "fonTurKod": None,
+                            "fonGrubu": None,
+                            "donemGetiri1a": "0",
+                            "donemGetiri3a": "0",
+                            "donemGetiri6a": "0",
+                            "donemGetiri1y": "0",
+                            "donemGetiriyb": "0",
+                            "donemGetiri3y": "0",
+                            "donemGetiri5y": "0",
+                            "basTarih": chunk_start.strftime("%Y%m%d"),
+                            "bitTarih": chunk_end.strftime("%Y%m%d"),
+                            "calismaTipi": 1,
+                            "getiriOrani": "1",
+                        }
+                else:
+                    base_payload = self._fund_list_body(
+                        start_date=chunk_start,
+                        end_date=chunk_end,
+                        fund_type=fund_type_code,
+                        end_row=TEFAS_DIRECT_PAGE_SIZE,
                     )
-                except TefasRateLimitError as exc:
-                    if attempt >= attempts:
-                        raise
-                    delay = _tefas_retry_delay_seconds(attempt, exc.retry_after_seconds)
-                    if delay > 0:
-                        time.sleep(delay)
-                    continue
-        raise TefasUpstreamError(f"{context} request failed")
+                referer = f"{portal_url}?startDate={prime_start.isoformat()}&endDate={prime_end.isoformat()}"
+                rows.extend(
+                    self._fetch_direct_pages(
+                        client,
+                        endpoint=endpoint,
+                        base_payload=base_payload,
+                        referer=referer,
+                        context=f"direct TEFAS returns {normalized_basis} {fund_type_code}",
+                    )
+                )
+                if chunk_index < len(chunks) - 1 and TEFAS_DIRECT_CHUNK_DELAY_SECONDS > 0:
+                    time.sleep(TEFAS_DIRECT_CHUNK_DELAY_SECONDS)
+        filtered = self._filter_direct_codes(rows, codes)
+        return self._tag_direct_rows(
+            filtered,
+            source=TEFAS_DIRECT_RETURNS_SOURCE,
+            source_url=endpoint,
+            fund_type=fund_type_code,
+        )
+
+    def fetch_management_fees_direct(
+        self,
+        *,
+        fund_type: str = "SEC",
+        fund_codes: Optional[Iterable[str]] = None,
+        as_of: Optional[date] = None,
+        lookback_days: int = 21,
+    ) -> List[Dict[str, Any]]:
+        end_date = as_of or date.today()
+        start_date = end_date - timedelta(days=max(7, int(lookback_days)))
+        return self.fetch_returns_direct(
+            basis="MB",
+            fund_type=fund_type,
+            fund_codes=fund_codes,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def fetch_portfolio_direct(
+        self,
+        *,
+        fund_code: str,
+        start_date: date,
+        end_date: date,
+        fund_type: str = "SEC",
+    ) -> List[Dict[str, Any]]:
+        """Fetch historical asset-allocation rows directly from TEFAS."""
+
+        normalized_code = normalize_fund_code(fund_code)
+        if not normalized_code or start_date > end_date:
+            return []
+        fund_type_code, portal_url, fund_url_param = self._direct_fund_config(fund_type)
+        endpoint = TEFAS_PORTFOLIO_ENDPOINT
+        rows: List[Dict[str, Any]] = []
+        chunks = self._direct_monthly_chunks(start_date, end_date)
+        with httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
+            for chunk_index, (chunk_start, chunk_end) in enumerate(chunks):
+                self._prime_direct_session(
+                    client,
+                    portal_url=portal_url,
+                    fund_url_param=fund_url_param,
+                    start_date=chunk_start,
+                    end_date=chunk_end,
+                )
+                base_payload = self._fund_list_body(
+                    fund_type=fund_type_code,
+                    start_date=chunk_start,
+                    end_date=chunk_end,
+                    fund_code=normalized_code,
+                    end_row=TEFAS_DIRECT_PAGE_SIZE,
+                )
+                referer = f"{portal_url}?startDate={chunk_start.isoformat()}&endDate={chunk_end.isoformat()}"
+                rows.extend(
+                    self._fetch_direct_pages(
+                        client,
+                        endpoint=endpoint,
+                        base_payload=base_payload,
+                        referer=referer,
+                        context=f"direct TEFAS portfolio {normalized_code}",
+                    )
+                )
+                if chunk_index < len(chunks) - 1 and TEFAS_DIRECT_CHUNK_DELAY_SECONDS > 0:
+                    time.sleep(TEFAS_DIRECT_CHUNK_DELAY_SECONDS)
+        filtered = self._filter_direct_codes(rows, [normalized_code])
+        return self._tag_direct_rows(
+            filtered,
+            source=TEFAS_DIRECT_PORTFOLIO_SOURCE,
+            source_url=endpoint,
+            fund_type=fund_type_code,
+        )
 
     def fetch_fund_list_snapshot(self, *, target_date: date) -> List[Dict[str, Any]]:
         payload = self._post_fund_list(
@@ -3425,13 +4076,21 @@ def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
     path = _snapshot_path(processed_dir)
     cache_key = f"snapshot:{path}"
     stat = path.stat() if path.exists() else None
+    file_signature = (
+        getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)),
+        int(stat.st_size),
+    ) if stat else None
     cached = _MEMORY_CACHE.get(cache_key)
-    if cached and stat and cached.get("mtime") == stat.st_mtime:
+    if cached and stat and cached.get("file_signature") == file_signature:
         payload = dict(cached["payload"])
     else:
         payload = _read_json(path) or _empty_snapshot_payload("fund snapshot cache is empty")
         if stat:
-            _MEMORY_CACHE[cache_key] = {"mtime": stat.st_mtime, "payload": payload}
+            _MEMORY_CACHE[cache_key] = {
+                "file_signature": file_signature,
+                "mtime": stat.st_mtime,
+                "payload": payload,
+            }
     fetched_at = payload.get("fetched_at")
     age = _cache_age_seconds(fetched_at)
     meta = dict(payload.get("source_metadata") or {})
@@ -3705,6 +4364,10 @@ def refresh_funds_snapshot(processed_dir: Path, *, lookback_days: int = 10) -> D
         source=TEFASFON_FUNDS_SOURCE,
         fetched_at=str(snapshot.get("fetched_at") or _utc_now_iso()),
     )
+    daily_return_overrides = _daily_return_overrides_from_price_history(processed_dir, snapshot["rows"])
+    if daily_return_overrides:
+        snapshot["rows"] = _apply_daily_return_overrides(processed_dir, snapshot["rows"])
+        _persist_daily_return_overrides(processed_dir, daily_return_overrides)
     backfilled = _backfill_daily_returns_from_local_prices(processed_dir, snapshot["rows"])
     if backfilled:
         meta = snapshot.setdefault("source_metadata", {})
@@ -3810,6 +4473,10 @@ def collect_daily_fund_prices(
     snapshot["source_metadata"]["source_policy"] = FUND_HISTORY_SOURCE_POLICY
     snapshot["source_metadata"]["fallback_used"] = fallback_attempted
     if snapshot_rows:
+        daily_return_overrides = _daily_return_overrides_from_price_history(processed_dir, snapshot["rows"])
+        if daily_return_overrides:
+            snapshot["rows"] = _apply_daily_return_overrides(processed_dir, snapshot["rows"])
+            _persist_daily_return_overrides(processed_dir, daily_return_overrides)
         backfilled = _backfill_daily_returns_from_local_prices(processed_dir, snapshot["rows"])
         if backfilled:
             snapshot["source_metadata"]["daily_return_local_fallback_count"] = backfilled
@@ -3982,6 +4649,7 @@ def get_funds_payload(
         and _meets_min_aum(row, min_aum)
         and _row_matches(row, q=q, fund_type=fund_type, founder=founder, manager=manager, risk=risk)
     ]
+    rows = _apply_daily_return_overrides(processed_dir, rows)
     rows = _sort_rows(rows, sort, order)
     meta = dict(snapshot.get("source_metadata") or {})
     meta["list_min_aum"] = min_aum
@@ -4059,7 +4727,7 @@ def _find_fund_row(processed_dir: Path, fund_code: str) -> Optional[Dict[str, An
             ):
                 if row.get(key) is None and ref_meta.get(key) is not None:
                     row[key] = ref_meta[key]
-            return row
+            return _apply_daily_return_overrides(processed_dir, [row])[0]
     return None
 
 
@@ -5695,6 +6363,7 @@ def refresh_fund_allocations_history(
     start_date = effective_as_of - timedelta(days=bounded_lookback - 1)
     warnings: List[str] = []
     client = TefasFonClient()
+    rate_limited = False
     try:
         rows = client.fetch_portfolio(
             fund_code=normalized,
@@ -5704,7 +6373,8 @@ def refresh_fund_allocations_history(
     except TefasUpstreamError as exc:
         rows = []
         warnings = [f"tefasfon_portfolio_history failed: {exc}"]
-    if not rows:
+        rate_limited = _is_tefas_rate_limit(exc)
+    if not rows and not rate_limited:
         daily_dates: List[date] = []
         target_date = start_date
         while target_date <= effective_as_of:

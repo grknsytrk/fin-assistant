@@ -10,9 +10,12 @@ from src import kap_fetcher
 from src.kap_fetcher import (
     KAP_BROWSER_USER_AGENT,
     KAP_CACHE_SCHEMA_VERSION,
+    _extract_disclosure_metrics,
     _http_get_json,
     _list_company_disclosures,
     _pick_metric_value,
+    _is_insurance_like_payload,
+    classify_kap_company_kind,
     fetch_kap_company_snapshot,
 )
 
@@ -1093,3 +1096,43 @@ def test_net_kar_falls_back_when_only_continued_operations_exists() -> None:
 
     picked = _pick_metric_value("net_kar", rows, period=3)
     assert picked == 3_500_000_000.0
+
+
+@pytest.mark.parametrize(
+    ("company", "title", "expected"),
+    [
+        ("TUPRS", "TÜPRAŞ-TÜRKİYE PETROL RAFİNERİLERİ A.Ş.", "generic"),
+        ("AKBNK", "AKBANK T.A.Ş.", "bank"),
+        ("TURSG", "TÜRKİYE SİGORTA A.Ş.", "insurance"),
+        ("", "Anadolu Hayat Emeklilik A.Ş.", "insurance"),
+    ],
+)
+def test_kap_company_kind_uses_identity_not_metrics(company: str, title: str, expected: str) -> None:
+    assert classify_kap_company_kind(company, title) == expected
+
+
+def test_non_insurance_metric_cannot_mark_payload_as_insurance() -> None:
+    payload = {
+        "company": "TUPRS",
+        "stock_code": "TUPRS",
+        "company_title": "TÜPRAŞ-TÜRKİYE PETROL RAFİNERİLERİ A.Ş.",
+        "quarters": [
+            {"metrics": {"teknik_karsiliklar": 2_600_783_003.0}},
+        ],
+    }
+    assert _is_insurance_like_payload(payload) is False
+
+
+def test_extract_disclosure_metrics_gates_insurance_rows_for_generic_issuers() -> None:
+    detail = {
+        "disclosureBody": [
+            '<div class="gwt-Label multi-language-content content-tr">Teknik Karşılıklar</div>'
+            '<td class="taxonomy-context-value col-order-class-4"><div><div title="2600783003">2.600.783.003</div></div></td>'
+        ]
+    }
+
+    generic_metrics, _ = _extract_disclosure_metrics(detail, period=4, is_insurance=False)
+    insurance_metrics, _ = _extract_disclosure_metrics(detail, period=4, is_insurance=True)
+
+    assert generic_metrics["teknik_karsiliklar"] is None
+    assert insurance_metrics["teknik_karsiliklar"] == 2_600_783_003.0
