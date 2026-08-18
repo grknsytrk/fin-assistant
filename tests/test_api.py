@@ -38,9 +38,6 @@ def _reset_flow_state(monkeypatch: pytest.MonkeyPatch) -> None:
     api_module._MARKET_INDEX_QUOTE_CACHE.clear()
     api_module._MARKET_INDEX_INTRADAY_CACHE.clear()
     api_module._MARKET_INDEX_RETURN_CACHE.clear()
-    api_module._JSONL_ROW_COUNT_CACHE.clear()
-    api_module._AVAILABLE_COMPANIES_CACHE.clear()
-    api_module._COMPANY_BREAKDOWN_CACHE.clear()
     api_module._KAP_MARKET_METADATA_CACHE.clear()
     api_module._STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE.clear()
     api_module._FUND_HOLDING_SECTOR_MAP_CACHE.clear()
@@ -2198,25 +2195,6 @@ def test_api_fund_allocations_history_schema(monkeypatch: pytest.MonkeyPatch) ->
     assert payload["history"][0]["allocations"][0]["label"] == "Hisse Senedi"
 
 
-def test_api_feedback() -> None:
-    client = TestClient(app)
-    response = client.post(
-        "/feedback",
-        json={
-            "company": "BIM",
-            "quarter": "Q1",
-            "metric": "net_kar",
-            "extracted_value": "1,23 mlr TL",
-            "user_value": "1,20 mlr TL",
-            "evidence_ref": "[doc|Q1|5|gelir tablosu]",
-            "verdict": "yanlis",
-        },
-    )
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["message"] == "feedback_saved"
-
-
 def _overview_commentary_payload() -> Dict[str, Any]:
     return {
         "company": "BIMAS",
@@ -3202,13 +3180,6 @@ def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.M
     )
     monkeypatch.setattr(
         api_module,
-        "_company_breakdown_from_chunks",
-        lambda _path: [
-            {"company": "A1CAP", "chunks": 3, "quarter_count": 2, "quarters": ["2025Q4"]},
-        ],
-    )
-    monkeypatch.setattr(
-        api_module,
         "_load_cached_kap_market_metadata",
         lambda _cache_dir, symbol: {
             "latest_quarter": "2026Q1",
@@ -3340,7 +3311,6 @@ def test_xutum_market_stocks_uses_cache_only_side_data(monkeypatch: pytest.Monke
             "fallback_used": False,
         },
     )
-    monkeypatch.setattr(api_module, "_company_breakdown_from_chunks", lambda _path: [])
     monkeypatch.setattr(
         api_module,
         "_load_cached_kap_market_metadata",
@@ -3402,7 +3372,6 @@ def test_legacy_xu030_payload_does_not_resolve_kap_logos(monkeypatch: pytest.Mon
     )
     monkeypatch.setattr(api_module, "_fill_prices_via_yahoo", lambda _symbols, base_map: base_map)
     monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: {})
-    monkeypatch.setattr(api_module, "_company_breakdown_from_chunks", lambda _path: [])
     monkeypatch.setattr(
         api_module,
         "_load_cached_kap_market_metadata",
@@ -3449,7 +3418,6 @@ def test_infoyatirim_stock_page_fallback_populates_xu100_rows_and_index_impact(
 
     monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse())
     monkeypatch.setattr("app.kap_service.get_bist100_companies", lambda: ["EGEEN"])
-    monkeypatch.setattr(api_module, "_company_breakdown_from_chunks", lambda _path: [])
     monkeypatch.setattr(
         api_module,
         "_load_cached_kap_market_metadata",

@@ -1,1 +1,1 @@
-"""Streamlit/FastAPI application package."""
+"""React/FastAPI application package."""

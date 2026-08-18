@@ -1,11 +1,6 @@
 import type {
-    AskRequest,
-    AskResponse,
-    StatsResponse,
-    FeedbackRequest,
     KapCompaniesResponse,
     KapSnapshotResponse,
-    CompanyBreakdownResponse,
     MarketUniverseResponse,
     MarketStocksResponse,
     MarketStockIndex,
@@ -212,8 +207,6 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
 export const apiClient = {
     health: () => fetchApi<{ status: string }>('/health'),
 
-    stats: () => fetchApi<StatsResponse>('/stats'),
-    companyBreakdown: () => fetchApi<CompanyBreakdownResponse>('/stats/company-breakdown'),
     marketUniverse: () => fetchApi<MarketUniverseResponse>('/market/universe'),
     marketStocks: (options?: { index?: MarketStockIndex; refresh?: boolean }) => {
         const params = new URLSearchParams();
@@ -409,39 +402,6 @@ export const apiClient = {
         return request;
     },
 
-    ask: (request: AskRequest) =>
-        fetchApi<AskResponse>('/ask', {
-            method: 'POST',
-            body: JSON.stringify(request),
-    }),
-
-    feedback: (request: FeedbackRequest) =>
-        fetchApi<{ message: string; path: string; feedback: unknown }>('/feedback', {
-            method: 'POST',
-            body: JSON.stringify(request),
-        }),
-
-    commentary: (request: {
-        question: string;
-        answer_payload: Record<string, unknown>;
-        company?: string;
-        year?: string;
-        quarter?: string;
-        model?: string;
-    }) =>
-        fetchApi<{ commentary: string; model_used: string; error?: string }>('/commentary', {
-            method: 'POST',
-            body: JSON.stringify(request),
-        }),
-
-    exportUrl: (type: 'trend' | 'ratio', company?: string) => {
-        const params = new URLSearchParams({ type });
-        if (company) {
-            params.append('company', company);
-        }
-        return `${API_BASE}/export?${params.toString()}`;
-    },
-
     kapCompanies: () => fetchApi<KapCompaniesResponse>('/kap/companies'),
 
     kapSnapshot: (company: string, refresh = false, maxQuarters = 10) => {
@@ -457,14 +417,6 @@ export const apiClient = {
             signal: options?.signal,
             timeoutMs: OVERVIEW_COMMENTARY_TIMEOUT_MS,
             debugLabel: 'kap-overview-commentary',
-        }),
-
-    ingest: () => fetchApi<{ message: string; pages_written: number; summary: unknown }>('/ingest', { method: 'POST' }),
-
-    index: (version: 'v1' | 'v2' = 'v2') =>
-        fetchApi<{ message: string; version: string; summary: unknown }>('/index', {
-            method: 'POST',
-            body: JSON.stringify({ version }),
         }),
 
     kapPrice: (symbol: string) =>

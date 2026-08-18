@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, BarChart3, BookOpen, ChevronRight, FileText, Info, MessageSquare, Star } from 'lucide-react';
+import { ArrowLeft, BarChart3, BookOpen, ChevronRight, FileText, Info, Star } from 'lucide-react';
 import './StockDetailPage.css';
 import { apiClient } from '../api/client';
 import type { KapSnapshotResponse, KapQuarter } from '../api/types';
@@ -13,7 +13,6 @@ import type { StockTab } from '../routing/routes';
 import StockOverview from './stock/sections/StockOverview';
 import StockFinancials from './stock/sections/StockFinancials';
 import StockKAP from './stock/sections/StockKAP';
-import StockAsk from './stock/sections/StockAsk';
 
 interface StockDetailPageProps {
     ticker: string;
@@ -44,7 +43,6 @@ const STOCK_DETAIL_TABS: Array<{ key: StockTab; label: string; icon: typeof Info
     { key: 'overview', label: 'Genel Bakış', icon: Info },
     { key: 'financials', label: 'Finansal Tablolar', icon: FileText },
     { key: 'kap', label: 'KAP Bildirimleri', icon: BookOpen },
-    { key: 'ask', label: 'RAG Asistanı', icon: MessageSquare },
 ];
 const FULL_KAP_QUARTER_COUNT = 20;
 
@@ -217,8 +215,6 @@ export default function StockDetailPage({
                 return <StockFinancials quarters={quarters} analysisNote={snapshot.analysis_note} />;
             case 'kap':
                 return <StockKAP ticker={ticker} quarters={quarters} />;
-            case 'ask':
-                return <StockAsk ticker={ticker} />;
             default:
                 return null;
         }

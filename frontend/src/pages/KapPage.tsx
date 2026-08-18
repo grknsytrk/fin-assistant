@@ -2,7 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, ChevronUp, ChevronDown } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { KapQuarter, KapSnapshotResponse } from '../api/types';
-import { classifyKapCompanyKind, KAP_FINANCIAL_TABLE_KEYS } from '../utils/formatters';
+import {
+    classifyKapCompanyKind,
+    KAP_FINANCIAL_TABLE_KEYS,
+    _resolveMetricYtdValue,
+    _resolveMetricYtdDisplay,
+} from '../utils/formatters';
 import './KapPage.css';
 
 /* ── Yahoo Finance Price Ticker ── */
@@ -1244,16 +1249,16 @@ export default function KapPage() {
                             <div className="kap-summary-grid">
                                 <div className="kap-summary-table-wrap">
                                     <h4>
-                                        Özet Gelir Tablosu <small>{_periodLabel(intSafe(latestQuarter.year), intSafe(latestQuarter.period), latestQuarter.quarter)}</small>
+                                        Özet Gelir Tablosu <small>{_periodLabel(intSafe(latestQuarter.year), intSafe(latestQuarter.period), latestQuarter.quarter)} YTD</small>
                                     </h4>
                                     <table className="kap-summary-table">
                                         <thead>
                                             <tr>
                                                 <th>Kalem</th>
-                                                <th>{_periodLabel(intSafe(latestQuarter.year), intSafe(latestQuarter.period), latestQuarter.quarter)}</th>
+                                                <th>{_periodLabel(intSafe(latestQuarter.year), intSafe(latestQuarter.period), latestQuarter.quarter)} YTD</th>
                                                 <th>
                                                     {prevYearSameQuarter
-                                                        ? _periodLabel(intSafe(prevYearSameQuarter.year), intSafe(prevYearSameQuarter.period), prevYearSameQuarter.quarter)
+                                                        ? `${_periodLabel(intSafe(prevYearSameQuarter.year), intSafe(prevYearSameQuarter.period), prevYearSameQuarter.quarter)} YTD`
                                                         : '-'}
                                                 </th>
                                                 <th>%</th>
@@ -1261,20 +1266,10 @@ export default function KapPage() {
                                         </thead>
                                         <tbody>
                                             {incomeSummaryRows.map((row) => {
-                                                const currentValue = _resolveMetricValue(
-                                                    orderedQuarters,
-                                                    latestQuarterIdx,
-                                                    row.key,
-                                                    true,
-                                                );
+                                                const currentValue = _resolveMetricYtdValue(latestQuarter, row.key);
                                                 const baseValue =
                                                     prevYearSameQuarterIdx >= 0
-                                                        ? _resolveMetricValue(
-                                                            orderedQuarters,
-                                                            prevYearSameQuarterIdx,
-                                                            row.key,
-                                                            true,
-                                                        )
+                                                        ? _resolveMetricYtdValue(prevYearSameQuarter, row.key)
                                                         : null;
                                                 if (currentValue === null && baseValue === null) {
                                                     return null;
@@ -1284,22 +1279,12 @@ export default function KapPage() {
                                                     <tr key={`income-${row.key}`}>
                                                         <td>{row.label}</td>
                                                         <td>
-                                                            {_resolveMetricDisplay(
-                                                                orderedQuarters,
-                                                                latestQuarterIdx,
-                                                                row.key,
-                                                                true,
-                                                            )}
+                                                            {_resolveMetricYtdDisplay(latestQuarter, row.key)}
                                                         </td>
                                                         <td>
                                                             {prevYearSameQuarterIdx >= 0
-                                                                ? _resolveMetricDisplay(
-                                                                    orderedQuarters,
-                                                                    prevYearSameQuarterIdx,
-                                                                    row.key,
-                                                                    true,
-                                                                )
-                                                                : '-'}
+                                                                ? _resolveMetricYtdDisplay(prevYearSameQuarter, row.key)
+                                                                 : '-'}
                                                         </td>
                                                         <td className={_pctClass(pct, row.key)}>{_pctText(pct)}</td>
                                                     </tr>

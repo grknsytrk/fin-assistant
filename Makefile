@@ -1,16 +1,10 @@
-.PHONY: demo doctor ui api test
-
-demo:
-	python -m ragfin.demo
-
-doctor:
-	python -m ragfin.doctor
-
-ui:
-	python -m ragfin.ui
+.PHONY: api test frontend-build
 
 api:
 	python -m ragfin.api
 
 test:
 	python -m pytest -q
+
+frontend-build:
+	cd frontend && npm run build

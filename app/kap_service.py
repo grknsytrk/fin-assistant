@@ -1,4 +1,4 @@
-"""KAP service layer — decouples KAP logic from Streamlit and FastAPI."""
+"""KAP service layer used by the FastAPI application."""
 from __future__ import annotations
 
 import csv

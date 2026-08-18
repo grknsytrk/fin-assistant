@@ -8,20 +8,20 @@ from src import config as config_module
 def test_load_dotenv_file_sets_env(monkeypatch, tmp_path: Path) -> None:
     dotenv = tmp_path / ".env"
     dotenv.write_text(
-        "OPENROUTER_API_KEY=test-key\n"
-        "RAGFIN_LLM_COMMENTARY_ENABLED=true\n",
+        "NVIDIA_API_KEY=test-key\n"
+        "RAGFIN_KAP_ENABLED=true\n",
         encoding="utf-8",
     )
 
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("RAGFIN_LLM_COMMENTARY_ENABLED", raising=False)
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.delenv("RAGFIN_KAP_ENABLED", raising=False)
     config_module._LOADED_DOTENV_FILES.clear()
 
     loaded = config_module.load_dotenv_file(dotenv)
     assert loaded is not None
     assert loaded.resolve() == dotenv.resolve()
-    assert config_module.os.getenv("OPENROUTER_API_KEY") == "test-key"
-    assert config_module.os.getenv("RAGFIN_LLM_COMMENTARY_ENABLED") == "true"
+    assert config_module.os.getenv("NVIDIA_API_KEY") == "test-key"
+    assert config_module.os.getenv("RAGFIN_KAP_ENABLED") == "true"
 
 
 def test_load_dotenv_file_accepts_colon_env_syntax(monkeypatch, tmp_path: Path) -> None:

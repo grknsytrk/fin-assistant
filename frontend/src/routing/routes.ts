@@ -51,7 +51,7 @@ export const MARKET_INDEX_CODES: readonly MarketIndexCode[] = [
     ...MARKET_STOCK_INDEX_CODES,
     ...MARKET_SECTOR_INDEX_CODES,
 ] as const;
-export const STOCK_TABS = ['overview', 'financials', 'kap', 'ask'] as const;
+export const STOCK_TABS = ['overview', 'financials', 'kap'] as const;
 export const FUND_TABS = ['overview', 'allocation', 'history'] as const;
 export const STOCK_RETURN_MODES = ['absolute', 'relative_xu100', 'relative_xu030'] as const;
 
@@ -117,7 +117,7 @@ export function isValidStockTab(raw: string | null | undefined): raw is StockTab
 
 export function normalizeStockTab(raw: string | null | undefined, fallback: StockTab = DEFAULT_STOCK_TAB): StockTab {
     const normalized = String(raw ?? '').trim().toLowerCase();
-    if (normalized === 'charts') {
+    if (normalized === 'charts' || normalized === 'ask') {
         return 'overview';
     }
     if (isValidStockTab(normalized)) {

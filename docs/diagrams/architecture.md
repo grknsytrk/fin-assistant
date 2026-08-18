@@ -1,43 +1,25 @@
-# RAG-Fin Architecture (Week-8)
-
-Bu dokuman, sistemi ise alim/portfolio sunumu icin tek sayfada aciklar.
-
-## A) Sistem Mimarisi
+# RAG-FIN mimarisi
 
 ```mermaid
 flowchart LR
-    A[data/raw PDF] --> B[src.ingest.py<br/>Page-level extraction]
-    B --> C[data/processed/pages.jsonl]
-    C --> D[src.chunking.py<br/>v1/v2 chunking]
-    D --> E[data/processed/chunks.jsonl<br/>chunks_v2.jsonl]
-    E --> F[src.embeddings.py<br/>multilingual-e5-small]
-    F --> G[(ChromaDB<br/>bimas_faaliyet_2025 / v2)]
-
-    H[src.retrieve.py<br/>v1/v2/v3/v5/v6] --> G
-    G --> H
-    E --> H
-
-    H --> I[src.answer.py<br/>Grounded answer + citation]
-    I --> J[Streamlit UI<br/>app/ui.py]
-    I --> K[FastAPI<br/>app/api.py]
-
-    L[src.metrics.py / eval_runner.py] --> H
-    M[src.error_analysis.py] --> L
-    N[src.latency_benchmark.py] --> H
+    B[React frontend] --> A[FastAPI API]
+    A --> F[Fund service]
+    F --> T[TEFAS / tefasfon]
+    A --> K[KAP service]
+    K --> C[KAP cache]
+    A --> R[Reference data]
+    F --> D[(SQLite + cache)]
+    K --> D
+    R --> D
+    A --> N[Opsiyonel yapılandırılmış KAP yorumu]
 ```
 
-## B) Retrieval Pipeline Karsilastirmasi
+Frontend finansal tabloları, KAP bildirimlerini, fon geçmişini ve portföy dağılımını doğrudan yapılandırılmış API sözleşmelerinden render eder. PDF ingest, embedding, ChromaDB ve doğal dil rapor retrieval akışı yoktur.
 
-```mermaid
-flowchart TB
-    Q[Query] --> V1[v1: Vector Top-K]
-    Q --> V3[v3: Vector Top-K + Lexical Boost + Query Parser]
-    Q --> V5[v5: Vector + BM25 Merge]
-    Q --> V6[v6: v5 Candidate Set + Cross-Encoder Rerank]
+## Servis sınırları
 
-    V1 --> R1[Top-K Chunks]
-    V3 --> R3[Top-K Chunks]
-    V5 --> R5[Top-K Chunks]
-    V6 --> R6[Top-K Chunks]
-```
-
+- `app/api.py`: HTTP sözleşmesi, cache ve market endpoint'leri.
+- `app/fund_service.py`: TEFAS fon listesi, geçmişi ve dağılımı.
+- `app/kap_service.py` ve `src/kap_fetcher.py`: KAP snapshot, finansallar ve bildirimler.
+- `src/nvidia_commentary.py`: yalnızca yapılandırılmış KAP overview payload'ı için isteğe bağlı yorum.
+- `app/reference_data.py`: şirket/fon referans evreni ve cache senkronizasyonu.

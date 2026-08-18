@@ -213,6 +213,22 @@ export function _resolveMetricValue(rows: KapQuarter[], idx: number, metricKey: 
     return null;
 }
 
+/** Summary income rows use the reported year-to-date value for the selected period. */
+export function _resolveMetricYtdValue(row: KapQuarter | null, metricKey: string): number | null {
+    if (!row) return null;
+    const ytdValue = _rawMetricValue(row, metricKey, 'metrics_ytd');
+    if (ytdValue !== null) return ytdValue;
+    const originalYtdValue = _asNumber(row.metrics_ytd_original?.[metricKey]?.value);
+    if (originalYtdValue !== null) return originalYtdValue;
+    return _resolveMetricValue([row], 0, metricKey, false);
+}
+
+export function _resolveMetricYtdDisplay(row: KapQuarter | null, metricKey: string): string {
+    const value = _resolveMetricYtdValue(row, metricKey);
+    if (value === null || !row) return '-';
+    return _formatMetric(value, row.currency || 'TL');
+}
+
 export function _resolveMetricValueByPriority(row: KapQuarter | null, metricKey: string, priority: Array<'metrics' | 'metrics_quarterly' | 'metrics_ytd'>): number | null {
     if (!row) return null;
     for (const bucket of priority) {

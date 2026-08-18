@@ -11,6 +11,8 @@ import {
 import {
     _resolveMetricValue,
     _resolveMetricDisplay,
+    _resolveMetricYtdValue,
+    _resolveMetricYtdDisplay,
     _calcPctChange,
     _pctText,
     intSafe,
@@ -397,9 +399,9 @@ export function buildOverviewAiPayload(snapshot: KapSnapshotResponse, quarters: 
 
     const incomeSummary = latestQuarter
         ? incomeSummaryRows.map((row): OverviewAiSummaryRow | null => {
-            const currentValue = _resolveMetricValue(quarters, latestQuarterIdx, row.key, true);
+            const currentValue = _resolveMetricYtdValue(latestQuarter, row.key);
             const baseValue = prevYearSameQuarterIdx >= 0
-                ? _resolveMetricValue(quarters, prevYearSameQuarterIdx, row.key, true)
+                ? _resolveMetricYtdValue(prevYearSameQuarter, row.key)
                 : null;
             if (currentValue === null && baseValue === null) return null;
             const pct = _calcPctChange(currentValue, baseValue);
@@ -408,11 +410,11 @@ export function buildOverviewAiPayload(snapshot: KapSnapshotResponse, quarters: 
                 label: row.label,
                 current_period: currentPeriod,
                 current_value: currentValue,
-                current_display: _resolveMetricDisplay(quarters, latestQuarterIdx, row.key, true),
+                current_display: _resolveMetricYtdDisplay(latestQuarter, row.key),
                 base_period: incomeBasePeriod,
                 base_value: baseValue,
                 base_display: prevYearSameQuarterIdx >= 0
-                    ? _resolveMetricDisplay(quarters, prevYearSameQuarterIdx, row.key, true)
+                    ? _resolveMetricYtdDisplay(prevYearSameQuarter, row.key)
                     : '',
                 pct_change: pct,
                 pct_display: _pctText(pct),

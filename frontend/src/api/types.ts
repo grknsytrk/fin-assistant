@@ -1,82 +1,3 @@
-export interface AskRequest {
-  question: string;
-  retriever?: 'v1' | 'v2' | 'v3' | 'v5' | 'v6';
-  mode?: 'single' | 'trend';
-  company?: string;
-}
-
-export interface AskResponse {
-  answer: {
-    bullets: string[];
-    answer_text?: string;
-    found: boolean;
-    confidence: number;
-    verify_status: string;
-  };
-  parsed: {
-    quarter: string | null;
-    query_type: string | null;
-    company: string | null;
-    mentioned_companies?: string[];
-  };
-  evidence: EvidenceChunk[];
-  debug: {
-    retriever: string;
-    latency_ms: number;
-    top_k: number;
-  };
-  trend?: {
-    rows: TrendRow[];
-  };
-  comparison?: {
-    mode: string;
-    target: string;
-    best_company: string | null;
-    best_value: number | null;
-    best_confidence: number | null;
-    rows: ComparisonRow[];
-  };
-}
-
-export interface EvidenceChunk {
-  doc_id: string;
-  company: string | null;
-  year: number | null;
-  quarter: string;
-  page: number;
-  section_title: string;
-  excerpt: string;
-  block_type: string;
-  confidence: number | null;
-  verify_status: string | null;
-  verify_warnings: string[];
-}
-
-export interface ComparisonRow {
-  company: string;
-  target: string;
-  quarter: string | null;
-  value: number | null;
-  confidence: number | null;
-}
-
-export interface TrendRow {
-  quarter?: string | null;
-  value?: string | number | null;
-  value_display?: string | number | null;
-  [key: string]: string | number | boolean | null | undefined;
-}
-
-export interface StatsResponse {
-  pdf_count: number;
-  page_count: number;
-  chunk_count_v1: number;
-  chunk_count_v2: number;
-  collection_count_v1: number | null;
-  collection_count_v2: number | null;
-  companies: string[];
-}
-
 export interface KapCompanySearchItem {
   symbol: string;
   title: string | null;
@@ -90,35 +11,17 @@ export interface KapCompaniesResponse {
   items?: KapCompanySearchItem[];
 }
 
-export interface CompanyBreakdownRow {
-  company: string;
-  chunks: number;
-  quarters: string[];
-  quarter_count: number;
-}
-
-export interface CompanyBreakdownResponse {
-  rows: CompanyBreakdownRow[];
-}
-
 export interface MarketUniverseStats {
   index: MarketStockIndex;
   index_count: number;
   bist100_count: number;
   bist_all_count: number;
-  rag_ready_count: number;
-  kap_only_count: number;
   kap_cache_count: number;
-  pdf_count: number;
-  page_count: number;
 }
 
 export interface MarketUniverseRow {
   company: string;
-  chunks: number;
-  quarter_count: number;
   latest_quarter: string | null;
-  has_rag: boolean;
   has_kap_cache: boolean;
   price: number | null;
   price_currency: string | null;
@@ -822,17 +725,6 @@ export interface MarketIndexResponse {
   index: string;
   rows: MarketUniverseRow[];
   as_of: string;
-}
-
-export interface FeedbackRequest {
-  timestamp?: string;
-  company?: string;
-  quarter?: string;
-  metric: string;
-  extracted_value?: string;
-  user_value?: string;
-  evidence_ref?: string;
-  verdict: 'dogru' | 'yanlis';
 }
 
 export interface KapMetricValue {
