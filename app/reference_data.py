@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from app.database import connect_postgres, database_enabled
+
 REFERENCE_DATA_DB_FILENAME = os.getenv("RAGFIN_REFERENCE_DATA_DB_FILENAME", "reference_data.sqlite3")
 
 _SOURCE_PRIORITY = {
@@ -95,7 +97,11 @@ def _source_priority(source: Any) -> int:
     return _SOURCE_PRIORITY.get(normalized, 50 if normalized else 0)
 
 
-def _connect(processed_dir: Path) -> sqlite3.Connection:
+def _connect(processed_dir: Path) -> Any:
+    if database_enabled():
+        conn = connect_postgres()
+        _init_schema(conn)
+        return conn
     path = reference_data_db_path(processed_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
@@ -107,7 +113,7 @@ def _connect(processed_dir: Path) -> sqlite3.Connection:
     return conn
 
 
-def _init_schema(conn: sqlite3.Connection) -> None:
+def _init_schema(conn: Any) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS instruments (

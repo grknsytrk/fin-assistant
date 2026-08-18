@@ -13,6 +13,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from app.database import read_json_cache, write_json_cache
+
 if TYPE_CHECKING:  # pragma: no cover
     from src.config import KapConfig
 
@@ -576,6 +578,9 @@ def _mark_live_disclosure_check_failed(cache_path: Path, payload: Dict[str, Any]
 
 
 def _read_cache(path: Path) -> Optional[Dict[str, Any]]:
+    remote_payload = read_json_cache(path)
+    if remote_payload is not None:
+        return remote_payload
     try:
         if not path.exists():
             return None
@@ -587,6 +592,7 @@ def _read_cache(path: Path) -> Optional[Dict[str, Any]]:
 def _write_cache(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_cache(path, payload)
 
 
 def _is_cache_fresh(payload: Dict[str, Any], ttl_hours: float) -> bool:

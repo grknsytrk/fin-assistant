@@ -33,6 +33,7 @@ from app.cache import cached as _cached_response
 from app.cache import get_cache as _get_cache
 from app.cache import get_json_dict as _cache_get_dict
 from app.cache import set_json as _cache_set_json
+from app.database import hydrate_json_cache
 from app.reference_data import (
     get_instruments,
     get_instrument_name,
@@ -115,6 +116,7 @@ async def _stop_fund_price_collector() -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     try:
+        await asyncio.to_thread(hydrate_json_cache, CONFIG.paths.processed_dir)
         await asyncio.to_thread(sync_reference_data_from_caches, CONFIG.paths.processed_dir)
     except Exception:
         LOGGER.debug("reference data bootstrap failed", exc_info=True)

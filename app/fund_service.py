@@ -21,6 +21,7 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
+from app.database import connect_postgres, database_enabled, read_json_cache, write_json_cache
 from app.reference_data import (
     get_instruments,
     get_instrument,
@@ -363,7 +364,11 @@ def _safe_json_loads(raw: Any, fallback: Any) -> Any:
         return fallback
 
 
-def _connect_fund_prices_db(processed_dir: Path) -> sqlite3.Connection:
+def _connect_fund_prices_db(processed_dir: Path) -> Any:
+    if database_enabled():
+        conn = connect_postgres()
+        _init_fund_prices_schema(conn)
+        return conn
     path = _fund_prices_db_path(processed_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
@@ -375,7 +380,7 @@ def _connect_fund_prices_db(processed_dir: Path) -> sqlite3.Connection:
     return conn
 
 
-def _init_fund_prices_schema(conn: sqlite3.Connection) -> None:
+def _init_fund_prices_schema(conn: Any) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fund_prices (
@@ -408,15 +413,16 @@ def _init_fund_prices_schema(conn: sqlite3.Connection) -> None:
         ON fund_prices (fund_code, date, updated_at DESC)
         """
     )
+    warning_id_type = "BIGSERIAL PRIMARY KEY" if getattr(conn, "is_postgres", False) else "INTEGER PRIMARY KEY AUTOINCREMENT"
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS fund_price_warnings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {warning_id_type},
             fund_code TEXT,
             date TEXT,
             source TEXT NOT NULL,
             warning TEXT NOT NULL,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
+            metadata_json TEXT NOT NULL DEFAULT '{{}}',
             raw_json TEXT,
             fetched_at TEXT NOT NULL
         )
@@ -432,6 +438,9 @@ def _init_fund_prices_schema(conn: sqlite3.Connection) -> None:
 
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
+    remote_payload = read_json_cache(path)
+    if remote_payload is not None:
+        return remote_payload
     try:
         with path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
@@ -450,6 +459,7 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     with tmp.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     tmp.replace(path)
+    write_json_cache(path, payload)
     _MEMORY_CACHE.clear()
 
 
