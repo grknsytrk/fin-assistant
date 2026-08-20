@@ -536,6 +536,72 @@ def test_fund_public_daily_return_uses_previous_business_day_price(tmp_path) -> 
     assert detail_payload["daily_return"] == pytest.approx(0.2351, abs=0.0001)
 
 
+def test_fund_payload_overlays_newer_history_point_on_stale_snapshot(tmp_path) -> None:
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {
+                "fund_code": "TLY",
+                "date": "2026-08-18",
+                "price": 8690.327521,
+                "daily_return": 0.912,
+                "aum": 279_794_000_000,
+                "investor_count": 107_078,
+                "source": "tefasfon_funds",
+            },
+            {
+                "fund_code": "TLY",
+                "date": "2026-08-20",
+                "price": 8819.35,
+                "daily_return": 0.9869,
+                "aum": 278_824_000_000,
+                "investor_count": 108_848,
+                "source": "tefasfon_funds",
+            },
+        ],
+        source="tefasfon_funds",
+    )
+    snapshot = {
+        "status": "ok",
+        "rows": [
+            {
+                "fund_code": "TLY",
+                "name": "TERA PORTFOY BIRINCI SERBEST FON",
+                "price": 8690.327521,
+                "daily_return": 0.912,
+                "aum": 279_794_000_000,
+                "investor_count": 107_078,
+                "tefas_open": True,
+                "as_of": "2026-08-18",
+                "source": "tefasfon_funds",
+            }
+        ],
+        "source": "tefasfon_funds",
+        "as_of": "2026-08-18",
+        "fetched_at": "2026-08-18T13:09:47+00:00",
+        "stale": True,
+        "degraded": False,
+        "warnings": [],
+        "source_metadata": {"source": "tefasfon_funds"},
+    }
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    list_payload = fund_service.get_funds_payload(tmp_path, min_aum=None)
+    detail_payload = fund_service.get_fund_detail_payload(tmp_path, "TLY")
+
+    assert list_payload["as_of"] == "2026-08-20"
+    assert list_payload["rows"][0]["as_of"] == "2026-08-20"
+    assert list_payload["rows"][0]["price"] == pytest.approx(8819.35)
+    assert list_payload["rows"][0]["daily_return"] == pytest.approx(0.9869)
+    assert list_payload["rows"][0]["investor_count"] == 108_848
+    assert list_payload["source_metadata"]["snapshot_as_of"] == "2026-08-18"
+    assert list_payload["source_metadata"]["price_history_as_of"] == "2026-08-20"
+    assert detail_payload["as_of"] == "2026-08-20"
+    assert detail_payload["price"] == pytest.approx(8819.35)
+
+
 def test_fund_categories_use_same_open_fund_visibility_rule(tmp_path) -> None:
     snapshot = {
         "status": "ok",

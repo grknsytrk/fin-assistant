@@ -127,6 +127,11 @@ export interface FundSourceMetadata {
   cache_policy?: string | null;
   stale?: boolean;
   parse_status?: string | null;
+  snapshot_as_of?: string | null;
+  price_history_as_of?: string | null;
+  price_history_overlay_count?: number;
+  price_history_overlay_source?: string | null;
+  price_history_fetched_at?: string | null;
   warnings?: string[];
   warning?: string | null;
   history_source_used?: string | null;

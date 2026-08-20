@@ -120,6 +120,10 @@ TEFAS_OPEN_ONLY = os.getenv("RAGFIN_TEFAS_OPEN_ONLY", "1").strip().lower() not i
 }
 FUNDS_SNAPSHOT_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_TTL_SECONDS", str(24 * 60 * 60)))
 FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS", "300"))
+FUNDS_SNAPSHOT_PUBLICATION_HOUR = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_PUBLICATION_HOUR", "21"))
+FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS = int(
+    os.getenv("RAGFIN_FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS", "60")
+)
 FUNDS_DAILY_SNAPSHOT_CACHE_VERSION = 2
 FUNDS_HISTORY_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HISTORY_TTL_SECONDS", str(24 * 60 * 60)))
 FUNDS_ALLOCATION_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_ALLOCATION_TTL_SECONDS", str(24 * 60 * 60)))
@@ -1285,6 +1289,34 @@ _DAILY_PRICE_SOURCES = _TEFASFON_DAILY_PRICE_SOURCES + _FINTABLES_DAILY_PRICE_SO
 _NON_DAILY_PRICE_SOURCES = {FINTABLES_YIELD_SUMMARY_SOURCE, TEFASFON_RETURNS_SOURCE, TEFASFON_PORTFOLIO_SOURCE}
 
 
+def _fund_price_storage_row_to_point(row: Any) -> Dict[str, Any]:
+    metadata = _safe_json_loads(row["metadata_json"], {})
+    point = {
+        "fund_code": str(row["fund_code"]),
+        "date": str(row["date"]),
+        "price": float(row["price"]),
+        "daily_return": row["daily_return"],
+        "aum": row["aum"],
+        "investor_count": row["investor_count"],
+        "share_count": row["share_count"],
+        "source": _public_price_source(str(row["source"])),
+        "fetched_at": str(row["fetched_at"]),
+    }
+    if isinstance(metadata, dict):
+        for key in (
+            "name",
+            "fund_type",
+            "founder_company",
+            "manager_company",
+            "tefas_open",
+            "risk_value",
+            "currency",
+        ):
+            if key in metadata:
+                point[key] = metadata[key]
+    return point
+
+
 def _normalize_price_source(source: str | None) -> str:
     normalized = str(source or "").strip().lower()
     return re.sub(r"[^a-z0-9_.-]+", "_", normalized)[:64] or "unknown"
@@ -1593,35 +1625,95 @@ def read_fund_price_points(
         if row_rank > existing_rank:
             by_date[str(row["date"])] = row
 
-    points: List[Dict[str, Any]] = []
-    for point_date in sorted(by_date):
-        row = by_date[point_date]
-        metadata = _safe_json_loads(row["metadata_json"], {})
-        point = {
-            "fund_code": str(row["fund_code"]),
-            "date": str(row["date"]),
-            "price": float(row["price"]),
-            "daily_return": row["daily_return"],
-            "aum": row["aum"],
-            "investor_count": row["investor_count"],
-            "share_count": row["share_count"],
-            "source": _public_price_source(str(row["source"])),
-            "fetched_at": str(row["fetched_at"]),
+    return [_fund_price_storage_row_to_point(by_date[point_date]) for point_date in sorted(by_date)]
+
+
+def read_latest_fund_price_points(
+    processed_dir: Path,
+    fund_codes: Iterable[str],
+    *,
+    end_date: Optional[date] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Read the latest daily price point for many funds in one query.
+
+    The fund catalogue is a point-in-time snapshot, while daily history can
+    receive newer rows independently. This bulk reader keeps the catalogue
+    overlay cheap enough to use for the list and detail endpoints.
+    """
+
+    normalized_codes = sorted({normalize_fund_code(code) for code in fund_codes if normalize_fund_code(code)})
+    if not normalized_codes:
+        return {}
+
+    cache_key = (
+        f"latest-fund-price-points:{_fund_prices_db_path(processed_dir)}:"
+        f"{end_date.isoformat() if end_date else 'latest'}:{','.join(normalized_codes)}"
+    )
+    cached = _MEMORY_CACHE.get(cache_key)
+    cached_at = cached.get("cached_at") if isinstance(cached, dict) else None
+    if isinstance(cached_at, (int, float)) and time.time() - float(cached_at) <= max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS):
+        return {
+            str(code): dict(point)
+            for code, point in dict(cached.get("points") or {}).items()
+            if isinstance(point, dict)
         }
-        if isinstance(metadata, dict):
-            for key in (
-                "name",
-                "fund_type",
-                "founder_company",
-                "manager_company",
-                "tefas_open",
-                "risk_value",
-                "currency",
-            ):
-                if key in metadata:
-                    point[key] = metadata[key]
-        points.append(point)
-    return points
+
+    source_placeholders = ", ".join("?" for _ in _DAILY_PRICE_SOURCES)
+    code_placeholders = ", ".join("?" for _ in normalized_codes)
+    inner_conditions = [
+        f"fund_code IN ({code_placeholders})",
+        "price > 0",
+        f"source IN ({source_placeholders})",
+    ]
+    inner_params: List[Any] = [*normalized_codes, *_DAILY_PRICE_SOURCES]
+    if end_date:
+        inner_conditions.append("date <= ?")
+        inner_params.append(end_date.isoformat())
+    query = f"""
+        SELECT fp.*
+        FROM fund_prices fp
+        INNER JOIN (
+            SELECT fund_code, MAX(date) AS latest_date
+            FROM fund_prices
+            WHERE {' AND '.join(inner_conditions)}
+            GROUP BY fund_code
+        ) latest
+          ON latest.fund_code = fp.fund_code
+         AND latest.latest_date = fp.date
+        WHERE fp.fund_code IN ({code_placeholders})
+          AND fp.price > 0
+          AND fp.source IN ({source_placeholders})
+        ORDER BY fp.fund_code, fp.updated_at DESC
+    """
+    params = [*inner_params, *normalized_codes, *_DAILY_PRICE_SOURCES]
+
+    selected: Dict[str, Any] = {}
+    try:
+        with _connect_fund_prices_db(processed_dir) as conn:
+            for row in conn.execute(query, params):
+                code = normalize_fund_code(str(row["fund_code"]))
+                existing = selected.get(code)
+                if existing is None:
+                    selected[code] = row
+                    continue
+                row_rank = (
+                    _FUND_PRICE_SOURCE_PRIORITY.get(str(row["source"] or ""), 0),
+                    str(row["updated_at"] or ""),
+                )
+                existing_rank = (
+                    _FUND_PRICE_SOURCE_PRIORITY.get(str(existing["source"] or ""), 0),
+                    str(existing["updated_at"] or ""),
+                )
+                if row_rank > existing_rank:
+                    selected[code] = row
+    except Exception:
+        # A history overlay is an enhancement. If the optional price store is
+        # unavailable, the catalogue snapshot remains the safe fallback.
+        return {}
+
+    points = {code: _fund_price_storage_row_to_point(row) for code, row in selected.items()}
+    _MEMORY_CACHE[cache_key] = {"cached_at": time.time(), "points": points}
+    return {code: dict(point) for code, point in points.items()}
 
 
 def _daily_return_reconciliation_candidates(rows: Iterable[Dict[str, Any]]) -> Dict[str, str]:
@@ -2049,7 +2141,13 @@ def _business_days_between(start: date, end: date) -> int:
 
 
 def _latest_fund_snapshot_target_date(today: Optional[date] = None) -> date:
-    current = today or date.today()
+    now_local = datetime.now(timezone(timedelta(hours=3)))
+    current = today or now_local.date()
+    # TEFAS fund prices are published after the market day closes. Before the
+    # configured cutoff, the latest valid target is the previous business day;
+    # otherwise a same-day snapshot request is incorrectly treated as stale.
+    if today is None and current == now_local.date() and now_local.hour < FUNDS_SNAPSHOT_PUBLICATION_HOUR:
+        current -= timedelta(days=1)
     if _is_turkey_market_business_day(current):
         return current
     while not _is_turkey_market_business_day(current):
@@ -4097,6 +4195,79 @@ def _empty_snapshot_payload(reason: str) -> Dict[str, Any]:
     }
 
 
+def _overlay_latest_price_history(
+    processed_dir: Path,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge newer daily points into the point-in-time fund catalogue.
+
+    TEFAS list metadata and daily price history are persisted independently.
+    A failed catalogue refresh must not hide a newer valid price that is
+    already present in the history store.
+    """
+
+    rows = [row for row in list(payload.get("rows") or []) if isinstance(row, dict)]
+    if not rows:
+        return payload
+
+    snapshot_as_of = _fund_date(payload.get("as_of") or (payload.get("source_metadata") or {}).get("as_of"))
+    target_date = _latest_fund_snapshot_target_date()
+    latest_points = read_latest_fund_price_points(
+        processed_dir,
+        (str(row.get("fund_code") or "") for row in rows),
+        end_date=target_date,
+    )
+    if not latest_points:
+        return payload
+
+    merged_rows: List[Dict[str, Any]] = []
+    overlay_count = 0
+    overlay_dates: List[str] = []
+    overlay_fetched_at: List[str] = []
+    for row in rows:
+        code = normalize_fund_code(str(row.get("fund_code") or ""))
+        point = latest_points.get(code)
+        if not point:
+            merged_rows.append(dict(row))
+            continue
+        row_date = _fund_date(row.get("as_of"))
+        point_date = _fund_date(point.get("date"))
+        if not point_date or (row_date and point_date < row_date):
+            merged_rows.append(dict(row))
+            continue
+
+        merged = dict(row)
+        is_newer_point = not row_date or point_date > row_date
+        for key in ("price", "daily_return", "aum", "investor_count", "share_count"):
+            if point.get(key) is not None:
+                merged[key] = point[key]
+        if is_newer_point:
+            merged["as_of"] = point_date
+            merged["source"] = point.get("source") or merged.get("source")
+            overlay_count += 1
+            overlay_dates.append(point_date)
+            if point.get("fetched_at"):
+                overlay_fetched_at.append(str(point["fetched_at"]))
+        merged_rows.append(merged)
+
+    if not overlay_count:
+        return payload
+
+    result = dict(payload)
+    result["rows"] = merged_rows
+    effective_as_of = max([value for value in [snapshot_as_of, *overlay_dates] if value], default=None)
+    if effective_as_of:
+        result["as_of"] = effective_as_of
+    metadata = dict(result.get("source_metadata") or {})
+    metadata["snapshot_as_of"] = snapshot_as_of
+    metadata["price_history_as_of"] = max(overlay_dates) if overlay_dates else None
+    metadata["price_history_overlay_count"] = overlay_count
+    metadata["price_history_overlay_source"] = "fund_prices"
+    metadata["price_history_fetched_at"] = max(overlay_fetched_at) if overlay_fetched_at else None
+    result["source_metadata"] = metadata
+    return result
+
+
 def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
     path = _snapshot_path(processed_dir)
     cache_key = f"snapshot:{path}"
@@ -4116,11 +4287,15 @@ def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
                 "mtime": stat.st_mtime,
                 "payload": payload,
             }
+    original_snapshot_as_of = _fund_date(
+        payload.get("as_of") or (payload.get("source_metadata") or {}).get("as_of")
+    )
+    payload = _overlay_latest_price_history(processed_dir, payload)
     fetched_at = payload.get("fetched_at")
     age = _cache_age_seconds(fetched_at)
     meta = dict(payload.get("source_metadata") or {})
     target_date = _latest_fund_snapshot_target_date()
-    snapshot_as_of = _fund_date(payload.get("as_of") or meta.get("as_of"))
+    snapshot_as_of = original_snapshot_as_of or _fund_date(payload.get("as_of") or meta.get("as_of"))
     snapshot_lag_days: Optional[int] = None
     if snapshot_as_of:
         try:
@@ -4144,6 +4319,8 @@ def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
     meta["snapshot_target_date"] = target_date.isoformat()
     meta["snapshot_as_of_lag_days"] = snapshot_lag_days
     meta["snapshot_intraday_check_ttl_seconds"] = FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS
+    meta["snapshot_as_of"] = snapshot_as_of
+    meta["as_of"] = payload.get("as_of")
     if is_behind_target:
         meta["awaiting_current_snapshot"] = recently_checked_current_day
     meta["tefas_open_only"] = TEFAS_OPEN_ONLY
@@ -4316,7 +4493,7 @@ def _fetch_tefasfon_daily_snapshots_for_codes(
 
 
 def refresh_funds_snapshot(processed_dir: Path, *, lookback_days: int = 10) -> Dict[str, Any]:
-    end_date = date.today()
+    end_date = _latest_fund_snapshot_target_date()
     existing_snapshot = load_funds_snapshot(processed_dir)
     rows, warnings = TefasFonClient().fetch_latest_fund_list_snapshot(
         as_of=end_date,
@@ -4408,7 +4585,7 @@ def collect_daily_fund_prices(
     as_of: Optional[date] = None,
     lookback_days: int = FUNDS_COLLECTOR_LOOKBACK_DAYS,
 ) -> Dict[str, Any]:
-    effective_as_of = as_of or date.today()
+    effective_as_of = as_of or _latest_fund_snapshot_target_date()
     start_date = effective_as_of - timedelta(days=max(1, lookback_days))
     existing_snapshot = load_funds_snapshot(processed_dir)
     fetched_at = _utc_now_iso()

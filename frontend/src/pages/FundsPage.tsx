@@ -5840,7 +5840,7 @@ export default function FundsPage({
                         <>
                             <header className="funds-header">
                                 <div>
-                                    <span className="funds-kicker">TEFAS snapshot</span>
+                                    <span className="funds-kicker">TEFAS verileri</span>
                                     <h1>Fonlar</h1>
                                     <p>Yatırım fonları, fiyat/getiri verisi ve kaynak durumuyla tek listede.</p>
                                 </div>
@@ -5867,11 +5867,13 @@ export default function FundsPage({
                                         {refreshError
                                             ? `Fon listesi yenilenemedi: ${refreshError}`
                                             : refreshing
-                                              ? 'Fon snapshot TEFAS üzerinden yenileniyor.'
+                                              ? 'Fon verileri TEFAS üzerinden yenileniyor.'
                                               : funds?.degraded
                                             ? 'Fon snapshot cache boş veya kullanılamıyor.'
+                                            : funds?.stale && funds?.source_metadata?.snapshot_as_of && funds?.source_metadata?.price_history_as_of
+                                            ? `Fon kataloğu ${formatDate(funds.source_metadata.snapshot_as_of)} tarihli; fiyat verileri ${formatDate(funds.source_metadata.price_history_as_of)} tarihine kadar güncel.`
                                             : funds?.stale
-                                            ? 'Fon snapshot stale cache üzerinden gösteriliyor.'
+                                            ? 'Fon kataloğu güncel snapshot alınamadığı için son güvenilir veriyle gösteriliyor.'
                                             : funds?.warnings?.length
                                             ? `Fon verisi TEFAS birincil kaynağından alınamadı; fallback sonucu gösteriliyor. ${funds.warnings[0]}`
                                             : 'Fon kaynak durumu uyarı verdi.'}
