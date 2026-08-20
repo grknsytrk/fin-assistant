@@ -24,6 +24,10 @@ _JSON_SCHEMA_READY = False
 _POOL_LOCK = threading.Lock()
 _POSTGRES_POOL: Any = None
 _POSTGRES_POOL_URL = ""
+_DATABASE_STATEMENT_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.getenv("RAGFIN_DATABASE_STATEMENT_TIMEOUT_SECONDS", "15")),
+)
 
 
 def database_url() -> str:
@@ -145,6 +149,10 @@ def _postgres_pool() -> Any:
                 "row_factory": _require_psycopg()[1],
                 # Safe for both Supavisor session mode and transaction mode.
                 "prepare_threshold": None,
+                # Remote cache persistence is an enhancement; a locked or
+                # overloaded database must not keep the API refresh worker
+                # waiting indefinitely.
+                "options": f"-c statement_timeout={int(_DATABASE_STATEMENT_TIMEOUT_SECONDS * 1000)}",
             },
             open=True,
         )
