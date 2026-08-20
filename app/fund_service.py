@@ -4550,7 +4550,12 @@ def _merge_refresh_rows_with_existing(
     return merged_rows
 
 
-def refresh_funds_snapshot(processed_dir: Path, *, lookback_days: int = 10) -> Dict[str, Any]:
+def refresh_funds_snapshot(
+    processed_dir: Path,
+    *,
+    lookback_days: int = 10,
+    persist_reference_data: bool = True,
+) -> Dict[str, Any]:
     end_date = _latest_fund_snapshot_target_date()
     existing_snapshot = load_funds_snapshot(processed_dir)
     bounded_lookback_days = min(3, max(1, int(lookback_days)))
@@ -4659,7 +4664,16 @@ def refresh_funds_snapshot(processed_dir: Path, *, lookback_days: int = 10) -> D
     if backfilled:
         meta = snapshot.setdefault("source_metadata", {})
         meta["daily_return_local_fallback_count"] = backfilled
-    snapshot["source_metadata"]["reference_data"] = _upsert_fund_reference_data(processed_dir, snapshot["rows"])
+    if persist_reference_data:
+        snapshot["source_metadata"]["reference_data"] = _upsert_fund_reference_data(processed_dir, snapshot["rows"])
+    else:
+        # The catalog snapshot already contains the searchable fund metadata.
+        # Reference-data upserts are intentionally deferred during the fast
+        # refresh path because writing thousands of optional records to a
+        # remote database can otherwise keep the background job running for
+        # minutes. Existing fee/reference values remain available on detail
+        # pages and can be synchronized by a separate maintenance flow.
+        snapshot["source_metadata"]["reference_data"] = {"deferred": True}
     _write_json(_snapshot_path(processed_dir), snapshot)
     return snapshot
 

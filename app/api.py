@@ -187,10 +187,22 @@ def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
     try:
         from app.fund_service import refresh_funds_snapshot
 
-        result = refresh_funds_snapshot(
-            CONFIG.paths.processed_dir,
-            lookback_days=min(_FUND_REFRESH_MAX_LOOKBACK_DAYS, max(1, int(lookback_days))),
-        )
+        bounded_lookback_days = min(_FUND_REFRESH_MAX_LOOKBACK_DAYS, max(1, int(lookback_days)))
+        try:
+            result = refresh_funds_snapshot(
+                CONFIG.paths.processed_dir,
+                lookback_days=bounded_lookback_days,
+                persist_reference_data=False,
+            )
+        except TypeError as exc:
+            # Keep older test doubles and external adapters compatible while
+            # the optional reference-data flag is introduced.
+            if "persist_reference_data" not in str(exc):
+                raise
+            result = refresh_funds_snapshot(
+                CONFIG.paths.processed_dir,
+                lookback_days=bounded_lookback_days,
+            )
         rows = list(result.get("rows") or []) if isinstance(result, dict) else []
         if not rows or bool(result.get("stale")) or bool(result.get("degraded")):
             warnings = list(result.get("warnings") or []) if isinstance(result, dict) else []
