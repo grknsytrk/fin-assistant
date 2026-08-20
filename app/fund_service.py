@@ -1483,6 +1483,155 @@ def upsert_fund_price_points(
     skipped_count = 0
     source_counts: Dict[str, int] = {}
     warnings: List[Dict[str, Any]] = []
+
+    if database_enabled():
+        # The deployed price store is PostgreSQL.  A catalog refresh contains
+        # one current point for roughly two thousand funds; sending those
+        # writes one by one through Supavisor turns a fast TEFAS response into
+        # a multi-minute job. Prepare the same rows in memory and send them in
+        # a few multi-value statements instead.
+        prepared_rows: List[tuple[Any, ...]] = []
+        warning_rows: List[tuple[Any, ...]] = []
+        for row in points:
+            if not isinstance(row, dict):
+                skipped_count += 1
+                warning = {
+                    "fund_code": normalize_fund_code(fallback_code),
+                    "date": None,
+                    "source": normalized_source,
+                    "warning": "non_object_price_row",
+                    "metadata": {},
+                    "raw": row,
+                }
+                warnings.append(warning)
+                warning_rows.append(
+                    (
+                        warning.get("fund_code") or None,
+                        None,
+                        normalized_source,
+                        warning["warning"],
+                        _stable_json_dumps(warning.get("metadata") or {}),
+                        _stable_json_dumps(warning.get("raw")) if warning.get("raw") is not None else None,
+                        effective_fetched_at,
+                    )
+                )
+                continue
+            row_source = _normalize_price_source(str(row.get("source") or normalized_source))
+            if row_source in _NON_DAILY_PRICE_SOURCES:
+                skipped_count += 1
+                warning = {
+                    "fund_code": normalize_fund_code(str(row.get("fund_code") or fallback_code or "")) or None,
+                    "date": _fund_date(row.get("date")),
+                    "source": row_source,
+                    "warning": "non_daily_price_source",
+                    "metadata": {"source": row_source},
+                    "raw": row,
+                }
+                warnings.append(warning)
+                warning_rows.append(
+                    (
+                        warning.get("fund_code"),
+                        warning.get("date"),
+                        row_source,
+                        warning["warning"],
+                        _stable_json_dumps(warning.get("metadata") or {}),
+                        _stable_json_dumps(warning.get("raw")) if warning.get("raw") is not None else None,
+                        effective_fetched_at,
+                    )
+                )
+                continue
+            point, warning = _storage_point_from_row(
+                row,
+                source=row_source,
+                fallback_code=fallback_code,
+            )
+            if not point:
+                skipped_count += 1
+                if warning:
+                    warnings.append(warning)
+                    warning_rows.append(
+                        (
+                            warning.get("fund_code") or None,
+                            warning.get("date"),
+                            row_source,
+                            str(warning.get("warning") or "invalid_price_row"),
+                            _stable_json_dumps(warning.get("metadata") or {}),
+                            _stable_json_dumps(warning.get("raw")) if warning.get("raw") is not None else None,
+                            effective_fetched_at,
+                        )
+                    )
+                continue
+            prepared_rows.append(
+                (
+                    point["fund_code"],
+                    point["date"],
+                    point["source"],
+                    point["price"],
+                    point.get("daily_return"),
+                    point.get("aum"),
+                    point.get("investor_count"),
+                    point.get("share_count"),
+                    _stable_json_dumps(point.get("metadata") or {}),
+                    _stable_json_dumps(point.get("raw")) if point.get("raw") is not None else None,
+                    effective_fetched_at,
+                    effective_fetched_at,
+                    effective_fetched_at,
+                )
+            )
+            upserted_count += 1
+            source_counts[point["source"]] = source_counts.get(point["source"], 0) + 1
+
+        with _connect_fund_prices_db(processed_dir) as conn:
+            insert_sql = """
+                INSERT INTO fund_prices (
+                    fund_code, date, source, price, daily_return, aum, investor_count,
+                    share_count, metadata_json, raw_json, fetched_at, created_at, updated_at
+                )
+                VALUES {values}
+                ON CONFLICT(fund_code, date, source) DO UPDATE SET
+                    price = excluded.price,
+                    daily_return = excluded.daily_return,
+                    aum = excluded.aum,
+                    investor_count = excluded.investor_count,
+                    share_count = excluded.share_count,
+                    metadata_json = excluded.metadata_json,
+                    raw_json = excluded.raw_json,
+                    fetched_at = excluded.fetched_at,
+                    updated_at = excluded.updated_at
+            """
+            for offset in range(0, len(prepared_rows), 250):
+                chunk = prepared_rows[offset : offset + 250]
+                value_group = "(" + ", ".join("?" for _ in range(13)) + ")"
+                conn.execute(
+                    insert_sql.format(values=", ".join(value_group for _ in chunk)),
+                    [value for row in chunk for value in row],
+                )
+            if warning_rows:
+                warning_sql = """
+                    INSERT INTO fund_price_warnings (
+                        fund_code, date, source, warning, metadata_json, raw_json, fetched_at
+                    )
+                    VALUES {values}
+                """
+                for offset in range(0, len(warning_rows), 250):
+                    chunk = warning_rows[offset : offset + 250]
+                    value_group = "(" + ", ".join("?" for _ in range(7)) + ")"
+                    conn.execute(
+                        warning_sql.format(values=", ".join(value_group for _ in chunk)),
+                        [value for row in chunk for value in row],
+                    )
+            conn.commit()
+        return {
+            "db_path": str(_fund_prices_db_path(processed_dir)),
+            "source": normalized_source,
+            "sources": source_counts,
+            "upserted_count": upserted_count,
+            "skipped_count": skipped_count,
+            "warning_count": len(warnings),
+            "warnings": warnings[:50],
+            "fetched_at": effective_fetched_at,
+        }
+
     with _connect_fund_prices_db(processed_dir) as conn:
         for row in points:
             if not isinstance(row, dict):
