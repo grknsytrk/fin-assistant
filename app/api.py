@@ -71,8 +71,14 @@ _FUND_REFRESH_HEARTBEAT_INTERVAL_SECONDS = float(
 _FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS = float(
     os.getenv("RAGFIN_FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS", "90")
 )
+_FUND_REFRESH_MAX_RUNTIME_SECONDS = float(
+    os.getenv("RAGFIN_FUND_REFRESH_MAX_RUNTIME_SECONDS", str(10 * 60))
+)
 _FUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1,
+    # A timed-out/orphaned job must not keep a newly requested refresh queued
+    # forever. Normal requests still share the Redis active marker; the second
+    # worker is only used after that marker is declared stale.
+    max_workers=2,
     thread_name_prefix="fund-snapshot-refresh",
 )
 _FUND_REFRESH_STATE_LOCK = threading.Lock()
@@ -131,6 +137,27 @@ def _active_fund_refresh_job() -> Optional[Dict[str, Any]]:
     job = _get_fund_refresh_job(str(active_id))
     if job and job.get("status") in {"queued", "running"}:
         if job.get("status") == "running":
+            requested_text = str(job.get("requested_at") or "").strip()
+            try:
+                requested_at = datetime.fromisoformat(requested_text.replace("Z", "+00:00"))
+                runtime = (datetime.now(timezone.utc) - requested_at).total_seconds()
+            except (TypeError, ValueError):
+                runtime = 0.0
+            if runtime > _FUND_REFRESH_MAX_RUNTIME_SECONDS:
+                expired = _update_fund_refresh_job(
+                    str(job["job_id"]),
+                    status="failed",
+                    finished_at=_fund_refresh_now_iso(),
+                    error="Fon yenilemesi maksimum çalışma süresini aştı; mevcut snapshot korundu.",
+                )
+                if expired is not None:
+                    job = expired
+                try:
+                    if backend.get(_FUND_REFRESH_ACTIVE_KEY) == active_id:
+                        backend.delete(_FUND_REFRESH_ACTIVE_KEY)
+                except Exception:
+                    pass
+                return None
             heartbeat_text = str(job.get("heartbeat_at") or "").strip()
             try:
                 heartbeat_at = datetime.fromisoformat(heartbeat_text.replace("Z", "+00:00"))
