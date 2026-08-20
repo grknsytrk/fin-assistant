@@ -348,6 +348,19 @@ export interface FundPortfolioEffect {
   as_of: string | null;
 }
 
+export type FundRefreshJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+
+export interface FundRefreshJob {
+  job_id: string;
+  status: FundRefreshJobStatus;
+  requested_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  as_of?: string | null;
+  row_count?: number | null;
+  error?: string | null;
+}
+
 export interface FundsResponse {
   status: string;
   rows: FundSummary[];
@@ -361,6 +374,7 @@ export interface FundsResponse {
   degraded: boolean;
   warnings: string[];
   source_metadata: FundSourceMetadata;
+  refresh_job?: FundRefreshJob;
 }
 
 export interface FundCategoriesResponse {

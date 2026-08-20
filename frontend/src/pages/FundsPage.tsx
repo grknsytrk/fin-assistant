@@ -47,6 +47,7 @@ import type {
     FundHoldingsResponse,
     FundPerformanceResponse,
     FundPortfolioPosition,
+    FundRefreshJob,
     FundPricePoint,
     FundSummary,
     FundYieldSummaryResponse,
@@ -557,29 +558,35 @@ type FundsCatalogPayload = {
 type FundsCatalogMemoryCache = FundsCatalogPayload & { fetchedAt: number };
 
 const FUNDS_CATALOG_MEMORY_TTL_MS = 5 * 60 * 1000;
+const FUND_REFRESH_POLL_INTERVAL_MS = 2000;
+const FUND_REFRESH_POLL_MAX_MS = 5 * 60 * 1000;
 let fundsCatalogMemoryCache: FundsCatalogMemoryCache | null = null;
 let fundsCatalogInFlight: Promise<FundsCatalogPayload> | null = null;
 
-async function fetchFundsCatalog(options: { refreshSnapshot?: boolean } = {}): Promise<FundsCatalogPayload> {
+function isActiveFundRefreshJob(job: FundRefreshJob | null | undefined): boolean {
+    return job?.status === 'queued' || job?.status === 'running';
+}
+
+async function fetchFundsCatalog(options: { refreshSnapshot?: boolean; bypassMemoryCache?: boolean } = {}): Promise<FundsCatalogPayload> {
     const refreshSnapshot = Boolean(options.refreshSnapshot);
+    const bypassMemoryCache = Boolean(options.bypassMemoryCache);
     const now = Date.now();
-    if (!refreshSnapshot && fundsCatalogMemoryCache && now - fundsCatalogMemoryCache.fetchedAt < FUNDS_CATALOG_MEMORY_TTL_MS) {
+    if (!refreshSnapshot && !bypassMemoryCache && fundsCatalogMemoryCache && now - fundsCatalogMemoryCache.fetchedAt < FUNDS_CATALOG_MEMORY_TTL_MS) {
         return {
             funds: fundsCatalogMemoryCache.funds,
             categories: fundsCatalogMemoryCache.categories,
         };
     }
-    if (!refreshSnapshot && fundsCatalogInFlight) return fundsCatalogInFlight;
+    if (!refreshSnapshot && !bypassMemoryCache && fundsCatalogInFlight) return fundsCatalogInFlight;
 
     const task = (async () => {
-        if (refreshSnapshot) {
-            await apiClient.refreshFundsSnapshot();
-        }
-
-        let fundPayload = await apiClient.funds();
+        let fundPayload = refreshSnapshot
+            ? await apiClient.refreshFundsSnapshot()
+            : await apiClient.funds();
         if (!refreshSnapshot && shouldRefreshSnapshot(fundPayload)) {
-            await apiClient.refreshFundsSnapshot();
-            fundPayload = await apiClient.funds();
+            // The refresh endpoint returns the current list immediately and
+            // includes a job id; it no longer blocks on TEFAS.
+            fundPayload = await apiClient.refreshFundsSnapshot();
         }
         const categoryPayload = await apiClient.fundCategories();
         const result = { funds: fundPayload, categories: categoryPayload };
@@ -5120,6 +5127,7 @@ export default function FundsPage({
     const [holdings, setHoldings] = useState<FundHoldingsResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
+    const [refreshJob, setRefreshJob] = useState<FundRefreshJob | null>(null);
     const [detailLoading, setDetailLoading] = useState(false);
     const [performanceLoading, setPerformanceLoading] = useState(false);
     const [yieldLoading, setYieldLoading] = useState(false);
@@ -5160,6 +5168,7 @@ export default function FundsPage({
     const holdingsFetchAttemptedRef = useRef(new Set<string>());
     const holdingsRefreshInFlightRef = useRef(false);
     const holdingsLiveInFlightRef = useRef(false);
+    const refreshMonitorInFlightRef = useRef<string | null>(null);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -5182,18 +5191,69 @@ export default function FundsPage({
         holdingsRef.current = holdings;
     }, [holdings]);
 
+    const monitorRefreshJob = useCallback(async (initialJob: FundRefreshJob) => {
+        if (refreshMonitorInFlightRef.current === initialJob.job_id) return;
+        refreshMonitorInFlightRef.current = initialJob.job_id;
+        let currentJob = initialJob;
+        const deadline = Date.now() + FUND_REFRESH_POLL_MAX_MS;
+        try {
+            while (isActiveFundRefreshJob(currentJob) && Date.now() < deadline) {
+                await new Promise((resolve) => window.setTimeout(resolve, FUND_REFRESH_POLL_INTERVAL_MS));
+                const response = await apiClient.fundRefreshSnapshotStatus(initialJob.job_id);
+                currentJob = response.refresh_job;
+                if (mountedRef.current) setRefreshJob(currentJob);
+            }
+
+            if (currentJob.status === 'succeeded') {
+                const { funds: fundPayload, categories: categoryPayload } = await fetchFundsCatalog({
+                    bypassMemoryCache: true,
+                });
+                if (!mountedRef.current) return;
+                setFunds(fundPayload);
+                setCategories(categoryPayload);
+                setRefreshJob(null);
+                return;
+            }
+            if (currentJob.status === 'failed') {
+                if (mountedRef.current) {
+                    setRefreshError(currentJob.error || 'Fon yenilemesi başarısız oldu. Mevcut veriler korunuyor.');
+                }
+                return;
+            }
+            if (mountedRef.current) {
+                setRefreshJob(null);
+                setRefreshError('Fon yenilemesi arka planda devam ediyor. Mevcut veriler gösteriliyor.');
+            }
+        } catch (err) {
+            if (mountedRef.current) {
+                setRefreshJob(null);
+                setRefreshError(err instanceof Error ? err.message : 'Fon yenileme durumu alınamadı.');
+            }
+        } finally {
+            if (refreshMonitorInFlightRef.current === initialJob.job_id) {
+                refreshMonitorInFlightRef.current = null;
+            }
+        }
+    }, []);
+
     const refreshSnapshot = useCallback(async (options: { rethrow?: boolean } = {}) => {
         setRefreshing(true);
         setRefreshError(null);
         try {
-            // Always read the canonical list response after a refresh so
-            // manual and initial loads share the same data contract.
+            // The backend returns the current canonical list immediately and
+            // runs the expensive TEFAS work as a background job.
             const { funds: fundPayload, categories: categoryPayload } = await fetchFundsCatalog({
                 refreshSnapshot: true,
+                bypassMemoryCache: true,
             });
             if (!mountedRef.current) return;
             setFunds(fundPayload);
             setCategories(categoryPayload);
+            const nextJob = fundPayload.refresh_job || null;
+            setRefreshJob(nextJob);
+            if (nextJob && isActiveFundRefreshJob(nextJob)) {
+                void monitorRefreshJob(nextJob);
+            }
             return { fundPayload, categoryPayload };
         } catch (err) {
             if (!mountedRef.current) return;
@@ -5205,7 +5265,7 @@ export default function FundsPage({
         } finally {
             if (mountedRef.current) setRefreshing(false);
         }
-    }, []);
+    }, [monitorRefreshJob]);
 
     const loadHoldings = useCallback(async (
         normalizedCode: string,
@@ -5264,6 +5324,11 @@ export default function FundsPage({
         if (hasUsableCachedCatalog && cachedCatalog) {
             setFunds(cachedCatalog.funds);
             setCategories(cachedCatalog.categories);
+            const cachedJob = cachedCatalog.funds.refresh_job || null;
+            setRefreshJob(cachedJob);
+            if (cachedJob && isActiveFundRefreshJob(cachedJob)) {
+                void monitorRefreshJob(cachedJob);
+            }
             setLoading(false);
         } else {
             setLoading(true);
@@ -5275,6 +5340,11 @@ export default function FundsPage({
                 if (!alive) return;
                 setFunds(fundPayload);
                 setCategories(categoryPayload);
+                const nextJob = fundPayload.refresh_job || null;
+                setRefreshJob(nextJob);
+                if (nextJob && isActiveFundRefreshJob(nextJob)) {
+                    void monitorRefreshJob(nextJob);
+                }
             } catch (err) {
                 if (!alive) return;
                 setError(err instanceof Error ? err.message : 'Fon listesi alınamadı.');
@@ -5292,7 +5362,7 @@ export default function FundsPage({
         return () => {
             alive = false;
         };
-    }, []);
+    }, [monitorRefreshJob]);
 
     useEffect(() => {
         activeFundCodeRef.current = fundCode?.trim().toUpperCase() || '';
@@ -5673,6 +5743,7 @@ export default function FundsPage({
     }, [fundCode, performance, performanceError, performanceLoading, yieldError, yieldLoading, yieldSummary]);
     const visibleFundTypes = categories?.fund_types.length ? categories.fund_types : Array.from(new Set((funds?.rows || []).map((row) => row.fund_type).filter(Boolean))) as string[];
     const visibleRiskValues = categories?.risk_values.length ? categories.risk_values : Array.from(new Set((funds?.rows || []).map((row) => row.risk_value).filter((value): value is number => typeof value === 'number'))).sort((a, b) => a - b);
+    const activeRefreshJob = isActiveFundRefreshJob(refreshJob);
     const setTableSort = useCallback((key: FundSortKey) => {
         if (sortKey === key) {
             setSortOrder((currentOrder) => (currentOrder === 'asc' ? 'desc' : 'asc'));
@@ -5860,14 +5931,18 @@ export default function FundsPage({
                                 </div>
                             </header>
 
-                            {(funds?.stale || funds?.degraded || funds?.warnings?.length) && (
+                            {(activeRefreshJob || Boolean(refreshError) || refreshJob?.status === 'failed' || funds?.stale || funds?.degraded || funds?.warnings?.length) && (
                                 <div className="funds-source-warning">
                                     <ShieldAlert size={17} aria-hidden="true" />
                                     <span>
                                         {refreshError
                                             ? `Fon listesi yenilenemedi: ${refreshError}`
-                                            : refreshing
-                                              ? 'Fon verileri TEFAS üzerinden yenileniyor.'
+                                            : activeRefreshJob
+                                              ? 'Fon yenilemesi arka planda çalışıyor. Mevcut veriler gösteriliyor.'
+                                              : refreshing
+                                              ? 'Fon yenilemesi başlatılıyor.'
+                                              : refreshJob?.status === 'failed'
+                                              ? `Fon yenilemesi başarısız oldu: ${refreshJob.error || 'TEFAS güncel veri döndürmedi.'}`
                                               : funds?.degraded
                                             ? 'Fon snapshot cache boş veya kullanılamıyor.'
                                             : funds?.stale && funds?.source_metadata?.snapshot_as_of && funds?.source_metadata?.price_history_as_of
@@ -5882,11 +5957,11 @@ export default function FundsPage({
                                         type="button"
                                         className="funds-refresh-button"
                                         onClick={() => { void refreshSnapshot(); }}
-                                        disabled={refreshing}
+                                        disabled={refreshing || activeRefreshJob}
                                         title="Fon listesini yenile"
                                     >
-                                        <RefreshCw size={15} aria-hidden="true" className={refreshing ? 'funds-spin' : undefined} />
-                                        {refreshing ? 'Yenileniyor' : 'Yenile'}
+                                        <RefreshCw size={15} aria-hidden="true" className={refreshing || activeRefreshJob ? 'funds-spin' : undefined} />
+                                        {refreshing ? 'Başlatılıyor' : activeRefreshJob ? 'Arka planda' : 'Yenile'}
                                     </button>
                                 </div>
                             )}
@@ -5928,7 +6003,9 @@ export default function FundsPage({
                                 ) : error ? (
                                     <div className="funds-state funds-state-error">{error}</div>
                                 ) : filteredFunds.length === 0 ? (
-                                    <div className="funds-state">Fon bulunamadı.</div>
+                                    <div className="funds-state">
+                                        {activeRefreshJob ? 'Fon verileri hazırlanıyor. Mevcut TEFAS kaydı bekleniyor.' : 'Fon bulunamadı.'}
+                                    </div>
                                 ) : (
                                     <FundsTable
                                         rows={filteredFunds}

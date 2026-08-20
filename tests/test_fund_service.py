@@ -1056,7 +1056,12 @@ def test_refresh_funds_snapshot_noops_when_tefas_returns_empty(monkeypatch, tmp_
         def fetch_latest_fund_list_snapshot(self, *, as_of, lookback_days):
             return [], ["empty"]
 
+    class EmptyDirectTefasClient:
+        def fetch_latest_fund_list_snapshot(self, *, as_of, lookback_days):
+            return [], ["direct-empty"]
+
     monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    monkeypatch.setattr(fund_service, "TefasClient", lambda: EmptyDirectTefasClient())
 
     payload = fund_service.refresh_funds_snapshot(tmp_path, lookback_days=1)
 
@@ -1065,6 +1070,75 @@ def test_refresh_funds_snapshot_noops_when_tefas_returns_empty(monkeypatch, tmp_
     assert payload["rows"] == []
     assert payload["source_metadata"]["parse_status"] == "empty_tefasfon_funds"
     assert "empty" in " ".join(payload["warnings"])
+
+
+def test_tefasfon_fast_snapshot_skips_returns_and_fee_enrichment(monkeypatch) -> None:
+    client = fund_service.TefasFonClient()
+    calls = {"funds": 0, "returns": 0, "fees": 0}
+
+    monkeypatch.setattr(
+        client,
+        "fetch_funds",
+        lambda **_kwargs: calls.__setitem__("funds", calls["funds"] + 1) or [
+            {
+                "fund_code": "TLY",
+                "name": "FAST FUND",
+                "date": "2026-05-20",
+                "price": 10.0,
+                "tefasDurum": True,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        client,
+        "fetch_returns",
+        lambda **_kwargs: calls.__setitem__("returns", calls["returns"] + 1) or pytest.fail("returns must not run"),
+    )
+    monkeypatch.setattr(
+        client,
+        "fetch_management_fees",
+        lambda **_kwargs: calls.__setitem__("fees", calls["fees"] + 1) or pytest.fail("fees must not run"),
+    )
+
+    rows, warnings = client.fetch_latest_fund_list_snapshot(
+        as_of=date(2026, 5, 20),
+        lookback_days=3,
+        enrich=False,
+    )
+
+    assert len(rows) == 1
+    assert warnings == []
+    assert calls == {"funds": 1, "returns": 0, "fees": 0}
+
+
+def test_refresh_funds_snapshot_uses_bounded_direct_fallback(monkeypatch, tmp_path) -> None:
+    calls = {"lookback_days": None}
+
+    class EmptyTefasFonClient:
+        def fetch_latest_fund_list_snapshot(self, *, as_of, lookback_days, enrich=True):
+            return [], ["tefasfon-empty"]
+
+    class DirectFallbackClient:
+        def fetch_latest_fund_list_snapshot(self, *, as_of, lookback_days):
+            calls["lookback_days"] = lookback_days
+            return [
+                {
+                    "fund_code": "TLY",
+                    "name": "DIRECT FALLBACK FUND",
+                    "date": "2026-05-20",
+                    "price": 10.0,
+                    "tefasDurum": True,
+                }
+            ], []
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: EmptyTefasFonClient())
+    monkeypatch.setattr(fund_service, "TefasClient", lambda: DirectFallbackClient())
+
+    payload = fund_service.refresh_funds_snapshot(tmp_path, lookback_days=10)
+
+    assert payload["rows"][0]["fund_code"] == "TLY"
+    assert calls["lookback_days"] == 3
+    assert "tefas_direct_funds fallback used" in payload["warnings"]
 
 
 def test_collect_daily_fund_prices_uses_tefasfon_then_fintables_for_missing_codes(monkeypatch, tmp_path) -> None:

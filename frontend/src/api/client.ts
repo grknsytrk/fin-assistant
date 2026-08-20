@@ -25,6 +25,7 @@ import type {
     FundHoldingsLiveResponse,
     FundHoldingsResponse,
     FundPerformanceResponse,
+    FundRefreshJob,
     FundYieldSummaryResponse,
     FundsResponse,
     KapOverviewCommentaryRequest,
@@ -313,9 +314,14 @@ export const apiClient = {
     refreshFundsSnapshot: (lookbackDays = 10) =>
         fetchApi<FundsResponse>(`/admin/funds/refresh-snapshot?lookback_days=${lookbackDays}`, {
             method: 'POST',
-            timeoutMs: 120000,
+            timeoutMs: 15000,
             exposeErrorDetail: true,
         }),
+    fundRefreshSnapshotStatus: (jobId: string) =>
+        fetchApi<{ refresh_job: FundRefreshJob }>(
+            `/admin/funds/refresh-snapshot/status?job_id=${encodeURIComponent(jobId)}`,
+            { timeoutMs: 10000, exposeErrorDetail: true },
+        ),
     fundDetail: (fundCode: string) => fetchApi<FundDetail>(`/funds/${encodeURIComponent(fundCode)}`),
     fundYieldSummary: (fundCode: string) =>
         fetchApi<FundYieldSummaryResponse>(`/funds/${encodeURIComponent(fundCode)}/yield-summary`, {

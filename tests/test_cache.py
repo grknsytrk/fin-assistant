@@ -31,6 +31,13 @@ def test_memory_cache_get_set_with_ttl() -> None:
     assert backend.get("k") == {"hello": "world"}
 
 
+def test_memory_cache_set_if_absent_is_atomic() -> None:
+    backend = cache_module.InMemoryCache()
+    assert backend.set_if_absent("job", "first", ttl_seconds=60) is True
+    assert backend.set_if_absent("job", "second", ttl_seconds=60) is False
+    assert backend.get("job") == "first"
+
+
 def test_memory_cache_returns_none_after_expiry(monkeypatch) -> None:
     backend = cache_module.InMemoryCache()
     backend.set("k", "v", ttl_seconds=1)

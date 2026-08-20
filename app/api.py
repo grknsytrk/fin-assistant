@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import html
 import json
 import logging
@@ -8,7 +9,9 @@ import math
 import os
 import re
 import sys
+import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
@@ -59,6 +62,14 @@ _FUND_HOLDINGS_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE
 _FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT_SECONDS", "120"))
 _FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 6
 _FUND_HOLDING_SECTOR_MAP_CACHE_TTL = 6 * 60 * 60
+_FUND_REFRESH_JOB_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_REFRESH_JOB_TTL_SECONDS", str(30 * 60)))
+_FUND_REFRESH_MAX_LOOKBACK_DAYS = 3
+_FUND_REFRESH_ACTIVE_KEY = "api:funds-refresh:active"
+_FUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="fund-snapshot-refresh",
+)
+_FUND_REFRESH_STATE_LOCK = threading.Lock()
 
 
 def _truthy_env(name: str, default: str = "1") -> bool:
@@ -73,6 +84,126 @@ def _shared_cache_get_dict(key: str) -> Optional[Dict[str, Any]]:
 def _shared_cache_set(key: str, value: Any, ttl_seconds: int) -> None:
     if isinstance(value, dict):
         _cache_set_json(key, value, ttl_seconds=ttl_seconds)
+
+
+def _fund_refresh_job_key(job_id: str) -> str:
+    return f"api:funds-refresh:job:{job_id}"
+
+
+def _fund_refresh_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _get_fund_refresh_job(job_id: str) -> Optional[Dict[str, Any]]:
+    job = _get_cache().get(_fund_refresh_job_key(job_id))
+    return dict(job) if isinstance(job, dict) else None
+
+
+def _set_fund_refresh_job(job: Dict[str, Any]) -> None:
+    _get_cache().set(
+        _fund_refresh_job_key(str(job["job_id"])),
+        job,
+        ttl_seconds=_FUND_REFRESH_JOB_TTL_SECONDS,
+    )
+
+
+def _update_fund_refresh_job(job_id: str, **updates: Any) -> Optional[Dict[str, Any]]:
+    with _FUND_REFRESH_STATE_LOCK:
+        job = _get_fund_refresh_job(job_id)
+        if job is None:
+            return None
+        job.update(updates)
+        _set_fund_refresh_job(job)
+        return job
+
+
+def _active_fund_refresh_job() -> Optional[Dict[str, Any]]:
+    backend = _get_cache()
+    active_id = backend.get(_FUND_REFRESH_ACTIVE_KEY)
+    if not active_id:
+        return None
+    job = _get_fund_refresh_job(str(active_id))
+    if job and job.get("status") in {"queued", "running"}:
+        return job
+    try:
+        backend.delete(_FUND_REFRESH_ACTIVE_KEY)
+    except Exception:
+        pass
+    return None
+
+
+def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
+    _update_fund_refresh_job(job_id, status="running", started_at=_fund_refresh_now_iso())
+    backend = _get_cache()
+    try:
+        from app.fund_service import refresh_funds_snapshot
+
+        result = refresh_funds_snapshot(
+            CONFIG.paths.processed_dir,
+            lookback_days=min(_FUND_REFRESH_MAX_LOOKBACK_DAYS, max(1, int(lookback_days))),
+        )
+        rows = list(result.get("rows") or []) if isinstance(result, dict) else []
+        if not rows or bool(result.get("stale")) or bool(result.get("degraded")):
+            warnings = list(result.get("warnings") or []) if isinstance(result, dict) else []
+            raise RuntimeError(warnings[0] if warnings else "TEFAS güncel fon kataloğu döndürmedi.")
+        _invalidate_fund_response_cache()
+        _update_fund_refresh_job(
+            job_id,
+            status="succeeded",
+            finished_at=_fund_refresh_now_iso(),
+            as_of=result.get("as_of"),
+            row_count=len(rows),
+            error=None,
+        )
+    except Exception as exc:
+        logging.getLogger("uvicorn.error").exception("fund snapshot refresh job failed")
+        _update_fund_refresh_job(
+            job_id,
+            status="failed",
+            finished_at=_fund_refresh_now_iso(),
+            error=str(exc),
+        )
+    finally:
+        try:
+            if backend.get(_FUND_REFRESH_ACTIVE_KEY) == job_id:
+                backend.delete(_FUND_REFRESH_ACTIVE_KEY)
+        except Exception:
+            pass
+
+
+def _start_fund_refresh_job(lookback_days: int) -> Dict[str, Any]:
+    existing = _active_fund_refresh_job()
+    if existing is not None:
+        return existing
+
+    backend = _get_cache()
+    job_id = uuid.uuid4().hex
+    job: Dict[str, Any] = {
+        "job_id": job_id,
+        "status": "queued",
+        "requested_at": _fund_refresh_now_iso(),
+        "started_at": None,
+        "finished_at": None,
+        "as_of": None,
+        "row_count": None,
+        "error": None,
+    }
+    _set_fund_refresh_job(job)
+    if not backend.set_if_absent(
+        _FUND_REFRESH_ACTIVE_KEY,
+        job_id,
+        ttl_seconds=_FUND_REFRESH_JOB_TTL_SECONDS,
+    ):
+        backend.delete(_fund_refresh_job_key(job_id))
+        existing = _active_fund_refresh_job()
+        if existing is not None:
+            return existing
+        # A concurrently completed job can remove the active marker between
+        # the checks above. Recurse once to create the next request safely.
+        return _start_fund_refresh_job(lookback_days)
+
+    _FUND_REFRESH_EXECUTOR.submit(_run_fund_refresh_job, job_id, lookback_days)
+    return job
 
 
 async def _fund_price_collector_loop() -> None:
@@ -641,7 +772,9 @@ def _funds_search_payload(*, q: str) -> Dict[str, Any]:
         sort="fund_code",
         order="asc",
         min_aum=None,
-        auto_refresh=True,
+        # Search must stay cache/snapshot-only as well; refresh is an explicit
+        # background job started by the list page.
+        auto_refresh=False,
     )
 
 
@@ -1683,22 +1816,27 @@ def _fund_detail_payload(*, normalized: str) -> Dict[str, Any]:
 
 @app.post("/admin/funds/refresh-snapshot")
 def admin_refresh_funds_snapshot(lookback_days: int = Query(10, ge=1, le=45)) -> Dict[str, Any]:
-    from app.fund_service import FundUpstreamError, get_funds_payload, refresh_funds_snapshot
+    from app.fund_service import get_funds_payload
 
-    try:
-        refresh_funds_snapshot(CONFIG.paths.processed_dir, lookback_days=lookback_days)
-    except FundUpstreamError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    _invalidate_fund_response_cache()
-    # Keep the admin refresh contract identical to GET /funds.  The raw
-    # snapshot is an internal storage shape and must not bypass list filters
-    # or metadata normalization in clients.
-    return get_funds_payload(
+    # Start the upstream work outside the request path. The current snapshot
+    # is returned immediately so a slow TEFAS/WAF response cannot freeze the UI.
+    job = _start_fund_refresh_job(lookback_days)
+    payload = get_funds_payload(
         CONFIG.paths.processed_dir,
         sort="fund_code",
         order="asc",
         auto_refresh=False,
     )
+    payload["refresh_job"] = job
+    return payload
+
+
+@app.get("/admin/funds/refresh-snapshot/status")
+def fund_refresh_snapshot_status(job_id: str = Query(..., min_length=8, max_length=64)) -> Dict[str, Any]:
+    job = _get_fund_refresh_job(job_id.strip())
+    if job is None:
+        raise HTTPException(status_code=404, detail="Fon yenileme işi bulunamadı veya süresi doldu.")
+    return {"refresh_job": job}
 
 
 def _invalidate_fund_response_cache() -> None:

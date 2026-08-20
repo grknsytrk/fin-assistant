@@ -49,6 +49,14 @@ class CacheBackend:
     def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
         return None
 
+    def set_if_absent(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
+        """Store a value only when the key does not already exist."""
+
+        if self.get(key) is not None:
+            return False
+        self.set(key, value, ttl_seconds=ttl_seconds)
+        return True
+
     def delete(self, key: str) -> None:
         return None
 
@@ -89,6 +97,18 @@ class InMemoryCache(CacheBackend):
         expires_at = time.time() + ttl_seconds if ttl_seconds and ttl_seconds > 0 else 0
         with self._mutex:
             self._store[key] = (expires_at, value)
+
+    def set_if_absent(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
+        expires_at = time.time() + ttl_seconds if ttl_seconds and ttl_seconds > 0 else 0
+        with self._mutex:
+            existing = self._store.get(key)
+            if existing is not None:
+                existing_expires_at, _ = existing
+                if not existing_expires_at or existing_expires_at >= time.time():
+                    return False
+                self._store.pop(key, None)
+            self._store[key] = (expires_at, value)
+            return True
 
     def delete(self, key: str) -> None:
         with self._mutex:
@@ -181,6 +201,26 @@ class RedisCache(CacheBackend):
             self._remember_error(exc)
             logger.warning("redis cache set failed for %s: %s", key, exc)
             self._fallback.set(key, value, ttl_seconds=ttl_seconds)
+
+    def set_if_absent(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
+        try:
+            payload = json.dumps(value, default=str)
+        except (TypeError, ValueError) as exc:
+            logger.debug("skipping non-serialisable cache value for %s: %s", key, exc)
+            return self._fallback.set_if_absent(key, value, ttl_seconds=ttl_seconds)
+        try:
+            return bool(
+                self._client.set(
+                    self._prefixed(key),
+                    payload,
+                    ex=int(ttl_seconds) if ttl_seconds and ttl_seconds > 0 else None,
+                    nx=True,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - depends on Redis
+            self._remember_error(exc)
+            logger.warning("redis cache set_if_absent failed for %s: %s", key, exc)
+            return self._fallback.set_if_absent(key, value, ttl_seconds=ttl_seconds)
 
     def delete(self, key: str) -> None:
         try:

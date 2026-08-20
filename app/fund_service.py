@@ -3409,7 +3409,13 @@ class TefasFonClient:
             raise recent_error
         return [rows_by_date[point_date] for point_date in sorted(rows_by_date)]
 
-    def fetch_latest_fund_list_snapshot(self, *, as_of: date, lookback_days: int = 10) -> Tuple[List[Dict[str, Any]], List[str]]:
+    def fetch_latest_fund_list_snapshot(
+        self,
+        *,
+        as_of: date,
+        lookback_days: int = 10,
+        enrich: bool = True,
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
         warnings: List[str] = []
         for offset in range(max(1, lookback_days)):
             target_date = as_of - timedelta(days=offset)
@@ -3423,6 +3429,19 @@ class TefasFonClient:
             if not fund_rows:
                 warnings.append(f"tefasfon_funds returned no rows for {target_date.isoformat()}")
                 continue
+            if not enrich:
+                open_rows, skipped_closed, skipped_unknown = _filter_tefas_open_rows(fund_rows)
+                if skipped_closed:
+                    warnings.append(f"tefas_open_only skipped {skipped_closed} closed fund rows")
+                if TEFAS_OPEN_ONLY and not open_rows:
+                    warnings.append(f"tefas_open_only returned no open rows for {target_date.isoformat()}")
+                    continue
+                kept_warnings = [
+                    w
+                    for w in warnings
+                    if "returned no rows" not in w and "tefas_open_only returned no open rows" not in w
+                ]
+                return open_rows, kept_warnings
             try:
                 return_rows = self.fetch_returns()
                 fund_rows = _merge_tefasfon_returns(fund_rows, return_rows)
@@ -4492,13 +4511,79 @@ def _fetch_tefasfon_daily_snapshots_for_codes(
     return rows, warnings
 
 
+def _merge_refresh_rows_with_existing(
+    existing_rows: Iterable[Dict[str, Any]],
+    fresh_rows: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep optional catalog fields when the fast TEFAS list omits them."""
+
+    existing_by_code = {
+        normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or "")): row
+        for row in existing_rows
+        if isinstance(row, dict)
+        and normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+    }
+    volatile_fields = {
+        "price",
+        "daily_return",
+        "aum",
+        "investor_count",
+        "share_count",
+        "as_of",
+        "fetched_at",
+        "source",
+        "source_url",
+    }
+    merged_rows: List[Dict[str, Any]] = []
+    for row in fresh_rows:
+        if not isinstance(row, dict):
+            continue
+        code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        previous = existing_by_code.get(code, {})
+        merged = {
+            key: value
+            for key, value in previous.items()
+            if key not in volatile_fields
+        }
+        merged.update(row)
+        merged_rows.append(merged)
+    return merged_rows
+
+
 def refresh_funds_snapshot(processed_dir: Path, *, lookback_days: int = 10) -> Dict[str, Any]:
     end_date = _latest_fund_snapshot_target_date()
     existing_snapshot = load_funds_snapshot(processed_dir)
-    rows, warnings = TefasFonClient().fetch_latest_fund_list_snapshot(
-        as_of=end_date,
-        lookback_days=max(1, lookback_days),
-    )
+    bounded_lookback_days = min(3, max(1, int(lookback_days)))
+    warnings: List[str] = []
+    tefasfon_client = TefasFonClient()
+    try:
+        rows, tefasfon_warnings = tefasfon_client.fetch_latest_fund_list_snapshot(
+            as_of=end_date,
+            lookback_days=bounded_lookback_days,
+            enrich=False,
+        )
+    except TypeError as exc:
+        # Keep test doubles and third-party compatible adapters working while
+        # the fast-refresh keyword is introduced.
+        if "enrich" not in str(exc):
+            raise
+        rows, tefasfon_warnings = tefasfon_client.fetch_latest_fund_list_snapshot(
+            as_of=end_date,
+            lookback_days=bounded_lookback_days,
+        )
+    warnings.extend(tefasfon_warnings)
+    if not rows:
+        try:
+            rows, direct_warnings = TefasClient().fetch_latest_fund_list_snapshot(
+                as_of=end_date,
+                lookback_days=bounded_lookback_days,
+            )
+            warnings.extend(direct_warnings)
+            if rows:
+                warnings.append("tefas_direct_funds fallback used")
+        except TefasUpstreamError as exc:
+            warnings.append(f"tefas_direct_funds failed: {exc}")
+    rows = _merge_refresh_rows_with_existing(existing_snapshot.get("rows") or [], rows)
     rows, skipped_closed, skipped_unknown = _filter_tefas_open_rows(rows)
     if skipped_closed:
         warnings.append(

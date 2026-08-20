@@ -266,7 +266,14 @@ def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         fund_service_module,
         "refresh_funds_snapshot",
-        lambda _processed_dir, *, lookback_days: {"status": "ok", "lookback_days": lookback_days},
+        lambda _processed_dir, *, lookback_days: {
+            "status": "ok",
+            "rows": [{"fund_code": "TLY"}],
+            "stale": False,
+            "degraded": False,
+            "as_of": "2026-05-20",
+            "lookback_days": lookback_days,
+        },
     )
     monkeypatch.setattr(
         fund_service_module,
@@ -285,6 +292,19 @@ def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.Mon
             "source_metadata": {"source": "tefasfon_funds", "list_min_aum": 0},
         },
     )
+    job = {
+        "job_id": "test-refresh-job",
+        "status": "queued",
+        "requested_at": "2026-05-20T09:00:00+00:00",
+        "started_at": None,
+        "finished_at": None,
+        "as_of": None,
+        "row_count": None,
+        "error": None,
+    }
+    api_module._set_fund_refresh_job(job)
+    backend.set(api_module._FUND_REFRESH_ACTIVE_KEY, job["job_id"], ttl_seconds=600)
+    monkeypatch.setattr(api_module, "_start_fund_refresh_job", lambda _lookback_days: job)
     client = TestClient(app)
 
     response = client.post("/admin/funds/refresh-snapshot", params={"lookback_days": 1})
@@ -292,6 +312,11 @@ def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.Mon
     assert response.status_code == 200
     assert response.json()["rows"][0]["fund_code"] == "TLY"
     assert response.json()["source_metadata"]["list_min_aum"] == 0
+    assert response.json()["refresh_job"]["job_id"] == "test-refresh-job"
+    assert backend.get("api:funds:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc") == {"stale": True}
+
+    api_module._run_fund_refresh_job("test-refresh-job", 1)
+
     assert backend.get("api:funds:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc") is None
     assert backend.get("api:funds:v2:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc") is None
     assert backend.get("api:funds-search:q=") is None
@@ -299,6 +324,49 @@ def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.Mon
     assert backend.get("api:funds-categories:v2") is None
     assert backend.get("api:fund-yield-summary:TLY") is None
     assert backend.get("api:fund-holdings:TLY") is None
+
+
+def test_admin_funds_refresh_reuses_active_job_and_exposes_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = cache_module.get_cache()
+    job = {
+        "job_id": "active-refresh-job",
+        "status": "running",
+        "requested_at": "2026-05-20T09:00:00+00:00",
+        "started_at": "2026-05-20T09:00:01+00:00",
+        "finished_at": None,
+        "as_of": None,
+        "row_count": None,
+        "error": None,
+    }
+    api_module._set_fund_refresh_job(job)
+    backend.set(api_module._FUND_REFRESH_ACTIVE_KEY, job["job_id"], ttl_seconds=600)
+    monkeypatch.setattr(api_module, "_start_fund_refresh_job", lambda _lookback_days: job)
+    monkeypatch.setattr(
+        fund_service_module,
+        "get_funds_payload",
+        lambda _processed_dir, **_kwargs: {
+            "status": "ok",
+            "rows": [],
+            "count": 0,
+            "total_count": 0,
+            "source": "tefasfon_funds",
+            "as_of": "2026-05-20",
+            "fetched_at": "2026-05-20T09:00:00+00:00",
+            "stale": True,
+            "degraded": False,
+            "warnings": [],
+            "source_metadata": {"source": "tefasfon_funds"},
+        },
+    )
+
+    client = TestClient(app)
+    response = client.post("/admin/funds/refresh-snapshot")
+    status = client.get("/admin/funds/refresh-snapshot/status", params={"job_id": job["job_id"]})
+
+    assert response.status_code == 200
+    assert response.json()["refresh_job"]["status"] == "running"
+    assert status.status_code == 200
+    assert status.json()["refresh_job"]["job_id"] == job["job_id"]
 
 
 def _patch_holdings_cache_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
