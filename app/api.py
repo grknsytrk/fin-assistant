@@ -65,6 +65,12 @@ _FUND_HOLDING_SECTOR_MAP_CACHE_TTL = 6 * 60 * 60
 _FUND_REFRESH_JOB_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_REFRESH_JOB_TTL_SECONDS", str(30 * 60)))
 _FUND_REFRESH_MAX_LOOKBACK_DAYS = 3
 _FUND_REFRESH_ACTIVE_KEY = "api:funds-refresh:active"
+_FUND_REFRESH_HEARTBEAT_INTERVAL_SECONDS = float(
+    os.getenv("RAGFIN_FUND_REFRESH_HEARTBEAT_INTERVAL_SECONDS", "15")
+)
+_FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS = float(
+    os.getenv("RAGFIN_FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS", "90")
+)
 _FUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="fund-snapshot-refresh",
@@ -124,6 +130,31 @@ def _active_fund_refresh_job() -> Optional[Dict[str, Any]]:
         return None
     job = _get_fund_refresh_job(str(active_id))
     if job and job.get("status") in {"queued", "running"}:
+        if job.get("status") == "running":
+            heartbeat_text = str(job.get("heartbeat_at") or "").strip()
+            try:
+                heartbeat_at = datetime.fromisoformat(heartbeat_text.replace("Z", "+00:00"))
+                heartbeat_age = (datetime.now(timezone.utc) - heartbeat_at).total_seconds()
+            except (TypeError, ValueError):
+                heartbeat_age = float("inf")
+            if heartbeat_age > _FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS:
+                # A worker restart can leave the distributed active marker in
+                # Redis forever.  Jobs created before heartbeat support have
+                # no timestamp and are treated as orphaned as well.
+                orphaned = _update_fund_refresh_job(
+                    str(job["job_id"]),
+                    status="failed",
+                    finished_at=_fund_refresh_now_iso(),
+                    error="Fon yenileme worker'ı yeniden başladı veya heartbeat kayboldu.",
+                )
+                if orphaned is not None:
+                    job = orphaned
+                try:
+                    if backend.get(_FUND_REFRESH_ACTIVE_KEY) == active_id:
+                        backend.delete(_FUND_REFRESH_ACTIVE_KEY)
+                except Exception:
+                    pass
+                return None
         return job
     try:
         backend.delete(_FUND_REFRESH_ACTIVE_KEY)
@@ -133,8 +164,26 @@ def _active_fund_refresh_job() -> Optional[Dict[str, Any]]:
 
 
 def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
-    _update_fund_refresh_job(job_id, status="running", started_at=_fund_refresh_now_iso())
+    _update_fund_refresh_job(
+        job_id,
+        status="running",
+        started_at=_fund_refresh_now_iso(),
+        heartbeat_at=_fund_refresh_now_iso(),
+    )
     backend = _get_cache()
+    heartbeat_stop = threading.Event()
+
+    def heartbeat() -> None:
+        interval = max(5.0, _FUND_REFRESH_HEARTBEAT_INTERVAL_SECONDS)
+        while not heartbeat_stop.wait(interval):
+            _update_fund_refresh_job(job_id, heartbeat_at=_fund_refresh_now_iso())
+
+    heartbeat_thread = threading.Thread(
+        target=heartbeat,
+        name=f"fund-refresh-heartbeat-{job_id[:8]}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
     try:
         from app.fund_service import refresh_funds_snapshot
 
@@ -164,6 +213,8 @@ def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
             error=str(exc),
         )
     finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
         try:
             if backend.get(_FUND_REFRESH_ACTIVE_KEY) == job_id:
                 backend.delete(_FUND_REFRESH_ACTIVE_KEY)
