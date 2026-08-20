@@ -293,14 +293,13 @@ def upsert_instruments(
                 for alias in row.get("aliases") or []:
                     alias_rows.append((alias, row["kind"], row["symbol"], row.get("source"), now))
 
-            conn.executemany(
-                """
+            instrument_insert_sql = """
                 INSERT INTO instruments (
                     kind, symbol, name, short_name, source, source_id,
                     logo_url, logo_source, active, as_of, metadata_json,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES {values}
                 ON CONFLICT(kind, symbol) DO UPDATE SET
                     name = excluded.name,
                     short_name = excluded.short_name,
@@ -312,22 +311,31 @@ def upsert_instruments(
                     as_of = excluded.as_of,
                     metadata_json = excluded.metadata_json,
                     updated_at = excluded.updated_at
-                """,
-                instrument_rows,
-            )
+                """
+            for offset in range(0, len(instrument_rows), 500):
+                chunk = instrument_rows[offset : offset + 500]
+                value_group = "(" + ", ".join("?" for _ in range(13)) + ")"
+                conn.execute(
+                    instrument_insert_sql.format(values=", ".join(value_group for _ in chunk)),
+                    [value for row in chunk for value in row],
+                )
             if alias_rows:
-                conn.executemany(
-                    """
+                alias_insert_sql = """
                     INSERT INTO instrument_aliases (alias, kind, symbol, source, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES {values}
                     ON CONFLICT(alias) DO UPDATE SET
                         kind = excluded.kind,
                         symbol = excluded.symbol,
                         source = excluded.source,
                         updated_at = excluded.updated_at
-                    """,
-                    alias_rows,
-                )
+                    """
+                for offset in range(0, len(alias_rows), 500):
+                    chunk = alias_rows[offset : offset + 500]
+                    value_group = "(" + ", ".join("?" for _ in range(5)) + ")"
+                    conn.execute(
+                        alias_insert_sql.format(values=", ".join(value_group for _ in chunk)),
+                        [value for row in chunk for value in row],
+                    )
             conn.commit()
             return {
                 "db_path": str(reference_data_db_path(processed_dir)),
