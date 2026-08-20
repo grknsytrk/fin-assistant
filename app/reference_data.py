@@ -243,6 +243,98 @@ def upsert_instruments(
 
     now = _utc_now_iso()
     with _connect(processed_dir) as conn:
+        # A fund catalog refresh can contain thousands of rows.  The SQLite
+        # path intentionally keeps its simple row-by-row behavior, but doing a
+        # SELECT and INSERT round-trip for every row through Supabase's pooler
+        # makes a refresh take minutes.  Read existing rows in small batches,
+        # merge priorities in memory, then send the upserts with executemany.
+        # This keeps the same conflict/metadata semantics without making the
+        # user-facing refresh job wait on thousands of network round-trips.
+        if getattr(conn, "is_postgres", False):
+            existing_by_key: Dict[tuple[str, str], Any] = {}
+            symbols_by_kind: Dict[str, List[str]] = {}
+            for incoming in normalized_records:
+                symbols_by_kind.setdefault(str(incoming["kind"]), []).append(str(incoming["symbol"]))
+            for kind, symbols in symbols_by_kind.items():
+                unique_symbols = list(dict.fromkeys(symbols))
+                for offset in range(0, len(unique_symbols), 500):
+                    chunk = unique_symbols[offset : offset + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = conn.execute(
+                        f"SELECT * FROM instruments WHERE kind = ? AND symbol IN ({placeholders})",
+                        (kind, *chunk),
+                    ).fetchall()
+                    for existing in rows:
+                        existing_by_key[(str(existing["kind"]), str(existing["symbol"]))] = existing
+
+            instrument_rows: List[tuple[Any, ...]] = []
+            alias_rows: List[tuple[Any, ...]] = []
+            for incoming in normalized_records:
+                existing = existing_by_key.get((incoming["kind"], incoming["symbol"]))
+                row = _merge_record(existing, incoming)
+                created_at = existing["created_at"] if existing else now
+                instrument_rows.append(
+                    (
+                        row["kind"],
+                        row["symbol"],
+                        row.get("name"),
+                        row.get("short_name"),
+                        row.get("source"),
+                        row.get("source_id"),
+                        row.get("logo_url"),
+                        row.get("logo_source"),
+                        int(row.get("active", 1)),
+                        row.get("as_of"),
+                        _stable_json(row.get("metadata") or {}),
+                        created_at,
+                        now,
+                    )
+                )
+                for alias in row.get("aliases") or []:
+                    alias_rows.append((alias, row["kind"], row["symbol"], row.get("source"), now))
+
+            conn.executemany(
+                """
+                INSERT INTO instruments (
+                    kind, symbol, name, short_name, source, source_id,
+                    logo_url, logo_source, active, as_of, metadata_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(kind, symbol) DO UPDATE SET
+                    name = excluded.name,
+                    short_name = excluded.short_name,
+                    source = excluded.source,
+                    source_id = excluded.source_id,
+                    logo_url = excluded.logo_url,
+                    logo_source = excluded.logo_source,
+                    active = excluded.active,
+                    as_of = excluded.as_of,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                instrument_rows,
+            )
+            if alias_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO instrument_aliases (alias, kind, symbol, source, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(alias) DO UPDATE SET
+                        kind = excluded.kind,
+                        symbol = excluded.symbol,
+                        source = excluded.source,
+                        updated_at = excluded.updated_at
+                    """,
+                    alias_rows,
+                )
+            conn.commit()
+            return {
+                "db_path": str(reference_data_db_path(processed_dir)),
+                "upserted_count": len(instrument_rows),
+                "alias_count": len(alias_rows),
+            }
+
         upserted = 0
         alias_count = 0
         for incoming in normalized_records:
