@@ -72,7 +72,7 @@ _FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS = float(
     os.getenv("RAGFIN_FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS", "90")
 )
 _FUND_REFRESH_MAX_RUNTIME_SECONDS = float(
-    os.getenv("RAGFIN_FUND_REFRESH_MAX_RUNTIME_SECONDS", str(10 * 60))
+    os.getenv("RAGFIN_FUND_REFRESH_MAX_RUNTIME_SECONDS", str(5 * 60))
 )
 _FUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     # A timed-out/orphaned job must not keep a newly requested refresh queued
