@@ -21,7 +21,8 @@ type StockRailTab = Extract<RailTab, 'xutum' | 'xu100' | 'xu030'>;
 type RailSortKey = 'symbol' | 'price' | 'changePct';
 type RailSortDirection = 'asc' | 'desc';
 
-const LIVE_RAIL_REFRESH_MS = 3000;
+const LIVE_RAIL_REFRESH_DESKTOP_MS = 30000;
+const LIVE_RAIL_REFRESH_MOBILE_MS = 60000;
 const STOCK_TAB_TO_INDEX: Record<StockRailTab, MarketStockIndex> = {
     xutum: 'XUTUM',
     xu100: 'XU100',
@@ -532,7 +533,7 @@ export default function MarketWatchRail({
                     tab === 'xutum'
                         ? Boolean((xutumPayload?.rows?.length || xu100Rows.length) > 0)
                         : tab === 'xu100'
-                          ? Boolean((xu100Payload?.rows?.length || xu100Rows.length) > 0)
+                          ? Boolean(xu100Payload?.rows?.length)
                           : Boolean(xu030Payload?.rows?.length);
                 if (!options?.silent || !hasRows) {
                     setTabError(tab, error instanceof Error ? error.message : fallback);
@@ -564,7 +565,7 @@ export default function MarketWatchRail({
                 activeTab === 'xutum'
                     ? Boolean((xutumPayload?.rows?.length || xu100Rows.length) > 0)
                     : activeTab === 'xu100'
-                      ? Boolean((xu100Payload?.rows?.length || xu100Rows.length) > 0)
+                      ? Boolean(xu100Payload?.rows?.length)
                       : Boolean(xu030Payload?.rows?.length);
             loadStockTab(activeTab, { silent: hasCurrentRows, refresh: false });
         }
@@ -589,7 +590,11 @@ export default function MarketWatchRail({
     useEffect(() => {
         if (panelCollapsed || activeTool !== 'markets') return;
 
+        const refreshMs = window.matchMedia('(max-width: 767px)').matches
+            ? LIVE_RAIL_REFRESH_MOBILE_MS
+            : LIVE_RAIL_REFRESH_DESKTOP_MS;
         const timer = window.setInterval(() => {
+            if (document.visibilityState !== 'visible') return;
             if (activeTab === 'global') {
                 loadGlobalRows({ silent: true });
             } else if (activeTab === 'commodities') {
@@ -599,8 +604,22 @@ export default function MarketWatchRail({
             } else if (activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030') {
                 loadStockTab(activeTab, { silent: true, refresh: false });
             }
-        }, LIVE_RAIL_REFRESH_MS);
-        return () => window.clearInterval(timer);
+        }, refreshMs);
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') {
+                if (activeTab === 'global') loadGlobalRows({ silent: true });
+                else if (activeTab === 'commodities') loadCommodityRows({ silent: true });
+                else if (activeTab === 'fx') loadFxRows({ silent: true });
+                else if (activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030') {
+                    loadStockTab(activeTab, { silent: true, refresh: false });
+                }
+            }
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            window.clearInterval(timer);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
     }, [activeTab, activeTool, panelCollapsed, loadCommodityRows, loadFxRows, loadGlobalRows, loadStockTab]);
 
     const rawRows = useMemo<RailRow[]>(() => {

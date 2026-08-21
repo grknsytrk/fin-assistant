@@ -20,7 +20,9 @@ export interface MarketUniverseStats {
 }
 
 export interface MarketUniverseRow {
+  symbol?: string;
   company: string;
+  name?: string | null;
   latest_quarter: string | null;
   has_kap_cache: boolean;
   price: number | null;
@@ -116,6 +118,18 @@ export interface MarketStocksResponse {
     fallback_used?: boolean;
   };
   as_of: string;
+  cache_status?: 'hit' | 'shared_hit' | 'miss' | 'coalesced' | 'stale' | 'unavailable';
+  quote_status?: 'fresh' | 'stale' | 'unavailable';
+  stale?: boolean;
+  quote_error?: string | null;
+}
+
+export interface MarketStockSearchResponse {
+  index: MarketStockIndex;
+  query: string;
+  count: number;
+  rows: MarketUniverseRow[];
+  as_of: string | null;
 }
 
 export interface FundSourceMetadata {

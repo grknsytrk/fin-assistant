@@ -55,7 +55,7 @@ import type {
     FxQuote,
     MarketComparisonHistoryResponse,
     MarketIndexListRow,
-    MarketStockRow,
+    MarketUniverseRow,
 } from '../api/types';
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo, { type SymbolLogoKind } from '../components/SymbolLogo';
@@ -471,9 +471,9 @@ function fundToComparisonAsset(row: FundSummary): ComparisonAsset {
     };
 }
 
-function stockToComparisonAsset(row: MarketStockRow): ComparisonAsset {
-    const symbol = normalizeCompareSymbol(row.company);
-    const label = STOCK_SEARCH_LABELS[symbol]?.[0] || 'Hisse';
+function stockToComparisonAsset(row: MarketUniverseRow): ComparisonAsset {
+    const symbol = normalizeCompareSymbol(row.symbol || row.company);
+    const label = row.name || STOCK_SEARCH_LABELS[symbol]?.[0] || 'Hisse';
     return {
         id: comparisonAssetId('stock', symbol),
         kind: 'stock',
@@ -567,34 +567,28 @@ function isActiveFundRefreshJob(job: FundRefreshJob | null | undefined): boolean
     return job?.status === 'queued' || job?.status === 'running';
 }
 
-async function fetchFundsCatalog(options: { refreshSnapshot?: boolean; bypassMemoryCache?: boolean } = {}): Promise<FundsCatalogPayload> {
-    const refreshSnapshot = Boolean(options.refreshSnapshot);
+async function fetchFundsCatalog(options: { bypassMemoryCache?: boolean } = {}): Promise<FundsCatalogPayload> {
     const bypassMemoryCache = Boolean(options.bypassMemoryCache);
     const now = Date.now();
-    if (!refreshSnapshot && !bypassMemoryCache && fundsCatalogMemoryCache && now - fundsCatalogMemoryCache.fetchedAt < FUNDS_CATALOG_MEMORY_TTL_MS) {
+    if (!bypassMemoryCache && fundsCatalogMemoryCache && now - fundsCatalogMemoryCache.fetchedAt < FUNDS_CATALOG_MEMORY_TTL_MS) {
         return {
             funds: fundsCatalogMemoryCache.funds,
             categories: fundsCatalogMemoryCache.categories,
         };
     }
-    if (!refreshSnapshot && !bypassMemoryCache && fundsCatalogInFlight) return fundsCatalogInFlight;
+    if (!bypassMemoryCache && fundsCatalogInFlight) return fundsCatalogInFlight;
 
     const task = (async () => {
-        let fundPayload = refreshSnapshot
-            ? await apiClient.refreshFundsSnapshot()
-            : await apiClient.funds();
-        if (!refreshSnapshot && shouldRefreshSnapshot(fundPayload)) {
-            // The refresh endpoint returns the current list immediately and
-            // includes a job id; it no longer blocks on TEFAS.
-            fundPayload = await apiClient.refreshFundsSnapshot();
-        }
+        // Refresh is an admin/workflow operation. Public clients only reread
+        // the current canonical snapshot and never carry an admin token.
+        const fundPayload = await apiClient.funds();
         const categoryPayload = await apiClient.fundCategories();
         const result = { funds: fundPayload, categories: categoryPayload };
         fundsCatalogMemoryCache = { ...result, fetchedAt: Date.now() };
         return result;
     })();
 
-    if (!refreshSnapshot) {
+    if (!bypassMemoryCache) {
         fundsCatalogInFlight = task;
         task.finally(() => {
             if (fundsCatalogInFlight === task) fundsCatalogInFlight = null;
@@ -4467,7 +4461,7 @@ function useFundComparisonState({
     const [searchOpen, setSearchOpen] = useState(false);
     const [searchSurface, setSearchSurface] = useState<FundComparisonControlSurface | null>(null);
     const [fundSearchRows, setFundSearchRows] = useState<FundSummary[]>([]);
-    const [stockRows, setStockRows] = useState<MarketStockRow[]>([]);
+    const [stockRows, setStockRows] = useState<MarketUniverseRow[]>([]);
     const [indexRows, setIndexRows] = useState<MarketIndexListRow[]>([]);
     const [fxRows, setFxRows] = useState<FxQuote[]>([]);
     const [fundSearchLoading, setFundSearchLoading] = useState(false);
@@ -4475,7 +4469,6 @@ function useFundComparisonState({
     const [indicesLoading, setIndicesLoading] = useState(false);
     const [fxLoading, setFxLoading] = useState(false);
     const inputRef = useRef<HTMLInputElement | null>(null);
-    const stocksLoadedRef = useRef(false);
 
     const selectedFundCode = normalizeCompareSymbol(selectedFund?.fund_code);
     const baseAsset = useMemo<ComparisonAsset | null>(() => {
@@ -4526,28 +4519,11 @@ function useFundComparisonState({
         };
     }, [selectedFundCode]);
 
-    const ensureStockRows = useCallback(() => {
-        if (stocksLoadedRef.current || stocksLoading) return;
-        stocksLoadedRef.current = true;
-        setStocksLoading(true);
-        apiClient
-            .marketStocks({ index: 'XUTUM' })
-            .then((payload) => {
-                setStockRows(payload.rows || []);
-            })
-            .catch(() => {
-                setStockRows([]);
-                stocksLoadedRef.current = false;
-            })
-            .finally(() => setStocksLoading(false));
-    }, [stocksLoading]);
-
     const openSearch = useCallback((surface: FundComparisonControlSurface = 'returns') => {
         setSearchSurface(surface);
         setSearchOpen(true);
-        ensureStockRows();
         window.setTimeout(() => inputRef.current?.focus(), 0);
-    }, [ensureStockRows]);
+    }, []);
 
     useEffect(() => {
         if (openSearchSignal <= 0 || !selectedFundCode) return;
@@ -4576,6 +4552,37 @@ function useFundComparisonState({
                 })
                 .finally(() => {
                     if (alive) setFundSearchLoading(false);
+                });
+        }, 160);
+        return () => {
+            alive = false;
+            window.clearTimeout(timer);
+            controller.abort();
+        };
+    }, [query, searchOpen]);
+
+    useEffect(() => {
+        const trimmed = query.trim();
+        if (!searchOpen || !trimmed) {
+            setStockRows([]);
+            setStocksLoading(false);
+            return;
+        }
+        let alive = true;
+        const controller = new AbortController();
+        setStocksLoading(true);
+        const timer = window.setTimeout(() => {
+            apiClient
+                .marketStockSearch({ q: trimmed, index: 'XUTUM', limit: 20, signal: controller.signal })
+                .then((payload) => {
+                    if (alive) setStockRows(payload.rows || []);
+                })
+                .catch((error) => {
+                    if ((error as Error)?.name === 'AbortError') return;
+                    if (alive) setStockRows([]);
+                })
+                .finally(() => {
+                    if (alive) setStocksLoading(false);
                 });
         }, 160);
         return () => {
@@ -5242,10 +5249,7 @@ export default function FundsPage({
         try {
             // The backend returns the current canonical list immediately and
             // runs the expensive TEFAS work as a background job.
-            const { funds: fundPayload, categories: categoryPayload } = await fetchFundsCatalog({
-                refreshSnapshot: true,
-                bypassMemoryCache: true,
-            });
+            const { funds: fundPayload, categories: categoryPayload } = await fetchFundsCatalog({ bypassMemoryCache: true });
             if (!mountedRef.current) return;
             setFunds(fundPayload);
             setCategories(categoryPayload);

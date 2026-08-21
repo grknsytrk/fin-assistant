@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FIN_API_BASE_URL: https://grknsytrk-fin-api.hf.space
+      FIN_API_ADMIN_TOKEN: ${{ secrets.FIN_API_ADMIN_TOKEN }}
     steps:
       - name: request refresh job
         id: request
@@ -20,7 +21,9 @@ jobs:
         run: |
           set -euo pipefail
           response="$(curl --fail-with-body --silent --show-error --retry 2 \
-            -X POST "$FIN_API_BASE_URL/admin/funds/refresh-snapshot?lookback_days=14")"
+            -X POST \
+            -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
+            "$FIN_API_BASE_URL/admin/funds/refresh-snapshot?lookback_days=14")"
           echo "$response" | jq .
           job_id="$(echo "$response" | jq -r '.refresh_job.job_id // empty')"
           if [[ -z "$job_id" ]]; then
@@ -37,6 +40,7 @@ jobs:
           set -euo pipefail
           for attempt in $(seq 1 90); do
             response="$(curl --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
               "$FIN_API_BASE_URL/admin/funds/refresh-snapshot/status?job_id=$JOB_ID")"
             echo "$response" | jq .
             status="$(echo "$response" | jq -r '.refresh_job.status // empty')"

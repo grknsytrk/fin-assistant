@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -24,11 +27,13 @@ def _reset_flow_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RAGFIN_CACHE_BACKEND", raising=False)
     monkeypatch.delenv("RAGFIN_REDIS_URL", raising=False)
     monkeypatch.delenv("RAGFIN_CACHE_NAMESPACE", raising=False)
+    monkeypatch.setenv("RAGFIN_ADMIN_REFRESH_TOKEN", "test-admin-token")
     cache_module.reset_cache_for_tests()
     api_module._FLOW_CACHE.clear()
     api_module._WATCH_CACHE.clear()
     api_module._WATCH_GLOBAL_CACHE.clear()
     api_module._STOCKS_CACHE.clear()
+    api_module._UNIVERSE_CACHE.clear()
     api_module._MARKET_PRICE_CACHE.clear()
     api_module._INFOYATIRIM_STOCK_PAGE_CACHE.clear()
     api_module._STOCK_RETURN_BASE_CACHE.clear()
@@ -61,6 +66,131 @@ def test_api_health() -> None:
     assert payload["status"] == "ok"
     assert payload["cache_backend"] in {"memory", "redis"}
     assert payload["cache_namespace"]
+
+
+def test_market_universe_is_metadata_only_and_batch_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.kap_service.get_bist_index_universe",
+        lambda index, force_refresh=False: {
+            "index": str(index).upper(),
+            "symbols": ["YKBNK", "BIMAS"],
+            "count": 2,
+            "source": "test",
+            "source_url": None,
+            "source_date": None,
+            "fetched_at": "2026-08-21T10:00:00+00:00",
+            "cache_hit": False,
+            "fallback_used": False,
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "get_instruments",
+        lambda *_args, **_kwargs: {
+            "YKBNK": {
+                "symbol": "YKBNK",
+                "name": "Yapı ve Kredi Bankası A.Ş.",
+                "source": "reference_data",
+                "logo_url": "https://example.test/ykbnk.svg",
+                "logo_source": "manual",
+                "metadata": {"latest_quarter": "2026Q2", "has_kap_cache": True},
+            }
+        },
+    )
+    monkeypatch.setattr(api_module, "_load_cached_kap_market_metadata", lambda *_args: {})
+    monkeypatch.setattr(api_module, "_fetch_market_price_map", lambda *_args, **_kwargs: pytest.fail("universe must not fetch quotes"))
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: pytest.fail("universe must not fetch summaries"))
+
+    payload = api_module._market_universe_payload(index_name="XU100", force_refresh=True)
+    rows = {row["symbol"]: row for row in payload["rows"]}
+
+    assert rows["YKBNK"]["name"] == "Yapı ve Kredi Bankası A.Ş."
+    assert rows["YKBNK"]["logo_url"] == "https://example.test/ykbnk.svg"
+    assert rows["YKBNK"]["latest_quarter"] == "2026Q2"
+    assert rows["YKBNK"]["has_kap_cache"] is True
+    assert rows["BIMAS"]["name"] == "BIMAS"
+    assert rows["BIMAS"]["price"] is None
+
+
+def test_market_stock_search_uses_metadata_without_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api_module, "_market_universe_payload", lambda **_kwargs: {
+        "universe": {"fetched_at": "2026-08-21T10:00:00+00:00"},
+        "rows": [
+            {"symbol": "YKBNK", "company": "YKBNK", "name": "Yapı ve Kredi Bankası A.Ş."},
+            {"symbol": "BIMAS", "company": "BIMAS", "name": "BİM Birleşik Mağazalar A.Ş."},
+        ],
+    })
+    monkeypatch.setattr(api_module, "_fetch_market_price_map", lambda *_args, **_kwargs: pytest.fail("search must not fetch quotes"))
+
+    response = TestClient(app).get("/market/stocks/search", params={"q": "ykbnk", "limit": 20})
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
+    assert response.json()["rows"][0]["symbol"] == "YKBNK"
+
+
+def test_cache_single_flight_never_runs_duplicate_factory() -> None:
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def factory() -> dict[str, str]:
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.15)
+        return {"value": "ready"}
+
+    def request() -> tuple[dict[str, str] | None, str]:
+        return cache_module.get_or_set_single_flight(
+            "test:market:quote",
+            ttl_seconds=30,
+            factory=factory,
+            lock_ttl_seconds=2,
+            wait_timeout_seconds=1,
+            poll_interval_seconds=0.01,
+        )
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(lambda _index: request(), range(10)))
+
+    assert calls == 1
+    assert all(value == {"value": "ready"} for value, _status in results)
+    assert any(status == "miss" for _value, status in results)
+
+
+def test_market_stocks_serves_stale_quote_when_upstream_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    stale_entry = {
+        "payload": {"index": "XUTUM", "rows": [{"company": "YKBNK", "price": 25.0}], "benchmarks": {}, "as_of": "old"},
+        "fresh_until": time.time() - 10,
+        "stale_until": time.time() + 120,
+    }
+    backend = cache_module.get_cache()
+    backend.set("api:market:stocks:XUTUM:v2", stale_entry, ttl_seconds=120)
+    monkeypatch.setattr(api_module, "_build_market_stocks_payload", lambda **_kwargs: {
+        "index": "XUTUM",
+        "rows": [{"company": "YKBNK", "price": None}],
+        "benchmarks": {},
+        "as_of": "new",
+    })
+
+    payload = api_module._market_stocks_payload(index_name="XUTUM", force_refresh=True)
+
+    assert payload["stale"] is True
+    assert payload["quote_status"] == "stale"
+    assert payload["rows"][0]["price"] == 25.0
+
+
+def test_admin_refresh_auth_distinguishes_missing_secret_and_bad_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TestClient(app)
+    monkeypatch.delenv("RAGFIN_ADMIN_REFRESH_TOKEN", raising=False)
+    assert client.post("/admin/funds/refresh-snapshot").status_code == 503
+
+    monkeypatch.setenv("RAGFIN_ADMIN_REFRESH_TOKEN", "test-admin-token")
+    assert client.post("/admin/funds/refresh-snapshot").status_code == 401
+    assert client.post(
+        "/admin/funds/refresh-snapshot",
+        headers={"Authorization": "Bearer wrong-token"},
+    ).status_code == 401
 
 
 def test_fenced_snapshot_commit_checks_ownership_before_upsert(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -373,7 +503,11 @@ def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.Mon
     monkeypatch.setattr(api_module, "_start_fund_refresh_job", lambda _lookback_days: job)
     client = TestClient(app)
 
-    response = client.post("/admin/funds/refresh-snapshot", params={"lookback_days": 1})
+    response = client.post(
+        "/admin/funds/refresh-snapshot",
+        params={"lookback_days": 1},
+        headers={"Authorization": "Bearer test-admin-token"},
+    )
 
     assert response.status_code == 200
     assert response.json()["rows"][0]["fund_code"] == "TLY"
@@ -426,8 +560,13 @@ def test_admin_funds_refresh_reuses_active_job_and_exposes_status(monkeypatch: p
     )
 
     client = TestClient(app)
-    response = client.post("/admin/funds/refresh-snapshot")
-    status = client.get("/admin/funds/refresh-snapshot/status", params={"job_id": job["job_id"]})
+    headers = {"Authorization": "Bearer test-admin-token"}
+    response = client.post("/admin/funds/refresh-snapshot", headers=headers)
+    status = client.get(
+        "/admin/funds/refresh-snapshot/status",
+        params={"job_id": job["job_id"]},
+        headers=headers,
+    )
 
     assert response.status_code == 200
     assert response.json()["refresh_job"]["status"] == "running"

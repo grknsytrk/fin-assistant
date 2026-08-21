@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -35,6 +36,7 @@ from src.nvidia_commentary import MAX_REQUEST_BYTES, PayloadValidationError, gen
 from app.cache import cache_status as _cache_status
 from app.cache import cached as _cached_response
 from app.cache import get_cache as _get_cache
+from app.cache import get_or_set_single_flight as _get_or_set_single_flight
 from app.cache import get_json_dict as _cache_get_dict
 from app.cache import set_json as _cache_set_json
 from app.database import (
@@ -86,11 +88,60 @@ _FUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="fund-snapshot-refresh",
 )
 _FUND_REFRESH_STATE_LOCK = threading.Lock()
+_ADMIN_REFRESH_TOKEN_ENV = "RAGFIN_ADMIN_REFRESH_TOKEN"
+_MARKET_UNIVERSE_CACHE_TTL = int(
+    os.getenv("RAGFIN_MARKET_UNIVERSE_CACHE_TTL_SECONDS", str(6 * 60 * 60))
+)
+_MARKET_QUOTES_FRESH_TTL = int(os.getenv("RAGFIN_MARKET_QUOTES_FRESH_TTL_SECONDS", "5"))
+_MARKET_QUOTES_STALE_TTL = int(os.getenv("RAGFIN_MARKET_QUOTES_STALE_TTL_SECONDS", "120"))
+_MARKET_QUOTES_LOCK_TTL_SECONDS = float(
+    os.getenv("RAGFIN_MARKET_QUOTES_LOCK_TTL_SECONDS", "60")
+)
+_MARKET_QUOTES_WAIT_TIMEOUT_SECONDS = float(
+    os.getenv("RAGFIN_MARKET_QUOTES_WAIT_TIMEOUT_SECONDS", "8")
+)
+_MARKET_QUOTES_POLL_INTERVAL_SECONDS = float(
+    os.getenv("RAGFIN_MARKET_QUOTES_POLL_INTERVAL_SECONDS", "0.05")
+)
 
 
 def _truthy_env(name: str, default: str = "1") -> bool:
     value = os.getenv(name, default).strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _require_admin_refresh_access(request: Request) -> None:
+    """Authenticate private refresh endpoints without exposing a frontend token."""
+
+    expected = str(os.getenv(_ADMIN_REFRESH_TOKEN_ENV) or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="Admin yenileme secret'i sunucuda tanımlı değil.")
+
+    authorization = str(request.headers.get("authorization") or "").strip()
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip() or not secrets.compare_digest(token.strip(), expected):
+        raise HTTPException(status_code=401, detail="Yetkisiz admin isteği.")
+
+
+def _log_market_cache_event(
+    *,
+    endpoint: str,
+    index: str,
+    cache_status: str,
+    upstream_called: bool,
+    stale: bool,
+    started_at: float,
+) -> None:
+    elapsed_ms = int(max(0.0, (time.perf_counter() - started_at) * 1000))
+    LOGGER.info(
+        "market_cache endpoint=%s index=%s cache_status=%s upstream_called=%s stale=%s elapsed_ms=%s",
+        endpoint,
+        index,
+        cache_status,
+        str(bool(upstream_called)).lower(),
+        str(bool(stale)).lower(),
+        elapsed_ms,
+    )
 
 
 def _shared_cache_get_dict(key: str) -> Optional[Dict[str, Any]]:
@@ -773,23 +824,39 @@ def _market_cap_from_quote_and_meta(
 
 
 _UNIVERSE_CACHE: Dict[str, Any] = {}
-_UNIVERSE_CACHE_TTL = 120  # 2 minutes
 
 
 def _market_universe_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
     from app.kap_service import get_bist_index_universe
 
+    started_at = time.perf_counter()
     now_ts = time.time()
     normalized_index = _normalize_stock_index(index_name)
     cache_key = f"payload:{normalized_index}"
     cached = _UNIVERSE_CACHE.get(cache_key)
-    if cached and not force_refresh and now_ts - cached.get("_ts", 0) < _UNIVERSE_CACHE_TTL:
+    if cached and not force_refresh and now_ts - cached.get("_ts", 0) < _MARKET_UNIVERSE_CACHE_TTL:
+        _log_market_cache_event(
+            endpoint="market/universe",
+            index=normalized_index,
+            cache_status="hit",
+            upstream_called=False,
+            stale=False,
+            started_at=started_at,
+        )
         return cached["data"]
-    shared_key = f"api:market:universe:{normalized_index}:v1"
+    shared_key = f"api:market:universe:{normalized_index}:v2"
     if not force_refresh:
         shared_cached = _shared_cache_get_dict(shared_key)
         if shared_cached is not None:
             _UNIVERSE_CACHE[cache_key] = {"_ts": now_ts, "data": shared_cached}
+            _log_market_cache_event(
+                endpoint="market/universe",
+                index=normalized_index,
+                cache_status="shared_hit",
+                upstream_called=False,
+                stale=False,
+                started_at=started_at,
+            )
             return dict(shared_cached)
 
     universe = get_bist_index_universe(normalized_index, force_refresh=force_refresh)
@@ -802,37 +869,55 @@ def _market_universe_payload(*, index_name: str = "XUTUM", force_refresh: bool =
         )
     except Exception:
         bist_all_count = int(universe.get("count") or len(symbols)) if normalized_index == "XUTUM" else 0
+    try:
+        instrument_map = get_instruments(CONFIG.paths.processed_dir, "stock", symbols)
+    except Exception as exc:
+        LOGGER.warning("reference instrument batch lookup failed: %s", exc)
+        instrument_map = {}
     cache_dir = CONFIG.paths.processed_dir / "kap_cache"
-    base_price_map = _fetch_market_price_map(symbols, index_name=normalized_index)
-    price_map = (
-        base_price_map
-        if normalized_index == "XUTUM"
-        else _fill_prices_via_yahoo(symbols, base_price_map)
-    )
-    basic_summary_map = _fetch_isyatirim_basic_summary_map()
     rows: List[Dict[str, Any]] = []
     kap_cache_count = 0
 
     for symbol in symbols:
+        normalized_symbol = str(symbol or "").strip().upper()
+        instrument = instrument_map.get(normalized_symbol) or {}
+        instrument_metadata = instrument.get("metadata") if isinstance(instrument.get("metadata"), dict) else {}
         cached_meta = _load_cached_kap_market_metadata(cache_dir, symbol)
-        latest_quarter = cached_meta.get("latest_quarter")
-        has_kap_cache = bool(cached_meta.get("has_kap_cache"))
-        quote = price_map.get(symbol, {})
+        latest_quarter = (
+            instrument_metadata.get("latest_quarter")
+            or cached_meta.get("latest_quarter")
+        )
+        source = str(instrument.get("source") or "").strip().lower()
+        has_kap_cache = bool(
+            instrument_metadata.get("has_kap_cache")
+            or source in {"kap", "kap_cache"}
+            or cached_meta.get("has_kap_cache")
+        )
+        name = (
+            str(instrument.get("name") or "").strip()
+            or str(cached_meta.get("company_title") or "").strip()
+            or normalized_symbol
+        )
+        logo_url = str(instrument.get("logo_url") or "").strip() or None
+        logo_source = str(instrument.get("logo_source") or "").strip() or None
         if has_kap_cache:
             kap_cache_count += 1
 
         rows.append(
             {
-                "company": symbol,
+                "symbol": normalized_symbol,
+                "company": normalized_symbol,
+                "name": name,
                 "latest_quarter": latest_quarter,
                 "has_kap_cache": has_kap_cache,
-                "price": quote.get("price"),
-                "price_currency": quote.get("currency"),
-                "change": quote.get("change"),
-                "change_pct": quote.get("change_pct"),
-                "price_as_of": quote.get("as_of"),
-                "market_cap": _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary_map.get(symbol)),
-                **_empty_logo_payload(),
+                "price": None,
+                "price_currency": None,
+                "change": None,
+                "change_pct": None,
+                "price_as_of": None,
+                "market_cap": None,
+                "logo_url": logo_url,
+                "logo_source": logo_source,
             }
         )
 
@@ -860,7 +945,15 @@ def _market_universe_payload(*, index_name: str = "XUTUM", force_refresh: bool =
         "coverage_rows": coverage_rows,
     }
     _UNIVERSE_CACHE[cache_key] = {"_ts": now_ts, "data": data}
-    _shared_cache_set(shared_key, data, ttl_seconds=_UNIVERSE_CACHE_TTL)
+    _shared_cache_set(shared_key, data, ttl_seconds=_MARKET_UNIVERSE_CACHE_TTL)
+    _log_market_cache_event(
+        endpoint="market/universe",
+        index=normalized_index,
+        cache_status="miss",
+        upstream_called=False,
+        stale=False,
+        started_at=started_at,
+    )
     return data
 
 
@@ -872,6 +965,42 @@ def health() -> Dict[str, Any]:
 @app.get("/market/universe")
 def market_universe(index: str = Query("XUTUM"), refresh: bool = Query(False)) -> Dict[str, Any]:
     return _market_universe_payload(index_name=index, force_refresh=refresh)
+
+
+@app.get("/market/stocks/search")
+def market_stocks_search(
+    q: str = Query("", max_length=80),
+    index: str = Query("XUTUM"),
+    limit: int = Query(20, ge=1, le=50),
+) -> Dict[str, Any]:
+    started_at = time.perf_counter()
+    normalized_index = _normalize_stock_index(index)
+    query = str(q or "").strip().upper()
+    payload = _market_universe_payload(index_name=normalized_index)
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    if query:
+        rows = [
+            row
+            for row in rows
+            if query in str(row.get("symbol") or row.get("company") or "").upper()
+            or query in str(row.get("name") or "").upper()
+        ]
+    rows = rows[:limit]
+    _log_market_cache_event(
+        endpoint="market/stocks/search",
+        index=normalized_index,
+        cache_status="metadata",
+        upstream_called=False,
+        stale=False,
+        started_at=started_at,
+    )
+    return {
+        "index": normalized_index,
+        "query": q,
+        "count": len(rows),
+        "rows": rows,
+        "as_of": payload.get("universe", {}).get("fetched_at") if isinstance(payload.get("universe"), dict) else None,
+    }
 
 
 @app.get("/market/stocks")
@@ -2036,10 +2165,12 @@ def _fund_detail_payload(*, normalized: str) -> Dict[str, Any]:
 
 @app.post("/admin/funds/refresh-snapshot")
 def admin_refresh_funds_snapshot(
+    request: Request,
     lookback_days: int = Query(_FUND_REFRESH_MAX_LOOKBACK_DAYS, ge=1, le=_FUND_REFRESH_MAX_LOOKBACK_DAYS)
 ) -> Dict[str, Any]:
     from app.fund_service import get_funds_payload
 
+    _require_admin_refresh_access(request)
     # Start the upstream work outside the request path. The current snapshot
     # is returned immediately so a slow TEFAS/WAF response cannot freeze the UI.
     job = _start_fund_refresh_job(lookback_days)
@@ -2054,7 +2185,11 @@ def admin_refresh_funds_snapshot(
 
 
 @app.get("/admin/funds/refresh-snapshot/status")
-def fund_refresh_snapshot_status(job_id: str = Query(..., min_length=8, max_length=64)) -> Dict[str, Any]:
+def fund_refresh_snapshot_status(
+    request: Request,
+    job_id: str = Query(..., min_length=8, max_length=64),
+) -> Dict[str, Any]:
+    _require_admin_refresh_access(request)
     job = _get_fund_refresh_job(job_id.strip())
     if job is None:
         raise HTTPException(status_code=404, detail="Fon yenileme işi bulunamadı veya süresi doldu.")
@@ -4401,16 +4536,10 @@ def _market_stock_row(
     }
 
 
-def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
+def _build_market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
     from app.kap_service import get_bist_index_universe
 
     normalized_index = _normalize_stock_index(index_name)
-    now_ts = time.time()
-    cache_key = f"payload:{normalized_index}"
-    cached = _STOCKS_CACHE.get(cache_key)
-    if cached and not force_refresh and now_ts - cached.get("_ts", 0) < _STOCKS_CACHE_TTL:
-        return cached["data"]
-
     symbols = _market_stock_symbols_for_index(normalized_index)
     try:
         universe = get_bist_index_universe(normalized_index, force_refresh=force_refresh)
@@ -4460,8 +4589,182 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
         },
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
-    _STOCKS_CACHE[cache_key] = {"_ts": now_ts, "data": data}
     return data
+
+
+def _market_quote_entry_is_fresh(entry: Any) -> bool:
+    if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+        return False
+    try:
+        return float(entry.get("fresh_until") or 0.0) > time.time()
+    except (TypeError, ValueError):
+        return False
+
+
+def _market_quote_entry_is_stale(entry: Any) -> bool:
+    if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+        return False
+    try:
+        return float(entry.get("stale_until") or 0.0) > time.time()
+    except (TypeError, ValueError):
+        return False
+
+
+def _market_quote_entry_payload(entry: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+        return None
+    return dict(entry["payload"])
+
+
+def _market_unavailable_stocks_payload(index_name: str) -> Dict[str, Any]:
+    normalized_index = _normalize_stock_index(index_name)
+    universe = _market_universe_payload(index_name=normalized_index)
+    universe_info = universe.get("universe") if isinstance(universe.get("universe"), dict) else {}
+    rows = []
+    for row in universe.get("rows") if isinstance(universe.get("rows"), list) else []:
+        rows.append(
+            {
+                **dict(row),
+                "volume": None,
+                "return_1w_pct": None,
+                "return_1m_pct": None,
+                "return_3m_pct": None,
+                "return_6m_pct": None,
+                "return_ytd_pct": None,
+                "return_1y_pct": None,
+            }
+        )
+    return {
+        "index": normalized_index,
+        "rows": rows,
+        "benchmarks": _market_stock_benchmarks(),
+        "source": "reference_data",
+        "universe": dict(universe_info),
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
+    normalized_index = _normalize_stock_index(index_name)
+    started_at = time.perf_counter()
+    local_key = f"payload:{normalized_index}"
+    shared_key = f"api:market:stocks:{normalized_index}:v2"
+    local_entry = _STOCKS_CACHE.get(local_key, {}).get("entry")
+
+    if not force_refresh and _market_quote_entry_is_fresh(local_entry):
+        payload = _market_quote_entry_payload(local_entry) or {}
+        payload.update({"cache_status": "hit", "quote_status": "fresh", "stale": False, "quote_error": None})
+        _log_market_cache_event(
+            endpoint="market/stocks",
+            index=normalized_index,
+            cache_status="hit",
+            upstream_called=False,
+            stale=False,
+            started_at=started_at,
+        )
+        return payload
+
+    shared_entry = _shared_cache_get_dict(shared_key)
+    stale_entry = local_entry if _market_quote_entry_is_stale(local_entry) else None
+    if _market_quote_entry_is_stale(shared_entry):
+        stale_entry = shared_entry
+    if not force_refresh and _market_quote_entry_is_fresh(shared_entry):
+        _STOCKS_CACHE[local_key] = {"_ts": time.time(), "entry": shared_entry}
+        payload = _market_quote_entry_payload(shared_entry) or {}
+        payload.update({"cache_status": "shared_hit", "quote_status": "fresh", "stale": False, "quote_error": None})
+        _log_market_cache_event(
+            endpoint="market/stocks",
+            index=normalized_index,
+            cache_status="shared_hit",
+            upstream_called=False,
+            stale=False,
+            started_at=started_at,
+        )
+        return payload
+
+    latest_build: Dict[str, Any] = {}
+
+    def build_and_envelope() -> Optional[Dict[str, Any]]:
+        nonlocal latest_build
+        built = _build_market_stocks_payload(index_name=normalized_index, force_refresh=force_refresh)
+        latest_build = dict(built)
+        rows = built.get("rows") if isinstance(built.get("rows"), list) else []
+        has_quote = not rows or any(row.get("price") is not None for row in rows if isinstance(row, dict))
+        if not has_quote:
+            return None
+        now = time.time()
+        return {
+            "payload": built,
+            "fresh_until": now + max(1, _MARKET_QUOTES_FRESH_TTL),
+            "stale_until": now + max(1, _MARKET_QUOTES_STALE_TTL),
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    entry, cache_status = _get_or_set_single_flight(
+        shared_key,
+        ttl_seconds=max(1, _MARKET_QUOTES_STALE_TTL),
+        factory=build_and_envelope,
+        lock_key=f"api:market:stocks:{normalized_index}:lock:v2",
+        lock_ttl_seconds=_MARKET_QUOTES_LOCK_TTL_SECONDS,
+        wait_timeout_seconds=_MARKET_QUOTES_WAIT_TIMEOUT_SECONDS,
+        poll_interval_seconds=_MARKET_QUOTES_POLL_INTERVAL_SECONDS,
+        cache_usable=_market_quote_entry_is_fresh,
+        allow_cached=not force_refresh,
+    )
+
+    if _market_quote_entry_is_fresh(entry):
+        _STOCKS_CACHE[local_key] = {"_ts": time.time(), "entry": entry}
+        payload = _market_quote_entry_payload(entry) or {}
+        payload.update({
+            "cache_status": cache_status,
+            "quote_status": "fresh",
+            "stale": False,
+            "quote_error": None,
+        })
+        _log_market_cache_event(
+            endpoint="market/stocks",
+            index=normalized_index,
+            cache_status=cache_status,
+            upstream_called=cache_status == "miss",
+            stale=False,
+            started_at=started_at,
+        )
+        return payload
+
+    stale_payload = _market_quote_entry_payload(stale_entry)
+    if stale_payload is not None:
+        stale_payload.update({
+            "cache_status": "stale",
+            "quote_status": "stale",
+            "stale": True,
+            "quote_error": "Piyasa fiyat kaynağına ulaşılamadı.",
+        })
+        _log_market_cache_event(
+            endpoint="market/stocks",
+            index=normalized_index,
+            cache_status="stale",
+            upstream_called=cache_status == "miss",
+            stale=True,
+            started_at=started_at,
+        )
+        return stale_payload
+
+    unavailable = latest_build or _market_unavailable_stocks_payload(normalized_index)
+    unavailable.update({
+        "cache_status": "unavailable",
+        "quote_status": "unavailable",
+        "stale": False,
+        "quote_error": "Piyasa fiyat kaynağına ulaşılamadı.",
+    })
+    _log_market_cache_event(
+        endpoint="market/stocks",
+        index=normalized_index,
+        cache_status="unavailable",
+        upstream_called=cache_status == "miss",
+        stale=False,
+        started_at=started_at,
+    )
+    return unavailable
 
 
 def _normalize_market_stock_card_symbol(symbol: str) -> str:

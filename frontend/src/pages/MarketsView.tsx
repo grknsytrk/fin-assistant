@@ -4,7 +4,6 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 import { CalendarDays, GripHorizontal, Plus, Search, Trash2, X } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type {
-    KapCompanySearchItem,
     MarketIndexCode,
     MarketIndexConstituent,
     MarketIndexDetailResponse,
@@ -86,7 +85,10 @@ const RETURN_KEYS: StockReturnKey[] = [
 ];
 const STOCK_CARD_STORAGE_KEY = 'ragfin_market_stock_cards';
 const MAX_STOCK_CARDS = 12;
-const LIVE_MARKET_REFRESH_MS = 3000;
+const MARKET_LIST_REFRESH_DESKTOP_MS = 30000;
+const MARKET_LIST_REFRESH_MOBILE_MS = 60000;
+const MARKET_DETAIL_REFRESH_DESKTOP_MS = 15000;
+const MARKET_DETAIL_REFRESH_MOBILE_MS = 30000;
 const STOCK_CARD_CHART_RANGES: Array<{ id: MarketStockCardChartRange; label: string; title: string }> = [
     { id: '1d', label: 'G', title: 'Gün içi' },
     { id: '1w', label: '1H', title: '1 Hafta' },
@@ -429,8 +431,7 @@ function MobileMarketOverview({
 }) {
     const [searchOpen, setSearchOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
-    const [companySearchItems, setCompanySearchItems] = useState<KapCompanySearchItem[]>([]);
-    const [companySearchLoaded, setCompanySearchLoaded] = useState(false);
+    const [companySearchItems, setCompanySearchItems] = useState<MarketUniverseRow[]>([]);
     const [companySearchLoading, setCompanySearchLoading] = useState(false);
     const [swipedWatchlistKey, setSwipedWatchlistKey] = useState<string | null>(null);
     const swipeStartRef = useRef<{ key: string; x: number; y: number } | null>(null);
@@ -444,44 +445,44 @@ function MobileMarketOverview({
     const isWatchlistFull = watchlistItems.length >= MAX_WATCHLIST_ITEMS;
     const normalizedSearch = searchTerm.trim().toUpperCase();
     useEffect(() => {
-        if (!searchOpen || companySearchLoaded || companySearchLoading) return;
+        const query = searchTerm.trim();
+        if (!searchOpen || !query) {
+            setCompanySearchItems([]);
+            setCompanySearchLoading(false);
+            return;
+        }
         let active = true;
+        const controller = new AbortController();
         setCompanySearchLoading(true);
-        apiClient.kapCompanies()
-            .then((payload) => {
-                if (!active) return;
-                if (payload.items?.length) {
-                    setCompanySearchItems(payload.items);
-                } else {
-                    setCompanySearchItems((payload.companies || []).map((symbol) => ({
-                        symbol,
-                        title: null,
-                    })));
-                }
-            })
-            .catch(() => {
-                if (active) setCompanySearchItems([]);
-            })
-            .finally(() => {
-                if (active) {
-                    setCompanySearchLoading(false);
-                    setCompanySearchLoaded(true);
-                }
-            });
+        const timer = window.setTimeout(() => {
+            apiClient.marketStockSearch({ q: query, index: 'XUTUM', limit: 20, signal: controller.signal })
+                .then((payload) => {
+                    if (active) setCompanySearchItems(payload.rows || []);
+                })
+                .catch((error) => {
+                    if ((error as Error)?.name === 'AbortError') return;
+                    if (active) setCompanySearchItems([]);
+                })
+                .finally(() => {
+                    if (active) setCompanySearchLoading(false);
+                });
+        }, 160);
         return () => {
             active = false;
+            window.clearTimeout(timer);
+            controller.abort();
         };
-    }, [companySearchLoaded, companySearchLoading, searchOpen]);
+    }, [searchOpen, searchTerm]);
 
     const searchCandidates = new Map<string, { symbol: string; name: string; logoUrl?: string | null }>();
     for (const row of rows) {
         const symbol = normalizeWatchlistSymbol(row.company);
-        searchCandidates.set(symbol, { symbol, name: row.company, logoUrl: row.logo_url });
+        searchCandidates.set(symbol, { symbol, name: row.name || row.company, logoUrl: row.logo_url });
     }
     for (const item of companySearchItems) {
-        const symbol = normalizeWatchlistSymbol(item.symbol);
+        const symbol = normalizeWatchlistSymbol(item.symbol || item.company);
         if (!symbol || searchCandidates.has(symbol)) continue;
-        searchCandidates.set(symbol, { symbol, name: item.title || symbol });
+        searchCandidates.set(symbol, { symbol, name: item.name || symbol, logoUrl: item.logo_url });
     }
     const searchResults = normalizedSearch
         ? [...searchCandidates.values()]
@@ -2289,6 +2290,12 @@ export default function MarketsView({
     const draggingStockCardSymbolRef = useRef<string | null>(null);
     const [draggingStockCardSymbol, setDraggingStockCardSymbol] = useState<string | null>(null);
     const stockCardSymbolsKey = stockCardSymbols.join(',');
+    const marketListRefreshMs = isMobileViewport
+        ? MARKET_LIST_REFRESH_MOBILE_MS
+        : MARKET_LIST_REFRESH_DESKTOP_MS;
+    const marketDetailRefreshMs = isMobileViewport
+        ? MARKET_DETAIL_REFRESH_MOBILE_MS
+        : MARKET_DETAIL_REFRESH_DESKTOP_MS;
     const watchlist = useWatchlist();
     const mobileWatchlistFundCodes = useMemo(
         () => watchlist.items
@@ -2319,12 +2326,17 @@ export default function MarketsView({
                 });
         };
         loadMobileIndex();
-        const intervalId = window.setInterval(loadMobileIndex, 10000);
+        const intervalId = window.setInterval(loadMobileIndex, marketDetailRefreshMs);
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') loadMobileIndex();
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
             alive = false;
             window.clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
         };
-    }, [activeSection, isMobileViewport]);
+    }, [activeSection, isMobileViewport, marketDetailRefreshMs]);
 
     useEffect(() => {
         if (activeSection !== 'markets' || !isMobileViewport) return;
@@ -2464,8 +2476,15 @@ export default function MarketsView({
             if (document.visibilityState === 'visible') {
                 loadStats(true);
             }
-        }, 10000);
-        return () => window.clearInterval(intervalId);
+        }, 5 * 60 * 1000);
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') loadStats(true);
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            window.clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
     }, [activeSection]);
 
     useEffect(() => {
@@ -2474,10 +2493,18 @@ export default function MarketsView({
         setStocksError(null);
         loadStocks(false, false, stockIndex);
         const intervalId = window.setInterval(() => {
+            if (document.visibilityState !== 'visible') return;
             loadStocks(true, false, stockIndex);
-        }, LIVE_MARKET_REFRESH_MS);
-        return () => window.clearInterval(intervalId);
-    }, [activeSection, stockIndex]);
+        }, marketListRefreshMs);
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') loadStocks(true, false, stockIndex);
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            window.clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+    }, [activeSection, marketListRefreshMs, stockIndex]);
 
     useEffect(() => {
         if (activeSection !== 'markets' || isMobileViewport) return;
@@ -2500,19 +2527,35 @@ export default function MarketsView({
         }
         loadStockCards(Boolean(cached), false, stockCardSymbols);
         const intervalId = window.setInterval(() => {
+            if (document.visibilityState !== 'visible') return;
             loadStockCards(true, false, stockCardSymbols);
-        }, LIVE_MARKET_REFRESH_MS);
-        return () => window.clearInterval(intervalId);
-    }, [activeSection, isMobileViewport, stockCardSymbols, stockCardSymbolsKey]);
+        }, marketDetailRefreshMs);
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') loadStockCards(true, false, stockCardSymbols);
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            window.clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+    }, [activeSection, isMobileViewport, marketDetailRefreshMs, stockCardSymbols, stockCardSymbolsKey]);
 
     useEffect(() => {
         if (activeSection !== 'indices') return;
         loadIndices(false, false);
         const intervalId = window.setInterval(() => {
+            if (document.visibilityState !== 'visible') return;
             loadIndices(true, false);
-        }, LIVE_MARKET_REFRESH_MS);
-        return () => window.clearInterval(intervalId);
-    }, [activeSection]);
+        }, marketListRefreshMs);
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') loadIndices(true, false);
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            window.clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+    }, [activeSection, marketListRefreshMs]);
 
     useEffect(() => {
         if (activeSection !== 'indices' || !selectedIndex) return;
@@ -2520,10 +2563,18 @@ export default function MarketsView({
         setIndexDetailError(null);
         loadIndexDetail(false, false, selectedIndex);
         const intervalId = window.setInterval(() => {
+            if (document.visibilityState !== 'visible') return;
             loadIndexDetail(true, false, selectedIndex);
-        }, LIVE_MARKET_REFRESH_MS);
-        return () => window.clearInterval(intervalId);
-    }, [activeSection, selectedIndex]);
+        }, marketDetailRefreshMs);
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') loadIndexDetail(true, false, selectedIndex);
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            window.clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+    }, [activeSection, marketDetailRefreshMs, selectedIndex]);
 
     async function loadStats(silent = false) {
         const cached = marketUniverseMemoryCache?.data;
@@ -2647,7 +2698,8 @@ export default function MarketsView({
                 .filter((row) => !stockCardSymbols.includes(row.company))
                 .filter((row) => {
                     if (!normalizedStockCardSearch) return true;
-                    return row.company.toLowerCase().includes(normalizedStockCardSearch);
+                    return row.company.toLowerCase().includes(normalizedStockCardSearch)
+                        || String(row.name || '').toLowerCase().includes(normalizedStockCardSearch);
                 })
                 .slice(0, 18),
         [market?.rows, normalizedStockCardSearch, stockCardSymbols],
@@ -3355,6 +3407,11 @@ export default function MarketsView({
                                         </span>
                                     )}
                                     {stocksError && <span className="stocks-soft-error">Son yenileme başarısız oldu.</span>}
+                                    {stocks.stale && (
+                                        <span className="stocks-soft-error">
+                                            {stocks.quote_error || 'Son veri alınamadı; son sağlıklı fiyat gösteriliyor.'}
+                                        </span>
+                                    )}
                                 </div>
 
                                 {sortedStocks.length === 0 ? (

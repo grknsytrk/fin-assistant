@@ -42,6 +42,8 @@ Canlı adresler:
 
 Frontend, `VITE_API_BASE_URL` üzerinden backend adresine bağlanır. Redis yalnızca cache ve kilitleme amacıyla kullanılır; kalıcı veri kaynağı Supabase'tir. Redis kullanılamazsa backend memory cache'e düşebilir.
 
+Piyasa metadata'sı (`/market/universe` ve `/market/stocks/search`) referans verisinden okunur ve canlı fiyat çağırmaz. Fiyat endpoint'i (`/market/stocks`) Redis'te fresh/stale quote cache ve single-flight lock kullanır; upstream geçici olarak erişilemezse son sağlıklı fiyat boş listeyle değiştirilmez.
+
 ## Çalıştırma
 
 Geliştirme ortamını hazırlayıp React ve FastAPI servislerini birlikte başlatmak için:
@@ -80,7 +82,9 @@ Canlı servislerde gizli değişkenler platformların secret/variable alanların
 
 - Hugging Face: `RAGFIN_DATABASE_URL`, `RAGFIN_REDIS_URL` ve KAP/API anahtarları secret olarak.
 - Hugging Face: `RAGFIN_CACHE_BACKEND=redis` variable olarak.
+- Hugging Face: `RAGFIN_ADMIN_REFRESH_TOKEN` secret olarak.
 - Cloudflare: `VITE_API_BASE_URL` build variable olarak.
+- GitHub Actions: `FIN_API_ADMIN_TOKEN` secret'ı, HF secret'ındaki değerle aynı olmalıdır. Bu token yalnızca `Authorization: Bearer ...` ile fon snapshot workflow'unda kullanılır; frontend'e aktarılmaz.
 
 Redis bağlantı URL'si, Supabase database şifresi ve API token'ları GitHub'a, frontend bundle'ına veya README'ye yazılmamalıdır.
 
@@ -101,6 +105,9 @@ Temel endpoint'ler:
 - `GET /kap/snapshot?company={ticker}`
 - `GET /kap/companies`
 - `POST /kap/overview-commentary`
+- `GET /market/universe`
+- `GET /market/stocks/search?q={query}`
+- `GET /market/stocks`
 - aktif market ve endeks endpoint'leri
 
 Eski `/stocks/:ticker/ask` adresleri bozulmaz; frontend bu yolu şirketin Genel Bakış sekmesine yönlendirir. RAG'e ait `/ask`, `/ingest`, `/index`, `/stats`, `/commentary` ve `/feedback` endpoint'leri artık sunulmaz.

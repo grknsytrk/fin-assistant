@@ -3,6 +3,7 @@ import type {
     KapSnapshotResponse,
     MarketUniverseResponse,
     MarketStocksResponse,
+    MarketStockSearchResponse,
     MarketStockIndex,
     MarketIndexCode,
     MarketIndicesResponse,
@@ -208,13 +209,32 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
 export const apiClient = {
     health: () => fetchApi<{ status: string }>('/health'),
 
-    marketUniverse: () => fetchApi<MarketUniverseResponse>('/market/universe'),
+    marketUniverse: (options?: { index?: MarketStockIndex; refresh?: boolean }) => {
+        const params = new URLSearchParams();
+        if (options?.index) params.append('index', options.index);
+        if (options?.refresh) params.append('refresh', 'true');
+        const query = params.toString();
+        return fetchApi<MarketUniverseResponse>(query ? `/market/universe?${query}` : '/market/universe');
+    },
     marketStocks: (options?: { index?: MarketStockIndex; refresh?: boolean }) => {
         const params = new URLSearchParams();
         if (options?.index) params.append('index', options.index);
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
         return fetchApi<MarketStocksResponse>(query ? `/market/stocks?${query}` : '/market/stocks');
+    },
+    marketStockSearch: (options: {
+        q: string;
+        index?: MarketStockIndex;
+        limit?: number;
+        signal?: AbortSignal;
+    }) => {
+        const params = new URLSearchParams({ q: options.q });
+        if (options.index) params.append('index', options.index);
+        if (options.limit) params.append('limit', String(options.limit));
+        return fetchApi<MarketStockSearchResponse>(`/market/stocks/search?${params.toString()}`, {
+            signal: options.signal,
+        });
     },
     marketStockCards: (options: { symbols: string[]; refresh?: boolean }) => {
         const params = new URLSearchParams();

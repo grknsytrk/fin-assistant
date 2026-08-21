@@ -403,14 +403,28 @@ export default function MarketSidebar({
     // OTO YENİLEME (PİYASALAR): Panel açıkken aktif sekmeyi canlı veri endpoint'inden tazeleyelim.
     useEffect(() => {
         if (!open || panelMode !== 'markets') return;
+        const refreshMs = window.matchMedia('(max-width: 767px)').matches ? 60000 : 30000;
         const intervalId = window.setInterval(() => {
+            if (document.visibilityState !== 'visible') return;
             if (tab === 'XUTUM') loadXutum(true);
             else if (tab === 'XU100') loadXu100(true);
             else if (tab === 'XU030') loadXu030(true);
             else if (tab === 'DOVIZ') loadFx(true);
             else if (tab === 'EMTIA') loadCommodities(true);
-        }, 3000);
-        return () => window.clearInterval(intervalId);
+        }, refreshMs);
+        const onVisibilityChange = () => {
+            if (document.visibilityState !== 'visible') return;
+            if (tab === 'XUTUM') loadXutum(true);
+            else if (tab === 'XU100') loadXu100(true);
+            else if (tab === 'XU030') loadXu030(true);
+            else if (tab === 'DOVIZ') loadFx(true);
+            else if (tab === 'EMTIA') loadCommodities(true);
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            window.clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
     }, [open, panelMode, tab, loadXutum, loadXu100, loadXu030, loadFx, loadCommodities]);
 
     const sortedXutum = useMemo(() => {

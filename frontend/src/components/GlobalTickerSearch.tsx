@@ -1,7 +1,7 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState, useTransition, type KeyboardEvent } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Search, X } from 'lucide-react';
 import { apiClient } from '../api/client';
-import type { FundSummary, KapCompanySearchItem, MarketStockRow } from '../api/types';
+import type { FundSummary, MarketUniverseRow } from '../api/types';
 import SymbolLogo from './SymbolLogo';
 import './GlobalTickerSearch.css';
 
@@ -140,59 +140,22 @@ function prepareSearchResult(result: SearchResult): SearchResult {
   };
 }
 
-function stockRowToResult(row: MarketStockRow): SearchResult {
-  const symbol = normalizeStockSymbol(row.company);
-  const aliases = getStockAliases(symbol, row.company);
-  const displayName = STOCK_SEARCH_LABELS[symbol]?.[0] || 'Hisse';
-  return {
-    id: resultId('stock', symbol),
-    type: 'stock',
-    symbol,
-    title: displayName,
-    subtitle: displayName,
-    aliases,
-    price: row.price,
-    changePct: row.change_pct,
-    logoUrl: row.logo_url,
-    logoName: displayName,
-  };
-}
-
-function companyCodeToResult(code: string): SearchResult {
-  const symbol = normalizeStockSymbol(code);
-  const aliases = getStockAliases(symbol, code);
-  const displayName = STOCK_SEARCH_LABELS[symbol]?.[0] || 'Hisse';
-  return {
-    id: resultId('stock', symbol),
-    type: 'stock',
-    symbol,
-    title: displayName,
-    subtitle: displayName,
-    aliases,
-    price: null,
-    changePct: null,
-    logoName: displayName,
-  };
-}
-
-function companySearchItemToResult(item: KapCompanySearchItem): SearchResult {
-  const symbol = normalizeStockSymbol(item.symbol);
-  const title = String(item.title || '').trim();
+function stockRowToResult(row: MarketUniverseRow): SearchResult {
+  const sourceSymbol = row.symbol || row.company;
+  const symbol = normalizeStockSymbol(sourceSymbol);
+  const title = String(row.name || '').trim();
   const displayName = title || STOCK_SEARCH_LABELS[symbol]?.[0] || 'Hisse';
-  const aliases = new Set<string>([
-    ...getStockAliases(symbol, item.symbol),
-    ...(item.aliases || []),
-    title,
-  ].filter(Boolean));
+  const aliases = getStockAliases(symbol, sourceSymbol);
   return {
     id: resultId('stock', symbol),
     type: 'stock',
     symbol,
     title: displayName,
     subtitle: displayName,
-    aliases: [...aliases],
-    price: null,
-    changePct: null,
+    aliases,
+    price: row.price ?? null,
+    changePct: row.change_pct ?? null,
+    logoUrl: row.logo_url,
     logoName: displayName,
   };
 }
@@ -263,12 +226,8 @@ export default function GlobalTickerSearch({
   onSelectTicker,
   onSelectFund,
 }: GlobalTickerSearchProps) {
-  const [stockRows, setStockRows] = useState<MarketStockRow[]>([]);
-  const [companyCodes, setCompanyCodes] = useState<string[]>([]);
-  const [companyItems, setCompanyItems] = useState<KapCompanySearchItem[]>([]);
-  const [stocksLoaded, setStocksLoaded] = useState(false);
+  const [stockRows, setStockRows] = useState<MarketUniverseRow[]>([]);
   const [stocksLoading, setStocksLoading] = useState(false);
-  const [stockQuotesLoaded, setStockQuotesLoaded] = useState(false);
   const [fundRows, setFundRows] = useState<FundSummary[]>([]);
   const [fundsLoading, setFundsLoading] = useState(false);
   const [query, setQuery] = useState('');
@@ -276,7 +235,6 @@ export default function GlobalTickerSearch({
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const [recentSearches, setRecentSearches] = useState<SearchResult[]>(() => readRecentSearches());
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [, startTransition] = useTransition();
 
   const deferredQuery = useDeferredValue(query);
   const trimmedQuery = deferredQuery.trim();
@@ -285,53 +243,38 @@ export default function GlobalTickerSearch({
   const normalizedSymbolQuery = normalizeSymbol(query.trim());
 
   useEffect(() => {
-    if (!isOpen || stocksLoaded) return;
+    if (!isOpen || trimmedQuery.length < 1) {
+      setStockRows([]);
+      setStocksLoading(false);
+      return;
+    }
     let active = true;
-    setStocksLoading(true);
-    apiClient.kapCompanies()
-      .then((payload) => {
-        if (!active) return;
-        const companies = [...(payload.companies || [])].map(normalizeSymbol).filter(Boolean);
-        startTransition(() => {
-          setCompanyCodes(companies);
-          setCompanyItems(payload.items || []);
-          setStocksLoaded(true);
-        });
-      })
-      .catch(() => {
-        if (!active) return;
-        setStockRows([]);
-        setCompanyCodes([]);
-        setCompanyItems([]);
-      })
-      .finally(() => {
-        if (active) setStocksLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [isOpen, stocksLoaded]);
-
-  useEffect(() => {
-    if (!isOpen || stockQuotesLoaded) return;
-    let active = true;
+    const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      apiClient
-        .marketStocks({ index: 'XUTUM' })
+      setStocksLoading(true);
+      apiClient.marketStockSearch({
+        q: trimmedQuery,
+        index: 'XUTUM',
+        limit: 12,
+        signal: controller.signal,
+      })
         .then((payload) => {
-          if (!active) return;
-          setStockRows(payload.rows || []);
-          setStockQuotesLoaded(true);
+          if (active) setStockRows(payload.rows || []);
         })
-        .catch(() => {
-          // Quotes are optional; the search still works without live prices.
+        .catch((error) => {
+          if ((error as Error)?.name === 'AbortError') return;
+          if (active) setStockRows([]);
+        })
+        .finally(() => {
+          if (active) setStocksLoading(false);
         });
-    }, 250);
+    }, 180);
     return () => {
       active = false;
       window.clearTimeout(timer);
+      controller.abort();
     };
-  }, [isOpen, stockQuotesLoaded]);
+  }, [isOpen, trimmedQuery]);
 
   useEffect(() => {
     if (!isOpen || trimmedQuery.length < MIN_FUND_SEARCH_QUERY_LENGTH) {
@@ -381,29 +324,8 @@ export default function GlobalTickerSearch({
   }, [isOpen]);
 
   const stockBaseResults = useMemo(() => {
-    const rowResults = stockRows.map(stockRowToResult).map(prepareSearchResult);
-    const resultMap = new Map<string, SearchResult>();
-    for (const result of rowResults) {
-      resultMap.set(result.symbol, result);
-    }
-
-    for (const item of companyItems) {
-      const result = prepareSearchResult(companySearchItemToResult(item));
-      if (!resultMap.has(result.symbol)) {
-        resultMap.set(result.symbol, result);
-      }
-    }
-
-    const rowSymbols = new Set(resultMap.keys());
-    const fallbackResults = companyCodes
-      .filter((code) => !rowSymbols.has(normalizeStockSymbol(code)))
-      .map(companyCodeToResult)
-      .map(prepareSearchResult);
-    for (const result of fallbackResults) {
-      resultMap.set(result.symbol, result);
-    }
-    return [...resultMap.values()];
-  }, [companyCodes, companyItems, stockRows]);
+    return stockRows.map(stockRowToResult).map(prepareSearchResult);
+  }, [stockRows]);
 
   const stockResults = useMemo(() => {
     return stockBaseResults
@@ -424,31 +346,14 @@ export default function GlobalTickerSearch({
   }, [fundRows, queryTerms]);
 
   const visibleResults = useMemo(() => {
-    if (!normalizedQuery) {
-      if (stockRows.length === 0) return recentSearches;
-      const quoteBySymbol = new Map<string, MarketStockRow>();
-      for (const row of stockRows) {
-        quoteBySymbol.set(normalizeStockSymbol(row.company), row);
-      }
-      return recentSearches.map((item) => {
-        if (item.type !== 'stock') return item;
-        const quote = quoteBySymbol.get(item.symbol);
-        if (!quote) return item;
-        return {
-          ...item,
-          price: quote.price ?? item.price,
-          changePct: quote.change_pct ?? item.changePct,
-          logoUrl: quote.logo_url ?? item.logoUrl,
-        };
-      });
-    }
+    if (!normalizedQuery) return recentSearches;
     const seen = new Set<string>();
     return [...stockResults, ...fundResults].filter((item) => {
       if (seen.has(item.id)) return false;
       seen.add(item.id);
       return true;
     }).slice(0, 14);
-  }, [fundResults, normalizedQuery, recentSearches, stockResults, stockRows]);
+  }, [fundResults, normalizedQuery, recentSearches, stockResults]);
 
   useEffect(() => {
     setHighlightedIndex(0);

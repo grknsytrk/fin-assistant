@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -483,6 +484,123 @@ def get_or_set(
             if cached_value is not None:
                 return cached_value, True
         return compute_and_store(), False
+
+
+def get_or_set_single_flight(
+    key: str,
+    *,
+    ttl_seconds: int,
+    factory: Callable[[], Any],
+    lock_ttl_seconds: float,
+    wait_timeout_seconds: float,
+    poll_interval_seconds: float = 0.05,
+    lock_key: Optional[str] = None,
+    cache_usable: Optional[Callable[[Any], bool]] = None,
+    allow_cached: bool = True,
+) -> tuple[Any, str]:
+    """Read or fill a cache entry without duplicate upstream work.
+
+    Unlike :func:`get_or_set`, a waiter never invokes ``factory`` after its
+    wait deadline.  It returns ``(None, "pending")`` instead, allowing the
+    caller to serve stale data or an explicit unavailable response.  The lock
+    TTL is intentionally independent from the waiter timeout: a slow owner
+    keeps ownership long enough to finish, while callers only wait briefly.
+    """
+
+    backend = get_cache()
+
+    def usable(value: Any) -> bool:
+        if value is None:
+            return False
+        if cache_usable is None:
+            return True
+        try:
+            return bool(cache_usable(value))
+        except Exception:
+            return False
+
+    def read_usable() -> Any:
+        try:
+            value = backend.get(key)
+        except Exception:
+            return None
+        return value if usable(value) else None
+
+    if allow_cached:
+        cached_value = read_usable()
+        if cached_value is not None:
+            return cached_value, "hit"
+
+    owner = uuid.uuid4().hex
+    actual_lock_key = lock_key or f"single-flight:{key}"
+    acquired = False
+    try:
+        acquired = backend.set_if_absent(
+            actual_lock_key,
+            owner,
+            ttl_seconds=max(1, int(math.ceil(float(lock_ttl_seconds)))),
+        )
+    except Exception:
+        acquired = False
+
+    if acquired:
+        heartbeat_stop = threading.Event()
+        ownership_lost = threading.Event()
+
+        def renew_lock() -> None:
+            interval = max(0.25, float(lock_ttl_seconds) / 3.0)
+            while not heartbeat_stop.wait(interval):
+                try:
+                    renewed = backend.renew_if_owner(
+                        actual_lock_key,
+                        owner,
+                        ttl_seconds=max(1, int(math.ceil(float(lock_ttl_seconds)))),
+                    )
+                except Exception:
+                    renewed = False
+                if not renewed:
+                    ownership_lost.set()
+                    return
+
+        heartbeat_thread = threading.Thread(
+            target=renew_lock,
+            name=f"cache-single-flight-{actual_lock_key[-32:]}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        try:
+            if allow_cached:
+                cached_value = read_usable()
+                if cached_value is not None:
+                    return cached_value, "hit"
+            result = factory()
+            if ownership_lost.is_set():
+                replacement = read_usable()
+                if replacement is not None:
+                    return replacement, "coalesced"
+                return None, "pending"
+            if result is not None:
+                try:
+                    backend.set(key, result, ttl_seconds=max(1, int(ttl_seconds)))
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("cache set failed for %s: %s", key, exc)
+            return result, "miss"
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=max(0.25, float(lock_ttl_seconds) / 3.0))
+            try:
+                backend.release_if_owner(actual_lock_key, owner)
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("single-flight unlock failed for %s", actual_lock_key)
+
+    deadline = time.time() + max(0.0, float(wait_timeout_seconds))
+    poll_seconds = max(0.01, float(poll_interval_seconds))
+    while time.time() < deadline:
+        time.sleep(poll_seconds)
+        cached_value = read_usable()
+        if cached_value is not None:
+            return cached_value, "coalesced"
+    return None, "pending"
 
 
 def l1_l2_cached(
