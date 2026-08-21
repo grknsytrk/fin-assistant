@@ -99,6 +99,7 @@ TEFAS_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_TEFAS_TIMEOUT_SECONDS", "60"))
 TEFAS_HTTP_RETRY_ATTEMPTS = int(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_ATTEMPTS", "5"))
 TEFAS_HTTP_RETRY_BASE_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_BASE_SECONDS", "5"))
 TEFAS_HTTP_RETRY_MAX_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_MAX_SECONDS", "45"))
+TEFAS_FUND_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_TEFAS_FUND_HISTORY_CHUNK_DAYS", "31"))
 TEFAS_DIRECT_PAGE_SIZE = int(os.getenv("RAGFIN_TEFAS_DIRECT_PAGE_SIZE", "1000"))
 TEFAS_DIRECT_PAGE_DELAY_SECONDS = float(os.getenv("RAGFIN_TEFAS_DIRECT_PAGE_DELAY_SECONDS", "1"))
 TEFAS_DIRECT_CHUNK_DELAY_SECONDS = float(os.getenv("RAGFIN_TEFAS_DIRECT_CHUNK_DELAY_SECONDS", "2"))
@@ -4457,18 +4458,46 @@ class TefasClient:
         if not codes or start_date > end_date:
             return []
         if len(codes) == 1:
-            try:
-                range_rows = self.fetch_fund_range(
-                    fund_code=next(iter(codes)),
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-                if range_rows:
-                    return range_rows
-            except TefasRateLimitError:
-                raise
-            except TefasUpstreamError:
-                pass
+            # TEFAS accepts a fund-specific range request, but rejects a
+            # range longer than one month. Do not fall back to one request per
+            # business day: split the range into bounded calendar windows and
+            # merge the returned daily rows. This is both faster and fixes
+            # newly-launched funds whose local cache has no older points yet.
+            normalized_code = next(iter(codes))
+            chunk_days = max(2, min(31, int(TEFAS_FUND_HISTORY_CHUNK_DAYS)))
+            chunk_rows: List[Dict[str, Any]] = []
+            chunk_errors: List[TefasUpstreamError] = []
+            chunks = list(_split_date_range(start_date, end_date, chunk_days))
+            for chunk_index, (chunk_start, chunk_end) in enumerate(chunks):
+                try:
+                    chunk_rows.extend(
+                        self.fetch_fund_range(
+                            fund_code=normalized_code,
+                            start_date=chunk_start,
+                            end_date=chunk_end,
+                        )
+                    )
+                except TefasRateLimitError:
+                    raise
+                except TefasUpstreamError as exc:
+                    # A single empty/temporarily bad month must not erase the
+                    # valid months around it. If every chunk fails, surface the
+                    # last upstream error to the caller for its normal fallback.
+                    chunk_errors.append(exc)
+                if chunk_index < len(chunks) - 1 and TEFAS_DIRECT_CHUNK_DELAY_SECONDS > 0:
+                    time.sleep(TEFAS_DIRECT_CHUNK_DELAY_SECONDS)
+
+            if chunk_rows:
+                by_date: Dict[str, Dict[str, Any]] = {}
+                for row in chunk_rows:
+                    point_date = _fund_date(_first_present(row, "date", "tarih", "TARIH", "TARIHSTR"))
+                    if point_date:
+                        by_date[point_date] = row
+                if by_date:
+                    return [by_date[key] for key in sorted(by_date)]
+            if chunk_errors:
+                raise chunk_errors[-1]
+            return []
         rows: List[Dict[str, Any]] = []
         current = start_date
         while current <= end_date:
@@ -6853,6 +6882,8 @@ def _fetch_fast_long_fund_history(
     warnings.extend(recent_warnings)
 
     metric_targets = _long_range_metric_targets(start_date, end_date)
+    metric_rows: List[Dict[str, Any]] = []
+    metric_warnings: List[str] = []
     if metric_targets:
         metric_rows, _fetched_months, metric_warnings = _fetch_fund_overview_metric_rows(
             normalized,
@@ -6860,8 +6891,32 @@ def _fetch_fast_long_fund_history(
             client=client,
             processed_dir=processed_dir,
         )
-        points.extend(metric_rows)
-        warnings.extend(metric_warnings)
+    points.extend(metric_rows)
+    warnings.extend(metric_warnings)
+
+    # Fintables is an excellent fast path when its daily UDF history exists,
+    # but it is not available for every TEFAS fund. If the cached series starts
+    # after the requested range, fill that missing prefix from TEFAS using the
+    # bounded month-chunk requests above. TLY/PHE keep their existing Fintables
+    # path; funds such as THF no longer get stuck at the local cache boundary.
+    point_dates = [
+        point_date
+        for point in points
+        for point_date in [_fund_date(point.get("date"))]
+        if point_date and _coerce_float(point.get("price")) is not None
+    ]
+    needs_tefas_prefix = not point_dates or min(date.fromisoformat(item) for item in point_dates) > start_date
+    if needs_tefas_prefix:
+        try:
+            direct_rows = TefasClient().fetch_fund_history(
+                fund_codes=[normalized],
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if direct_rows:
+                points.extend(direct_rows)
+        except TefasUpstreamError as exc:
+            warnings.append(f"tefas_fund_list chunked history backfill failed: {exc}")
 
     if not points:
         warnings.append("fast long range bootstrap returned no points")
