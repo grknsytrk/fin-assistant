@@ -1,0 +1,61 @@
+name: refresh funds snapshot
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 09:55, 13:30 and 23:55 Europe/Istanbul (UTC+3), weekdays.
+    - cron: "55 6 * * 1-5"
+    - cron: "30 10 * * 1-5"
+    - cron: "55 20 * * 1-5"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      FIN_API_BASE_URL: https://grknsytrk-fin-api.hf.space
+    steps:
+      - name: request refresh job
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(curl --fail-with-body --silent --show-error --retry 2 \
+            -X POST "$FIN_API_BASE_URL/admin/funds/refresh-snapshot?lookback_days=14")"
+          echo "$response" | jq .
+          job_id="$(echo "$response" | jq -r '.refresh_job.job_id // empty')"
+          if [[ -z "$job_id" ]]; then
+            echo "refresh endpoint did not return a job id" >&2
+            exit 1
+          fi
+          echo "job_id=$job_id" >> "$GITHUB_OUTPUT"
+
+      - name: wait for refresh result
+        shell: bash
+        env:
+          JOB_ID: ${{ steps.request.outputs.job_id }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            response="$(curl --fail-with-body --silent --show-error \
+              "$FIN_API_BASE_URL/admin/funds/refresh-snapshot/status?job_id=$JOB_ID")"
+            echo "$response" | jq .
+            status="$(echo "$response" | jq -r '.refresh_job.status // empty')"
+            resolution="$(echo "$response" | jq -r '.refresh_job.resolution_status // empty')"
+            case "$status" in
+              succeeded)
+                echo "refresh succeeded: $resolution"
+                exit 0
+                ;;
+              failed)
+                echo "refresh failed: $resolution" >&2
+                exit 1
+                ;;
+              superseded)
+                echo "refresh was superseded by a newer generation; existing snapshot remains authoritative"
+                exit 0
+                ;;
+            esac
+            sleep 20
+          done
+          echo "refresh job did not finish within 30 minutes" >&2
+          exit 1

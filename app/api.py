@@ -38,10 +38,15 @@ from app.cache import get_cache as _get_cache
 from app.cache import get_json_dict as _cache_get_dict
 from app.cache import set_json as _cache_set_json
 from app.database import (
+    acquire_refresh_lease,
     close_postgres_pool,
     database_enabled,
     ensure_json_cache_schema,
+    ensure_refresh_lease_schema,
+    get_refresh_lease,
     hydrate_json_cache,
+    release_refresh_lease,
+    renew_refresh_lease,
 )
 from app.reference_data import (
     ensure_reference_data_schema,
@@ -63,22 +68,21 @@ _FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_FUND_HOLDINGS_RES
 _FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 6
 _FUND_HOLDING_SECTOR_MAP_CACHE_TTL = 6 * 60 * 60
 _FUND_REFRESH_JOB_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_REFRESH_JOB_TTL_SECONDS", str(30 * 60)))
-_FUND_REFRESH_MAX_LOOKBACK_DAYS = 3
+_FUND_REFRESH_MAX_LOOKBACK_DAYS = 14
+_FUND_REFRESH_RESOURCE_KEY = "funds_snapshot"
+_FUND_REFRESH_LEASE_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_REFRESH_LEASE_TTL_SECONDS", "90"))
 _FUND_REFRESH_ACTIVE_KEY = "api:funds-refresh:active"
 _FUND_REFRESH_HEARTBEAT_INTERVAL_SECONDS = float(
-    os.getenv("RAGFIN_FUND_REFRESH_HEARTBEAT_INTERVAL_SECONDS", "15")
+    os.getenv("RAGFIN_FUND_REFRESH_HEARTBEAT_INTERVAL_SECONDS", "20")
 )
 _FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS = float(
-    os.getenv("RAGFIN_FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS", "90")
+    os.getenv("RAGFIN_FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS", "120")
 )
 _FUND_REFRESH_MAX_RUNTIME_SECONDS = float(
-    os.getenv("RAGFIN_FUND_REFRESH_MAX_RUNTIME_SECONDS", str(5 * 60))
+    os.getenv("RAGFIN_FUND_REFRESH_MAX_RUNTIME_SECONDS", str(15 * 60))
 )
 _FUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    # A timed-out/orphaned job must not keep a newly requested refresh queued
-    # forever. Normal requests still share the Redis active marker; the second
-    # worker is only used after that marker is declared stale.
-    max_workers=2,
+    max_workers=1,
     thread_name_prefix="fund-snapshot-refresh",
 )
 _FUND_REFRESH_STATE_LOCK = threading.Lock()
@@ -131,10 +135,41 @@ def _update_fund_refresh_job(job_id: str, **updates: Any) -> Optional[Dict[str, 
 
 def _active_fund_refresh_job() -> Optional[Dict[str, Any]]:
     backend = _get_cache()
-    active_id = backend.get(_FUND_REFRESH_ACTIVE_KEY)
+    marker = backend.get(_FUND_REFRESH_ACTIVE_KEY)
+    active_id = marker.get("job_id") if isinstance(marker, dict) else marker
+    lease: Optional[Dict[str, Any]] = None
+    if not active_id and database_enabled():
+        lease = get_refresh_lease(_FUND_REFRESH_RESOURCE_KEY)
+        lease_until = lease.get("lease_until") if isinstance(lease, dict) else None
+        try:
+            lease_active = bool(lease_until and lease_until > datetime.now(timezone.utc))
+        except TypeError:
+            try:
+                lease_active = datetime.fromisoformat(str(lease_until).replace("Z", "+00:00")) > datetime.now(timezone.utc)
+            except (TypeError, ValueError):
+                lease_active = False
+        active_id = lease.get("job_id") if lease_active and isinstance(lease, dict) else None
     if not active_id:
         return None
     job = _get_fund_refresh_job(str(active_id))
+    if job is None and lease and active_id:
+        # Redis/job keys can disappear during a process restart while the
+        # authoritative Postgres lease is still alive. Recreate a status
+        # record and let the lease expire before another generation starts.
+        job = {
+            "job_id": str(active_id),
+            "status": "running",
+            "requested_at": _fund_refresh_now_iso(),
+            "started_at": None,
+            "finished_at": None,
+            "as_of": None,
+            "row_count": None,
+            "error": "Yenileme worker'ı yeniden başlatıldı; mevcut lease bekleniyor.",
+            "resolution_status": None,
+            "snapshot_action": None,
+            "generation": lease.get("generation"),
+        }
+        _set_fund_refresh_job(job)
     if job and job.get("status") in {"queued", "running"}:
         if job.get("status") == "running":
             requested_text = str(job.get("requested_at") or "").strip()
@@ -144,20 +179,7 @@ def _active_fund_refresh_job() -> Optional[Dict[str, Any]]:
             except (TypeError, ValueError):
                 runtime = 0.0
             if runtime > _FUND_REFRESH_MAX_RUNTIME_SECONDS:
-                expired = _update_fund_refresh_job(
-                    str(job["job_id"]),
-                    status="failed",
-                    finished_at=_fund_refresh_now_iso(),
-                    error="Fon yenilemesi maksimum çalışma süresini aştı; mevcut snapshot korundu.",
-                )
-                if expired is not None:
-                    job = expired
-                try:
-                    if backend.get(_FUND_REFRESH_ACTIVE_KEY) == active_id:
-                        backend.delete(_FUND_REFRESH_ACTIVE_KEY)
-                except Exception:
-                    pass
-                return None
+                return job
             heartbeat_text = str(job.get("heartbeat_at") or "").strip()
             try:
                 heartbeat_at = datetime.fromisoformat(heartbeat_text.replace("Z", "+00:00"))
@@ -165,32 +187,25 @@ def _active_fund_refresh_job() -> Optional[Dict[str, Any]]:
             except (TypeError, ValueError):
                 heartbeat_age = float("inf")
             if heartbeat_age > _FUND_REFRESH_HEARTBEAT_TIMEOUT_SECONDS:
-                # A worker restart can leave the distributed active marker in
-                # Redis forever.  Jobs created before heartbeat support have
-                # no timestamp and are treated as orphaned as well.
-                orphaned = _update_fund_refresh_job(
-                    str(job["job_id"]),
-                    status="failed",
-                    finished_at=_fund_refresh_now_iso(),
-                    error="Fon yenileme worker'ı yeniden başladı veya heartbeat kayboldu.",
-                )
-                if orphaned is not None:
-                    job = orphaned
-                try:
-                    if backend.get(_FUND_REFRESH_ACTIVE_KEY) == active_id:
-                        backend.delete(_FUND_REFRESH_ACTIVE_KEY)
-                except Exception:
-                    pass
-                return None
+                return job
         return job
-    try:
-        backend.delete(_FUND_REFRESH_ACTIVE_KEY)
-    except Exception:
-        pass
     return None
 
 
 def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
+    initial_job = _get_fund_refresh_job(job_id) or {}
+    owner_token = str(initial_job.get("owner_token") or job_id)
+    generation = int(initial_job.get("generation") or 0)
+    owner_marker: Any = {
+        "job_id": job_id,
+        "owner_token": owner_token,
+        # Redis is only an advisory lease; the Postgres generation is kept
+        # separately and checked during the fenced commit transaction.
+        "generation": 0,
+    }
+    current_marker = _get_cache().get(_FUND_REFRESH_ACTIVE_KEY)
+    if current_marker == job_id:
+        owner_marker = job_id
     _update_fund_refresh_job(
         job_id,
         status="running",
@@ -199,11 +214,43 @@ def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
     )
     backend = _get_cache()
     heartbeat_stop = threading.Event()
+    lease_lost = threading.Event()
 
     def heartbeat() -> None:
         interval = max(5.0, _FUND_REFRESH_HEARTBEAT_INTERVAL_SECONDS)
         while not heartbeat_stop.wait(interval):
-            _update_fund_refresh_job(job_id, heartbeat_at=_fund_refresh_now_iso())
+            current_job = _get_fund_refresh_job(job_id) or {}
+            started_text = str(current_job.get("started_at") or current_job.get("requested_at") or "")
+            try:
+                runtime = (
+                    datetime.now(timezone.utc)
+                    - datetime.fromisoformat(started_text.replace("Z", "+00:00"))
+                ).total_seconds()
+            except (TypeError, ValueError):
+                runtime = 0.0
+            if runtime > _FUND_REFRESH_MAX_RUNTIME_SECONDS:
+                lease_lost.set()
+                _update_fund_refresh_job(
+                    job_id,
+                    heartbeat_at=_fund_refresh_now_iso(),
+                    error="Fon yenilemesi maksimum çalışma süresine ulaştı; commit engellenecek.",
+                )
+                continue
+            renewed = backend.renew_if_owner(
+                _FUND_REFRESH_ACTIVE_KEY,
+                owner_marker,
+                ttl_seconds=_FUND_REFRESH_LEASE_TTL_SECONDS,
+            )
+            db_renewed = renew_refresh_lease(
+                _FUND_REFRESH_RESOURCE_KEY,
+                job_id=job_id,
+                owner_token=owner_token,
+                ttl_seconds=_FUND_REFRESH_LEASE_TTL_SECONDS,
+            )
+            if database_enabled() and not db_renewed:
+                lease_lost.set()
+            if renewed or not database_enabled():
+                _update_fund_refresh_job(job_id, heartbeat_at=_fund_refresh_now_iso())
 
     heartbeat_thread = threading.Thread(
         target=heartbeat,
@@ -215,26 +262,76 @@ def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
         from app.fund_service import refresh_funds_snapshot
 
         bounded_lookback_days = min(_FUND_REFRESH_MAX_LOOKBACK_DAYS, max(1, int(lookback_days)))
-        try:
-            result = refresh_funds_snapshot(
-                CONFIG.paths.processed_dir,
-                lookback_days=bounded_lookback_days,
-                persist_reference_data=False,
-                backfill_daily_returns=False,
-            )
-        except TypeError as exc:
-            # Keep older test doubles and external adapters compatible while
-            # the optional reference-data flag is introduced.
-            if "persist_reference_data" not in str(exc):
+        refresh_kwargs = {
+            "lookback_days": bounded_lookback_days,
+            "persist_reference_data": False,
+            "backfill_daily_returns": False,
+            "persist_snapshot": False,
+        }
+        while True:
+            try:
+                result = refresh_funds_snapshot(CONFIG.paths.processed_dir, **refresh_kwargs)
+                break
+            except TypeError as exc:
+                unexpected = str(exc)
+                if "persist_snapshot" in unexpected and "persist_snapshot" in refresh_kwargs:
+                    refresh_kwargs.pop("persist_snapshot")
+                    continue
+                if "persist_reference_data" in unexpected and "persist_reference_data" in refresh_kwargs:
+                    refresh_kwargs.pop("persist_reference_data")
+                    refresh_kwargs.pop("backfill_daily_returns", None)
+                    continue
+                if "lookback_days" in unexpected and len(refresh_kwargs) == 1:
+                    result = refresh_funds_snapshot(CONFIG.paths.processed_dir)
+                    break
                 raise
-            result = refresh_funds_snapshot(
-                CONFIG.paths.processed_dir,
-                lookback_days=bounded_lookback_days,
-            )
+        if not isinstance(result, dict):
+            raise RuntimeError("Fon yenilemesi geçerli bir sonuç döndürmedi.")
         rows = list(result.get("rows") or []) if isinstance(result, dict) else []
-        if not rows or bool(result.get("stale")) or bool(result.get("degraded")):
-            warnings = list(result.get("warnings") or []) if isinstance(result, dict) else []
-            raise RuntimeError(warnings[0] if warnings else "TEFAS güncel fon kataloğu döndürmedi.")
+        resolution_status = str(result.get("resolution_status") or ("available" if rows else "upstream_unavailable"))
+        if lease_lost.is_set():
+            _update_fund_refresh_job(
+                job_id,
+                status="superseded",
+                finished_at=_fund_refresh_now_iso(),
+                error="Fon yenileme lease'i başka bir generation tarafından devralındı.",
+                resolution_status=resolution_status,
+            )
+            return
+        if resolution_status == "upstream_unavailable":
+            warnings = list(result.get("warnings") or [])
+            _update_fund_refresh_job(
+                job_id,
+                status="failed",
+                finished_at=_fund_refresh_now_iso(),
+                resolution_status=resolution_status,
+                snapshot_action="retained_existing",
+                error=warnings[0] if warnings else "TEFAS güvenilir cevap döndürmedi; mevcut snapshot korundu.",
+            )
+            return
+        from app.fund_service import commit_funds_snapshot
+
+        result = dict(result)
+        result["snapshot_generation"] = generation
+        result_meta = dict(result.get("source_metadata") or {})
+        result_meta["snapshot_generation"] = generation
+        result["source_metadata"] = result_meta
+        committed = commit_funds_snapshot(
+            CONFIG.paths.processed_dir,
+            result,
+            job_id=job_id,
+            owner_token=owner_token,
+            generation=generation,
+        )
+        if not committed:
+            _update_fund_refresh_job(
+                job_id,
+                status="superseded",
+                finished_at=_fund_refresh_now_iso(),
+                resolution_status=resolution_status,
+                error="Snapshot commit'i lease/generation kontrolünden geçmedi.",
+            )
+            return
         _invalidate_fund_response_cache()
         _update_fund_refresh_job(
             job_id,
@@ -242,24 +339,23 @@ def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
             finished_at=_fund_refresh_now_iso(),
             as_of=result.get("as_of"),
             row_count=len(rows),
+            resolution_status=resolution_status,
+            resolved_as_of=(result.get("source_metadata") or {}).get("resolved_as_of"),
+            snapshot_action=(result.get("source_metadata") or {}).get("snapshot_action") or result.get("snapshot_action"),
             error=None,
         )
     except Exception as exc:
         logging.getLogger("uvicorn.error").exception("fund snapshot refresh job failed")
-        _update_fund_refresh_job(
-            job_id,
-            status="failed",
-            finished_at=_fund_refresh_now_iso(),
-            error=str(exc),
-        )
+        _update_fund_refresh_job(job_id, status="failed", finished_at=_fund_refresh_now_iso(), error=str(exc))
     finally:
         heartbeat_stop.set()
         heartbeat_thread.join(timeout=2)
-        try:
-            if backend.get(_FUND_REFRESH_ACTIVE_KEY) == job_id:
-                backend.delete(_FUND_REFRESH_ACTIVE_KEY)
-        except Exception:
-            pass
+        backend.release_if_owner(_FUND_REFRESH_ACTIVE_KEY, owner_marker)
+        release_refresh_lease(
+            _FUND_REFRESH_RESOURCE_KEY,
+            job_id=job_id,
+            owner_token=owner_token,
+        )
 
 
 def _start_fund_refresh_job(lookback_days: int) -> Dict[str, Any]:
@@ -269,6 +365,7 @@ def _start_fund_refresh_job(lookback_days: int) -> Dict[str, Any]:
 
     backend = _get_cache()
     job_id = uuid.uuid4().hex
+    owner_token = uuid.uuid4().hex
     job: Dict[str, Any] = {
         "job_id": job_id,
         "status": "queued",
@@ -278,21 +375,52 @@ def _start_fund_refresh_job(lookback_days: int) -> Dict[str, Any]:
         "as_of": None,
         "row_count": None,
         "error": None,
+        "resolution_status": None,
+        "snapshot_action": None,
+        "owner_token": owner_token,
+        "generation": None,
     }
-    _set_fund_refresh_job(job)
+    owner_marker = {"job_id": job_id, "owner_token": owner_token, "generation": 0}
     if not backend.set_if_absent(
         _FUND_REFRESH_ACTIVE_KEY,
-        job_id,
-        ttl_seconds=_FUND_REFRESH_JOB_TTL_SECONDS,
+        owner_marker,
+        ttl_seconds=_FUND_REFRESH_LEASE_TTL_SECONDS,
     ):
-        backend.delete(_fund_refresh_job_key(job_id))
         existing = _active_fund_refresh_job()
         if existing is not None:
             return existing
-        # A concurrently completed job can remove the active marker between
-        # the checks above. Recurse once to create the next request safely.
-        return _start_fund_refresh_job(lookback_days)
+        job.update(
+            status="failed",
+            finished_at=_fund_refresh_now_iso(),
+            error="Fon yenilemesi başka bir worker tarafından devralındı; tekrar deneyin.",
+        )
+        _set_fund_refresh_job(job)
+        return job
 
+    lease = acquire_refresh_lease(
+        _FUND_REFRESH_RESOURCE_KEY,
+        job_id=job_id,
+        owner_token=owner_token,
+        ttl_seconds=_FUND_REFRESH_LEASE_TTL_SECONDS,
+    )
+    if database_enabled() and not lease:
+        backend.release_if_owner(_FUND_REFRESH_ACTIVE_KEY, owner_marker)
+        existing = _active_fund_refresh_job()
+        if existing is not None:
+            return existing
+        job.update(
+            status="failed",
+            finished_at=_fund_refresh_now_iso(),
+            error="Fon yenileme Postgres lease'i alınamadı; mevcut snapshot korundu.",
+        )
+        _set_fund_refresh_job(job)
+        return job
+    if lease:
+        generation = int(lease.get("generation") or 0)
+        job["generation"] = generation
+        owner_marker["generation"] = generation
+    job["lease_until"] = str(lease.get("lease_until")) if lease else None
+    _set_fund_refresh_job(job)
     _FUND_REFRESH_EXECUTOR.submit(_run_fund_refresh_job, job_id, lookback_days)
     return job
 
@@ -352,6 +480,7 @@ def bootstrap_application_storage() -> None:
     """
 
     ensure_json_cache_schema()
+    ensure_refresh_lease_schema()
     ensure_reference_data_schema(CONFIG.paths.processed_dir)
     from app.fund_service import ensure_fund_prices_schema
 
@@ -1906,7 +2035,9 @@ def _fund_detail_payload(*, normalized: str) -> Dict[str, Any]:
 
 
 @app.post("/admin/funds/refresh-snapshot")
-def admin_refresh_funds_snapshot(lookback_days: int = Query(10, ge=1, le=45)) -> Dict[str, Any]:
+def admin_refresh_funds_snapshot(
+    lookback_days: int = Query(_FUND_REFRESH_MAX_LOOKBACK_DAYS, ge=1, le=_FUND_REFRESH_MAX_LOOKBACK_DAYS)
+) -> Dict[str, Any]:
     from app.fund_service import get_funds_payload
 
     # Start the upstream work outside the request path. The current snapshot

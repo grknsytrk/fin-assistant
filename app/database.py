@@ -21,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 
 _SCHEMA_LOCK = threading.Lock()
 _JSON_SCHEMA_READY = False
+_REFRESH_LEASE_SCHEMA_READY = False
 _POOL_LOCK = threading.Lock()
 _POSTGRES_POOL: Any = None
 _POSTGRES_POOL_URL = ""
@@ -203,9 +204,16 @@ def ensure_json_cache_schema() -> None:
                 CREATE TABLE IF NOT EXISTS ragfin_json_cache (
                     cache_key TEXT PRIMARY KEY,
                     payload JSONB NOT NULL,
+                    version BIGINT NOT NULL DEFAULT 0,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
                 """
+            )
+            # Existing deployments predate fenced snapshot commits.  Keep
+            # this migration idempotent so a restart upgrades them without a
+            # separate migration command.
+            conn.execute(
+                "ALTER TABLE ragfin_json_cache ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0"
             )
             conn.execute(
                 """
@@ -215,6 +223,208 @@ def ensure_json_cache_schema() -> None:
             )
             conn.commit()
         _JSON_SCHEMA_READY = True
+
+
+def ensure_refresh_lease_schema() -> None:
+    """Create the Postgres lease table used as the fencing authority."""
+
+    global _REFRESH_LEASE_SCHEMA_READY
+    if not database_enabled() or _REFRESH_LEASE_SCHEMA_READY:
+        return
+    ensure_json_cache_schema()
+    with _SCHEMA_LOCK:
+        if _REFRESH_LEASE_SCHEMA_READY:
+            return
+        with connect_postgres() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ragfin_refresh_lease (
+                    resource_key TEXT PRIMARY KEY,
+                    generation BIGINT NOT NULL DEFAULT 0,
+                    job_id TEXT,
+                    owner_token TEXT,
+                    lease_until TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ragfin_refresh_lease_until
+                ON ragfin_refresh_lease (lease_until)
+                """
+            )
+            conn.commit()
+        _REFRESH_LEASE_SCHEMA_READY = True
+
+
+def acquire_refresh_lease(
+    resource_key: str,
+    *,
+    job_id: str,
+    owner_token: str,
+    ttl_seconds: int,
+) -> Optional[dict[str, Any]]:
+    """Atomically claim a generation lease, returning its generation."""
+
+    if not database_enabled():
+        return None
+    try:
+        ensure_refresh_lease_schema()
+        with connect_postgres() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO ragfin_refresh_lease
+                    (resource_key, generation, job_id, owner_token, lease_until, updated_at)
+                VALUES (?, 1, ?, ?, NOW() + (? * INTERVAL '1 second'), NOW())
+                ON CONFLICT (resource_key) DO UPDATE SET
+                    generation = ragfin_refresh_lease.generation + 1,
+                    job_id = EXCLUDED.job_id,
+                    owner_token = EXCLUDED.owner_token,
+                    lease_until = EXCLUDED.lease_until,
+                    updated_at = NOW()
+                WHERE ragfin_refresh_lease.lease_until IS NULL
+                   OR ragfin_refresh_lease.lease_until <= NOW()
+                RETURNING generation, job_id, owner_token, lease_until
+                """,
+                (resource_key, job_id, owner_token, max(1, int(ttl_seconds))),
+            ).fetchone()
+            conn.commit()
+        return dict(row) if isinstance(row, dict) else None
+    except Exception:
+        LOGGER.warning("refresh lease acquire failed for %s", resource_key, exc_info=True)
+        return None
+
+
+def renew_refresh_lease(
+    resource_key: str,
+    *,
+    job_id: str,
+    owner_token: str,
+    ttl_seconds: int,
+) -> bool:
+    if not database_enabled():
+        return True
+    try:
+        ensure_refresh_lease_schema()
+        with connect_postgres() as conn:
+            row = conn.execute(
+                """
+                UPDATE ragfin_refresh_lease
+                SET lease_until = NOW() + (? * INTERVAL '1 second'), updated_at = NOW()
+                WHERE resource_key = ? AND job_id = ? AND owner_token = ?
+                  AND lease_until > NOW()
+                RETURNING generation
+                """,
+                (max(1, int(ttl_seconds)), resource_key, job_id, owner_token),
+            ).fetchone()
+            conn.commit()
+        return isinstance(row, dict)
+    except Exception:
+        LOGGER.warning("refresh lease renew failed for %s", resource_key, exc_info=True)
+        return False
+
+
+def release_refresh_lease(resource_key: str, *, job_id: str, owner_token: str) -> bool:
+    if not database_enabled():
+        return True
+    try:
+        ensure_refresh_lease_schema()
+        with connect_postgres() as conn:
+            row = conn.execute(
+                """
+                UPDATE ragfin_refresh_lease
+                SET lease_until = NOW(), updated_at = NOW()
+                WHERE resource_key = ? AND job_id = ? AND owner_token = ?
+                RETURNING generation
+                """,
+                (resource_key, job_id, owner_token),
+            ).fetchone()
+            conn.commit()
+        return isinstance(row, dict)
+    except Exception:
+        LOGGER.warning("refresh lease release failed for %s", resource_key, exc_info=True)
+        return False
+
+
+def get_refresh_lease(resource_key: str) -> Optional[dict[str, Any]]:
+    if not database_enabled():
+        return None
+    try:
+        ensure_refresh_lease_schema()
+        with connect_postgres() as conn:
+            row = conn.execute(
+                "SELECT generation, job_id, owner_token, lease_until FROM ragfin_refresh_lease WHERE resource_key = ?",
+                (resource_key,),
+            ).fetchone()
+        return dict(row) if isinstance(row, dict) else None
+    except Exception:
+        LOGGER.warning("refresh lease read failed for %s", resource_key, exc_info=True)
+        return None
+
+
+def commit_json_cache_if_fenced(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    resource_key: str,
+    job_id: str,
+    owner_token: str,
+    generation: int,
+) -> bool:
+    """Commit a cache payload only while the caller owns the current lease.
+
+    The lease row lock and versioned cache upsert intentionally share one
+    transaction.  A late worker can therefore never pass a separate
+    check-then-write gap after another generation takes over.
+    """
+
+    if not database_enabled():
+        return False
+    try:
+        ensure_refresh_lease_schema()
+        with connect_postgres() as conn:
+            lease = conn.execute(
+                """
+                SELECT generation, job_id, owner_token, lease_until
+                FROM ragfin_refresh_lease
+                WHERE resource_key = ? AND lease_until > NOW()
+                FOR UPDATE
+                """,
+                (resource_key,),
+            ).fetchone()
+            if not isinstance(lease, dict):
+                conn.rollback()
+                return False
+            if (
+                int(lease.get("generation") or -1) != int(generation)
+                or str(lease.get("job_id") or "") != job_id
+                or str(lease.get("owner_token") or "") != owner_token
+                or lease.get("lease_until") is None
+            ):
+                conn.rollback()
+                return False
+            row = conn.execute(
+                """
+                INSERT INTO ragfin_json_cache (cache_key, payload, version, updated_at)
+                VALUES (?, ?::jsonb, ?, NOW())
+                ON CONFLICT (cache_key) DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    version = EXCLUDED.version,
+                    updated_at = EXCLUDED.updated_at
+                WHERE ragfin_json_cache.version < EXCLUDED.version
+                RETURNING version
+                """,
+                (_cache_key(path), json.dumps(payload, ensure_ascii=False, default=str), int(generation)),
+            ).fetchone()
+            if not isinstance(row, dict):
+                conn.rollback()
+                return False
+            conn.commit()
+        return True
+    except Exception:
+        LOGGER.warning("fenced JSON cache commit failed for %s", path, exc_info=True)
+        return False
 
 
 def read_json_cache(path: Path) -> Optional[dict[str, Any]]:
@@ -300,6 +510,7 @@ def hydrate_json_cache(processed_dir: Path) -> int:
 
 
 def reset_database_state_for_tests() -> None:
-    global _JSON_SCHEMA_READY
+    global _JSON_SCHEMA_READY, _REFRESH_LEASE_SCHEMA_READY
     close_postgres_pool()
     _JSON_SCHEMA_READY = False
+    _REFRESH_LEASE_SCHEMA_READY = False

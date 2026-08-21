@@ -1068,7 +1068,7 @@ def test_refresh_funds_snapshot_noops_when_tefas_returns_empty(monkeypatch, tmp_
     assert payload["status"] == "unavailable"
     assert payload["degraded"] is True
     assert payload["rows"] == []
-    assert payload["source_metadata"]["parse_status"] == "empty_tefasfon_funds"
+    assert payload["source_metadata"]["parse_status"] == "upstream_unavailable"
     assert "empty" in " ".join(payload["warnings"])
 
 
@@ -1111,6 +1111,72 @@ def test_tefasfon_fast_snapshot_skips_returns_and_fee_enrichment(monkeypatch) ->
     assert calls == {"funds": 1, "returns": 0, "fees": 0}
 
 
+def test_tefasfon_snapshot_resolution_finds_previous_date_within_fourteen_days(monkeypatch) -> None:
+    client = fund_service.TefasFonClient()
+    calls = []
+
+    def fetch_funds(*, start_date, end_date, fund_codes=None):
+        calls.append(start_date)
+        if start_date == date(2026, 8, 20):
+            return [{"fund_code": "TLY", "date": "2026-08-20", "price": 8.819, "tefasDurum": True}]
+        return []
+
+    monkeypatch.setattr(client, "fetch_funds", fetch_funds)
+    result = client.fetch_latest_fund_list_snapshot_result(
+        as_of=date(2026, 8, 21), lookback_days=40, enrich=False
+    )
+
+    assert result.resolution_status == "resolved_previous_date"
+    assert result.resolved_as_of == "2026-08-20"
+    assert calls == [date(2026, 8, 21), date(2026, 8, 20)]
+
+
+def test_tefasfon_snapshot_resolution_distinguishes_empty_from_upstream_error(monkeypatch) -> None:
+    client = fund_service.TefasFonClient()
+    monkeypatch.setattr(client, "fetch_funds", lambda **_kwargs: [])
+    empty = client.fetch_latest_fund_list_snapshot_result(
+        as_of=date(2026, 8, 21), lookback_days=40, enrich=False
+    )
+    assert empty.resolution_status == "not_published"
+    assert len(empty.attempted_dates) == 14
+
+    def unavailable(**_kwargs):
+        raise fund_service.TefasUpstreamError("429")
+
+    monkeypatch.setattr(client, "fetch_funds", unavailable)
+    failed = client.fetch_latest_fund_list_snapshot_result(
+        as_of=date(2026, 8, 21), lookback_days=14, enrich=False
+    )
+    assert failed.resolution_status == "upstream_unavailable"
+    assert len(failed.upstream_errors) == 3
+
+
+def test_refresh_funds_snapshot_does_not_downgrade_newer_snapshot(monkeypatch, tmp_path) -> None:
+    existing = fund_service._build_snapshot(
+        [{"fund_code": "TLY", "date": "2026-08-21", "price": 8.865, "tefasDurum": True}]
+    )
+    fund_service._write_json(fund_service._snapshot_path(tmp_path), existing)
+
+    class FakeTefasFonClient:
+        def fetch_latest_fund_list_snapshot_result(self, *, as_of, lookback_days, enrich=False):
+            return fund_service.FundSnapshotFetchResult(
+                rows=[{"fund_code": "TLY", "date": "2026-08-20", "price": 8.819, "tefasDurum": True}],
+                resolution_status="resolved_previous_date",
+                requested_as_of="2026-08-21",
+                resolved_as_of="2026-08-20",
+                attempted_dates=["2026-08-21", "2026-08-20"],
+            )
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    payload = fund_service.refresh_funds_snapshot(
+        tmp_path, lookback_days=14, persist_reference_data=False, backfill_daily_returns=False
+    )
+
+    assert payload["as_of"] == "2026-08-21"
+    assert payload["snapshot_action"] == "retained_newer"
+    assert payload["resolution_status"] == "resolved_previous_date"
+
+
 def test_refresh_funds_snapshot_uses_bounded_direct_fallback(monkeypatch, tmp_path) -> None:
     calls = {"lookback_days": None}
 
@@ -1137,7 +1203,7 @@ def test_refresh_funds_snapshot_uses_bounded_direct_fallback(monkeypatch, tmp_pa
     payload = fund_service.refresh_funds_snapshot(tmp_path, lookback_days=10)
 
     assert payload["rows"][0]["fund_code"] == "TLY"
-    assert calls["lookback_days"] == 3
+    assert calls["lookback_days"] == 10
     assert "tefas_direct_funds fallback used" in payload["warnings"]
 
 

@@ -311,7 +311,7 @@ export const apiClient = {
         });
     },
     fundCategories: () => fetchApi<FundCategoriesResponse>('/funds/categories'),
-    refreshFundsSnapshot: (lookbackDays = 10) =>
+    refreshFundsSnapshot: (lookbackDays = 14) =>
         fetchApi<FundsResponse>(`/admin/funds/refresh-snapshot?lookback_days=${lookbackDays}`, {
             method: 'POST',
             timeoutMs: 15000,

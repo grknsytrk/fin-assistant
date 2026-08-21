@@ -13,6 +13,7 @@ import threading
 import time
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -21,7 +22,13 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
-from app.database import connect_postgres, database_enabled, read_json_cache, write_json_cache
+from app.database import (
+    commit_json_cache_if_fenced,
+    connect_postgres,
+    database_enabled,
+    read_json_cache,
+    write_json_cache,
+)
 from app.reference_data import (
     get_instruments,
     get_instrument,
@@ -120,7 +127,7 @@ TEFAS_OPEN_ONLY = os.getenv("RAGFIN_TEFAS_OPEN_ONLY", "1").strip().lower() not i
 }
 FUNDS_SNAPSHOT_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_TTL_SECONDS", str(24 * 60 * 60)))
 FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS", "300"))
-FUNDS_SNAPSHOT_PUBLICATION_HOUR = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_PUBLICATION_HOUR", "21"))
+FUNDS_MAX_LOOKBACK_CALENDAR_DAYS = int(os.getenv("RAGFIN_FUNDS_MAX_LOOKBACK_CALENDAR_DAYS", "14"))
 FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS = int(
     os.getenv("RAGFIN_FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS", "60")
 )
@@ -266,6 +273,30 @@ class TefasRateLimitError(TefasUpstreamError):
 
 class TefasFormatError(TefasUpstreamError):
     pass
+
+
+@dataclass
+class FundSnapshotFetchResult:
+    """Outcome of a bounded TEFAS catalogue probe.
+
+    ``warnings`` is deliberately separate from ``upstream_errors``: an empty
+    successful response means “not published”, while a failed request means
+    that the upstream could not be trusted for that date.
+    """
+
+    rows: List[Dict[str, Any]] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    resolution_status: str = "not_published"
+    requested_as_of: Optional[str] = None
+    resolved_as_of: Optional[str] = None
+    attempted_dates: List[str] = field(default_factory=list)
+    empty_dates: List[str] = field(default_factory=list)
+    upstream_errors: List[str] = field(default_factory=list)
+    source: str = TEFASFON_FUNDS_SOURCE
+
+    @property
+    def all_requests_succeeded(self) -> bool:
+        return not self.upstream_errors
 
 
 def reset_fund_caches_for_tests() -> None:
@@ -473,13 +504,48 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+    _write_local_json(path, payload)
+    write_json_cache(path, payload)
+    _MEMORY_CACHE.clear()
+
+
+def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     tmp.replace(path)
-    write_json_cache(path, payload)
     _MEMORY_CACHE.clear()
+
+
+def commit_funds_snapshot(
+    processed_dir: Path,
+    payload: Dict[str, Any],
+    *,
+    job_id: str,
+    owner_token: str,
+    generation: int,
+) -> bool:
+    """Commit the latest catalogue through the Postgres fencing transaction."""
+
+    path = _snapshot_path(processed_dir)
+    if database_enabled():
+        committed = commit_json_cache_if_fenced(
+            path,
+            payload,
+            resource_key="funds_snapshot",
+            job_id=job_id,
+            owner_token=owner_token,
+            generation=generation,
+        )
+        if not committed:
+            return False
+        # Postgres is authoritative. Mirror only after its transaction has
+        # committed, so a stale worker cannot overwrite the local mirror.
+        _write_local_json(path, payload)
+        return True
+    _write_json(path, payload)
+    return True
 
 
 def _daily_snapshot_cache_is_fresh(payload: Dict[str, Any], as_of: date) -> bool:
@@ -2292,11 +2358,11 @@ def _business_days_between(start: date, end: date) -> int:
 def _latest_fund_snapshot_target_date(today: Optional[date] = None) -> date:
     now_local = datetime.now(timezone(timedelta(hours=3)))
     current = today or now_local.date()
-    # TEFAS fund prices are published after the market day closes. Before the
-    # configured cutoff, the latest valid target is the previous business day;
-    # otherwise a same-day snapshot request is incorrectly treated as stale.
-    if today is None and current == now_local.date() and now_local.hour < FUNDS_SNAPSHOT_PUBLICATION_HOUR:
-        current -= timedelta(days=1)
+    # The requested date is the latest Turkish market business day.  TEFAS
+    # publication timing is resolved by the bounded probe below, not by a
+    # fixed wall-clock cutoff that can permanently hide a newly published
+    # close.
+    del now_local
     if _is_turkey_market_business_day(current):
         return current
     while not _is_turkey_market_business_day(current):
@@ -3558,78 +3624,119 @@ class TefasFonClient:
             raise recent_error
         return [rows_by_date[point_date] for point_date in sorted(rows_by_date)]
 
+    def fetch_latest_fund_list_snapshot_result(
+        self,
+        *,
+        as_of: date,
+        lookback_days: int = FUNDS_MAX_LOOKBACK_CALENDAR_DAYS,
+        enrich: bool = True,
+    ) -> FundSnapshotFetchResult:
+        warnings: List[str] = []
+        upstream_errors: List[str] = []
+        attempted_dates: List[str] = []
+        empty_dates: List[str] = []
+        requested = as_of.isoformat()
+        window = min(FUNDS_MAX_LOOKBACK_CALENDAR_DAYS, max(1, int(lookback_days)))
+        consecutive_errors = 0
+        for offset in range(window):
+            target_date = as_of - timedelta(days=offset)
+            target_text = target_date.isoformat()
+            attempted_dates.append(target_text)
+            try:
+                fund_rows = self.fetch_funds(start_date=target_date, end_date=target_date)
+            except TefasUpstreamError as exc:
+                message = f"tefasfon_funds failed for {target_text}: {exc}"
+                warnings.append(message)
+                upstream_errors.append(message)
+                consecutive_errors += 1
+                if _is_tefasfon_adapter_unavailable(exc) or _is_tefas_rate_limit(exc) or consecutive_errors >= 3:
+                    break
+                continue
+            if not fund_rows:
+                consecutive_errors = 0
+                empty_dates.append(target_text)
+                continue
+            if not enrich:
+                fund_rows, skipped_closed, _skipped_unknown = _filter_tefas_open_rows(fund_rows)
+                if skipped_closed:
+                    warnings.append(f"tefas_open_only skipped {skipped_closed} closed fund rows")
+                if TEFAS_OPEN_ONLY and not fund_rows:
+                    empty_dates.append(target_text)
+                    continue
+            else:
+                try:
+                    fund_rows = _merge_tefasfon_returns(fund_rows, self.fetch_returns())
+                except TefasUpstreamError as exc:
+                    warnings.append(f"tefasfon_returns failed: {exc}")
+                try:
+                    fund_rows = _merge_tefasfon_management_fees(
+                        fund_rows,
+                        self.fetch_management_fees(as_of=target_date),
+                    )
+                except TefasUpstreamError as exc:
+                    warnings.append(f"tefasfon_management_fees failed: {exc}")
+                try:
+                    previous_business_day = _previous_turkey_market_business_day(target_date)
+                    fund_rows = _merge_tefasfon_range_returns(
+                        fund_rows,
+                        daily_return_rows=self.fetch_returns(
+                            start_date=previous_business_day,
+                            end_date=target_date,
+                        ),
+                        weekly_return_rows=self.fetch_returns(
+                            start_date=target_date - timedelta(days=7),
+                            end_date=target_date,
+                        ),
+                    )
+                except TefasUpstreamError as exc:
+                    warnings.append(f"tefasfon_range_returns failed: {exc}")
+                open_rows, skipped_closed, _skipped_unknown = _filter_tefas_open_rows(fund_rows)
+                if skipped_closed:
+                    warnings.append(f"tefas_open_only skipped {skipped_closed} closed fund rows")
+                if TEFAS_OPEN_ONLY and not open_rows:
+                    empty_dates.append(target_text)
+                    continue
+                fund_rows = open_rows
+            resolved_dates = [
+                _fund_date(_first_present(row, "date", "tarih", "TARIH", "TARIHSTR"))
+                for row in fund_rows
+                if isinstance(row, dict)
+            ]
+            resolved = max((item for item in resolved_dates if item), default=target_text)
+            return FundSnapshotFetchResult(
+                rows=list(fund_rows),
+                warnings=warnings,
+                resolution_status="available" if offset == 0 else "resolved_previous_date",
+                requested_as_of=requested,
+                resolved_as_of=resolved,
+                attempted_dates=attempted_dates,
+                empty_dates=empty_dates,
+                upstream_errors=upstream_errors,
+                source=TEFASFON_FUNDS_SOURCE,
+            )
+        return FundSnapshotFetchResult(
+            warnings=warnings,
+            resolution_status="upstream_unavailable" if upstream_errors else "not_published",
+            requested_as_of=requested,
+            attempted_dates=attempted_dates,
+            empty_dates=empty_dates,
+            upstream_errors=upstream_errors,
+            source=TEFASFON_FUNDS_SOURCE,
+        )
+
     def fetch_latest_fund_list_snapshot(
         self,
         *,
         as_of: date,
-        lookback_days: int = 10,
+        lookback_days: int = FUNDS_MAX_LOOKBACK_CALENDAR_DAYS,
         enrich: bool = True,
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
-        warnings: List[str] = []
-        for offset in range(max(1, lookback_days)):
-            target_date = as_of - timedelta(days=offset)
-            try:
-                fund_rows = self.fetch_funds(start_date=target_date, end_date=target_date)
-            except TefasUpstreamError as exc:
-                warnings.append(f"tefasfon_funds failed for {target_date.isoformat()}: {exc}")
-                if _is_tefasfon_adapter_unavailable(exc):
-                    break
-                continue
-            if not fund_rows:
-                warnings.append(f"tefasfon_funds returned no rows for {target_date.isoformat()}")
-                continue
-            if not enrich:
-                open_rows, skipped_closed, skipped_unknown = _filter_tefas_open_rows(fund_rows)
-                if skipped_closed:
-                    warnings.append(f"tefas_open_only skipped {skipped_closed} closed fund rows")
-                if TEFAS_OPEN_ONLY and not open_rows:
-                    warnings.append(f"tefas_open_only returned no open rows for {target_date.isoformat()}")
-                    continue
-                kept_warnings = [
-                    w
-                    for w in warnings
-                    if "returned no rows" not in w and "tefas_open_only returned no open rows" not in w
-                ]
-                return open_rows, kept_warnings
-            try:
-                return_rows = self.fetch_returns()
-                fund_rows = _merge_tefasfon_returns(fund_rows, return_rows)
-            except TefasUpstreamError as exc:
-                warnings.append(f"tefasfon_returns failed: {exc}")
-            try:
-                fee_rows = self.fetch_management_fees(as_of=target_date)
-                fund_rows = _merge_tefasfon_management_fees(fund_rows, fee_rows)
-            except TefasUpstreamError as exc:
-                warnings.append(f"tefasfon_management_fees failed: {exc}")
-            try:
-                previous_business_day = _previous_turkey_market_business_day(target_date)
-                daily_return_rows = self.fetch_returns(start_date=previous_business_day, end_date=target_date)
-                weekly_return_rows = self.fetch_returns(start_date=target_date - timedelta(days=7), end_date=target_date)
-                fund_rows = _merge_tefasfon_range_returns(
-                    fund_rows,
-                    daily_return_rows=daily_return_rows,
-                    weekly_return_rows=weekly_return_rows,
-                )
-            except TefasUpstreamError as exc:
-                warnings.append(f"tefasfon_range_returns failed: {exc}")
-            open_rows, skipped_closed, skipped_unknown = _filter_tefas_open_rows(fund_rows)
-            if skipped_closed:
-                warnings.append(
-                    f"tefas_open_only skipped {skipped_closed} closed fund rows"
-                )
-            if TEFAS_OPEN_ONLY and not open_rows:
-                warnings.append(f"tefas_open_only returned no open rows for {target_date.isoformat()}")
-                continue
-            fund_rows = open_rows
-            # Drop the per-day "no rows" lookback noise once we successfully resolved a
-            # snapshot. Weekends and Turkish holidays naturally have no TEFAS data and
-            # those messages would otherwise be surfaced as a fallback warning banner.
-            kept_warnings = [
-                w for w in warnings
-                if "returned no rows" not in w and "tefas_open_only returned no open rows" not in w
-            ]
-            return fund_rows, kept_warnings
-        return [], warnings
+        result = self.fetch_latest_fund_list_snapshot_result(
+            as_of=as_of,
+            lookback_days=lookback_days,
+            enrich=enrich,
+        )
+        return result.rows, result.warnings
 
     def fetch_latest_portfolio(
         self,
@@ -4319,19 +4426,71 @@ class TefasClient:
             current += timedelta(days=1)
         return rows
 
-    def fetch_latest_fund_list_snapshot(self, *, as_of: date, lookback_days: int = 10) -> Tuple[List[Dict[str, Any]], List[str]]:
+    def fetch_latest_fund_list_snapshot_result(
+        self,
+        *,
+        as_of: date,
+        lookback_days: int = FUNDS_MAX_LOOKBACK_CALENDAR_DAYS,
+    ) -> FundSnapshotFetchResult:
         warnings: List[str] = []
-        for offset in range(max(1, lookback_days)):
+        upstream_errors: List[str] = []
+        attempted_dates: List[str] = []
+        empty_dates: List[str] = []
+        requested = as_of.isoformat()
+        window = min(FUNDS_MAX_LOOKBACK_CALENDAR_DAYS, max(1, int(lookback_days)))
+        consecutive_errors = 0
+        for offset in range(window):
             target_date = as_of - timedelta(days=offset)
+            target_text = target_date.isoformat()
+            attempted_dates.append(target_text)
             try:
                 rows = self.fetch_fund_list_snapshot(target_date=target_date)
             except TefasUpstreamError as exc:
-                warnings.append(f"tefas_fund_list failed for {target_date.isoformat()}: {exc}")
+                message = f"tefas_fund_list failed for {target_text}: {exc}"
+                warnings.append(message)
+                upstream_errors.append(message)
+                consecutive_errors += 1
+                if _is_tefas_rate_limit(exc) or consecutive_errors >= 3:
+                    break
                 continue
-            if rows:
-                return rows, warnings
-            warnings.append(f"tefas_fund_list returned no rows for {target_date.isoformat()}")
-        return [], warnings
+            if not rows:
+                consecutive_errors = 0
+                empty_dates.append(target_text)
+                continue
+            resolved_dates = [
+                _fund_date(_first_present(row, "date", "tarih", "TARIH", "TARIHSTR"))
+                for row in rows
+                if isinstance(row, dict)
+            ]
+            return FundSnapshotFetchResult(
+                rows=list(rows),
+                warnings=warnings,
+                resolution_status="available" if offset == 0 else "resolved_previous_date",
+                requested_as_of=requested,
+                resolved_as_of=max((item for item in resolved_dates if item), default=target_text),
+                attempted_dates=attempted_dates,
+                empty_dates=empty_dates,
+                upstream_errors=upstream_errors,
+                source=TEFAS_DIRECT_FUNDS_SOURCE,
+            )
+        return FundSnapshotFetchResult(
+            warnings=warnings,
+            resolution_status="upstream_unavailable" if upstream_errors else "not_published",
+            requested_as_of=requested,
+            attempted_dates=attempted_dates,
+            empty_dates=empty_dates,
+            upstream_errors=upstream_errors,
+            source=TEFAS_DIRECT_FUNDS_SOURCE,
+        )
+
+    def fetch_latest_fund_list_snapshot(
+        self,
+        *,
+        as_of: date,
+        lookback_days: int = FUNDS_MAX_LOOKBACK_CALENDAR_DAYS,
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        result = self.fetch_latest_fund_list_snapshot_result(as_of=as_of, lookback_days=lookback_days)
+        return result.rows, result.warnings
 
 
 def _empty_snapshot_payload(reason: str) -> Dict[str, Any]:
@@ -4471,13 +4630,25 @@ def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
         except ValueError:
             snapshot_lag_days = None
     is_behind_target = snapshot_lag_days is not None and snapshot_lag_days > 0
+    resolution_status = str(meta.get("resolution_status") or payload.get("resolution_status") or "")
+    last_checked_at = meta.get("last_checked_at")
+    last_check_age = _cache_age_seconds(last_checked_at)
+    successful_current_probe = (
+        resolution_status in {"not_published", "resolved_previous_date", "available"}
+        and str(meta.get("requested_as_of") or meta.get("last_checked_requested_date") or "")
+        == target_date.isoformat()
+        and last_check_age is not None
+        and last_check_age <= max(FUNDS_SNAPSHOT_TTL_SECONDS, FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS)
+    )
     recently_checked_current_day = (
         is_behind_target
         and age is not None
         and age <= max(0, FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS)
     )
     ttl_stale = age is None or age > FUNDS_SNAPSHOT_TTL_SECONDS
-    stale = bool(payload.get("stale")) or ttl_stale or (is_behind_target and not recently_checked_current_day)
+    stale = (
+        bool(payload.get("stale")) or ttl_stale or (is_behind_target and not recently_checked_current_day)
+    ) and not successful_current_probe
     public_source = _public_price_source(str(payload.get("source") or meta.get("source") or TEFASFON_FUNDS_SOURCE))
     meta["source"] = public_source
     if public_source == "legacy_cache":
@@ -4488,9 +4659,11 @@ def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
     meta["snapshot_as_of_lag_days"] = snapshot_lag_days
     meta["snapshot_intraday_check_ttl_seconds"] = FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS
     meta["snapshot_as_of"] = snapshot_as_of
+    meta["resolution_status"] = resolution_status or None
+    meta["last_checked_at"] = last_checked_at
     meta["as_of"] = payload.get("as_of")
     if is_behind_target:
-        meta["awaiting_current_snapshot"] = recently_checked_current_day
+        meta["awaiting_current_snapshot"] = recently_checked_current_day or successful_current_probe
     meta["tefas_open_only"] = TEFAS_OPEN_ONLY
     payload = dict(payload)
     payload["source"] = public_source
@@ -4699,46 +4872,155 @@ def _merge_refresh_rows_with_existing(
     return merged_rows
 
 
+def _legacy_fund_fetch_result(
+    client: Any,
+    *,
+    as_of: date,
+    lookback_days: int,
+    enrich: bool = False,
+    source: str,
+) -> FundSnapshotFetchResult:
+    """Adapt older test doubles/adapters to the explicit outcome contract."""
+
+    try:
+        value = client.fetch_latest_fund_list_snapshot(
+            as_of=as_of,
+            lookback_days=lookback_days,
+            enrich=enrich,
+        )
+    except TypeError as exc:
+        if "enrich" not in str(exc):
+            raise
+        value = client.fetch_latest_fund_list_snapshot(as_of=as_of, lookback_days=lookback_days)
+    rows, warnings = value if isinstance(value, tuple) and len(value) == 2 else (value, [])
+    rows = list(rows or [])
+    warnings = list(warnings or [])
+    if rows:
+        dates = [
+            _fund_date(_first_present(row, "date", "tarih", "TARIH", "TARIHSTR"))
+            for row in rows
+            if isinstance(row, dict)
+        ]
+        resolved = max((item for item in dates if item), default=as_of.isoformat())
+        return FundSnapshotFetchResult(
+            rows=rows,
+            warnings=warnings,
+            resolution_status="available" if resolved == as_of.isoformat() else "resolved_previous_date",
+            requested_as_of=as_of.isoformat(),
+            resolved_as_of=resolved,
+            attempted_dates=[as_of.isoformat()],
+            source=source,
+        )
+    # Legacy adapters used warnings to signal transport errors. Preserve that
+    # meaning while a warning-free empty response is a valid not-published
+    # result under the new contract.
+    has_error = bool(warnings)
+    return FundSnapshotFetchResult(
+        warnings=warnings,
+        resolution_status="upstream_unavailable" if has_error else "not_published",
+        requested_as_of=as_of.isoformat(),
+        attempted_dates=[as_of.isoformat()],
+        upstream_errors=list(warnings) if has_error else [],
+        source=source,
+    )
+
+
+def _fund_fetch_result(client: Any, *, as_of: date, lookback_days: int, source: str) -> FundSnapshotFetchResult:
+    method = getattr(client, "fetch_latest_fund_list_snapshot_result", None)
+    if callable(method):
+        try:
+            result = method(as_of=as_of, lookback_days=lookback_days, enrich=False)
+        except TypeError as exc:
+            if "enrich" not in str(exc):
+                raise
+            result = method(as_of=as_of, lookback_days=lookback_days)
+        if isinstance(result, FundSnapshotFetchResult):
+            return result
+    return _legacy_fund_fetch_result(
+        client,
+        as_of=as_of,
+        lookback_days=lookback_days,
+        enrich=False,
+        source=source,
+    )
+
+
+def _snapshot_as_of_date(snapshot: Dict[str, Any]) -> Optional[date]:
+    value = _fund_date(snapshot.get("as_of") or (snapshot.get("source_metadata") or {}).get("as_of"))
+    try:
+        return date.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+
+
+def _add_snapshot_resolution_metadata(
+    payload: Dict[str, Any],
+    *,
+    result: FundSnapshotFetchResult,
+    action: str,
+    warnings: List[str],
+) -> Dict[str, Any]:
+    meta = dict(payload.get("source_metadata") or {})
+    meta.update(
+        {
+            "resolution_status": result.resolution_status,
+            "requested_as_of": result.requested_as_of,
+            "resolved_as_of": result.resolved_as_of,
+            "last_checked_requested_date": result.requested_as_of,
+            "last_checked_at": _utc_now_iso(),
+            "snapshot_action": action,
+            "upstream_errors": list(result.upstream_errors),
+            "attempted_dates": list(result.attempted_dates),
+            "empty_dates": list(result.empty_dates),
+            "warnings": list(warnings),
+        }
+    )
+    payload["source_metadata"] = meta
+    payload["warnings"] = list(warnings)
+    payload["snapshot_action"] = action
+    payload["resolution_status"] = result.resolution_status
+    return payload
+
+
 def refresh_funds_snapshot(
     processed_dir: Path,
     *,
-    lookback_days: int = 10,
+    lookback_days: int = FUNDS_MAX_LOOKBACK_CALENDAR_DAYS,
     persist_reference_data: bool = True,
     backfill_daily_returns: bool = True,
+    persist_snapshot: bool = True,
 ) -> Dict[str, Any]:
     end_date = _latest_fund_snapshot_target_date()
     existing_snapshot = load_funds_snapshot(processed_dir)
-    bounded_lookback_days = min(3, max(1, int(lookback_days)))
+    bounded_lookback_days = min(FUNDS_MAX_LOOKBACK_CALENDAR_DAYS, max(1, int(lookback_days)))
     warnings: List[str] = []
-    tefasfon_client = TefasFonClient()
-    try:
-        rows, tefasfon_warnings = tefasfon_client.fetch_latest_fund_list_snapshot(
+    primary = _fund_fetch_result(
+        TefasFonClient(),
+        as_of=end_date,
+        lookback_days=bounded_lookback_days,
+        source=TEFASFON_FUNDS_SOURCE,
+    )
+    result = primary
+    warnings.extend(primary.warnings)
+    # Direct TEFAS is a limited fallback for an unreliable primary adapter.
+    # A reliable all-empty response is deliberately not reclassified as an
+    # upstream failure merely because another adapter might behave differently.
+    if not primary.rows and primary.resolution_status == "upstream_unavailable":
+        direct = _fund_fetch_result(
+            TefasClient(),
             as_of=end_date,
             lookback_days=bounded_lookback_days,
-            enrich=False,
+            source=TEFAS_DIRECT_FUNDS_SOURCE,
         )
-    except TypeError as exc:
-        # Keep test doubles and third-party compatible adapters working while
-        # the fast-refresh keyword is introduced.
-        if "enrich" not in str(exc):
-            raise
-        rows, tefasfon_warnings = tefasfon_client.fetch_latest_fund_list_snapshot(
-            as_of=end_date,
-            lookback_days=bounded_lookback_days,
-        )
-    warnings.extend(tefasfon_warnings)
-    if not rows:
-        try:
-            rows, direct_warnings = TefasClient().fetch_latest_fund_list_snapshot(
-                as_of=end_date,
-                lookback_days=bounded_lookback_days,
-            )
-            warnings.extend(direct_warnings)
-            if rows:
-                warnings.append("tefas_direct_funds fallback used")
-        except TefasUpstreamError as exc:
-            warnings.append(f"tefas_direct_funds failed: {exc}")
-    rows = _merge_refresh_rows_with_existing(existing_snapshot.get("rows") or [], rows)
+        warnings.extend(direct.warnings)
+        if direct.rows:
+            warnings.append("tefas_direct_funds fallback used")
+            direct.upstream_errors = list(primary.upstream_errors) + list(direct.upstream_errors)
+            result = direct
+        else:
+            result.upstream_errors = list(primary.upstream_errors) + list(direct.upstream_errors)
+            result.resolution_status = "upstream_unavailable"
+    rows = _merge_refresh_rows_with_existing(existing_snapshot.get("rows") or [], result.rows)
     rows, skipped_closed, skipped_unknown = _filter_tefas_open_rows(rows)
     if skipped_closed:
         warnings.append(
@@ -4746,31 +5028,39 @@ def refresh_funds_snapshot(
         )
     if not rows:
         payload = dict(existing_snapshot)
-        existing_warnings = list(payload.get("warnings") or [])
-        all_warnings = existing_warnings + warnings
-        meta = dict(payload.get("source_metadata") or {})
-        meta["parse_status"] = "empty_tefasfon_funds"
-        meta["warnings"] = all_warnings
-        meta["stale"] = True
-        meta["cache_hit"] = bool(payload.get("rows"))
-        meta["source_policy"] = FUND_HISTORY_SOURCE_POLICY
-        meta["fallback_used"] = bool(payload.get("rows"))
-        meta["tefas_open_only"] = TEFAS_OPEN_ONLY
-        payload["status"] = payload.get("status") or "unavailable"
-        payload["stale"] = True
-        payload["degraded"] = bool(payload.get("degraded")) or not bool(payload.get("rows"))
-        payload["warnings"] = all_warnings
-        payload["source_metadata"] = meta
+        all_warnings = list(existing_snapshot.get("warnings") or []) + warnings
+        action = "retained_existing"
+        payload["status"] = (
+            "unavailable"
+            if result.resolution_status == "upstream_unavailable"
+            else ("ok" if existing_snapshot.get("rows") else "empty")
+        )
+        payload["stale"] = result.resolution_status == "upstream_unavailable"
+        payload["degraded"] = result.resolution_status == "upstream_unavailable" or not bool(payload.get("rows"))
+        payload = _add_snapshot_resolution_metadata(
+            payload,
+            result=result,
+            action=action,
+            warnings=all_warnings,
+        )
+        payload.setdefault("source_metadata", {})["parse_status"] = (
+            "upstream_unavailable" if result.resolution_status == "upstream_unavailable" else "not_published"
+        )
+        payload["source_metadata"]["source_policy"] = FUND_HISTORY_SOURCE_POLICY
+        payload["source_metadata"]["fallback_used"] = bool(existing_snapshot.get("rows"))
+        payload["source_metadata"]["tefas_open_only"] = TEFAS_OPEN_ONLY
+        if persist_snapshot and not database_enabled():
+            _write_json(_snapshot_path(processed_dir), payload)
         return payload
     snapshot = _build_snapshot(
         rows,
         warnings=warnings,
-        source=TEFASFON_FUNDS_SOURCE,
-        source_url=TEFASFON_SOURCE_URL,
-        parse_status="ok_tefasfon_funds",
+        source=result.source,
+        source_url=TEFAS_BASE_URL if result.source == TEFAS_DIRECT_FUNDS_SOURCE else TEFASFON_SOURCE_URL,
+        parse_status="ok_tefas_funds",
     )
     snapshot["source_metadata"]["source_policy"] = FUND_HISTORY_SOURCE_POLICY
-    snapshot["source_metadata"]["fallback_used"] = False
+    snapshot["source_metadata"]["fallback_used"] = result.source == TEFAS_DIRECT_FUNDS_SOURCE
     if not snapshot["rows"]:
         return {
             **existing_snapshot,
@@ -4778,6 +5068,31 @@ def refresh_funds_snapshot(
             "degraded": True,
             "warnings": list(existing_snapshot.get("warnings") or []) + warnings + ["tefasfon_funds returned no valid fund rows"],
         }
+    found_as_of = _snapshot_as_of_date(snapshot)
+    existing_as_of = _snapshot_as_of_date(existing_snapshot)
+    if found_as_of is not None and existing_as_of is not None and found_as_of <= existing_as_of:
+        action = "retained_newer" if found_as_of < existing_as_of else "retained_current"
+        retained = dict(existing_snapshot)
+        retained["stale"] = False if result.resolution_status != "upstream_unavailable" else True
+        retained["degraded"] = result.resolution_status == "upstream_unavailable"
+        retained = _add_snapshot_resolution_metadata(
+            retained,
+            result=result,
+            action=action,
+            warnings=list(existing_snapshot.get("warnings") or []) + warnings,
+        )
+        retained.setdefault("source_metadata", {})["source_policy"] = FUND_HISTORY_SOURCE_POLICY
+        if persist_snapshot and not database_enabled():
+            _write_json(_snapshot_path(processed_dir), retained)
+        return retained
+    snapshot = _add_snapshot_resolution_metadata(
+        snapshot,
+        result=result,
+        action="updated",
+        warnings=warnings,
+    )
+    snapshot["stale"] = False
+    snapshot["degraded"] = False
     # Guard: do not overwrite a healthy snapshot with a clearly-truncated refresh
     # (e.g. TEFAS pagination cut short and we end up with the first page only).
     new_count = len(snapshot["rows"])
@@ -4799,11 +5114,17 @@ def refresh_funds_snapshot(
         merged["warnings"] = merged_warnings
         merged["stale"] = True
         merged["source_metadata"] = merged_meta
+        merged = _add_snapshot_resolution_metadata(
+            merged,
+            result=result,
+            action="retained_existing",
+            warnings=merged_warnings,
+        )
         return merged
     upsert_fund_price_points(
         processed_dir,
         rows,
-        source=TEFASFON_FUNDS_SOURCE,
+        source=result.source,
         fetched_at=str(snapshot.get("fetched_at") or _utc_now_iso()),
     )
     daily_return_overrides = _daily_return_overrides_from_price_history(processed_dir, snapshot["rows"])
@@ -4828,7 +5149,12 @@ def refresh_funds_snapshot(
         # minutes. Existing fee/reference values remain available on detail
         # pages and can be synchronized by a separate maintenance flow.
         snapshot["source_metadata"]["reference_data"] = {"deferred": True}
-    _write_json(_snapshot_path(processed_dir), snapshot)
+    if persist_snapshot:
+        # The deployed refresh job owns the latest catalogue through the
+        # Postgres generation lease. The collector may still populate the
+        # price-history store, but must not race that fenced snapshot write.
+        if not database_enabled():
+            _write_json(_snapshot_path(processed_dir), snapshot)
     return snapshot
 
 
@@ -4936,7 +5262,11 @@ def collect_daily_fund_prices(
         if backfilled:
             snapshot["source_metadata"]["daily_return_local_fallback_count"] = backfilled
         snapshot["source_metadata"]["reference_data"] = _upsert_fund_reference_data(processed_dir, snapshot_rows)
-        _write_json(_snapshot_path(processed_dir), snapshot)
+        # In Postgres mode the refresh job owns the latest catalogue and
+        # commits it with generation fencing. The collector only updates the
+        # separate price-history store there.
+        if not database_enabled():
+            _write_json(_snapshot_path(processed_dir), snapshot)
 
     skipped_warnings = [
         str(item.get("warning") or "invalid_price_row")
@@ -5043,6 +5373,11 @@ def _sort_rows(rows: List[Dict[str, Any]], sort: str, order: str) -> List[Dict[s
 
 def _refresh_funds_snapshot_if_stale(processed_dir: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not snapshot.get("stale"):
+        return snapshot
+    # In a deployed Postgres-backed instance, refreshes must go through the
+    # API job so the generation/ownership transaction fences late workers.
+    # Synchronous stale refresh remains useful for local file-cache mode.
+    if database_enabled():
         return snapshot
     source = _public_price_source(str(snapshot.get("source") or (snapshot.get("source_metadata") or {}).get("source") or ""))
     if source != TEFASFON_FUNDS_SOURCE:

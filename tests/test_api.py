@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app import api as api_module
 from app import cache as cache_module
+from app import database as database_module
 from app import fund_service as fund_service_module
 from app import kap_service as kap_service_module
 from app.api import app
@@ -60,6 +61,71 @@ def test_api_health() -> None:
     assert payload["status"] == "ok"
     assert payload["cache_backend"] in {"memory", "redis"}
     assert payload["cache_namespace"]
+
+
+def test_fenced_snapshot_commit_checks_ownership_before_upsert(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(database_module, "database_enabled", lambda: True)
+    monkeypatch.setattr(database_module, "ensure_refresh_lease_schema", lambda: None)
+
+    class Result:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Connection:
+        def __init__(self, lease):
+            self.lease = lease
+            self.queries = []
+            self.commits = 0
+            self.rollbacks = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, _params=()):
+            self.queries.append(query)
+            if "SELECT generation" in query:
+                return Result(self.lease)
+            if "INSERT INTO ragfin_json_cache" in query:
+                return Result({"version": 7})
+            raise AssertionError(f"unexpected query: {query}")
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    owner = {"generation": 7, "job_id": "job-a", "owner_token": "token-a", "lease_until": "future"}
+    connection = Connection(owner)
+    monkeypatch.setattr(database_module, "connect_postgres", lambda: connection)
+
+    assert database_module.commit_json_cache_if_fenced(
+        tmp_path / "funds_snapshot.json",
+        {"rows": []},
+        resource_key="funds_snapshot",
+        job_id="job-a",
+        owner_token="token-a",
+        generation=7,
+    ) is True
+    assert len([query for query in connection.queries if "INSERT INTO ragfin_json_cache" in query]) == 1
+    assert connection.commits == 1
+
+    connection.lease = {**owner, "owner_token": "token-b"}
+    assert database_module.commit_json_cache_if_fenced(
+        tmp_path / "funds_snapshot.json",
+        {"rows": ["late"]},
+        resource_key="funds_snapshot",
+        job_id="job-a",
+        owner_token="token-a",
+        generation=7,
+    ) is False
+    assert len([query for query in connection.queries if "INSERT INTO ragfin_json_cache" in query]) == 1
 
 
 def test_kap_snapshot_response_cache_uses_schema_and_refresh_bypasses(

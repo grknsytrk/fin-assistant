@@ -60,6 +60,12 @@ class CacheBackend:
     def delete(self, key: str) -> None:
         return None
 
+    def renew_if_owner(self, key: str, owner: Any, *, ttl_seconds: int) -> bool:
+        return False
+
+    def release_if_owner(self, key: str, owner: Any) -> bool:
+        return False
+
     def delete_prefix(self, prefix: str) -> int:
         return 0
 
@@ -113,6 +119,34 @@ class InMemoryCache(CacheBackend):
     def delete(self, key: str) -> None:
         with self._mutex:
             self._store.pop(key, None)
+
+    def renew_if_owner(self, key: str, owner: Any, *, ttl_seconds: int) -> bool:
+        with self._mutex:
+            current = self._store.get(key)
+            if current is None:
+                return False
+            expires_at, value = current
+            if expires_at and expires_at < time.time():
+                self._store.pop(key, None)
+                return False
+            if value != owner:
+                return False
+            self._store[key] = (time.time() + max(1, int(ttl_seconds)), value)
+            return True
+
+    def release_if_owner(self, key: str, owner: Any) -> bool:
+        with self._mutex:
+            current = self._store.get(key)
+            if current is None:
+                return False
+            expires_at, value = current
+            if expires_at and expires_at < time.time():
+                self._store.pop(key, None)
+                return False
+            if value != owner:
+                return False
+            self._store.pop(key, None)
+            return True
 
     def delete_prefix(self, prefix: str) -> int:
         with self._mutex:
@@ -171,6 +205,10 @@ class RedisCache(CacheBackend):
     def _remember_error(self, exc: Exception) -> None:
         self.last_error = str(exc)
 
+    @staticmethod
+    def _serialize(value: Any) -> str:
+        return json.dumps(value, default=str, separators=(",", ":"))
+
     def get(self, key: str) -> Any:
         try:
             raw = self._client.get(self._prefixed(key))
@@ -187,7 +225,7 @@ class RedisCache(CacheBackend):
 
     def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
         try:
-            payload = json.dumps(value, default=str)
+            payload = self._serialize(value)
         except (TypeError, ValueError) as exc:
             logger.debug("skipping non-serialisable cache value for %s: %s", key, exc)
             self._fallback.set(key, value, ttl_seconds=ttl_seconds)
@@ -204,7 +242,7 @@ class RedisCache(CacheBackend):
 
     def set_if_absent(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
         try:
-            payload = json.dumps(value, default=str)
+            payload = self._serialize(value)
         except (TypeError, ValueError) as exc:
             logger.debug("skipping non-serialisable cache value for %s: %s", key, exc)
             return self._fallback.set_if_absent(key, value, ttl_seconds=ttl_seconds)
@@ -229,6 +267,43 @@ class RedisCache(CacheBackend):
             self._remember_error(exc)
             logger.warning("redis cache delete failed for %s: %s", key, exc)
         self._fallback.delete(key)
+
+    def renew_if_owner(self, key: str, owner: Any, *, ttl_seconds: int) -> bool:
+        try:
+            script = (
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                "return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end"
+            )
+            renewed = bool(
+                self._client.eval(
+                    script,
+                    1,
+                    self._prefixed(key),
+                    self._serialize(owner),
+                    max(1, int(ttl_seconds)),
+                )
+            )
+            if renewed:
+                self._fallback.renew_if_owner(key, owner, ttl_seconds=ttl_seconds)
+            return renewed
+        except Exception as exc:  # pragma: no cover - depends on Redis
+            self._remember_error(exc)
+            logger.warning("redis lease renew failed for %s: %s", key, exc)
+            return self._fallback.renew_if_owner(key, owner, ttl_seconds=ttl_seconds)
+
+    def release_if_owner(self, key: str, owner: Any) -> bool:
+        try:
+            script = (
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                "return redis.call('del', KEYS[1]) else return 0 end"
+            )
+            released = bool(self._client.eval(script, 1, self._prefixed(key), self._serialize(owner)))
+            self._fallback.release_if_owner(key, owner)
+            return released
+        except Exception as exc:  # pragma: no cover - depends on Redis
+            self._remember_error(exc)
+            logger.warning("redis lease release failed for %s: %s", key, exc)
+            return self._fallback.release_if_owner(key, owner)
 
     def delete_prefix(self, prefix: str) -> int:
         deleted = self._fallback.delete_prefix(prefix)

@@ -559,7 +559,7 @@ type FundsCatalogMemoryCache = FundsCatalogPayload & { fetchedAt: number };
 
 const FUNDS_CATALOG_MEMORY_TTL_MS = 5 * 60 * 1000;
 const FUND_REFRESH_POLL_INTERVAL_MS = 2000;
-const FUND_REFRESH_POLL_MAX_MS = 5 * 60 * 1000;
+const FUND_REFRESH_POLL_MAX_MS = 20 * 60 * 1000;
 let fundsCatalogMemoryCache: FundsCatalogMemoryCache | null = null;
 let fundsCatalogInFlight: Promise<FundsCatalogPayload> | null = null;
 
