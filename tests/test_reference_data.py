@@ -87,3 +87,25 @@ def test_reference_data_bootstraps_existing_json_caches(tmp_path) -> None:
     assert result["record_count"] == 2
     assert get_instrument(tmp_path, "fund", "TLY")["name"] == "TERA PORTFÖY BİRİNCİ SERBEST FON"
     assert get_instrument(tmp_path, "stock", "DSTKF")["name"] == "DESTEK FİNANS FAKTORİNG A.Ş."
+
+
+def test_reference_data_deduplicates_batch_keys(tmp_path) -> None:
+    funds_dir = tmp_path / "funds_cache"
+    funds_dir.mkdir()
+    (funds_dir / "funds_latest.json").write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {"fund_code": "TLY", "name": "TLY", "source": "tefasfon_funds"},
+                    {"fund_code": "TLY", "name": "TLY updated", "source": "tefasfon_funds"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = sync_reference_data_from_caches(tmp_path)
+
+    assert result["record_count"] == 2
+    assert result["upserted_count"] == 1
+    assert get_instrument(tmp_path, "fund", "TLY")["name"] == "TLY updated"

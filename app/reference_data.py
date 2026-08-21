@@ -229,13 +229,58 @@ def _merge_record(existing: Optional[sqlite3.Row], incoming: Dict[str, Any]) -> 
     return merged
 
 
+def _merge_normalized_records(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge duplicate records before sending a PostgreSQL batch upsert.
+
+    PostgreSQL rejects a single ``INSERT ... ON CONFLICT DO UPDATE`` statement
+    when its VALUES list contains the same constrained key more than once.
+    Cache bootstrap data can legitimately contain duplicate fund or stock
+    rows, so collapse them in memory first while preserving source priority.
+    """
+
+    existing_priority = _source_priority(existing.get("source"))
+    incoming_priority = _source_priority(incoming.get("source"))
+    incoming_can_override = incoming_priority >= existing_priority
+    merged = dict(incoming)
+    for key in ("name", "short_name", "source_id", "logo_url", "logo_source", "as_of"):
+        existing_value = existing.get(key)
+        incoming_value = incoming.get(key)
+        if existing_value and (not incoming_value or not incoming_can_override):
+            merged[key] = existing_value
+    if existing.get("source") and (not incoming.get("source") or not incoming_can_override):
+        merged["source"] = existing["source"]
+    merged["metadata"] = {
+        **dict(existing.get("metadata") or {}),
+        **dict(incoming.get("metadata") or {}),
+    }
+    merged["aliases"] = list(
+        dict.fromkeys(
+            [
+                *list(existing.get("aliases") or []),
+                *list(incoming.get("aliases") or []),
+            ]
+        )
+    )
+    return merged
+
+
 def upsert_instruments(
     processed_dir: Path,
     records: Iterable[Dict[str, Any]],
     *,
     seed_manual: bool = True,
 ) -> Dict[str, Any]:
-    normalized_records = [item for record in records for item in [_normalize_record(record)] if item]
+    normalized_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for record in records:
+        normalized = _normalize_record(record)
+        if not normalized:
+            continue
+        key = (str(normalized["kind"]), str(normalized["symbol"]))
+        previous = normalized_by_key.get(key)
+        normalized_by_key[key] = (
+            _merge_normalized_records(previous, normalized) if previous else normalized
+        )
+    normalized_records = list(normalized_by_key.values())
     if seed_manual:
         seed_manual_instruments(processed_dir)
     if not normalized_records:
@@ -268,7 +313,7 @@ def upsert_instruments(
                         existing_by_key[(str(existing["kind"]), str(existing["symbol"]))] = existing
 
             instrument_rows: List[tuple[Any, ...]] = []
-            alias_rows: List[tuple[Any, ...]] = []
+            alias_by_key: Dict[str, tuple[Any, ...]] = {}
             for incoming in normalized_records:
                 existing = existing_by_key.get((incoming["kind"], incoming["symbol"]))
                 row = _merge_record(existing, incoming)
@@ -291,7 +336,9 @@ def upsert_instruments(
                     )
                 )
                 for alias in row.get("aliases") or []:
-                    alias_rows.append((alias, row["kind"], row["symbol"], row.get("source"), now))
+                    alias_by_key[str(alias)] = (alias, row["kind"], row["symbol"], row.get("source"), now)
+
+            alias_rows = list(alias_by_key.values())
 
             instrument_insert_sql = """
                 INSERT INTO instruments (
