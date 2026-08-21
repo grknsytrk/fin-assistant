@@ -220,6 +220,7 @@ def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
                 CONFIG.paths.processed_dir,
                 lookback_days=bounded_lookback_days,
                 persist_reference_data=False,
+                backfill_daily_returns=False,
             )
         except TypeError as exc:
             # Keep older test doubles and external adapters compatible while

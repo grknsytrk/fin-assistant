@@ -4704,6 +4704,7 @@ def refresh_funds_snapshot(
     *,
     lookback_days: int = 10,
     persist_reference_data: bool = True,
+    backfill_daily_returns: bool = True,
 ) -> Dict[str, Any]:
     end_date = _latest_fund_snapshot_target_date()
     existing_snapshot = load_funds_snapshot(processed_dir)
@@ -4809,7 +4810,11 @@ def refresh_funds_snapshot(
     if daily_return_overrides:
         snapshot["rows"] = _apply_daily_return_overrides(processed_dir, snapshot["rows"])
         _persist_daily_return_overrides(processed_dir, daily_return_overrides)
-    backfilled = _backfill_daily_returns_from_local_prices(processed_dir, snapshot["rows"])
+    backfilled = (
+        _backfill_daily_returns_from_local_prices(processed_dir, snapshot["rows"])
+        if backfill_daily_returns
+        else 0
+    )
     if backfilled:
         meta = snapshot.setdefault("source_metadata", {})
         meta["daily_return_local_fallback_count"] = backfilled
