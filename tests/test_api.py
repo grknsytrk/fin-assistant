@@ -158,6 +158,123 @@ def test_cache_single_flight_never_runs_duplicate_factory() -> None:
     assert any(status == "miss" for _value, status in results)
 
 
+def test_fund_history_requests_share_one_job_and_widen_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    submitted: List[tuple[Any, ...]] = []
+
+    class FakeExecutor:
+        def submit(self, *args: Any, **kwargs: Any) -> None:
+            submitted.append(args)
+
+    monkeypatch.setattr(api_module, "_FUND_HISTORY_EXECUTOR", FakeExecutor())
+
+    seven_month_job = api_module._history_start_or_extend_job(
+        "THF",
+        start_date=date(2026, 1, 22),
+        end_date=date(2026, 8, 18),
+    )
+    one_year_job = api_module._history_start_or_extend_job(
+        "THF",
+        start_date=date(2025, 8, 22),
+        end_date=date(2026, 8, 18),
+    )
+
+    assert seven_month_job is not None
+    assert one_year_job is not None
+    assert one_year_job["job_id"] == seven_month_job["job_id"]
+    assert one_year_job["requested_start"] == "2025-08-22"
+    assert one_year_job["effective_start"] <= "2025-08-17"
+    assert len(submitted) == 1
+
+    running_job = dict(one_year_job)
+    running_job["status"] = "running"
+    api_module._history_job_set("THF", running_job)
+    three_year_job = api_module._history_start_or_extend_job(
+        "THF",
+        start_date=date(2023, 8, 18),
+        end_date=date(2026, 8, 21),
+    )
+
+    assert three_year_job is not None
+    assert three_year_job["job_id"] == one_year_job["job_id"]
+    assert three_year_job["effective_start"] == "2023-08-18"
+    assert three_year_job["effective_end"] == "2026-08-21"
+    assert three_year_job["extension_requested"] is True
+    assert len(submitted) == 1
+
+
+def test_fund_history_background_job_state_is_friendly_with_existing_points() -> None:
+    payload = {
+        "points": [{"date": "2026-08-18", "price": 10.0}],
+        "source_metadata": {"resolution": "monthly_anchor", "coverage_state": "complete"},
+    }
+    job = {
+        "job_id": "history-1",
+        "fund_code": "THF",
+        "status": "running",
+        "requested_start": "2025-08-22",
+        "requested_end": "2026-08-18",
+    }
+
+    attached = api_module._history_attach_job(payload, job)
+
+    assert attached["points"] == payload["points"]
+    assert attached["source_metadata"]["coverage_state"] == "upgrading"
+    assert attached["source_metadata"]["daily_upgrade_state"] == "pending"
+
+
+def test_fund_performance_returns_local_points_and_queues_background_history_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: List[Dict[str, Any]] = []
+    submitted: List[tuple[Any, ...]] = []
+
+    def fake_performance(processed_dir: Any, fund_code: str, **kwargs: Any) -> Dict[str, Any]:
+        calls.append(kwargs)
+        assert kwargs["auto_refresh"] is False
+        return {
+            "fund_code": fund_code,
+            "status": "ok",
+            "points": [{"date": "2026-08-18", "price": 10.0}],
+            "period_stats": {},
+            "source_metadata": {
+                "resolution": "monthly_anchor",
+                "coverage_state": "complete",
+                "available_start_date": "2025-11-28",
+                "available_end_date": "2026-08-18",
+                "internal_gap_count": 0,
+            },
+        }
+
+    class FakeExecutor:
+        def submit(self, *args: Any, **kwargs: Any) -> None:
+            submitted.append(args)
+
+    monkeypatch.setattr(fund_service_module, "get_fund_performance_payload", fake_performance)
+    monkeypatch.setattr(api_module, "_FUND_HISTORY_EXECUTOR", FakeExecutor())
+
+    response = TestClient(app).get(
+        "/funds/THF/performance",
+        params={"start_date": "2026-01-22", "end_date": "2026-08-18"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["points"][0]["price"] == 10.0
+    assert payload["source_metadata"]["coverage_state"] == "upgrading"
+    assert payload["source_metadata"]["history_job"]["status"] == "queued"
+    assert len(calls) == 1
+    assert len(submitted) == 1
+
+
+def test_single_fund_history_invalidation_clears_versioned_performance_cache() -> None:
+    backend = cache_module.get_cache()
+    backend.set("api:fund-performance:v2:THF:2026-01-22:2026-08-18:fb=0:refresh=0", {"stale": True})
+
+    api_module._invalidate_single_fund_response_cache("THF")
+
+    assert backend.get("api:fund-performance:v2:THF:2026-01-22:2026-08-18:fb=0:refresh=0") is None
+
+
 def test_market_stocks_serves_stale_quote_when_upstream_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     stale_entry = {
         "payload": {"index": "XUTUM", "rows": [{"company": "YKBNK", "price": 25.0}], "benchmarks": {}, "as_of": "old"},

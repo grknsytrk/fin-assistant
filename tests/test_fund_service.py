@@ -840,6 +840,69 @@ def test_fund_history_gap_still_warns_for_real_business_day_gap() -> None:
     ]
 
 
+def test_fund_history_monthly_anchor_is_resolution_not_partial_gap() -> None:
+    points = [
+        {"fund_code": "THF", "date": point_date, "price": float(index + 1)}
+        for index, point_date in enumerate(
+            [
+                "2025-11-28",
+                "2025-12-31",
+                "2026-01-30",
+                "2026-02-27",
+                "2026-03-31",
+                "2026-04-30",
+                "2026-05-29",
+                "2026-06-30",
+                "2026-07-31",
+            ]
+        )
+    ]
+
+    assert fund_service._history_resolution(points) == "monthly_anchor"
+    assert fund_service._history_internal_gap_warnings(points) == []
+
+
+def test_fund_history_mixed_resolution_keeps_real_daily_gap_warning() -> None:
+    points = [
+        {"fund_code": "IIH", "date": point_date, "price": float(index + 1)}
+        for index, point_date in enumerate(
+            [
+                "2026-05-29",
+                "2026-06-30",
+                "2026-07-31",
+                "2026-08-03",
+                "2026-08-10",
+                "2026-08-11",
+            ]
+        )
+    ]
+
+    assert fund_service._history_resolution(points) == "mixed"
+    warnings = fund_service._history_internal_gap_warnings(points)
+    assert len(warnings) == 1
+    assert "previous=2026-08-03, next=2026-08-10" in warnings[0]
+
+
+def test_fund_performance_metadata_exposes_monthly_anchor_resolution(tmp_path) -> None:
+    points = [
+        {"fund_code": "THF", "date": "2026-06-30", "price": 10.0},
+        {"fund_code": "THF", "date": "2026-07-31", "price": 11.0},
+    ]
+
+    payload = fund_service._fund_performance_payload_from_points(
+        tmp_path,
+        "THF",
+        points,
+        start_date=date(2026, 6, 30),
+        end_date=date(2026, 7, 31),
+    )
+
+    metadata = payload["source_metadata"]
+    assert metadata["resolution"] == "monthly_anchor"
+    assert metadata["coverage_state"] == "complete"
+    assert metadata["internal_gap_count"] == 0
+
+
 def test_refresh_funds_snapshot_backfills_daily_return_from_local_prices(monkeypatch, tmp_path) -> None:
     """When TEFAS does not publish a daily return for a fund (typical for
     qualified-investor / TEFAS-closed funds), the snapshot should still pick up

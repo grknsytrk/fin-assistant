@@ -164,6 +164,13 @@ export interface FundSourceMetadata {
   fallback_used?: boolean;
   cached_fallback_points_present?: boolean;
   cached_fallback_point_count?: number | null;
+  coverage_state?: 'complete' | 'range_incomplete' | 'upgrading' | 'unavailable' | string | null;
+  resolution?: 'daily' | 'monthly_anchor' | 'mixed' | 'unknown' | string | null;
+  requested_resolution?: 'daily' | string | null;
+  available_start_date?: string | null;
+  available_end_date?: string | null;
+  daily_upgrade_state?: 'idle' | 'pending' | 'complete' | 'unavailable' | 'failed' | string | null;
+  history_job?: FundHistoryJob | null;
   source_policy?: string | null;
   adapter_version?: string | null;
   holdings_quality?: {
@@ -177,6 +184,27 @@ export interface FundSourceMetadata {
       reason?: string | null;
     } | null;
   } | null;
+}
+
+export type FundHistoryJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'idle';
+
+export interface FundHistoryJob {
+  job_id: string;
+  fund_code: string;
+  requested_start?: string | null;
+  requested_end?: string | null;
+  effective_start?: string | null;
+  effective_end?: string | null;
+  status: FundHistoryJobStatus;
+  requested_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  heartbeat_at?: string | null;
+  error?: string | null;
+  resolution?: string | null;
+  coverage_state?: string | null;
+  daily_upgrade_state?: string | null;
+  phase?: number | null;
 }
 
 export interface FundPeriodReturns {

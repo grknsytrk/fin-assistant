@@ -152,6 +152,7 @@ FUNDS_OVERVIEW_METRIC_MONTHS = int(os.getenv("RAGFIN_FUNDS_OVERVIEW_METRIC_MONTH
 FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS", "10"))
 FUNDS_FAST_LONG_RANGE_DAYS = int(os.getenv("RAGFIN_FUNDS_FAST_LONG_RANGE_DAYS", "120"))
 FUNDS_RECENT_DETAIL_LOOKBACK_DAYS = int(os.getenv("RAGFIN_FUNDS_RECENT_DETAIL_LOOKBACK_DAYS", "35"))
+FUNDS_HISTORY_WARMUP_DAYS = int(os.getenv("RAGFIN_FUNDS_HISTORY_WARMUP_DAYS", "366"))
 FUNDS_FULL_HISTORY_START_DATE = os.getenv("RAGFIN_FUNDS_FULL_HISTORY_START_DATE", "2000-01-01").strip() or "2000-01-01"
 FUNDS_LIST_MIN_AUM = float(os.getenv("RAGFIN_FUNDS_LIST_MIN_AUM", "0"))
 FUND_PRICES_DB_FILENAME = os.getenv("RAGFIN_FUND_PRICES_DB_FILENAME", "fund_prices.sqlite3")
@@ -2414,6 +2415,7 @@ def _history_internal_gap_warnings(
     points: List[Dict[str, Any]],
     *,
     threshold_business_days: int = 3,
+    resolution: Optional[str] = None,
 ) -> List[str]:
     parsed_dates = sorted(
         {
@@ -2423,10 +2425,16 @@ def _history_internal_gap_warnings(
             if point_date
         }
     )
+    resolved_resolution = resolution or _history_resolution(points)
+    if resolved_resolution == "monthly_anchor":
+        return []
+
     warnings: List[str] = []
     for previous, current in zip(parsed_dates, parsed_dates[1:]):
         business_gap = _business_days_between(previous + timedelta(days=1), current - timedelta(days=1))
         if business_gap > threshold_business_days:
+            if resolved_resolution == "mixed" and _is_monthly_anchor_transition(previous, current):
+                continue
             warnings.append(
                 f"Fund history has an internal gap: previous={previous.isoformat()}, "
                 f"next={current.isoformat()}, missing_business_days={business_gap}."
@@ -2434,7 +2442,57 @@ def _history_internal_gap_warnings(
     return warnings
 
 
-def _history_needs_detail_fill(points: List[Dict[str, Any]], start_date: date, end_date: date) -> bool:
+def _is_monthly_anchor_transition(previous: date, current: date) -> bool:
+    """Return whether a long gap looks like an intentional month-end sample.
+
+    The long-range fallback keeps month-end anchors and recent daily points.
+    Month-end-to-month-end gaps are therefore a resolution characteristic,
+    not evidence that the fund lost daily records.
+    """
+
+    if previous.day < 25:
+        return False
+    return current.day >= 25 or current.day <= 7
+
+
+def _history_resolution(points: List[Dict[str, Any]]) -> str:
+    """Classify the stored series without treating sampling as data loss."""
+
+    parsed_dates = sorted(
+        {
+            date.fromisoformat(point_date)
+            for point in points
+            for point_date in [_fund_date(point.get("date"))]
+            if point_date
+        }
+    )
+    if len(parsed_dates) < 2:
+        return "unknown"
+
+    large_gaps = []
+    monthly_anchor_gaps = []
+    for previous, current in zip(parsed_dates, parsed_dates[1:]):
+        business_gap = _business_days_between(previous + timedelta(days=1), current - timedelta(days=1))
+        if business_gap <= 3:
+            continue
+        large_gaps.append((previous, current))
+        if _is_monthly_anchor_transition(previous, current):
+            monthly_anchor_gaps.append((previous, current))
+
+    if large_gaps and len(monthly_anchor_gaps) == len(large_gaps):
+        return "monthly_anchor"
+    if monthly_anchor_gaps:
+        return "mixed"
+    return "daily"
+
+
+def _history_needs_detail_fill(
+    points: List[Dict[str, Any]],
+    start_date: date,
+    end_date: date,
+    *,
+    resolution: Optional[str] = None,
+) -> bool:
     if not points:
         return True
     parsed_dates = [
@@ -2447,10 +2505,13 @@ def _history_needs_detail_fill(points: List[Dict[str, Any]], start_date: date, e
         return True
     if min(parsed_dates) > start_date and _business_days_between(start_date, min(parsed_dates) - timedelta(days=1)) > 3:
         return True
+    resolved_resolution = resolution or _history_resolution(points)
+    if resolved_resolution == "monthly_anchor":
+        return False
     coverage = _history_coverage_info(points, end_date)
     if coverage.get("coverage_gap_business_days") and int(coverage["coverage_gap_business_days"]) > 3:
         return True
-    return bool(_history_internal_gap_warnings(points))
+    return bool(_history_internal_gap_warnings(points, resolution=resolved_resolution))
 
 
 def _dedupe_price_points(points: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -5766,6 +5827,8 @@ def _fund_performance_payload_from_points(
     recent_detail_backfill: Optional[Dict[str, Any]] = None,
     overview_metric_backfill: Optional[Dict[str, Any]] = None,
     full_history_requested: bool = False,
+    history_job: Optional[Dict[str, Any]] = None,
+    requested_resolution: str = "daily",
 ) -> Dict[str, Any]:
     ordered = _valid_performance_points(points, normalized_code)
     latest_point_date = ordered[-1]["date"] if ordered else None
@@ -5778,10 +5841,36 @@ def _fund_performance_payload_from_points(
     effective_end = end_date or (date.fromisoformat(latest_point_date) if latest_point_date else date.today())
     coverage = _history_coverage_info(ordered, effective_end)
     coverage_warnings = list(coverage.get("warnings") or [])
-    internal_gap_warnings = _history_internal_gap_warnings(ordered)
+    resolution = _history_resolution(ordered)
+    internal_gap_warnings = _history_internal_gap_warnings(ordered, resolution=resolution)
     all_warnings = list(warnings or []) + coverage_warnings + internal_gap_warnings
     date_min = ordered[0]["date"] if ordered else None
     date_max = ordered[-1]["date"] if ordered else None
+    coverage_state = "complete"
+    if ordered:
+        first_date = date.fromisoformat(date_min) if date_min else None
+        start_gap = (
+            _business_days_between(start_date, first_date - timedelta(days=1))
+            if start_date and first_date and first_date > start_date
+            else 0
+        )
+        # A late tail is a refresh/freshness concern, not evidence that the
+        # fund's historical range starts later. The API can expose the local
+        # points immediately while its background job fills that tail.
+        if start_gap > 3:
+            coverage_state = "range_incomplete"
+    else:
+        coverage_state = "unavailable"
+    daily_upgrade_state = "idle"
+    if history_job:
+        job_status = str(history_job.get("status") or "").strip().lower()
+        if job_status in {"queued", "running"} and resolution != "daily":
+            coverage_state = "upgrading" if coverage_state == "complete" else coverage_state
+            daily_upgrade_state = "pending"
+        elif job_status == "succeeded" and resolution != "daily":
+            daily_upgrade_state = "unavailable"
+        elif job_status == "failed":
+            daily_upgrade_state = "failed"
     history_source_used = _dominant_price_source(ordered) or TEFASFON_FUNDS_SOURCE
     fallback_point_count = sum(
         1
@@ -5813,6 +5902,12 @@ def _fund_performance_payload_from_points(
         "date_max": date_max,
         "backfill_used": backfill_used,
         "full_history_requested": bool(full_history_requested),
+        "coverage_state": coverage_state,
+        "resolution": resolution,
+        "requested_resolution": requested_resolution,
+        "available_start_date": date_min,
+        "available_end_date": date_max,
+        "daily_upgrade_state": daily_upgrade_state,
         "latest_point_date": coverage.get("latest_point_date"),
         "coverage_gap_days": coverage.get("coverage_gap_days"),
         "coverage_gap_business_days": coverage.get("coverage_gap_business_days"),
@@ -5836,6 +5931,8 @@ def _fund_performance_payload_from_points(
         metadata["recent_detail_backfill"] = recent_detail_backfill
     if overview_metric_backfill is not None:
         metadata["overview_metric_backfill"] = overview_metric_backfill
+    if history_job is not None:
+        metadata["history_job"] = history_job
 
     return {
         "fund_code": normalized_code,
@@ -5869,7 +5966,8 @@ def _has_requested_price_coverage(
     if start_date and min(parsed_dates) > start_date:
         if _business_days_between(start_date, min(parsed_dates) - timedelta(days=1)) > 3:
             return False
-    if _history_internal_gap_warnings(points):
+    resolution = _history_resolution(points)
+    if _history_internal_gap_warnings(points, resolution=resolution):
         return False
     if end_date:
         latest = max(parsed_dates)
@@ -6865,6 +6963,8 @@ def get_fund_performance_payload(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     allow_upstream_fallback: bool = False,
+    auto_refresh: bool = True,
+    history_job: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized = normalize_fund_code(fund_code)
     full_history_requested = start_date is None and end_date is None
@@ -6899,7 +6999,7 @@ def get_fund_performance_payload(
         start_date=query_start,
         end_date=effective_end,
     )
-    if not has_requested_coverage:
+    if auto_refresh and not has_requested_coverage:
         auto_fetch_attempted = True
         auto_warnings = _auto_refresh_fund_performance(
             processed_dir,
@@ -6914,7 +7014,7 @@ def get_fund_performance_payload(
             start_date=query_start,
             end_date=query_end,
         )
-    elif _needs_recent_tail_refresh(points, end_date=effective_end):
+    elif auto_refresh and _needs_recent_tail_refresh(points, end_date=effective_end):
         latest_point_date = _latest_fund_point_date(points)
         if latest_point_date is not None:
             auto_fetch_attempted = True
@@ -6935,7 +7035,7 @@ def get_fund_performance_payload(
 
     recent_detail_backfill: Optional[Dict[str, Any]] = None
     recent_detail_backfill_attempted = False
-    if points:
+    if auto_refresh and points:
         recent_detail_backfill = _auto_refresh_fund_recent_details(
             processed_dir,
             normalized,
@@ -6954,7 +7054,7 @@ def get_fund_performance_payload(
 
     overview_metric_backfill: Optional[Dict[str, Any]] = None
     overview_metric_backfill_attempted = False
-    if points and not (auto_fetch_attempted and not full_history_requested):
+    if auto_refresh and points and not (auto_fetch_attempted and not full_history_requested):
         overview_targets = (
             None
             if full_history_requested
@@ -7015,6 +7115,13 @@ def get_fund_performance_payload(
                 "auto_fetch_attempted": auto_fetch_attempted,
                 "recent_detail_backfill": recent_detail_backfill,
                 "overview_metric_backfill": overview_metric_backfill,
+                "coverage_state": "unavailable",
+                "resolution": "unknown",
+                "requested_resolution": "daily",
+                "available_start_date": None,
+                "available_end_date": None,
+                "daily_upgrade_state": "failed" if history_job and history_job.get("status") == "failed" else "idle",
+                "history_job": history_job,
             },
         }
     dominant_source = _dominant_price_source(points)
@@ -7053,6 +7160,7 @@ def get_fund_performance_payload(
         recent_detail_backfill=recent_detail_backfill,
         overview_metric_backfill=overview_metric_backfill,
         full_history_requested=full_history_requested,
+        history_job=history_job,
     )
 
 

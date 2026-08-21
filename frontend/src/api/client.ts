@@ -23,6 +23,7 @@ import type {
     FundAllocationsHistoryResponse,
     FundCategoriesResponse,
     FundDetail,
+    FundHistoryJob,
     FundHoldingsLiveResponse,
     FundHoldingsResponse,
     FundPerformanceResponse,
@@ -348,13 +349,23 @@ export const apiClient = {
             timeoutMs: 30000,
             exposeErrorDetail: true,
         }),
-    fundPerformance: (fundCode: string, options?: { startDate?: string; endDate?: string }) => {
+    fundPerformance: (fundCode: string, options?: { startDate?: string; endDate?: string; refresh?: boolean }) => {
+        const params = new URLSearchParams();
+        if (options?.startDate) params.append('start_date', options.startDate);
+        if (options?.endDate) params.append('end_date', options.endDate);
+        if (options?.refresh) params.append('refresh', 'true');
+        const query = params.toString();
+        return fetchApi<FundPerformanceResponse>(
+            `/funds/${encodeURIComponent(fundCode)}/performance${query ? `?${query}` : ''}`,
+        );
+    },
+    fundPerformanceStatus: (fundCode: string, options?: { startDate?: string; endDate?: string }) => {
         const params = new URLSearchParams();
         if (options?.startDate) params.append('start_date', options.startDate);
         if (options?.endDate) params.append('end_date', options.endDate);
         const query = params.toString();
-        return fetchApi<FundPerformanceResponse>(
-            `/funds/${encodeURIComponent(fundCode)}/performance${query ? `?${query}` : ''}`,
+        return fetchApi<{ fund_code: string; status: FundHistoryJob['status']; history_job: FundHistoryJob | null }>(
+            `/funds/${encodeURIComponent(fundCode)}/performance/status${query ? `?${query}` : ''}`,
         );
     },
     refreshFundPerformance: (fundCode: string, startDate: string, endDate?: string) => {

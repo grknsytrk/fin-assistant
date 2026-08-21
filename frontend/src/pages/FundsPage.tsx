@@ -111,7 +111,9 @@ type FundHistorySubtab = 'prices' | 'allocation';
 
 const FUND_HOLDINGS_LIVE_REFRESH_MS = 3000;
 const FUND_HOLDINGS_LIVE_FLASH_MS = 900;
-const FUND_INITIAL_PERFORMANCE_MONTHS = 7;
+// The first chart view is six months. The backend may still warm the shared
+// history job up to one year, but that wider fetch must not change the UI range.
+const FUND_INITIAL_PERFORMANCE_MONTHS = 6;
 
 const FUND_HISTORY_TABS: Array<{ key: FundHistorySubtab; label: string; icon: typeof LineChart }> = [
     { key: 'prices', label: 'Fiyat / Yatırımcı', icon: LineChart },
@@ -5144,6 +5146,7 @@ export default function FundsPage({
     const [refreshError, setRefreshError] = useState<string | null>(null);
     const [detailError, setDetailError] = useState<string | null>(null);
     const [performanceError, setPerformanceError] = useState<string | null>(null);
+    const [historyBackfillError, setHistoryBackfillError] = useState<string | null>(null);
     const [yieldError, setYieldError] = useState<string | null>(null);
     const [holdingsError, setHoldingsError] = useState<string | null>(null);
     const [historySubtab, setHistorySubtab] = useState<FundHistorySubtab>('prices');
@@ -5166,7 +5169,6 @@ export default function FundsPage({
     const allocationRefreshAttemptedRef = useRef(new Set<string>());
     const comparisonPanelRef = useRef<HTMLDivElement | null>(null);
     const fundsPageRef = useRef<HTMLDivElement | null>(null);
-    const heatmapFetchKeyRef = useRef<string | null>(null);
     const [comparisonHistory, setComparisonHistory] = useState<MarketComparisonHistoryResponse | null>(null);
     const [comparisonHistoryLoading, setComparisonHistoryLoading] = useState(false);
     const [comparisonHistoryError, setComparisonHistoryError] = useState<string | null>(null);
@@ -5406,7 +5408,6 @@ export default function FundsPage({
         setCustomStartDate(isoDateMonthsAgo(6));
         setCustomEndDate(new Date().toISOString().slice(0, 10));
         setHeatmapPerformance(null);
-        heatmapFetchKeyRef.current = null;
         setHoldings(null);
         setHoldingsError(null);
         setHoldingsLoading(true);
@@ -5419,14 +5420,15 @@ export default function FundsPage({
         if (!fundCode) {
             setPerformance(null);
             setHeatmapPerformance(null);
-            heatmapFetchKeyRef.current = null;
             setPerformanceError(null);
+            setHistoryBackfillError(null);
             return;
         }
         let alive = true;
         const normalizedCode = fundCode.trim().toUpperCase();
         setPerformanceLoading(true);
         setPerformanceError(null);
+        setHistoryBackfillError(null);
         apiClient
             .fundPerformance(normalizedCode, { startDate: isoDateMonthsAgo(FUND_INITIAL_PERFORMANCE_MONTHS) })
             .then((payload) => {
@@ -5449,32 +5451,94 @@ export default function FundsPage({
     useEffect(() => {
         if (!fundCode) {
             setHeatmapPerformance(null);
-            heatmapFetchKeyRef.current = null;
             return;
         }
-        if (hasFullHistoryPerformance(performance)) {
-            setHeatmapPerformance(performance);
+        // The performance endpoint now coalesces the requested range into one
+        // per-fund background job. A second full-history request here would
+        // only duplicate the old backfill race, so the heatmap follows the
+        // same response until the job publishes a newer one.
+        setHeatmapPerformance(performance);
+    }, [fundCode, performance]);
+
+    const historyJob = performance?.source_metadata?.history_job || null;
+    const historyJobId = historyJob?.job_id || null;
+
+    useEffect(() => {
+        if (!fundCode || !historyJob || !historyJobId || !['queued', 'running'].includes(historyJob.status)) {
             return;
         }
-        if (!performance) return;
         const normalizedCode = fundCode.trim().toUpperCase();
-        if (!normalizedCode || heatmapFetchKeyRef.current === normalizedCode) return;
-        heatmapFetchKeyRef.current = normalizedCode;
+        const requestedStart = historyJob.requested_start || performance?.source_metadata?.requested_start_date || undefined;
+        const requestedEnd = historyJob.requested_end || performance?.source_metadata?.requested_end_date || undefined;
+        const deadline = Date.now() + 120_000;
         let alive = true;
-        apiClient
-            .fundPerformance(normalizedCode)
-            .then((payload) => {
+        let timer: number | null = null;
+        let inFlight = false;
+        let continuePolling = true;
+
+        const schedule = () => {
+            if (alive && continuePolling) timer = window.setTimeout(poll, 2000);
+        };
+        const poll = async () => {
+            if (!alive || inFlight) return;
+            if (Date.now() >= deadline) {
+                setHistoryBackfillError('Günlük geçmiş hazırlaması zaman aşımına uğradı; mevcut veriler gösteriliyor.');
+                continuePolling = false;
+                return;
+            }
+            if (document.visibilityState !== 'visible') {
+                schedule();
+                return;
+            }
+            inFlight = true;
+            try {
+                const status = await apiClient.fundPerformanceStatus(normalizedCode, {
+                    startDate: requestedStart,
+                    endDate: requestedEnd,
+                });
+                const job = status.history_job;
                 if (!alive) return;
-                setHeatmapPerformance(payload);
-            })
-            .catch(() => {
-                if (!alive) return;
-                heatmapFetchKeyRef.current = null;
-            });
+                if (!job) {
+                    continuePolling = false;
+                    return;
+                }
+                if (!['queued', 'running'].includes(job.status)) {
+                    continuePolling = false;
+                    if (job?.status === 'succeeded') {
+                        const refreshed = await apiClient.fundPerformance(normalizedCode, {
+                            startDate: requestedStart,
+                            endDate: requestedEnd,
+                            refresh: true,
+                        });
+                        if (!alive) return;
+                        setPerformance(refreshed);
+                        setHeatmapPerformance(refreshed);
+                        setHistoryBackfillError(null);
+                    } else if (job?.status === 'failed') {
+                        setHistoryBackfillError('Günlük geçmiş alınamadı; mevcut veriler gösteriliyor.');
+                    }
+                    return;
+                }
+            } catch {
+                // A transient status failure should not erase the chart or
+                // turn a healthy partial series into an error state.
+            } finally {
+                inFlight = false;
+                schedule();
+            }
+        };
+
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') void poll();
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        void poll();
         return () => {
             alive = false;
+            if (timer !== null) window.clearTimeout(timer);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
         };
-    }, [fundCode, performance]);
+    }, [fundCode, historyJob, historyJobId, performance?.source_metadata?.requested_end_date, performance?.source_metadata?.requested_start_date]);
 
     useEffect(() => {
         if (!fundCode) {
@@ -5733,18 +5797,34 @@ export default function FundsPage({
     }, [comparisonAssetRequestKey, comparisonChartEndDate, comparisonChartStartDate, pendingChartRange]);
     const detailSourceWarnings = useMemo(() => {
         if (!fundCode) return [];
+        const historyMetadata = performance?.source_metadata;
+        const userHistoryWarnings: string[] = [];
+        if (historyMetadata?.coverage_state === 'range_incomplete' && historyMetadata.available_start_date) {
+            userHistoryWarnings.push(
+                `Bu fon için kullanılabilir geçmiş ${formatDate(historyMetadata.available_start_date)} tarihinden başlıyor.`,
+            );
+        }
+        if (historyMetadata?.coverage_state === 'upgrading') {
+            userHistoryWarnings.push('Mevcut geçmiş gösteriliyor; günlük ayrıntılar arka planda hazırlanıyor.');
+        }
+        if (historyBackfillError) userHistoryWarnings.push(historyBackfillError);
+        const technicalHistoryWarnings = (performance?.source_metadata?.warnings || [])
+            .filter((warning) => !/(internal gap|auto fetch|tefas|fintables|waf|cloudflare|upstream|coverage gap|missing_business_days|already in progress)/i.test(warning));
         const warnings = [
             performanceError,
             yieldError,
             performanceLoading && !performance ? 'Grafik verisi TEFAS üzerinden yükleniyor.' : null,
             yieldLoading && !yieldSummary ? 'Getiri özeti TEFAS üzerinden yükleniyor.' : null,
-            ...(performance?.source_metadata?.warnings || []),
-            performance?.source_metadata?.warning,
+            ...userHistoryWarnings,
+            ...technicalHistoryWarnings,
+            performance?.source_metadata?.warning && !/(internal gap|auto fetch|tefas|fintables|waf|cloudflare|upstream|coverage gap|missing_business_days|already in progress)/i.test(performance.source_metadata.warning)
+                ? performance.source_metadata.warning
+                : null,
             ...(yieldSummary?.source_metadata?.warnings || []),
             yieldSummary?.source_metadata?.warning,
         ];
         return Array.from(new Set(warnings.filter((item): item is string => Boolean(item))));
-    }, [fundCode, performance, performanceError, performanceLoading, yieldError, yieldLoading, yieldSummary]);
+    }, [fundCode, historyBackfillError, performance, performanceError, performanceLoading, yieldError, yieldLoading, yieldSummary]);
     const visibleFundTypes = categories?.fund_types.length ? categories.fund_types : Array.from(new Set((funds?.rows || []).map((row) => row.fund_type).filter(Boolean))) as string[];
     const visibleRiskValues = categories?.risk_values.length ? categories.risk_values : Array.from(new Set((funds?.rows || []).map((row) => row.risk_value).filter((value): value is number => typeof value === 'number'))).sort((a, b) => a - b);
     const activeRefreshJob = isActiveFundRefreshJob(refreshJob);
@@ -6257,6 +6337,8 @@ export default function FundsPage({
                                             {historySubtab === 'prices' ? (
                                                 performanceLoading && !performancePoints.length ? (
                                                     <FinLoader message="Geçmiş fiyat verisi yükleniyor" />
+                                                ) : historyJob && ['queued', 'running'].includes(historyJob.status) && !performancePoints.length ? (
+                                                    <FinLoader message="Geçmiş veriler arka planda hazırlanıyor" />
                                                 ) : performanceError ? (
                                                     <div className="funds-state funds-state-error">{performanceError}</div>
                                                 ) : performancePoints.length ? (

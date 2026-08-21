@@ -87,7 +87,20 @@ _FUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="fund-snapshot-refresh",
 )
+_FUND_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="fund-history-backfill",
+)
 _FUND_REFRESH_STATE_LOCK = threading.Lock()
+_FUND_HISTORY_STATE_LOCK = threading.Lock()
+_FUND_HISTORY_JOB_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_HISTORY_JOB_TTL_SECONDS", str(30 * 60)))
+_FUND_HISTORY_WARMUP_DAYS = int(os.getenv("RAGFIN_FUNDS_HISTORY_WARMUP_DAYS", "366"))
+_FUND_HISTORY_LEASE_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_HISTORY_LEASE_TTL_SECONDS", "120"))
+_FUND_HISTORY_HEARTBEAT_INTERVAL_SECONDS = float(
+    os.getenv("RAGFIN_FUND_HISTORY_HEARTBEAT_INTERVAL_SECONDS", "30")
+)
+_FUND_HISTORY_MAX_PHASES = int(os.getenv("RAGFIN_FUND_HISTORY_MAX_PHASES", "2"))
+_FUND_HISTORY_KEY_VERSION = 2
 _ADMIN_REFRESH_TOKEN_ENV = "RAGFIN_ADMIN_REFRESH_TOKEN"
 _MARKET_UNIVERSE_CACHE_TTL = int(
     os.getenv("RAGFIN_MARKET_UNIVERSE_CACHE_TTL_SECONDS", str(6 * 60 * 60))
@@ -1139,12 +1152,371 @@ def _funds_categories_payload() -> Dict[str, Any]:
     return get_fund_categories_payload(CONFIG.paths.processed_dir)
 
 
+def _history_job_key(fund_code: str, job_id: str) -> str:
+    return f"api:fund-history:job:v{_FUND_HISTORY_KEY_VERSION}:{fund_code}:{job_id}"
+
+
+def _history_active_key(fund_code: str) -> str:
+    return f"api:fund-history:active:v{_FUND_HISTORY_KEY_VERSION}:{fund_code}"
+
+
+def _history_last_key(fund_code: str) -> str:
+    return f"api:fund-history:last:v{_FUND_HISTORY_KEY_VERSION}:{fund_code}"
+
+
+def _history_job_get(fund_code: str, job_id: str) -> Optional[Dict[str, Any]]:
+    value = _get_cache().get(_history_job_key(fund_code, job_id))
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _history_job_set(fund_code: str, job: Dict[str, Any]) -> None:
+    _get_cache().set(
+        _history_job_key(fund_code, str(job["job_id"])),
+        job,
+        ttl_seconds=_FUND_HISTORY_JOB_TTL_SECONDS,
+    )
+
+
+def _history_job_public(job: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not job:
+        return None
+    return {
+        key: job.get(key)
+        for key in (
+            "job_id",
+            "fund_code",
+            "requested_start",
+            "requested_end",
+            "effective_start",
+            "effective_end",
+            "status",
+            "requested_at",
+            "started_at",
+            "finished_at",
+            "heartbeat_at",
+            "error",
+            "resolution",
+            "coverage_state",
+            "daily_upgrade_state",
+            "phase",
+        )
+        if key in job
+    }
+
+
+def _history_job_date(value: Any) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _history_request_range(
+    start_date: Optional[date],
+    end_date: Optional[date],
+) -> Dict[str, Any]:
+    from app.fund_service import _fund_full_history_start_date
+
+    effective_end = end_date or date.today()
+    full_history = start_date is None and end_date is None
+    requested_start = start_date or _fund_full_history_start_date()
+    warmup_start = effective_end - timedelta(days=max(1, _FUND_HISTORY_WARMUP_DAYS))
+    effective_start = requested_start if full_history else min(requested_start, warmup_start)
+    return {
+        "requested_start": requested_start,
+        "requested_end": effective_end,
+        "effective_start": effective_start,
+        "effective_end": effective_end,
+        "full_history": full_history,
+    }
+
+
+def _history_job_covers(job: Dict[str, Any], target: Dict[str, Any]) -> bool:
+    job_start = _history_job_date(job.get("effective_start"))
+    job_end = _history_job_date(job.get("effective_end"))
+    return bool(
+        job_start
+        and job_end
+        and job_start <= target["requested_start"]
+        and job_end >= target["requested_end"]
+    )
+
+
+def _history_job_should_schedule(
+    payload: Dict[str, Any],
+    *,
+    last_job: Optional[Dict[str, Any]],
+    target: Dict[str, Any],
+) -> bool:
+    metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+    points = payload.get("points") if isinstance(payload.get("points"), list) else []
+    if not points:
+        return True
+    last_point = _history_job_date(metadata.get("available_end_date") or metadata.get("date_max"))
+    if last_point and last_point < target["requested_end"]:
+        from app.fund_service import _business_days_between
+
+        if _business_days_between(last_point + timedelta(days=1), target["requested_end"]) > 0:
+            return not (last_job and _history_job_covers(last_job, target))
+    if str(metadata.get("coverage_state") or "") == "range_incomplete":
+        return not (last_job and _history_job_covers(last_job, target))
+    if int(metadata.get("internal_gap_count") or 0) > 0:
+        return not (last_job and _history_job_covers(last_job, target))
+    resolution = str(metadata.get("resolution") or "unknown")
+    if resolution != "daily":
+        if last_job and _history_job_covers(last_job, target):
+            return str(last_job.get("daily_upgrade_state") or "") not in {"unavailable", "failed"}
+        return True
+    return False
+
+
+def _history_attach_job(payload: Dict[str, Any], job: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not job:
+        return payload
+    attached = dict(payload)
+    metadata = dict(attached.get("source_metadata") or {})
+    public_job = _history_job_public(job)
+    metadata["history_job"] = public_job
+    points = attached.get("points") if isinstance(attached.get("points"), list) else []
+    status = str(job.get("status") or "").lower()
+    resolution = str(metadata.get("resolution") or "unknown")
+    if status in {"queued", "running"}:
+        if points and resolution != "daily":
+            if metadata.get("coverage_state") == "complete":
+                metadata["coverage_state"] = "upgrading"
+        elif not points:
+            metadata["coverage_state"] = "upgrading"
+        metadata["daily_upgrade_state"] = "pending"
+    elif status == "failed":
+        metadata["daily_upgrade_state"] = "failed"
+    attached["source_metadata"] = metadata
+    return attached
+
+
+def _history_find_existing_job(fund_code: str, target: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    backend = _get_cache()
+    active_id = backend.get(_history_active_key(fund_code))
+    if isinstance(active_id, dict):
+        active_id = active_id.get("job_id")
+    if active_id:
+        active = _history_job_get(fund_code, str(active_id))
+        if active and str(active.get("status") or "") in {"queued", "running"}:
+            return active
+        try:
+            backend.delete(_history_active_key(fund_code))
+        except Exception:
+            pass
+    last = backend.get(_history_last_key(fund_code))
+    if isinstance(last, dict) and _history_job_covers(last, target):
+        return dict(last)
+    return None
+
+
+def _history_merge_target(job: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
+    for field, chooser in (
+        ("requested_start", min),
+        ("effective_start", min),
+    ):
+        existing = _history_job_date(job.get(field))
+        value = chooser(existing, target[field]) if existing else target[field]
+        job[field] = value.isoformat()
+    for field, chooser in (
+        ("requested_end", max),
+        ("effective_end", max),
+    ):
+        existing = _history_job_date(job.get(field))
+        value = chooser(existing, target[field]) if existing else target[field]
+        job[field] = value.isoformat()
+    return job
+
+
+def _history_start_or_extend_job(
+    fund_code: str,
+    *,
+    start_date: Optional[date],
+    end_date: Optional[date],
+) -> Optional[Dict[str, Any]]:
+    normalized = str(fund_code or "").strip().upper()
+    if not normalized:
+        return None
+    target = _history_request_range(start_date, end_date)
+    backend = _get_cache()
+    job: Optional[Dict[str, Any]] = None
+    submit = False
+    with backend.lock(f"fund-history-state:{normalized}", timeout=5.0) as acquired:
+        if not acquired:
+            job = _history_find_existing_job(normalized, target)
+        else:
+            existing = _history_find_existing_job(normalized, target)
+            if existing and str(existing.get("status") or "") in {"queued", "running"}:
+                previous_start = _history_job_date(existing.get("effective_start"))
+                previous_end = _history_job_date(existing.get("effective_end"))
+                job = _history_merge_target(existing, target)
+                if str(job.get("status")) == "running" and (
+                    (previous_start and target["effective_start"] < previous_start)
+                    or (previous_end and target["effective_end"] > previous_end)
+                ):
+                    job["extension_requested"] = True
+                _history_job_set(normalized, job)
+            elif existing and _history_job_covers(existing, target):
+                job = existing
+            else:
+                now = _fund_refresh_now_iso()
+                job = {
+                    "job_id": uuid.uuid4().hex,
+                    "fund_code": normalized,
+                    "requested_start": target["requested_start"].isoformat(),
+                    "requested_end": target["requested_end"].isoformat(),
+                    "effective_start": target["effective_start"].isoformat(),
+                    "effective_end": target["effective_end"].isoformat(),
+                    "status": "queued",
+                    "requested_at": now,
+                    "started_at": None,
+                    "finished_at": None,
+                    "heartbeat_at": None,
+                    "error": None,
+                    "phase": 0,
+                }
+                _history_job_set(normalized, job)
+                backend.set(_history_active_key(normalized), job["job_id"], ttl_seconds=_FUND_HISTORY_JOB_TTL_SECONDS)
+                submit = True
+    if submit and job:
+        try:
+            _FUND_HISTORY_EXECUTOR.submit(_run_fund_history_job, normalized, str(job["job_id"]))
+        except Exception as exc:
+            job["status"] = "failed"
+            job["finished_at"] = _fund_refresh_now_iso()
+            job["error"] = f"history worker could not start: {exc}"
+            _history_job_set(normalized, job)
+    return job
+
+
+def _history_job_owned(backend: Any, lease_key: str, owner_token: str) -> bool:
+    return backend.get(lease_key) == owner_token
+
+
+def _run_fund_history_job(fund_code: str, job_id: str) -> None:
+    from app.fund_service import FundUpstreamError, get_fund_performance_payload, normalize_fund_code, refresh_fund_performance
+
+    normalized = normalize_fund_code(fund_code)
+    job = _history_job_get(normalized, job_id)
+    if not job:
+        return
+    backend = _get_cache()
+    lease_key = f"api:fund-history:lease:v{_FUND_HISTORY_KEY_VERSION}:{normalized}"
+    owner_token = uuid.uuid4().hex
+    if not backend.set_if_absent(lease_key, owner_token, ttl_seconds=_FUND_HISTORY_LEASE_TTL_SECONDS):
+        job["status"] = "failed"
+        job["finished_at"] = _fund_refresh_now_iso()
+        job["error"] = "history job lease is already owned"
+        _history_job_set(normalized, job)
+        return
+
+    heartbeat_stop = threading.Event()
+    lease_lost = threading.Event()
+
+    def heartbeat() -> None:
+        while not heartbeat_stop.wait(max(1.0, _FUND_HISTORY_HEARTBEAT_INTERVAL_SECONDS)):
+            try:
+                renewed = backend.renew_if_owner(
+                    lease_key,
+                    owner_token,
+                    ttl_seconds=_FUND_HISTORY_LEASE_TTL_SECONDS,
+                )
+            except Exception:
+                renewed = False
+            if not renewed:
+                lease_lost.set()
+                return
+
+    heartbeat_thread = threading.Thread(target=heartbeat, name=f"fund-history-heartbeat-{normalized}", daemon=True)
+    heartbeat_thread.start()
+    try:
+        job["status"] = "running"
+        job["started_at"] = job.get("started_at") or _fund_refresh_now_iso()
+        job["heartbeat_at"] = _fund_refresh_now_iso()
+        _history_job_set(normalized, job)
+        for phase in range(max(1, _FUND_HISTORY_MAX_PHASES)):
+            current = _history_job_get(normalized, job_id) or job
+            phase_start = _history_job_date(current.get("effective_start"))
+            phase_end = _history_job_date(current.get("effective_end"))
+            if not phase_start or not phase_end:
+                raise FundUpstreamError("history job range is invalid")
+            current["phase"] = phase + 1
+            current["heartbeat_at"] = _fund_refresh_now_iso()
+            _history_job_set(normalized, current)
+            refresh_fund_performance(
+                CONFIG.paths.processed_dir,
+                normalized,
+                start_date=phase_start,
+                end_date=phase_end,
+                prefer_fast_long_range=(phase_end - phase_start).days > 120,
+            )
+            if lease_lost.is_set() or not _history_job_owned(backend, lease_key, owner_token):
+                raise FundUpstreamError("history job lease was lost before commit")
+            latest = _history_job_get(normalized, job_id) or current
+            latest_start = _history_job_date(latest.get("effective_start"))
+            latest_end = _history_job_date(latest.get("effective_end"))
+            range_widened = bool(
+                (latest_start and latest_start < phase_start)
+                or (latest_end and latest_end > phase_end)
+            )
+            if phase + 1 < max(1, _FUND_HISTORY_MAX_PHASES) and range_widened:
+                continue
+            result = get_fund_performance_payload(
+                CONFIG.paths.processed_dir,
+                normalized,
+                start_date=phase_start,
+                end_date=phase_end,
+                auto_refresh=False,
+            )
+            metadata = result.get("source_metadata") if isinstance(result.get("source_metadata"), dict) else {}
+            latest.update(
+                {
+                    "status": "succeeded",
+                    "finished_at": _fund_refresh_now_iso(),
+                    "heartbeat_at": _fund_refresh_now_iso(),
+                    "resolution": metadata.get("resolution"),
+                    "coverage_state": metadata.get("coverage_state"),
+                    "daily_upgrade_state": "unavailable" if metadata.get("resolution") != "daily" else "complete",
+                    "error": None,
+                }
+            )
+            _invalidate_single_fund_response_cache(normalized)
+            _history_job_set(normalized, latest)
+            backend.set(_history_last_key(normalized), latest, ttl_seconds=_FUND_HISTORY_JOB_TTL_SECONDS)
+            return
+    except Exception as exc:
+        failed = _history_job_get(normalized, job_id) or job
+        failed.update(
+            {
+                "status": "failed",
+                "finished_at": _fund_refresh_now_iso(),
+                "error": str(exc),
+                "daily_upgrade_state": "failed",
+            }
+        )
+        _history_job_set(normalized, failed)
+        backend.set(_history_last_key(normalized), failed, ttl_seconds=_FUND_HISTORY_JOB_TTL_SECONDS)
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=max(1.0, _FUND_HISTORY_HEARTBEAT_INTERVAL_SECONDS))
+        try:
+            backend.release_if_owner(lease_key, owner_token)
+        except Exception:
+            pass
+        active = backend.get(_history_active_key(normalized))
+        if active == job_id:
+            backend.delete(_history_active_key(normalized))
+
+
 @app.get("/funds/{fund_code}/performance")
 def fund_performance(
     fund_code: str,
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None),
     fallback: bool = Query(False),
+    refresh: bool = Query(False),
 ) -> Dict[str, Any]:
     if start_date and end_date and start_date > end_date:
         raise HTTPException(status_code=400, detail="start_date end_date sonrasinda olamaz")
@@ -1153,15 +1525,17 @@ def fund_performance(
         start_iso=start_date.isoformat() if start_date else None,
         end_iso=end_date.isoformat() if end_date else None,
         fallback=fallback,
+        refresh=refresh,
     )
 
 
 @_cached_response(
-    key_fn=lambda *, fund_code, start_iso, end_iso, fallback: (
-        f"api:fund-performance:{fund_code}:{start_iso or 'full'}:{end_iso or 'today'}"
-        f":fb={1 if fallback else 0}"
+    key_fn=lambda *, fund_code, start_iso, end_iso, fallback, refresh: (
+        f"api:fund-performance:v{_FUND_HISTORY_KEY_VERSION}:{fund_code}:{start_iso or 'full'}:{end_iso or 'today'}"
+        f":fb={1 if fallback else 0}:refresh={1 if refresh else 0}"
     ),
     ttl_seconds=60,
+    skip_when=lambda *, refresh, **_kwargs: bool(refresh),
 )
 def _fund_performance_payload(
     *,
@@ -1169,18 +1543,44 @@ def _fund_performance_payload(
     start_iso: Optional[str],
     end_iso: Optional[str],
     fallback: bool,
+    refresh: bool,
 ) -> Dict[str, Any]:
-    from app.fund_service import get_fund_performance_payload
+    from app.fund_service import get_fund_performance_payload, normalize_fund_code
 
     start = date.fromisoformat(start_iso) if start_iso else None
     end = date.fromisoformat(end_iso) if end_iso else None
-    return get_fund_performance_payload(
+    normalized = normalize_fund_code(fund_code)
+    target = _history_request_range(start, end)
+    existing_job = _history_find_existing_job(normalized, target)
+    payload = get_fund_performance_payload(
         CONFIG.paths.processed_dir,
-        fund_code,
+        normalized,
         start_date=start,
         end_date=end,
         allow_upstream_fallback=fallback,
+        auto_refresh=False,
     )
+    if _history_job_should_schedule(payload, last_job=existing_job, target=target):
+        existing_job = _history_start_or_extend_job(normalized, start_date=start, end_date=end)
+    return _history_attach_job(payload, existing_job)
+
+
+@app.get("/funds/{fund_code}/performance/status")
+def fund_performance_status(
+    fund_code: str,
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+) -> Dict[str, Any]:
+    from app.fund_service import normalize_fund_code
+
+    normalized = normalize_fund_code(fund_code)
+    target = _history_request_range(start_date, end_date)
+    job = _history_find_existing_job(normalized, target)
+    return {
+        "fund_code": normalized,
+        "status": str(job.get("status") if job else "idle"),
+        "history_job": _history_job_public(job),
+    }
 
 
 @app.get("/funds/{fund_code}/yield-summary")
@@ -2228,6 +2628,7 @@ def _invalidate_single_fund_response_cache(normalized: str) -> None:
     backend = _get_cache()
     for key_or_prefix in (
         f"api:fund-performance:{normalized}:",
+        f"api:fund-performance:v{_FUND_HISTORY_KEY_VERSION}:{normalized}:",
         f"api:fund-detail:{normalized}",
         f"api:fund-yield-summary:{normalized}",
         f"api:fund-holdings:{normalized}:",
