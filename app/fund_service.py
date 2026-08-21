@@ -6857,6 +6857,7 @@ def _fetch_fast_long_fund_history(
 ) -> Tuple[List[Dict[str, Any]], List[str], bool, Optional[str]]:
     normalized = normalize_fund_code(fund_code)
     points: List[Dict[str, Any]] = []
+    price_points: List[Dict[str, Any]] = []
     warnings: List[str] = []
     fallback_used = False
     fallback_reason: Optional[str] = None
@@ -6899,13 +6900,22 @@ def _fetch_fast_long_fund_history(
     # after the requested range, fill that missing prefix from TEFAS using the
     # bounded month-chunk requests above. TLY/PHE keep their existing Fintables
     # path; funds such as THF no longer get stuck at the local cache boundary.
-    point_dates = [
+    # Monthly overview rows are useful for AUM/investor metadata, but they do
+    # not prove that the requested daily price range is covered.  Counting
+    # them here makes a range such as YTD look complete as soon as the first
+    # month-end anchor arrives, which prevents the chunked TEFAS daily history
+    # request below from filling the missing January-to-present series.
+    price_point_dates = [
         point_date
-        for point in points
+        for point in price_points
         for point_date in [_fund_date(point.get("date"))]
         if point_date and _coerce_float(point.get("price")) is not None
     ]
-    needs_tefas_prefix = not point_dates or min(date.fromisoformat(item) for item in point_dates) > start_date
+    first_price_date = min((date.fromisoformat(item) for item in price_point_dates), default=None)
+    needs_tefas_prefix = (
+        first_price_date is None
+        or _business_days_between(start_date, first_price_date - timedelta(days=1)) > 3
+    )
     if needs_tefas_prefix:
         try:
             direct_rows = TefasClient().fetch_fund_history(

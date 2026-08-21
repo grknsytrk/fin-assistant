@@ -1835,6 +1835,63 @@ def test_get_fund_performance_payload_fast_bootstraps_long_partial_range(monkeyp
     assert second_payload["source_metadata"]["full_history_requested"] is False
 
 
+def test_fast_long_history_does_not_treat_monthly_metrics_as_daily_coverage(monkeypatch) -> None:
+    direct_calls = []
+
+    def unavailable_fintables_history(fund_code, start_date, end_date):
+        raise fund_service.FintablesUpstreamError("unavailable")
+
+    class FakeTefasClient:
+        def fetch_fund_history(self, *, fund_codes, start_date, end_date):
+            direct_calls.append((start_date, end_date))
+            return [
+                {
+                    "fonKodu": fund_codes[0],
+                    "tarih": end_date.isoformat(),
+                    "fiyat": 2.0,
+                    "source": "tefasfon_funds",
+                }
+            ]
+
+    class FakeTefasFonClient:
+        def fetch_history(self, fund_code, start_date, end_date):
+            return [
+                {
+                    "fonKodu": fund_code,
+                    "tarih": end_date.isoformat(),
+                    "fiyat": 1.0,
+                    "source": "tefasfon_funds",
+                }
+            ]
+
+        def fetch_daily_funds_snapshot(self, as_of):
+            return [
+                {
+                    "fonKodu": "THF",
+                    "tarih": as_of.isoformat(),
+                    "fiyat": 1.0,
+                    "portfoyBuyukluk": 1_000_000,
+                    "kisiSayisi": 100,
+                    "source": "tefasfon_funds",
+                }
+            ]
+
+    monkeypatch.setattr(fund_service, "fetch_fintables_udf_history", unavailable_fintables_history)
+    monkeypatch.setattr(fund_service, "TefasClient", lambda: FakeTefasClient())
+
+    points, warnings, _fallback_used, _fallback_reason = fund_service._fetch_fast_long_fund_history(
+        None,
+        "THF",
+        start_date=date(2025, 11, 28),
+        end_date=date(2026, 8, 21),
+        client=FakeTefasFonClient(),
+    )
+
+    assert points
+    assert warnings[0] == "fintables_udf_history fast bootstrap failed: unavailable"
+    assert (date(2025, 11, 28), date(2026, 8, 21)) in direct_calls
+
+
 def test_get_fund_performance_payload_backfills_missing_overview_metrics(monkeypatch, tmp_path) -> None:
     fund_service.reset_fund_caches_for_tests()
 
