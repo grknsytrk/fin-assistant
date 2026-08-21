@@ -199,6 +199,43 @@ def test_fund_prices_db_uses_wal_and_updated_index(tmp_path) -> None:
     assert "idx_fund_prices_code_date_updated" in indexes
 
 
+def test_postgres_fund_price_upsert_deduplicates_same_batch_key(monkeypatch, tmp_path) -> None:
+    executions = []
+
+    class FakePostgresConnection:
+        is_postgres = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def execute(self, query, params=()):
+            executions.append((query, list(params)))
+
+        def commit(self):
+            return None
+
+    monkeypatch.setattr(fund_service, "database_enabled", lambda: True)
+    monkeypatch.setattr(fund_service, "connect_postgres", lambda: FakePostgresConnection())
+
+    result = fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "THF", "date": "2026-04-30", "price": 10.0, "source": "tefasfon_funds"},
+            {"fund_code": "THF", "date": "2026-04-30", "price": 11.0, "source": "tefasfon_funds"},
+        ],
+        source="tefasfon_funds",
+    )
+
+    fund_inserts = [item for item in executions if "INSERT INTO fund_prices" in item[0]]
+    assert result["upserted_count"] == 1
+    assert len(fund_inserts) == 1
+    assert len(fund_inserts[0][1]) == 13
+    assert fund_inserts[0][1][3] == 11.0
+
+
 def test_normalize_fintables_udf_history_payload_uses_close_series() -> None:
     rows = fund_service._normalize_fintables_udf_history_payload(
         {

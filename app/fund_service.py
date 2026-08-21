@@ -1558,7 +1558,7 @@ def upsert_fund_price_points(
         # writes one by one through Supavisor turns a fast TEFAS response into
         # a multi-minute job. Prepare the same rows in memory and send them in
         # a few multi-value statements instead.
-        prepared_rows: List[tuple[Any, ...]] = []
+        prepared_rows_by_key: Dict[Tuple[str, str, str], tuple[Any, ...]] = {}
         warning_rows: List[tuple[Any, ...]] = []
         for row in points:
             if not isinstance(row, dict):
@@ -1629,25 +1629,33 @@ def upsert_fund_price_points(
                         )
                     )
                 continue
-            prepared_rows.append(
-                (
-                    point["fund_code"],
-                    point["date"],
-                    point["source"],
-                    point["price"],
-                    point.get("daily_return"),
-                    point.get("aum"),
-                    point.get("investor_count"),
-                    point.get("share_count"),
-                    _stable_json_dumps(point.get("metadata") or {}),
-                    _stable_json_dumps(point.get("raw")) if point.get("raw") is not None else None,
-                    effective_fetched_at,
-                    effective_fetched_at,
-                    effective_fetched_at,
-                )
+            prepared_row = (
+                point["fund_code"],
+                point["date"],
+                point["source"],
+                point["price"],
+                point.get("daily_return"),
+                point.get("aum"),
+                point.get("investor_count"),
+                point.get("share_count"),
+                _stable_json_dumps(point.get("metadata") or {}),
+                _stable_json_dumps(point.get("raw")) if point.get("raw") is not None else None,
+                effective_fetched_at,
+                effective_fetched_at,
+                effective_fetched_at,
             )
-            upserted_count += 1
-            source_counts[point["source"]] = source_counts.get(point["source"], 0) + 1
+            # A long-range refresh can combine overlapping TEFAS/Fintables
+            # windows. PostgreSQL rejects a multi-value INSERT when the same
+            # conflict key appears twice in that one statement, so keep the
+            # last (most recently merged) row for each fund/date/source key.
+            prepared_rows_by_key[(point["fund_code"], point["date"], point["source"])] = prepared_row
+
+        prepared_rows = list(prepared_rows_by_key.values())
+        upserted_count = len(prepared_rows)
+        source_counts = {}
+        for prepared_row in prepared_rows:
+            row_source = str(prepared_row[2])
+            source_counts[row_source] = source_counts.get(row_source, 0) + 1
 
         with _connect_fund_prices_db(processed_dir) as conn:
             insert_sql = """

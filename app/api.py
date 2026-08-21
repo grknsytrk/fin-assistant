@@ -1242,6 +1242,15 @@ def _history_job_covers(job: Dict[str, Any], target: Dict[str, Any]) -> bool:
     )
 
 
+def _history_job_failed(job: Optional[Dict[str, Any]]) -> bool:
+    if not job:
+        return False
+    return (
+        str(job.get("status") or "").strip().lower() == "failed"
+        or str(job.get("daily_upgrade_state") or "").strip().lower() == "failed"
+    )
+
+
 def _history_job_should_schedule(
     payload: Dict[str, Any],
     *,
@@ -1257,15 +1266,30 @@ def _history_job_should_schedule(
         from app.fund_service import _business_days_between
 
         if _business_days_between(last_point + timedelta(days=1), target["requested_end"]) > 0:
-            return not (last_job and _history_job_covers(last_job, target))
+            return not (
+                last_job
+                and _history_job_covers(last_job, target)
+                and not _history_job_failed(last_job)
+            )
     if str(metadata.get("coverage_state") or "") == "range_incomplete":
-        return not (last_job and _history_job_covers(last_job, target))
+        return not (
+            last_job
+            and _history_job_covers(last_job, target)
+            and not _history_job_failed(last_job)
+        )
     if int(metadata.get("internal_gap_count") or 0) > 0:
-        return not (last_job and _history_job_covers(last_job, target))
+        return not (
+            last_job
+            and _history_job_covers(last_job, target)
+            and not _history_job_failed(last_job)
+        )
     resolution = str(metadata.get("resolution") or "unknown")
     if resolution != "daily":
         if last_job and _history_job_covers(last_job, target):
-            return str(last_job.get("daily_upgrade_state") or "") not in {"unavailable", "failed"}
+            return _history_job_failed(last_job) or str(last_job.get("daily_upgrade_state") or "") not in {
+                "unavailable",
+                "failed",
+            }
         return True
     return False
 
@@ -1358,7 +1382,7 @@ def _history_start_or_extend_job(
                 ):
                     job["extension_requested"] = True
                 _history_job_set(normalized, job)
-            elif existing and _history_job_covers(existing, target):
+            elif existing and _history_job_covers(existing, target) and not _history_job_failed(existing):
                 job = existing
             else:
                 now = _fund_refresh_now_iso()

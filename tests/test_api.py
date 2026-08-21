@@ -222,6 +222,40 @@ def test_fund_history_background_job_state_is_friendly_with_existing_points() ->
     assert attached["source_metadata"]["daily_upgrade_state"] == "pending"
 
 
+def test_failed_fund_history_job_can_be_retried_for_same_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    submitted: List[tuple[Any, ...]] = []
+
+    class FakeExecutor:
+        def submit(self, *args: Any, **kwargs: Any) -> None:
+            submitted.append(args)
+
+    monkeypatch.setattr(api_module, "_FUND_HISTORY_EXECUTOR", FakeExecutor())
+    failed_job = {
+        "job_id": "failed-history-1",
+        "fund_code": "RETRYTHF",
+        "requested_start": "2026-01-01",
+        "requested_end": "2026-08-21",
+        "effective_start": "2026-01-01",
+        "effective_end": "2026-08-21",
+        "status": "failed",
+        "daily_upgrade_state": "failed",
+    }
+    backend = api_module._get_cache()
+    api_module._history_job_set("RETRYTHF", failed_job)
+    backend.set(api_module._history_last_key("RETRYTHF"), failed_job, ttl_seconds=300)
+
+    retried = api_module._history_start_or_extend_job(
+        "RETRYTHF",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 8, 21),
+    )
+
+    assert retried is not None
+    assert retried["job_id"] != failed_job["job_id"]
+    assert retried["status"] == "queued"
+    assert len(submitted) == 1
+
+
 def test_fund_performance_returns_local_points_and_queues_background_history_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
