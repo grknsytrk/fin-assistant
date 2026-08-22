@@ -256,6 +256,55 @@ def test_failed_fund_history_job_can_be_retried_for_same_range(monkeypatch: pyte
     assert len(submitted) == 1
 
 
+def test_legacy_long_history_job_is_retried_for_fintables_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    submitted: List[tuple[Any, ...]] = []
+
+    class FakeExecutor:
+        def submit(self, *args: Any, **kwargs: Any) -> None:
+            submitted.append(args)
+
+    monkeypatch.setattr(api_module, "_FUND_HISTORY_EXECUTOR", FakeExecutor())
+    legacy_job = {
+        "job_id": "legacy-long-history",
+        "fund_code": "THF",
+        "requested_start": "2025-08-21",
+        "requested_end": "2026-08-21",
+        "effective_start": "2025-08-20",
+        "effective_end": "2026-08-21",
+        "status": "succeeded",
+        "resolution": "mixed",
+        "coverage_state": "complete",
+        "daily_upgrade_state": "unavailable",
+    }
+    payload = {
+        "points": [{"date": "2025-08-21", "price": 1.0}],
+        "source_metadata": {
+            "coverage_state": "complete",
+            "resolution": "mixed",
+            "internal_gap_count": 0,
+        },
+    }
+    backend = api_module._get_cache()
+    api_module._history_job_set("THF", legacy_job)
+    backend.set(api_module._history_last_key("THF"), legacy_job, ttl_seconds=300)
+
+    assert api_module._history_job_should_schedule(
+        payload,
+        last_job=legacy_job,
+        target=api_module._history_request_range(date(2025, 8, 21), date(2026, 8, 21)),
+    ) is True
+    retried = api_module._history_start_or_extend_job(
+        "THF",
+        start_date=date(2025, 8, 21),
+        end_date=date(2026, 8, 21),
+        force_new=True,
+    )
+
+    assert retried is not None
+    assert retried["job_id"] != legacy_job["job_id"]
+    assert len(submitted) == 1
+
+
 def test_fund_performance_returns_local_points_and_queues_background_history_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

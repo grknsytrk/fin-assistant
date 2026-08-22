@@ -204,6 +204,8 @@ export interface FundHistoryJob {
   resolution?: string | null;
   coverage_state?: string | null;
   daily_upgrade_state?: string | null;
+  fintables_point_count?: number | null;
+  history_source_used?: string | null;
   phase?: number | null;
 }
 

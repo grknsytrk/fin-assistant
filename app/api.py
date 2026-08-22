@@ -1198,6 +1198,8 @@ def _history_job_public(job: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any
             "resolution",
             "coverage_state",
             "daily_upgrade_state",
+            "fintables_point_count",
+            "history_source_used",
             "phase",
         )
         if key in job
@@ -1261,6 +1263,13 @@ def _history_job_should_schedule(
     points = payload.get("points") if isinstance(payload.get("points"), list) else []
     if not points:
         return True
+    # Long chart ranges are bootstrapped from Fintables' daily UDF series.
+    # Jobs created before that source was made explicit can look successful
+    # while containing only the shorter TEFAS detail history. Give each such
+    # legacy job one retry; the worker records the probe result so an
+    # unavailable upstream does not create a request loop.
+    if _history_job_needs_fintables_probe(last_job, target):
+        return True
     last_point = _history_job_date(metadata.get("available_end_date") or metadata.get("date_max"))
     if last_point and last_point < target["requested_end"]:
         from app.fund_service import _business_days_between
@@ -1292,6 +1301,19 @@ def _history_job_should_schedule(
             }
         return True
     return False
+
+
+def _history_job_needs_fintables_probe(
+    last_job: Optional[Dict[str, Any]],
+    target: Dict[str, Any],
+) -> bool:
+    target_span_days = (target["requested_end"] - target["requested_start"]).days
+    return bool(
+        target_span_days > 120
+        and last_job
+        and _history_job_covers(last_job, target)
+        and "fintables_point_count" not in last_job
+    )
 
 
 def _history_attach_job(payload: Dict[str, Any], job: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1359,6 +1381,7 @@ def _history_start_or_extend_job(
     *,
     start_date: Optional[date],
     end_date: Optional[date],
+    force_new: bool = False,
 ) -> Optional[Dict[str, Any]]:
     normalized = str(fund_code or "").strip().upper()
     if not normalized:
@@ -1382,7 +1405,7 @@ def _history_start_or_extend_job(
                 ):
                     job["extension_requested"] = True
                 _history_job_set(normalized, job)
-            elif existing and _history_job_covers(existing, target) and not _history_job_failed(existing):
+            elif existing and _history_job_covers(existing, target) and not _history_job_failed(existing) and not force_new:
                 job = existing
             else:
                 now = _fund_refresh_now_iso()
@@ -1503,6 +1526,8 @@ def _run_fund_history_job(fund_code: str, job_id: str) -> None:
                     "resolution": metadata.get("resolution"),
                     "coverage_state": metadata.get("coverage_state"),
                     "daily_upgrade_state": "unavailable" if metadata.get("resolution") != "daily" else "complete",
+                    "fintables_point_count": int(metadata.get("cached_fallback_point_count") or 0),
+                    "history_source_used": metadata.get("history_source_used"),
                     "error": None,
                 }
             )
@@ -1585,7 +1610,12 @@ def _fund_performance_payload(
         auto_refresh=False,
     )
     if _history_job_should_schedule(payload, last_job=existing_job, target=target):
-        existing_job = _history_start_or_extend_job(normalized, start_date=start, end_date=end)
+        existing_job = _history_start_or_extend_job(
+            normalized,
+            start_date=start,
+            end_date=end,
+            force_new=_history_job_needs_fintables_probe(existing_job, target),
+        )
     return _history_attach_job(payload, existing_job)
 
 

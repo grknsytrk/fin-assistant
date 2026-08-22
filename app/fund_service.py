@@ -113,7 +113,7 @@ TEFAS_DIRECT_RETURNS_SOURCE = "tefas_direct_returns"
 TEFAS_DIRECT_PORTFOLIO_SOURCE = "tefas_direct_portfolio"
 FINTABLES_UDF_HISTORY_SOURCE = "fintables_udf_history"
 FINTABLES_YIELD_SUMMARY_SOURCE = "fintables_yield_summary"
-FUND_HISTORY_SOURCE_POLICY = "tefasfon_primary_fintables_fallback"
+FUND_HISTORY_SOURCE_POLICY = "fintables_long_range_tefas_recent"
 _TEFAS_ALLOWED_FUND_TYPES = {"SEC", "PEN", "ETF", "RE", "VC"}
 TEFAS_FUND_TYPES = tuple(
     item.strip().upper()

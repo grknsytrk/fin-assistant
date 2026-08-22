@@ -1526,7 +1526,7 @@ def test_refresh_fund_performance_uses_tefasfon_primary(monkeypatch, tmp_path) -
 
     assert payload["status"] == "ok"
     assert payload["source_metadata"]["history_source_used"] == "tefasfon_funds"
-    assert payload["source_metadata"]["history_source_policy"] == "tefasfon_primary_fintables_fallback"
+    assert payload["source_metadata"]["history_source_policy"] == "fintables_long_range_tefas_recent"
     assert payload["source_metadata"]["primary_source"] == "tefasfon"
     assert payload["source_metadata"]["fallback_used"] is False
     assert payload["source_metadata"]["fallback_reason"] is None
@@ -1640,7 +1640,7 @@ def test_get_fund_performance_payload_fetches_tefasfon_on_cache_miss(monkeypatch
     assert payload["status"] == "ok"
     assert [point["price"] for point in payload["points"]] == [3.1, 3.2]
     assert payload["source_metadata"]["history_source_used"] == "tefasfon_funds"
-    assert payload["source_metadata"]["history_source_policy"] == "tefasfon_primary_fintables_fallback"
+    assert payload["source_metadata"]["history_source_policy"] == "fintables_long_range_tefas_recent"
     assert payload["source_metadata"]["final_points_count"] == 2
     assert payload["source_metadata"]["date_min"] == "2026-04-28"
     assert payload["source_metadata"]["date_max"] == "2026-04-29"
@@ -2335,7 +2335,7 @@ def test_get_fund_performance_payload_does_not_use_legacy_when_sources_fail(monk
     assert "fintables blocked" in " ".join(payload["source_metadata"]["warnings"])
     assert payload["source_metadata"]["warning"]
     assert payload["source_metadata"]["history_source_used"] is None
-    assert payload["source_metadata"]["history_source_policy"] == "tefasfon_primary_fintables_fallback"
+    assert payload["source_metadata"]["history_source_policy"] == "fintables_long_range_tefas_recent"
     assert payload["source_metadata"]["final_points_count"] == 0
     assert payload["source_metadata"]["backfill_used"] is True
     assert fund_service.read_fund_price_points(tmp_path, "TLY") == []
