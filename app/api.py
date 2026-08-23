@@ -67,7 +67,7 @@ _KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_KAP_SNAPSHOT_RESPO
 _FUND_YIELD_SUMMARY_CACHE_TTL = int(os.getenv("RAGFIN_FUND_YIELD_SUMMARY_CACHE_TTL_SECONDS", "900"))
 _FUND_HOLDINGS_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_CACHE_TTL_SECONDS", str(60 * 60)))
 _FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT_SECONDS", "120"))
-_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 6
+_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 7
 _FUND_HOLDING_SECTOR_MAP_CACHE_TTL = 6 * 60 * 60
 _FUND_REFRESH_JOB_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_REFRESH_JOB_TTL_SECONDS", str(30 * 60)))
 _FUND_REFRESH_MAX_LOOKBACK_DAYS = 14
@@ -2315,22 +2315,42 @@ def _per_position_basis_points_threshold() -> float:
     return 1000.0
 
 
-def _validated_holding_weight(raw_value: Any, scale_factor: float) -> Dict[str, Any]:
+def _validated_holding_weight(
+    raw_value: Any,
+    scale_factor: float,
+    *,
+    quality_hint: Any = None,
+    warning_hint: Any = None,
+) -> Dict[str, Any]:
     raw_number = _api_number(raw_value)
     if raw_number is None:
-        return {"weight": None, "raw_weight": None, "quality": "missing"}
+        return {"weight": None, "raw_weight": None, "quality": "missing", "warning": None}
     weight = raw_number * scale_factor
-    quality = "normalized" if scale_factor != 1.0 else "ok"
+    hinted_quality = str(quality_hint or "").strip().lower()
+    quality = "normalized" if scale_factor != 1.0 else ("fallback" if hinted_quality == "fallback" else "ok")
+    warning = str(warning_hint or "").strip() or None
     # Per-position safety net: a single row well past 1000% with the rest of
     # the portfolio in normal percent territory is almost always a basis-point
     # leak.  Divide it down individually so other rows stay untouched.
     if scale_factor == 1.0 and abs(raw_number) > _per_position_basis_points_threshold() and abs(raw_number) <= 11000:
         weight = raw_number / 100.0
         quality = "normalized"
+        warning = warning or "KAP ağırlığı yüzde ölçeğine normalize edildi."
+    # A value beyond the normalization range is not a plausible holding
+    # weight.  It is commonly a leaked borsa/sözleşme number (for example
+    # 80100517), so fail closed instead of exposing an astronomical percent.
+    if not math.isfinite(weight) or abs(weight) > _per_position_basis_points_threshold():
+        return {
+            "weight": None,
+            "raw_weight": raw_number,
+            "quality": "invalid",
+            "warning": warning or "KAP ağırlığı geçersiz veya sözleşme numarası olarak algılandı.",
+        }
     return {
         "weight": round(weight, 6),
         "raw_weight": raw_number if quality == "normalized" else None,
         "quality": quality,
+        "warning": warning,
     }
 
 
@@ -2339,6 +2359,8 @@ def _validate_fund_holding_weights(positions: List[Dict[str, Any]]) -> tuple[Lis
     scale_factor = float(scale_context.get("factor") or 1.0)
     validated: List[Dict[str, Any]] = []
     normalized_count = 0
+    fallback_count = 0
+    invalid_count = 0
     raw_positive_total = 0.0
     adjusted_positive_total = 0.0
 
@@ -2348,12 +2370,22 @@ def _validate_fund_holding_weights(positions: List[Dict[str, Any]]) -> tuple[Lis
         if raw_weight is not None and raw_weight > 0:
             raw_positive_total += raw_weight
 
-        weight_result = _validated_holding_weight(row.get("weight"), scale_factor)
-        previous_result = _validated_holding_weight(row.get("previous_weight"), scale_factor)
+        weight_result = _validated_holding_weight(
+            row.get("weight"),
+            scale_factor,
+            quality_hint=row.get("weight_quality"),
+            warning_hint=row.get("weight_warning"),
+        )
+        previous_result = _validated_holding_weight(
+            row.get("previous_weight"),
+            scale_factor,
+            quality_hint=row.get("previous_weight_quality"),
+            warning_hint=row.get("previous_weight_warning"),
+        )
 
         row["weight"] = weight_result["weight"]
         row["weight_quality"] = weight_result["quality"]
-        row["weight_warning"] = None
+        row["weight_warning"] = weight_result["warning"]
         if weight_result["raw_weight"] is not None:
             row["raw_weight"] = weight_result["raw_weight"]
         else:
@@ -2361,21 +2393,29 @@ def _validate_fund_holding_weights(positions: List[Dict[str, Any]]) -> tuple[Lis
 
         row["previous_weight"] = previous_result["weight"]
         row["previous_weight_quality"] = previous_result["quality"]
-        row["previous_weight_warning"] = None
+        row["previous_weight_warning"] = previous_result["warning"]
         if previous_result["raw_weight"] is not None:
             row["raw_previous_weight"] = previous_result["raw_weight"]
         else:
             row.pop("raw_previous_weight", None)
 
-        if weight_result["quality"] == "normalized":
+        if weight_result["quality"] == "normalized" or previous_result["quality"] == "normalized":
             normalized_count += 1
-            if previous_result["weight"] is not None:
-                row["weight_change"] = round(weight_result["weight"] - previous_result["weight"], 6)
-            elif row.get("weight_change") is not None:
-                raw_change = _api_number(row.get("weight_change"))
-                row["weight_change"] = round(raw_change * scale_factor, 6) if raw_change is not None else None
-        elif previous_result["quality"] == "normalized" and row.get("weight") is not None:
-            row["weight_change"] = round(float(row["weight"]) - float(previous_result["weight"] or 0.0), 6)
+        if weight_result["quality"] == "fallback" or previous_result["quality"] == "fallback":
+            fallback_count += 1
+        if weight_result["quality"] == "invalid" or previous_result["quality"] == "invalid":
+            invalid_count += 1
+
+        current_weight = weight_result["weight"]
+        previous_weight = previous_result["weight"]
+        if weight_result["quality"] == "invalid" or previous_result["quality"] == "invalid":
+            row["weight_change"] = None
+        elif current_weight is not None and previous_weight is not None and (
+            weight_result["quality"] != "ok" or previous_result["quality"] != "ok"
+        ):
+            row["weight_change"] = round(current_weight - previous_weight, 6)
+        elif current_weight is not None and previous_weight is None and weight_result["quality"] != "ok":
+            row["weight_change"] = round(current_weight, 6)
 
         if row.get("weight") is not None and row["weight"] > 0:
             adjusted_positive_total += float(row["weight"])
@@ -2389,6 +2429,8 @@ def _validate_fund_holding_weights(positions: List[Dict[str, Any]]) -> tuple[Lis
     quality = {
         "status": status,
         "normalized_position_count": normalized_count,
+        "fallback_position_count": fallback_count,
+        "invalid_position_count": invalid_count,
         "raw_total_weight": round(raw_positive_total, 6),
         "adjusted_total_weight": round(adjusted_positive_total, 6),
         "normalization": {

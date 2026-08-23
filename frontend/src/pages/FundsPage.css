@@ -2851,6 +2851,21 @@
     color: var(--text-primary);
 }
 
+.fund-holding-weight-value {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.22rem;
+}
+
+.fund-holding-weight-value.has-warning {
+    color: var(--warning-color, #f59e0b);
+}
+
+.fund-holding-weight-value.has-warning svg {
+    flex: 0 0 auto;
+}
+
 .fund-holding-weight-previous {
     color: var(--text-muted);
 }

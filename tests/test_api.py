@@ -1673,6 +1673,95 @@ def test_api_fund_holdings_normalizes_per_position_basis_points(
     assert quality["status"] == "ok"
 
 
+def test_api_fund_holdings_hides_astronomical_contract_number_weight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fund_snapshot_row_map_with_meta",
+        lambda: ({"TLY": {"as_of": "2026-05-20", "aum": 100_000_000.0}}, {"cache_hit": False, "row_count": 1}),
+    )
+    monkeypatch.setattr(api_module, "_quote_map_for_holding_stocks", lambda _symbols: {})
+    monkeypatch.setattr(api_module, "_fund_holding_sector_map", lambda: ({}, {"symbol_count": 0}))
+    payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {
+                "asset_code": "DSTKF",
+                "asset_name": "DESTEK FİNANS FAKTORİNG A.Ş.",
+                "asset_type": "local_equity",
+                "weight": 80100517.0,
+                "previous_weight": 20.45,
+                "weight_change": 80100496.55,
+            },
+            {
+                "asset_code": "GOOD",
+                "asset_name": "Geçerli",
+                "asset_type": "local_equity",
+                "weight": 20.0,
+                "previous_weight": 18.0,
+                "weight_change": 2.0,
+            },
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {"source": "kap_portfolio_allocation_report", "as_of": "2026-04-30", "warnings": []},
+    }
+
+    enriched = api_module._enrich_fund_holdings_with_daily_market_data(payload, "TLY")
+
+    positions = {item["asset_code"]: item for item in enriched["positions"]}
+    assert positions["DSTKF"]["weight"] is None
+    assert positions["DSTKF"]["weight_quality"] == "invalid"
+    assert positions["DSTKF"]["raw_weight"] == 80100517.0
+    assert positions["DSTKF"]["weight_change"] is None
+    assert "sözleşme" in positions["DSTKF"]["weight_warning"]
+    assert positions["GOOD"]["weight"] == 20.0
+    assert enriched["source_metadata"]["holdings_quality"]["invalid_position_count"] == 1
+    assert enriched["source_metadata"]["holdings_quality"]["adjusted_total_weight"] == pytest.approx(20.0)
+
+
+def test_api_fund_holdings_recomputes_delta_for_fallback_weight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fund_snapshot_row_map_with_meta",
+        lambda: ({"TLY": {"as_of": "2026-05-20", "aum": 100_000_000.0}}, {"cache_hit": False, "row_count": 1}),
+    )
+    monkeypatch.setattr(api_module, "_quote_map_for_holding_stocks", lambda _symbols: {})
+    monkeypatch.setattr(api_module, "_fund_holding_sector_map", lambda: ({}, {"symbol_count": 0}))
+    payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": [
+            {
+                "asset_code": "DSTKF",
+                "asset_name": "DESTEK FİNANS FAKTORİNG A.Ş.",
+                "asset_type": "local_equity",
+                "weight": 6.90,
+                "weight_quality": "fallback",
+                "weight_warning": "KAP satırındaki son FTD yüzdesi okunamadı.",
+                "previous_weight": 20.45,
+                "previous_weight_quality": "ok",
+                "weight_change": 80100496.55,
+            },
+        ],
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {"source": "kap_portfolio_allocation_report", "as_of": "2026-04-30", "warnings": []},
+    }
+
+    enriched = api_module._enrich_fund_holdings_with_daily_market_data(payload, "TLY")
+
+    position = enriched["positions"][0]
+    assert position["weight"] == pytest.approx(6.90)
+    assert position["previous_weight"] == pytest.approx(20.45)
+    assert position["weight_change"] == pytest.approx(-13.55)
+    assert position["weight_quality"] == "fallback"
+    assert position["weight_warning"]
+    assert enriched["source_metadata"]["holdings_quality"]["fallback_position_count"] == 1
+
+
 def test_api_fund_holdings_flags_gross_exposure_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2146,6 +2235,49 @@ HISSE TÜRK
     assert by_code["TPKGY"]["asset_type"] == "fund"
     assert by_code["TPKGY"]["weight"] == pytest.approx(9.08)
     assert "OBAMS" not in by_code
+
+
+def test_kap_holdings_parser_uses_safe_fallback_when_borsa_number_replaces_ftd() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+Hisse Türk
+DSTKF DESTEK FİNANS FAKTORİNG A.Ş.
+18.340,00 1.817,671842 28/04/26 2.730,000000 50.068.200,00 8,12 6,90TL 80100517TREDSTF00012
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="TST",
+        report_date="2026-04-30",
+        source_url=None,
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert by_code["DSTKF"]["weight"] == pytest.approx(6.90)
+    assert by_code["DSTKF"]["weight"] < 1000
+    assert by_code["DSTKF"]["weight_quality"] == "fallback"
+    assert "yaklaşık" in by_code["DSTKF"]["weight_warning"]
+
+
+def test_kap_holdings_parser_prefers_real_ftd_after_separated_borsa_number() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+Hisse Türk
+DSTKF DESTEK FİNANS FAKTORİNG A.Ş.
+18.340,00 1.817,671842 28/04/26 2.730,000000 50.068.200,00 8,12 6,90TL 80_100_5 7,42TREDSTF00012
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="TST",
+        report_date="2026-04-30",
+        source_url=None,
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert by_code["DSTKF"]["weight"] == pytest.approx(7.42)
+    assert by_code["DSTKF"]["weight_quality"] == "ok"
+    assert by_code["DSTKF"]["weight_warning"] is None
 
 
 def test_kap_holdings_parser_drops_orphan_page_header_before_position() -> None:

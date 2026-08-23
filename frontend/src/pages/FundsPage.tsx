@@ -1047,6 +1047,35 @@ function formatHoldingWeight(position: FundPortfolioPosition, key: 'weight' | 'p
     return formatAllocationWeight(holdingWeightValue(position, key));
 }
 
+function holdingWeightWarning(
+    position: FundPortfolioPosition,
+    key: 'weight' | 'previous_weight' = 'weight',
+): string | null {
+    const warning = key === 'weight' ? position.weight_warning : position.previous_weight_warning;
+    return warning ? String(warning) : null;
+}
+
+function HoldingWeightDisplay({
+    position,
+    weightKey = 'weight',
+}: {
+    position: FundPortfolioPosition;
+    weightKey?: 'weight' | 'previous_weight';
+}) {
+    const value = formatHoldingWeight(position, weightKey);
+    const warning = holdingWeightWarning(position, weightKey);
+    return (
+        <span
+            className={`fund-holding-weight-value${warning ? ' has-warning' : ''}`}
+            title={warning || undefined}
+            aria-label={warning ? `${value}. ${warning}` : value}
+        >
+            {value}
+            {warning ? <ShieldAlert size={12} aria-hidden="true" /> : null}
+        </span>
+    );
+}
+
 
 
 function renderWeightDelta(value: number | null | undefined): ReactNode {
@@ -2534,7 +2563,7 @@ function FundHoldingsHighlightCard({ title, positions }: FundHoldingsHighlightCa
                                     <strong>{position.asset_code || '-'}</strong>
                                 </span>
                                 <span className="fund-holdings-highlight-values">
-                                    <strong>{formatHoldingWeight(position)}</strong>
+                                    <strong><HoldingWeightDisplay position={position} /></strong>
                                     <small className={pctClass(position.weight_change)}>{formatCompactWeightDelta(position.weight_change)}</small>
                                 </span>
                             </div>
@@ -2910,12 +2939,23 @@ function FundHoldingsPanel({
         'ÖNCEKİ',
     );
     const normalizedCount = finiteNumber(holdingsQuality?.normalized_position_count);
+    const fallbackCount = finiteNumber(holdingsQuality?.fallback_position_count);
+    const invalidCount = finiteNumber(holdingsQuality?.invalid_position_count);
     const adjustedTotalWeight = finiteNumber(holdingsQuality?.adjusted_total_weight);
     const isGrossExposure = (holdingsQuality?.status === 'gross_exposure')
         || (adjustedTotalWeight != null && adjustedTotalWeight > 100.5);
-    const qualityWarning = normalizedCount != null && normalizedCount > 0
-        ? `${normalizedCount} ağırlık ölçek hatası nedeniyle normalize edildi.`
-        : null;
+    const qualityWarnings = [
+        fallbackCount != null && fallbackCount > 0
+            ? `${fallbackCount} ağırlık KAP satırındaki eksik yüzde nedeniyle yaklaşık değer olarak gösteriliyor.`
+            : null,
+        invalidCount != null && invalidCount > 0
+            ? `${invalidCount} geçersiz KAP ağırlığı güvenlik nedeniyle gösterilmedi.`
+            : null,
+        normalizedCount != null && normalizedCount > 0
+            ? `${normalizedCount} ağırlık ölçek hatası nedeniyle normalize edildi.`
+            : null,
+    ].filter((warning): warning is string => Boolean(warning));
+    const qualityWarning = qualityWarnings.length ? qualityWarnings.join(' ') : null;
     const grossExposureWarning = isGrossExposure
         ? `Raporlanan toplam ağırlık ${formatAllocationWeight(adjustedTotalWeight)}. Brüt pozisyon (kaldıraç ya da KAP formatı) görünüyor; çubuklar oransal, yüzdeler ham değer.`
         : null;
@@ -3028,7 +3068,8 @@ function FundHoldingsPanel({
                                 const previousRank = previousRankByKey.get(holdingPositionKey(position));
                                 const rankDelta = previousRank == null ? null : previousRank - (index + 1);
                                 const rankTrend = rankDelta == null ? '' : rankDelta > 0 ? '▲' : rankDelta < 0 ? '▼' : '—';
-                                const barTooltip = `${currentMonthLabel}: ${formatHoldingWeight(position)} · ${previousMonthLabel}: ${formatHoldingWeight(position, 'previous_weight')}`;
+                                const barWarning = holdingWeightWarning(position) || holdingWeightWarning(position, 'previous_weight');
+                                const barTooltip = `${currentMonthLabel}: ${formatHoldingWeight(position)} · ${previousMonthLabel}: ${formatHoldingWeight(position, 'previous_weight')}${barWarning ? ` · ${barWarning}` : ''}`;
                                 const status = holdingChangeStatus(position);
                                 const statusIcon = status === 'new'
                                     ? <LogIn size={13} aria-label="Fona girdi" />
@@ -3090,7 +3131,7 @@ function FundHoldingsPanel({
                                                     style={{ '--holding-weight-width': `${previousWidthPct}%` } as CSSProperties}
                                                 />
                                             </div>
-                                            <span className="fund-holdings-rank-weight">{formatHoldingWeight(position)}</span>
+                                            <span className="fund-holdings-rank-weight"><HoldingWeightDisplay position={position} /></span>
                                             <span className={pctClass(position.weight_change)}>{renderWeightDelta(position.weight_change)}</span>
                                         </div>
                                         <span className="fund-holdings-rank-previous">
@@ -3245,10 +3286,10 @@ function FundHoldingsPanel({
                                                         </span>
                                                     </FundLiveValueCell>
                                                     <td className="fund-holding-weight-current">
-                                                        {formatHoldingWeight(position)}
+                                                        <HoldingWeightDisplay position={position} />
                                                     </td>
                                                     <td className="fund-holding-weight-previous">
-                                                        {formatHoldingWeight(position, 'previous_weight')}
+                                                        <HoldingWeightDisplay position={position} weightKey="previous_weight" />
                                                     </td>
                                                     <td className={pctClass(position.weight_change)}>{renderWeightDelta(position.weight_change)}</td>
                                                     <td>

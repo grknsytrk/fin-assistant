@@ -176,6 +176,8 @@ export interface FundSourceMetadata {
   holdings_quality?: {
     status?: string | null;
     normalized_position_count?: number | null;
+    fallback_position_count?: number | null;
+    invalid_position_count?: number | null;
     raw_total_weight?: number | null;
     adjusted_total_weight?: number | null;
     normalization?: {
@@ -351,11 +353,11 @@ export interface FundPortfolioPosition {
   isin?: string | null;
   weight: number | null;
   raw_weight?: number | null;
-  weight_quality?: 'ok' | 'normalized' | 'missing' | string | null;
+  weight_quality?: 'ok' | 'normalized' | 'fallback' | 'invalid' | 'missing' | string | null;
   weight_warning?: string | null;
   previous_weight?: number | null;
   raw_previous_weight?: number | null;
-  previous_weight_quality?: 'ok' | 'normalized' | 'missing' | string | null;
+  previous_weight_quality?: 'ok' | 'normalized' | 'fallback' | 'invalid' | 'missing' | string | null;
   previous_weight_warning?: string | null;
   weight_change?: number | null;
   raw_weight_change?: number | null;

@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -7501,7 +7502,7 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
 
 
 KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
-KAP_HOLDINGS_PARSE_VERSION = 13
+KAP_HOLDINGS_PARSE_VERSION = 14
 _KAP_NUMBER_PATTERN = re.compile(
     r"-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?(?!\d)|\d+[.,]\d+|\d+)(?:\s*%)?"
 )
@@ -7513,6 +7514,16 @@ _KAP_ISIN_TAIL_PATTERN = re.compile(
     r"(?P<weight>-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?))\s*%?\s*(?:TL|TRY|USD|EUR|JPY|GBP)?\s*\d*[A-Z]{2}[A-Z0-9]{6,}\s*$",
     flags=re.IGNORECASE,
 )
+# Some KAP PDF text extractions omit the final FTD percentage and glue the
+# borsa/sözleşme number directly to the ISIN (for example
+# ``80100517TREDSTF00012`` or ``80_100_5TREDSTF00012``).  That number is not a
+# portfolio weight and must never be selected as one.
+_KAP_BORSA_CONTRACT_TAIL_PATTERN = re.compile(
+    r"(?P<contract>(?:\d{2}(?:[_-]\d{3})+|\d{6,}))\s*"
+    r"(?P<isin>[A-Z]{2}[A-Z0-9]{6,})\s*$",
+    flags=re.IGNORECASE,
+)
+_KAP_MAX_REASONABLE_WEIGHT = 1000.0
 # Lines that introduce continuation rows for an already-listed position
 # (e.g. ``Tem.Ver.``/``Teminat Veren`` collateral lender prefixes) must not
 # be treated as a new asset code, otherwise the parser invents a phantom row
@@ -8131,6 +8142,78 @@ def _kap_number_tokens(block: str) -> List[Dict[str, Any]]:
     return tokens
 
 
+def _kap_borsa_contract_tail_match(block: str) -> Optional[re.Match[str]]:
+    return _KAP_BORSA_CONTRACT_TAIL_PATTERN.search(str(block or ""))
+
+
+def _kap_token_is_inside(token: Dict[str, Any], match: Optional[re.Match[str]]) -> bool:
+    if match is None:
+        return False
+    try:
+        token_start = int(token.get("start"))
+        token_end = int(token.get("end"))
+    except (TypeError, ValueError):
+        return False
+    return token_start >= match.start("contract") and token_end <= match.end("contract")
+
+
+def _kap_weight_candidate_is_valid(raw_value: Any, value: Optional[float]) -> bool:
+    if value is None or not math.isfinite(value) or abs(value) > _KAP_MAX_REASONABLE_WEIGHT:
+        return False
+    raw = str(raw_value or "").replace("%", "").replace(" ", "").strip()
+    # A plain 6+ digit integer directly before an ISIN is a borsa/sözleşme
+    # number, not a percentage. Decimal and thousands-formatted percentages
+    # are still handled by the numeric parser and magnitude guard above.
+    if raw and not any(separator in raw for separator in (",", ".")) and len(re.sub(r"\D", "", raw)) >= 6:
+        return False
+    return True
+
+
+def _kap_extract_weight_candidate(
+    compact: str,
+    number_tokens: List[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """Return the best row weight token and whether it used a fallback.
+
+    KAP has both FPD and FTD percentage columns.  The trailing FTD value is
+    preferred, but PDF text occasionally drops it and leaves the borsa number
+    glued to the ISIN.  In that case use the last valid percentage-like token
+    outside the contract-number span and mark the row as approximate.
+    """
+    contract_tail = _kap_borsa_contract_tail_match(compact)
+    percent_tokens = [
+        token
+        for token in number_tokens
+        if token.get("is_percent")
+        and _kap_weight_candidate_is_valid(token.get("text"), float(token.get("value")))
+        and not _kap_token_is_inside(token, contract_tail)
+    ]
+    if percent_tokens:
+        return percent_tokens[-1], False
+
+    tail = None if contract_tail else _KAP_ISIN_TAIL_PATTERN.search(compact)
+    if tail:
+        raw_weight = tail.group("weight")
+        weight = _coerce_kap_number_text(raw_weight)
+        if _kap_weight_candidate_is_valid(raw_weight, weight):
+            return {
+                "start": tail.start("weight"),
+                "end": tail.end("weight"),
+                "text": raw_weight,
+                "value": weight,
+            }, False
+
+    fallback_tokens = [
+        token
+        for token in number_tokens
+        if _kap_weight_candidate_is_valid(token.get("text"), float(token.get("value")))
+        and not _kap_token_is_inside(token, contract_tail)
+    ]
+    if not fallback_tokens:
+        return None, True
+    return fallback_tokens[-1], True
+
+
 def _kap_extract_isin(compact: str) -> Optional[str]:
     candidates = [
         match.group(1)
@@ -8567,23 +8650,12 @@ def _parse_kap_holding_block(
     raw_name = re.sub(r"\s*/\s*", " ", raw_name)
     raw_name = re.sub(r"\s+-\s+", " ", raw_name)
     asset_name = " ".join(raw_name.split()) or code
-    tail = _KAP_ISIN_TAIL_PATTERN.search(compact)
     isin = _kap_extract_isin(compact)
     if isin:
         asset_name = " ".join(re.sub(rf"\b{re.escape(isin)}\b", " ", asset_name, flags=re.IGNORECASE).split()) or code
-    percent_tokens = [token for token in number_tokens if token.get("is_percent")]
-    weight_token = percent_tokens[-1] if percent_tokens else None
+    weight_token, used_weight_fallback = _kap_extract_weight_candidate(compact, number_tokens)
     weight = float(weight_token["value"]) if weight_token else None
-    if weight is None:
-        weight = _coerce_kap_number_text(tail.group("weight")) if tail else None
-        if tail:
-            weight_token = {"start": tail.start("weight"), "end": tail.end("weight"), "value": weight}
     numbers = [float(token["value"]) for token in number_tokens]
-    if weight is None:
-        small_tokens = [token for token in number_tokens[-6:] if abs(float(token["value"])) <= 100]
-        if small_tokens:
-            weight_token = small_tokens[-1]
-            weight = float(weight_token["value"])
     if weight is None:
         return None
 
@@ -8615,6 +8687,12 @@ def _parse_kap_holding_block(
         "logo_symbol": provider_symbol or code,
         "detail_clickable": False if is_foreign else None,
         "weight": round(float(weight), 6),
+        "weight_quality": "fallback" if used_weight_fallback else "ok",
+        "weight_warning": (
+            "KAP satırındaki son FTD yüzdesi okunamadı; aynı satırdaki geçerli yüzde yaklaşık değer olarak kullanıldı."
+            if used_weight_fallback
+            else None
+        ),
         "previous_weight": None,
         "weight_change": None,
         "change_status": "unchanged",
@@ -8664,6 +8742,13 @@ def _kap_deduplicate_positions(positions: List[Dict[str, Any]]) -> List[Dict[str
             existing["weight"] = _kap_sum_optional_number(existing.get("weight"), position.get("weight"), digits=6)
             existing["amount"] = _kap_sum_optional_number(existing.get("amount"), position.get("amount"), digits=6)
             existing["market_value"] = _kap_sum_optional_number(existing.get("market_value"), position.get("market_value"), digits=2)
+            if str(existing.get("weight_quality") or "ok") != "ok" or str(position.get("weight_quality") or "ok") != "ok":
+                existing["weight_quality"] = "fallback"
+                existing["weight_warning"] = (
+                    existing.get("weight_warning")
+                    or position.get("weight_warning")
+                    or "KAP satırındaki ağırlık yaklaşık değer olarak kullanıldı."
+                )
             existing["parse_confidence"] = min(
                 float(existing.get("parse_confidence") or 0.0),
                 float(position.get("parse_confidence") or 0.0),
@@ -8978,6 +9063,12 @@ def _merge_holding_positions(
             delta = current_weight
         merged_position = dict(position)
         merged_position["previous_weight"] = previous_weight
+        merged_position["previous_weight_quality"] = (
+            str(previous.get("weight_quality") or "ok") if previous else "missing"
+        )
+        merged_position["previous_weight_warning"] = (
+            previous.get("weight_warning") if previous else None
+        )
         merged_position["previous_report_date"] = previous_report_date
         merged_position["weight_change"] = delta
         merged_position["change_status"] = status
@@ -8990,6 +9081,8 @@ def _merge_holding_positions(
         removed = dict(previous)
         removed["weight"] = 0.0
         removed["previous_weight"] = previous_weight
+        removed["previous_weight_quality"] = str(previous.get("weight_quality") or "ok")
+        removed["previous_weight_warning"] = previous.get("weight_warning")
         removed["previous_report_date"] = previous_report_date
         removed["weight_change"] = round(-previous_weight, 6) if previous_weight is not None else None
         removed["change_status"] = "removed"
