@@ -4357,6 +4357,12 @@ _MARKET_STOCK_CARD_PREVIOUS_SESSION_LOOKBACK_DAYS = 10
 _STOCK_CARD_VALUATION_CACHE: Dict[str, Any] = {}
 _STOCK_CARD_VALUATION_CACHE_TTL = int(os.getenv("RAGFIN_STOCK_CARD_VALUATION_CACHE_TTL_SECONDS", str(6 * 60 * 60)))
 _TURKEY_TIMEZONE = timezone(timedelta(hours=3))
+# Borsa İstanbul Pay Piyasası tam iş günlerinde 09:40-18:10 arasındadır.
+# 09:55 açılış fiyatının belirlendiği, 18:05 ise kapanış emir toplama
+# aşamasının bittiği zamandır; bu saatler piyasanın genel açık/kapalı
+# sınırları olarak kullanılmamalıdır.
+_BIST_EQUITY_SESSION_OPEN_MINUTE = (9 * 60) + 40
+_BIST_EQUITY_SESSION_CLOSE_MINUTE = (18 * 60) + 10
 _MARKET_STOCK_CARD_CHART_RANGES: Dict[str, Dict[str, Any]] = {
     "1d": {"interval": "5m", "range": "1d", "ttl": 30},
     "1w": {"interval": "15m", "range": "5d", "ttl": 60},
@@ -5367,6 +5373,18 @@ def _stock_card_latest_point_dt(points: List[Dict[str, Any]]) -> Optional[dateti
     return None
 
 
+def _bist_equity_session_status(now_local: datetime) -> str:
+    """Return the BIST equity session phase for a Turkey-local timestamp."""
+    if now_local.weekday() >= 5:
+        return "closed"
+    minute_of_day = (now_local.hour * 60) + now_local.minute
+    if minute_of_day < _BIST_EQUITY_SESSION_OPEN_MINUTE:
+        return "pre"
+    if minute_of_day >= _BIST_EQUITY_SESSION_CLOSE_MINUTE:
+        return "post"
+    return "open"
+
+
 def _stock_card_session_state(
     points: List[Dict[str, Any]],
     *,
@@ -5374,7 +5392,6 @@ def _stock_card_session_state(
     source: Any = None,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    state = str(market_state or "").strip().upper()
     source_text = str(source or "").strip()
     now_local = (now or datetime.now(_TURKEY_TIMEZONE)).astimezone(_TURKEY_TIMEZONE)
     latest_dt = _stock_card_latest_point_dt(points)
@@ -5385,20 +5402,21 @@ def _stock_card_session_state(
         source_text == "yahoo_previous_session"
         or (latest_local is not None and latest_local.date() < now_local.date())
     )
+    bist_session = _bist_equity_session_status(now_local)
 
     if previous_session:
         status = "previous_session"
         label = "Piyasa kapalı"
         is_live = False
-    elif state == "REGULAR":
+    elif bist_session == "open":
         status = "open"
         label = "Canlı"
         is_live = True
-    elif state in {"PRE", "PREPRE"}:
+    elif bist_session == "pre":
         status = "pre"
         label = "Açılış öncesi"
         is_live = False
-    elif state in {"POST", "POSTPOST"}:
+    elif bist_session == "post":
         status = "post"
         label = "Kapanış sonrası"
         is_live = False
@@ -5465,7 +5483,7 @@ def _fetch_stock_card_chart(symbol: str, chart_range: str, *, force_refresh: boo
         payload = dict(cached.get("data") or {})
         payload["source"] = "yahoo_cache"
         return payload
-    shared_key = f"api:market:stock-card-chart:{ticker}:range={normalized_range}:v2"
+    shared_key = f"api:market:stock-card-chart:{ticker}:range={normalized_range}:v3"
     if not force_refresh:
         shared_cached = _shared_cache_get_dict(shared_key)
         if shared_cached is not None:
@@ -5620,7 +5638,7 @@ def _fetch_stock_card_intraday(symbol: str, *, force_refresh: bool = False) -> D
 
 def _stock_cards_response_cache_key(symbols: List[str]) -> str:
     normalized = ",".join(sorted(symbols))
-    return f"api:market:stock-cards:symbols={normalized}:v1"
+    return f"api:market:stock-cards:symbols={normalized}:v2"
 
 
 def _first_not_none(*values: Any) -> Any:
