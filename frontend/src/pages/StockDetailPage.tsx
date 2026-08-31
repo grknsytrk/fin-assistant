@@ -128,7 +128,7 @@ function stockDetailChartDateKey(value: Date): string {
 function formatStockDetailChartTime(value: string, range: MarketStockCardChartRange): string {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return '-';
-    if (range === '1d') {
+    if (range === '1d' || range === '1m') {
         return date.toLocaleTimeString('tr-TR', {
             hour: '2-digit',
             minute: '2-digit',

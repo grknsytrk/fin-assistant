@@ -248,7 +248,7 @@ function formatStockCardChartDate(iso: string | null | undefined, range: MarketS
     if (!iso) return '-';
     const dt = new Date(iso);
     if (Number.isNaN(dt.getTime())) return '-';
-    const withTime = range === '1d' || range === '1w';
+    const withTime = range === '1d' || range === '1w' || range === '1m';
     return new Intl.DateTimeFormat('tr-TR', {
         timeZone: 'Europe/Istanbul',
         day: '2-digit',

@@ -4366,8 +4366,8 @@ _BIST_EQUITY_SESSION_CLOSE_MINUTE = (18 * 60) + 10
 _MARKET_STOCK_CARD_CHART_RANGES: Dict[str, Dict[str, Any]] = {
     "1d": {"interval": "5m", "range": "1d", "ttl": 30},
     "1w": {"interval": "15m", "range": "5d", "ttl": 60},
-    "1m": {"interval": "1d", "range": "1mo", "ttl": 600},
-    "1y": {"interval": "1wk", "range": "1y", "ttl": 3600},
+    "1m": {"interval": "4h", "range": "1mo", "ttl": 600},
+    "1y": {"interval": "1d", "range": "1y", "ttl": 3600},
 }
 _STOCK_RETURN_BASE_CACHE: Dict[str, Any] = {}
 _STOCK_RETURN_BASE_CACHE_TTL = 900  # 15 minutes
@@ -5310,7 +5310,7 @@ def _normalize_stock_card_chart_range(chart_range: str) -> str:
 
 
 def _stock_card_chart_cache_key(symbol: str, chart_range: str) -> str:
-    return f"stock-card-chart:{symbol}:{chart_range}"
+    return f"stock-card-chart:v4:{symbol}:{chart_range}"
 
 
 def _point_datetime(raw: Any) -> Optional[datetime]:
@@ -5483,7 +5483,7 @@ def _fetch_stock_card_chart(symbol: str, chart_range: str, *, force_refresh: boo
         payload = dict(cached.get("data") or {})
         payload["source"] = "yahoo_cache"
         return payload
-    shared_key = f"api:market:stock-card-chart:{ticker}:range={normalized_range}:v3"
+    shared_key = f"api:market:stock-card-chart:{ticker}:range={normalized_range}:v4"
     if not force_refresh:
         shared_cached = _shared_cache_get_dict(shared_key)
         if shared_cached is not None:

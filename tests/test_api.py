@@ -4393,6 +4393,36 @@ def test_market_stock_card_chart_maps_range_and_normalizes_points(monkeypatch: p
     assert payload["line_points"][1]["close"] == 753.0
 
 
+@pytest.mark.parametrize(
+    ("chart_range", "expected_interval", "expected_yahoo_range"),
+    [("1m", "4h", "1mo"), ("1y", "1d", "1y")],
+)
+def test_market_stock_card_chart_uses_requested_long_range_granularity(
+    monkeypatch: pytest.MonkeyPatch,
+    chart_range: str,
+    expected_interval: str,
+    expected_yahoo_range: str,
+) -> None:
+    calls: List[str] = []
+
+    def fake_chart(yahoo_symbol: str, *, interval: str, range_: str) -> Dict[str, Any]:
+        calls.append(f"{yahoo_symbol}:{interval}:{range_}")
+        return {
+            "ok": True,
+            "meta": {},
+            "points": [{"time": "2026-04-25T08:00:00+00:00", "close": 750.0}],
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_raw", fake_chart)
+
+    client = TestClient(app)
+    response = client.get(f"/market/stocks/cards/chart?symbol=BIMAS&range={chart_range}&refresh=true")
+
+    assert response.status_code == 200
+    assert response.json()["range"] == chart_range
+    assert calls == [f"BIMAS.IS:{expected_interval}:{expected_yahoo_range}"]
+
+
 def test_market_stock_card_chart_uses_normalized_cache_key(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: List[str] = []
 
