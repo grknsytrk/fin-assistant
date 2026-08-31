@@ -5756,7 +5756,7 @@ export default function FundsPage({
         if (fundCode || selectedFund) {
             const normalizedCode = selectedFund?.fund_code || fundCode?.trim().toUpperCase();
             const quoteTitle = [
-                formatTitleCurrency(detailLatestPrice ?? selectedFund?.price, selectedFund?.currency, {
+                formatTitleCurrency(detailLatestPrice, selectedFund?.currency, {
                     minimumFractionDigits: 4,
                     maximumFractionDigits: 6,
                 }),
@@ -6208,7 +6208,7 @@ export default function FundsPage({
 
                                             <div className="fund-market-quote">
                                                 <div>
-                                                    <strong>{formatQuotePrice(selectedFund.price)}</strong>
+                                                    <strong>{formatQuotePrice(detailLatestPrice)}</strong>
                                                     <span className={pctClass(selectedFund.daily_return)}>{formatPct(selectedFund.daily_return)}</span>
                                                 </div>
                                                 <small>{formatDate(selectedFund.as_of)}</small>
