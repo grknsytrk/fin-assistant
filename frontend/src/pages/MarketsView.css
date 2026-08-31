@@ -2014,6 +2014,64 @@
     border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 66%, transparent);
 }
 
+.indices-line-chart {
+    touch-action: none;
+}
+
+.indices-chart-measure {
+    pointer-events: none;
+}
+
+.indices-chart-measure-path {
+    stroke: color-mix(in srgb, var(--accent-color) 56%, var(--text-primary));
+    stroke-width: 1.4;
+    stroke-dasharray: 4 5;
+    vector-effect: non-scaling-stroke;
+}
+
+.indices-chart-measure-line {
+    stroke: color-mix(in srgb, var(--text-primary) 52%, transparent);
+    stroke-width: 1.1;
+    stroke-dasharray: 3 4;
+    vector-effect: non-scaling-stroke;
+}
+
+.indices-chart-measure-point {
+    stroke: color-mix(in srgb, var(--bg-color) 86%, black);
+    stroke-width: 1.9;
+}
+
+.indices-chart-measure-tooltip {
+    will-change: transform;
+}
+
+.indices-chart-measure-tooltip-bg {
+    fill: color-mix(in srgb, var(--bg-color) 96%, black);
+    stroke: color-mix(in srgb, var(--accent-color) 42%, transparent);
+}
+
+.indices-chart-measure-muted {
+    fill: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 800;
+}
+
+.indices-chart-measure-value {
+    fill: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 17px;
+    font-weight: 900;
+}
+
+.indices-chart-measure-value.is-positive {
+    fill: var(--success-color);
+}
+
+.indices-chart-measure-value.is-negative {
+    fill: var(--danger-color);
+}
+
 .indices-chart-empty {
     display: grid;
     place-items: center;

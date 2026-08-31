@@ -897,10 +897,17 @@ function IndexLineChart({
     changePct: number | null;
 }) {
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+    const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
     const width = 1120;
     const height = 400;
     const padding = { top: 30, right: 65, bottom: 40, left: 16 };
     const validPoints = points.filter((point) => Number.isFinite(point.close));
+    const pointWindowKey = `${symbol || ''}:${validPoints.length}:${validPoints[0]?.time || ''}:${validPoints[validPoints.length - 1]?.time || ''}`;
+
+    useEffect(() => {
+        setHoverIndex(null);
+        setMeasureAnchorIndex(null);
+    }, [pointWindowKey]);
 
     if (validPoints.length < 2) {
         return <div className="indices-chart-empty">Grafik verisi bekleniyor.</div>;
@@ -979,10 +986,7 @@ function IndexLineChart({
         
     const areaData = `${pathData} L ${xFor(validPoints.length - 1)} ${height - padding.bottom} L ${padding.left} ${height - padding.bottom} Z`;
 
-    const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        if (rect.width <= 0) return;
-        const x = ((event.clientX - rect.left) / rect.width) * width;
+    const closestIndexForX = (x: number) => {
         let closestIndex = 0;
         let minDiff = Infinity;
         for (let i = 0; i < validPoints.length; i++) {
@@ -992,7 +996,41 @@ function IndexLineChart({
                 closestIndex = i;
             }
         }
+        return closestIndex;
+    };
+
+    const chartXFromEvent = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return null;
+        return Math.min(Math.max(((event.clientX - rect.left) / rect.width) * width, 0), width);
+    };
+
+    const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const x = chartXFromEvent(event);
+        if (x == null) return;
+        setHoverIndex(closestIndexForX(x));
+    };
+
+    const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        event.preventDefault();
+        const x = chartXFromEvent(event);
+        if (x == null) return;
+        const closestIndex = closestIndexForX(x);
         setHoverIndex(closestIndex);
+        setMeasureAnchorIndex(closestIndex);
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+    };
+
+    const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+        setMeasureAnchorIndex(null);
+        try {
+            if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+        } catch {
+            // Ignore release errors when the browser has already cancelled capture.
+        }
     };
 
     const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
@@ -1000,6 +1038,50 @@ function IndexLineChart({
     const hoverPoint = activeHoverIndex == null ? null : validPoints[activeHoverIndex];
     const hoverX = activeHoverIndex == null ? null : xFor(activeHoverIndex);
     const hoverY = hoverPoint ? yFor(hoverPoint.close) : null;
+    const measureAnchorPoint = measureAnchorIndex == null
+        ? null
+        : validPoints[clamp(measureAnchorIndex, 0, validPoints.length - 1)];
+    const measureEndPoint = measureAnchorPoint && hoverPoint && activeHoverIndex != null && activeHoverIndex !== measureAnchorIndex
+        ? hoverPoint
+        : null;
+    const measureAnchorX = measureAnchorIndex == null ? null : xFor(clamp(measureAnchorIndex, 0, validPoints.length - 1));
+    const measureAnchorY = measureAnchorPoint ? yFor(measureAnchorPoint.close) : null;
+    const measureEndX = measureEndPoint && activeHoverIndex != null ? xFor(activeHoverIndex) : null;
+    const measureEndY = measureEndPoint ? yFor(measureEndPoint.close) : null;
+    const measureStartValue = measureAnchorPoint?.close ?? null;
+    const measureEndValue = measureEndPoint?.close ?? null;
+    const measureDelta = measureStartValue != null && measureEndValue != null
+        ? measureEndValue - measureStartValue
+        : null;
+    const measureReturn = measureStartValue != null && measureEndValue != null && measureStartValue !== 0
+        ? ((measureEndValue - measureStartValue) / measureStartValue) * 100
+        : null;
+    const measureLineY = measureAnchorY != null && measureEndY != null
+        ? Math.max(padding.top + 12, Math.min(measureAnchorY, measureEndY) - 18)
+        : null;
+    const measureTooltipWidth = 190;
+    const measureTooltipHeight = 70;
+    const measureTooltipGap = 14;
+    const measureTooltipAnchorX = hoverX ?? measureEndX;
+    const measureTooltipAnchorY = hoverY ?? measureEndY;
+    const measureTooltipShouldFlip = measureTooltipAnchorX != null
+        && measureTooltipAnchorX + measureTooltipGap + measureTooltipWidth > width - 8;
+    const measureTooltipX = measureTooltipAnchorX == null
+        ? 0
+        : measureTooltipShouldFlip
+            ? Math.max(8, measureTooltipAnchorX - measureTooltipGap - measureTooltipWidth)
+            : Math.min(measureTooltipAnchorX + measureTooltipGap, width - measureTooltipWidth - 8);
+    const measureTooltipY = measureTooltipAnchorY == null
+        ? 0
+        : measureTooltipAnchorY - measureTooltipGap - measureTooltipHeight >= padding.top
+            ? measureTooltipAnchorY - measureTooltipGap - measureTooltipHeight
+            : Math.min(measureTooltipAnchorY + measureTooltipGap, height - measureTooltipHeight - 8);
+    const measureDeltaText = measureDelta == null
+        ? '-'
+        : `${measureDelta > 0 ? '+' : measureDelta < 0 ? '-' : ''}${formatIndexPrice(Math.abs(measureDelta))} puan`;
+    const measureClass = measureReturn == null ? '' : measureReturn >= 0 ? 'is-positive' : 'is-negative';
+    const measureLeftX = measureAnchorX != null && measureEndX != null ? Math.min(measureAnchorX, measureEndX) : null;
+    const measureRightX = measureAnchorX != null && measureEndX != null ? Math.max(measureAnchorX, measureEndX) : null;
     const tooltipWidth = 145;
     const tooltipHeight = 60;
     const tooltipX = hoverX == null ? 0 : clamp(hoverX + 16, padding.left, width - tooltipWidth - padding.right);
@@ -1014,7 +1096,13 @@ function IndexLineChart({
             aria-label="Endeks çizgi grafiği" 
             style={{ display: 'block', width: '100%', height: 'auto', borderBottom: 'none' }}
             onPointerMove={handlePointerMove}
-            onPointerLeave={() => setHoverIndex(null)}
+            onPointerDown={handlePointerDown}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerUp}
+            onPointerLeave={() => {
+                setHoverIndex(null);
+                setMeasureAnchorIndex(null);
+            }}
         >
             <defs>
                 <linearGradient id="areaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
@@ -1092,8 +1180,71 @@ function IndexLineChart({
                                 </text>
             </g>
 
+            {/* Drag-to-measure */}
+            {measureAnchorPoint
+                && measureEndPoint
+                && measureAnchorX != null
+                && measureAnchorY != null
+                && measureEndX != null
+                && measureEndY != null
+                && measureLeftX != null
+                && measureRightX != null
+                && measureLineY != null
+                && measureReturn != null
+                && measureDelta != null && (
+                <g className="indices-chart-measure">
+                    <line
+                        x1={measureAnchorX}
+                        y1={measureAnchorY}
+                        x2={measureEndX}
+                        y2={measureEndY}
+                        className="indices-chart-measure-path"
+                    />
+                    <line
+                        x1={measureLeftX}
+                        y1={measureLineY}
+                        x2={measureRightX}
+                        y2={measureLineY}
+                        className="indices-chart-measure-line"
+                    />
+                    <line
+                        x1={measureAnchorX}
+                        y1={measureLineY - 5}
+                        x2={measureAnchorX}
+                        y2={measureLineY + 5}
+                        className="indices-chart-measure-line"
+                    />
+                    <line
+                        x1={measureEndX}
+                        y1={measureLineY - 5}
+                        x2={measureEndX}
+                        y2={measureLineY + 5}
+                        className="indices-chart-measure-line"
+                    />
+                    <circle cx={measureAnchorX} cy={measureAnchorY} r="4.2" className="indices-chart-measure-point" fill={chartColor} />
+                    <circle cx={measureEndX} cy={measureEndY} r="4.2" className="indices-chart-measure-point" fill={chartColor} />
+                    <g
+                        className="indices-chart-measure-tooltip"
+                        style={{ transform: `translate(${measureTooltipX}px, ${measureTooltipY}px)` }}
+                    >
+                        <rect width={measureTooltipWidth} height={measureTooltipHeight} rx="7" className="indices-chart-measure-tooltip-bg" />
+                        <text x="10" y="18" className="indices-chart-measure-muted">
+                            {new Intl.DateTimeFormat('tr-TR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(measureAnchorPoint.time))}
+                            {' - '}
+                            {new Intl.DateTimeFormat('tr-TR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(measureEndPoint.time))}
+                        </text>
+                        <text x="10" y="42" className={`indices-chart-measure-value ${measureClass}`}>
+                            {formatTablePct(measureReturn)}
+                        </text>
+                        <text x="10" y="60" className="indices-chart-measure-muted">
+                            {measureDeltaText}
+                        </text>
+                    </g>
+                </g>
+            )}
+
             {/* Hover Tooltip */}
-            {hoverPoint && hoverX != null && hoverY != null && (
+            {measureAnchorIndex == null && hoverPoint && hoverX != null && hoverY != null && (
                 <g className="indices-chart-hover">
                     <line
                         x1={hoverX}
