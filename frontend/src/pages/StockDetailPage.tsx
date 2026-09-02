@@ -160,10 +160,12 @@ function StockDetailPriceChart({
     ticker,
     currency,
     dailyChangePct,
+    currentPrice,
 }: {
     ticker: string;
     currency?: string | null;
     dailyChangePct?: number | null;
+    currentPrice?: number | null;
 }) {
     const [selectedRange, setSelectedRange] = useState<MarketStockCardChartRange>('1d');
     const [chartDataByRange, setChartDataByRange] = useState<
@@ -286,8 +288,11 @@ function StockDetailPriceChart({
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
     const values = validPoints.map((point) => point.close);
-    let minValue = Math.min(...values);
-    let maxValue = Math.max(...values);
+    const markerPrice = currentPrice != null && Number.isFinite(currentPrice)
+        ? currentPrice
+        : validPoints[validPoints.length - 1].close;
+    let minValue = Math.min(...values, markerPrice);
+    let maxValue = Math.max(...values, markerPrice);
     const rawSpan = Math.max(0.01, maxValue - minValue);
     minValue -= rawSpan * 0.05;
     maxValue += rawSpan * 0.05;
@@ -444,9 +449,10 @@ function StockDetailPriceChart({
         : hoverY - tooltipHeight / 2 < padding.top
             ? padding.top
             : Math.min(hoverY - tooltipHeight / 2, height - tooltipHeight - padding.bottom);
-    const markerLabel = formatQuotePrice(validPoints[validPoints.length - 1].close, currency);
+    const markerLabel = formatQuotePrice(markerPrice, currency);
     const markerWidth = Math.max(70, markerLabel.length * 8 + 18);
-    const markerX = width - padding.right - markerWidth;
+    const markerY = yFor(markerPrice);
+    const markerX = width - padding.right + 4;
 
     return (
         <section className="sd-price-chart-panel" aria-label={`${ticker} fiyat grafiği`}>
@@ -509,9 +515,9 @@ function StockDetailPriceChart({
                 <path d={areaData} fill={`url(#sd-price-chart-area-${ticker}-${selectedRange})`} />
                 <path d={pathData} fill="none" stroke={chartColor} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
                 <circle cx={xFor(validPoints.length - 1)} cy={yFor(validPoints[validPoints.length - 1].close)} r="4" fill={chartColor} />
-                <g transform={`translate(${markerX}, ${yFor(validPoints[validPoints.length - 1].close)})`}>
+                <g transform={`translate(${markerX}, ${markerY})`}>
                     <rect width={markerWidth} height="20" y="-10" rx="2" fill={chartColor} />
-                    <path d={`M ${markerWidth} 0 L ${markerWidth + 6} -6 L ${markerWidth + 6} 6 Z`} fill={chartColor} />
+                    <path d="M 0 0 L -6 -6 L -6 6 Z" fill={chartColor} />
                     <text x={markerWidth / 2} y="3" fill="#ffffff" fontSize="11" fontFamily="monospace" textAnchor="middle" fontWeight="bold">
                         {markerLabel}
                     </text>
@@ -829,6 +835,7 @@ export default function StockDetailPage({
                                 ticker={normalizedTicker}
                                 currency={displayCurrency}
                                 dailyChangePct={displayChangePct}
+                                currentPrice={displayPrice}
                             />
                         )}
                         {renderContent()}
