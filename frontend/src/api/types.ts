@@ -395,7 +395,7 @@ export interface FundPortfolioEffect {
 }
 
 export type FundRefreshJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'superseded';
-export type FundResolutionStatus = 'available' | 'resolved_previous_date' | 'not_published' | 'upstream_unavailable';
+export type FundResolutionStatus = 'available' | 'resolved_previous_date' | 'not_published' | 'upstream_unavailable' | 'market_closed';
 
 export interface FundRefreshJob {
   job_id: string;
@@ -408,7 +408,7 @@ export interface FundRefreshJob {
   error?: string | null;
   resolution_status?: FundResolutionStatus | null;
   resolved_as_of?: string | null;
-  snapshot_action?: 'updated' | 'retained_current' | 'retained_newer' | 'retained_existing' | null;
+  snapshot_action?: 'updated' | 'retained_current' | 'retained_newer' | 'retained_existing' | 'retained_current_market_closed' | null;
   generation?: number | null;
 }
 

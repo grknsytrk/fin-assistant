@@ -2379,18 +2379,75 @@ def _business_days_between(start: date, end: date) -> int:
 
 
 def _latest_fund_snapshot_target_date(today: Optional[date] = None) -> date:
-    now_local = datetime.now(timezone(timedelta(hours=3)))
-    current = today or now_local.date()
+    current = today or _turkey_market_today()
     # The requested date is the latest Turkish market business day.  TEFAS
     # publication timing is resolved by the bounded probe below, not by a
     # fixed wall-clock cutoff that can permanently hide a newly published
     # close.
-    del now_local
     if _is_turkey_market_business_day(current):
         return current
     while not _is_turkey_market_business_day(current):
         current -= timedelta(days=1)
     return current
+
+
+def _turkey_market_today() -> date:
+    """Return the current calendar date in the market's local timezone."""
+
+    return datetime.now(timezone(timedelta(hours=3))).date()
+
+
+def _snapshot_is_current_on_market_closure(
+    snapshot: Dict[str, Any],
+    *,
+    today: Optional[date] = None,
+) -> bool:
+    """Whether a snapshot already covers the latest published market session.
+
+    On weekends and full-day holidays TEFAS has no newer session to publish.
+    Retrying a Friday snapshot on those days only creates a false upstream-error
+    warning, so a non-empty snapshot for the latest business day is current.
+    """
+
+    current = today or _turkey_market_today()
+    target = _latest_fund_snapshot_target_date(current)
+    snapshot_as_of = _snapshot_as_of_date(snapshot)
+    return bool(
+        current > target
+        and snapshot_as_of is not None
+        and snapshot_as_of >= target
+        and list(snapshot.get("rows") or [])
+    )
+
+
+def _mark_snapshot_current_for_market_closure(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Clear a stale transport warning when the market is expected to be closed."""
+
+    payload = dict(snapshot)
+    prior_warnings = list(payload.get("warnings") or [])
+    meta = dict(payload.get("source_metadata") or {})
+    target = _latest_fund_snapshot_target_date()
+    if prior_warnings:
+        meta["last_refresh_warnings"] = prior_warnings
+    meta.update(
+        {
+            "resolution_status": "market_closed",
+            "requested_as_of": target.isoformat(),
+            "resolved_as_of": payload.get("as_of"),
+            "snapshot_action": "retained_current_market_closed",
+            "market_closed": True,
+            "market_closed_target_date": target.isoformat(),
+            "warnings": [],
+        }
+    )
+    payload["status"] = "ok" if payload.get("rows") else payload.get("status")
+    payload["stale"] = False
+    payload["degraded"] = False
+    payload["warnings"] = []
+    payload["source_metadata"] = meta
+    payload["snapshot_action"] = "retained_current_market_closed"
+    payload["resolution_status"] = "market_closed"
+    return payload
 
 
 def _history_coverage_info(points: List[Dict[str, Any]], end_date: date, threshold_days: int = 3) -> Dict[str, Any]:
@@ -5103,6 +5160,14 @@ def refresh_funds_snapshot(
 ) -> Dict[str, Any]:
     end_date = _latest_fund_snapshot_target_date()
     existing_snapshot = load_funds_snapshot(processed_dir)
+    # A Friday close is already the latest valid snapshot throughout the
+    # weekend/holiday. Do not call providers merely to turn it into a false
+    # "refresh failed" warning.
+    if _snapshot_is_current_on_market_closure(existing_snapshot):
+        retained = _mark_snapshot_current_for_market_closure(existing_snapshot)
+        if persist_snapshot and not database_enabled():
+            _write_json(_snapshot_path(processed_dir), retained)
+        return retained
     bounded_lookback_days = min(FUNDS_MAX_LOOKBACK_CALENDAR_DAYS, max(1, int(lookback_days)))
     warnings: List[str] = []
     primary = _fund_fetch_result(
@@ -5540,6 +5605,10 @@ def get_funds_payload(
     auto_refresh: bool = False,
 ) -> Dict[str, Any]:
     snapshot = load_funds_snapshot(processed_dir)
+    # A previously failed weekend refresh may already be stored. Present the
+    # Friday/last-business-day snapshot as current instead of alarming users.
+    if _snapshot_is_current_on_market_closure(snapshot):
+        snapshot = _mark_snapshot_current_for_market_closure(snapshot)
     if auto_refresh:
         snapshot = _refresh_funds_snapshot_if_stale(processed_dir, snapshot)
     rows = [

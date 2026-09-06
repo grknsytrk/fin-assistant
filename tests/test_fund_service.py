@@ -1285,6 +1285,34 @@ def test_refresh_funds_snapshot_does_not_downgrade_newer_snapshot(monkeypatch, t
     assert payload["resolution_status"] == "resolved_previous_date"
 
 
+def test_weekend_snapshot_is_not_refreshed_or_reported_stale(monkeypatch, tmp_path) -> None:
+    existing = fund_service._build_snapshot(
+        [{"fund_code": "TLY", "date": "2026-09-04", "price": 8.865, "tefasDurum": True}]
+    )
+    existing.update({"stale": True, "degraded": True, "warnings": ["temporary upstream error"]})
+    fund_service._write_json(fund_service._snapshot_path(tmp_path), existing)
+    monkeypatch.setattr(fund_service, "_turkey_market_today", lambda: date(2026, 9, 6))
+
+    class UnexpectedTefasClient:
+        def fetch_latest_fund_list_snapshot_result(self, **_kwargs):
+            pytest.fail("weekend should not call TEFAS")
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: UnexpectedTefasClient())
+
+    refreshed = fund_service.refresh_funds_snapshot(
+        tmp_path, lookback_days=14, persist_reference_data=False, backfill_daily_returns=False
+    )
+    listed = fund_service.get_funds_payload(tmp_path)
+
+    assert refreshed["resolution_status"] == "market_closed"
+    assert refreshed["snapshot_action"] == "retained_current_market_closed"
+    assert refreshed["stale"] is False
+    assert refreshed["warnings"] == []
+    assert listed["stale"] is False
+    assert listed["degraded"] is False
+    assert listed["warnings"] == []
+
+
 def test_refresh_funds_snapshot_uses_bounded_direct_fallback(monkeypatch, tmp_path) -> None:
     calls = {"lookback_days": None}
 
