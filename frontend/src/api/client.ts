@@ -27,7 +27,6 @@ import type {
     FundHoldingsLiveResponse,
     FundHoldingsResponse,
     FundPerformanceResponse,
-    FundRefreshJob,
     FundYieldSummaryResponse,
     FundsResponse,
     KapOverviewCommentaryRequest,
@@ -37,7 +36,7 @@ import type {
 const rawApiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
 const API_BASE = (rawApiBase && rawApiBase !== '/' ? rawApiBase : 'http://localhost:8000').replace(/\/+$/, '');
 
-const RETRYABLE_HTTP_STATUSES = new Set([502, 503, 504]);
+const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
 const STARTUP_HINT = 'Uygulama yeni baslatiliyor olabilir. Lutfen 5-10 saniye bekleyip tekrar deneyin.';
 const NETWORK_ERROR_MESSAGE = 'Su an baglanti kurulamiyor. Lutfen kisa bir sure sonra tekrar deneyin.';
 const SERVER_ERROR_MESSAGE = 'Islem su an tamamlanamiyor. Lutfen daha sonra tekrar deneyin.';
@@ -77,10 +76,20 @@ function isRetryableNetworkError(error: unknown): boolean {
     );
 }
 
-function retryDelayMs(attempt: number): number {
+function retryDelayMs(attempt: number, retryAfterMs?: number | null): number {
+    if (retryAfterMs != null && Number.isFinite(retryAfterMs)) return Math.max(0, retryAfterMs);
     const base = 250;
     const max = 1800;
-    return Math.min(max, base * Math.pow(1.6, Math.max(0, attempt - 1)));
+    return Math.round(Math.min(max, base * Math.pow(1.6, Math.max(0, attempt - 1))) * (0.8 + Math.random() * 0.4));
+}
+
+function retryAfterMs(response: Response): number | null {
+    const raw = response.headers.get('Retry-After')?.trim();
+    if (!raw) return null;
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds)) return Math.min(Math.max(0, seconds * 1000), 300_000);
+    const when = Date.parse(raw);
+    return Number.isFinite(when) ? Math.min(Math.max(0, when - Date.now()), 300_000) : null;
 }
 
 async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Promise<T> {
@@ -163,7 +172,7 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
         if (!response.ok) {
             const elapsedMs = Math.round((window.performance?.now?.() ?? Date.now()) - startedAt);
             if (allowRetry && RETRYABLE_HTTP_STATUSES.has(response.status) && attempt < maxAttempts) {
-                await sleep(retryDelayMs(attempt));
+                await sleep(retryDelayMs(attempt, retryAfterMs(response)));
                 continue;
             }
 
@@ -332,24 +341,13 @@ export const apiClient = {
         });
     },
     fundCategories: () => fetchApi<FundCategoriesResponse>('/funds/categories'),
-    refreshFundsSnapshot: (lookbackDays = 14) =>
-        fetchApi<FundsResponse>(`/admin/funds/refresh-snapshot?lookback_days=${lookbackDays}`, {
-            method: 'POST',
-            timeoutMs: 15000,
-            exposeErrorDetail: true,
-        }),
-    fundRefreshSnapshotStatus: (jobId: string) =>
-        fetchApi<{ refresh_job: FundRefreshJob }>(
-            `/admin/funds/refresh-snapshot/status?job_id=${encodeURIComponent(jobId)}`,
-            { timeoutMs: 10000, exposeErrorDetail: true },
-        ),
     fundDetail: (fundCode: string) => fetchApi<FundDetail>(`/funds/${encodeURIComponent(fundCode)}`),
     fundYieldSummary: (fundCode: string) =>
         fetchApi<FundYieldSummaryResponse>(`/funds/${encodeURIComponent(fundCode)}/yield-summary`, {
             timeoutMs: 30000,
             exposeErrorDetail: true,
         }),
-    fundPerformance: (fundCode: string, options?: { startDate?: string; endDate?: string; refresh?: boolean }) => {
+    fundPerformance: (fundCode: string, options?: { startDate?: string; endDate?: string; refresh?: boolean; signal?: AbortSignal }) => {
         const params = new URLSearchParams();
         if (options?.startDate) params.append('start_date', options.startDate);
         if (options?.endDate) params.append('end_date', options.endDate);
@@ -357,6 +355,7 @@ export const apiClient = {
         const query = params.toString();
         return fetchApi<FundPerformanceResponse>(
             `/funds/${encodeURIComponent(fundCode)}/performance${query ? `?${query}` : ''}`,
+            { signal: options?.signal },
         );
     },
     fundPerformanceStatus: (fundCode: string, options?: { startDate?: string; endDate?: string }) => {
@@ -366,18 +365,6 @@ export const apiClient = {
         const query = params.toString();
         return fetchApi<{ fund_code: string; status: FundHistoryJob['status']; history_job: FundHistoryJob | null }>(
             `/funds/${encodeURIComponent(fundCode)}/performance/status${query ? `?${query}` : ''}`,
-        );
-    },
-    refreshFundPerformance: (fundCode: string, startDate: string, endDate?: string) => {
-        const params = new URLSearchParams({ start_date: startDate });
-        if (endDate) params.append('end_date', endDate);
-        return fetchApi<FundPerformanceResponse>(
-            `/admin/funds/${encodeURIComponent(fundCode)}/refresh-performance?${params.toString()}`,
-            {
-                method: 'POST',
-                timeoutMs: 180000,
-                exposeErrorDetail: true,
-            },
         );
     },
     fundAllocations: (fundCode: string) =>
@@ -390,19 +377,6 @@ export const apiClient = {
                 exposeErrorDetail: true,
             },
         ),
-    refreshFundAllocations: (fundCode: string, asOf?: string) => {
-        const params = new URLSearchParams();
-        if (asOf) params.append('as_of', asOf);
-        const suffix = params.toString() ? `?${params.toString()}` : '';
-        return fetchApi<FundAllocationsResponse>(
-            `/admin/funds/${encodeURIComponent(fundCode)}/refresh-allocations${suffix}`,
-            {
-                method: 'POST',
-                timeoutMs: 45000,
-                exposeErrorDetail: true,
-            },
-        );
-    },
     fundHoldings: async (fundCode: string, options?: { force?: boolean }) => {
         const normalizedCode = fundCode.trim().toUpperCase();
         const now = Date.now();

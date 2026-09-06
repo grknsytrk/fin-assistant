@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
@@ -39,6 +40,7 @@ from app.cache import get_cache as _get_cache
 from app.cache import get_or_set_single_flight as _get_or_set_single_flight
 from app.cache import get_json_dict as _cache_get_dict
 from app.cache import set_json as _cache_set_json
+from app.rate_limit import RequestRateLimitMiddleware
 from app.database import (
     acquire_refresh_lease,
     close_postgres_pool,
@@ -68,6 +70,15 @@ _FUND_YIELD_SUMMARY_CACHE_TTL = int(os.getenv("RAGFIN_FUND_YIELD_SUMMARY_CACHE_T
 _FUND_HOLDINGS_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_CACHE_TTL_SECONDS", str(60 * 60)))
 _FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT_SECONDS", "120"))
 _FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 7
+_FUND_HOLDINGS_LIVE_RESPONSE_CACHE_TTL = int(
+    os.getenv("RAGFIN_FUND_HOLDINGS_LIVE_RESPONSE_CACHE_TTL_SECONDS", "10")
+)
+_FUND_HOLDINGS_LIVE_RESPONSE_LOCK_TTL = float(
+    os.getenv("RAGFIN_FUND_HOLDINGS_LIVE_RESPONSE_LOCK_TTL_SECONDS", "30")
+)
+_FUND_HOLDINGS_LIVE_RESPONSE_WAIT_TIMEOUT = float(
+    os.getenv("RAGFIN_FUND_HOLDINGS_LIVE_RESPONSE_WAIT_TIMEOUT_SECONDS", "2")
+)
 _FUND_HOLDING_SECTOR_MAP_CACHE_TTL = 6 * 60 * 60
 _FUND_REFRESH_JOB_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_REFRESH_JOB_TTL_SECONDS", str(30 * 60)))
 _FUND_REFRESH_MAX_LOOKBACK_DAYS = 14
@@ -91,9 +102,22 @@ _FUND_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="fund-history-backfill",
 )
+_FUND_ALLOCATION_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=max(1, int(os.getenv("RAGFIN_FUND_ALLOCATION_HISTORY_WORKERS", "1"))),
+    thread_name_prefix="fund-allocation-history-refresh",
+)
 _FUND_REFRESH_STATE_LOCK = threading.Lock()
 _FUND_HISTORY_STATE_LOCK = threading.Lock()
 _FUND_HISTORY_JOB_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_HISTORY_JOB_TTL_SECONDS", str(30 * 60)))
+_FUND_ALLOCATION_HISTORY_JOB_TTL_SECONDS = int(
+    os.getenv("RAGFIN_FUND_ALLOCATION_HISTORY_JOB_TTL_SECONDS", str(30 * 60))
+)
+_FUND_ALLOCATION_HISTORY_LEASE_TTL_SECONDS = int(
+    os.getenv("RAGFIN_FUND_ALLOCATION_HISTORY_LEASE_TTL_SECONDS", "120")
+)
+_FUND_ALLOCATION_HISTORY_HEARTBEAT_INTERVAL_SECONDS = float(
+    os.getenv("RAGFIN_FUND_ALLOCATION_HISTORY_HEARTBEAT_INTERVAL_SECONDS", "30")
+)
 _FUND_HISTORY_WARMUP_DAYS = int(os.getenv("RAGFIN_FUNDS_HISTORY_WARMUP_DAYS", "366"))
 _FUND_HISTORY_LEASE_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_HISTORY_LEASE_TTL_SECONDS", "120"))
 _FUND_HISTORY_HEARTBEAT_INTERVAL_SECONDS = float(
@@ -102,6 +126,9 @@ _FUND_HISTORY_HEARTBEAT_INTERVAL_SECONDS = float(
 _FUND_HISTORY_MAX_PHASES = int(os.getenv("RAGFIN_FUND_HISTORY_MAX_PHASES", "2"))
 _FUND_HISTORY_KEY_VERSION = 2
 _ADMIN_REFRESH_TOKEN_ENV = "RAGFIN_ADMIN_REFRESH_TOKEN"
+_ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS = int(
+    os.getenv("RAGFIN_ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS", "370")
+)
 _MARKET_UNIVERSE_CACHE_TTL = int(
     os.getenv("RAGFIN_MARKET_UNIVERSE_CACHE_TTL_SECONDS", str(6 * 60 * 60))
 )
@@ -615,19 +642,31 @@ def _cors_allow_origin_regex() -> str:
     return r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$"
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_allow_origins(),
-    allow_origin_regex=_cors_allow_origin_regex(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def configure_http_middleware(target: FastAPI) -> None:
+    """Install the public HTTP policy on every production API host.
 
-# The fund catalogue contains every visible TEFAS fund and is intentionally
-# returned in one response for client-side filtering.  Compressing responses
-# keeps that catalogue cheap to transfer without changing its API contract.
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+    Spaces serves this router from Gradio's FastAPI application rather than
+    from ``app`` itself, so this function is also called by ``hf_entrypoint``.
+    """
+
+    target.add_middleware(RequestRateLimitMiddleware)
+    # Middleware is evaluated in reverse registration order. CORS therefore
+    # wraps the limiter too, so browser clients can read a 429/Retry-After.
+    target.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_allow_origins(),
+        allow_origin_regex=_cors_allow_origin_regex(),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    # The fund catalogue contains every visible TEFAS fund and is intentionally
+    # returned in one response for client-side filtering.  Compressing responses
+    # keeps that catalogue cheap to transfer without changing its API contract.
+    target.add_middleware(GZipMiddleware, minimum_size=1024)
+
+
+configure_http_middleware(app)
 
 
 class MarketComparisonHistoryAsset(BaseModel):
@@ -1581,10 +1620,9 @@ def fund_performance(
 @_cached_response(
     key_fn=lambda *, fund_code, start_iso, end_iso, fallback, refresh: (
         f"api:fund-performance:v{_FUND_HISTORY_KEY_VERSION}:{fund_code}:{start_iso or 'full'}:{end_iso or 'today'}"
-        f":fb={1 if fallback else 0}:refresh={1 if refresh else 0}"
+        f":fb={1 if fallback else 0}"
     ),
     ttl_seconds=60,
-    skip_when=lambda *, refresh, **_kwargs: bool(refresh),
 )
 def _fund_performance_payload(
     *,
@@ -1844,6 +1882,36 @@ def fund_holdings_live(fund_code: str) -> Dict[str, Any]:
     from app.fund_service import normalize_fund_code
 
     normalized = normalize_fund_code(fund_code)
+    key = f"api:fund-holdings-live:{normalized}:v1"
+    payload, cache_status = _get_or_set_single_flight(
+        key,
+        ttl_seconds=_FUND_HOLDINGS_LIVE_RESPONSE_CACHE_TTL,
+        factory=lambda: _fund_holdings_live_payload(normalized=normalized),
+        lock_ttl_seconds=_FUND_HOLDINGS_LIVE_RESPONSE_LOCK_TTL,
+        wait_timeout_seconds=_FUND_HOLDINGS_LIVE_RESPONSE_WAIT_TIMEOUT,
+    )
+    if isinstance(payload, dict):
+        return payload
+    # Do not make a waiter repeat the live Yahoo/InfoYatirim fan-out. The
+    # static response lets the client retain its existing values until the
+    # single owner populates the short shared cache.
+    static = _fund_holdings_static_payload(normalized=normalized)
+    return {
+        "fund_code": normalized,
+        "status": static.get("status") or "pending",
+        "positions": [],
+        "portfolio_effect": None,
+        "source": "daily_market_enrichment",
+        "as_of": None,
+        "source_metadata": {
+            "source": "daily_market_enrichment",
+            "live_cache_status": cache_status,
+            "refresh_pending": True,
+        },
+    }
+
+
+def _fund_holdings_live_payload(*, normalized: str) -> Dict[str, Any]:
     payload = _fund_holdings_static_payload(normalized=normalized)
     enriched = _enrich_fund_holdings_with_daily_market_data(payload, normalized)
     positions = []
@@ -2623,18 +2691,181 @@ def fund_allocations(fund_code: str) -> Dict[str, Any]:
     return get_fund_allocations_payload(CONFIG.paths.processed_dir, fund_code)
 
 
+def _allocation_history_job_key(fund_code: str, lookback_days: int) -> str:
+    return f"api:fund-allocation-history:job:{fund_code}:{lookback_days}"
+
+
+def _allocation_history_active_key(fund_code: str, lookback_days: int) -> str:
+    return f"api:fund-allocation-history:active:{fund_code}:{lookback_days}"
+
+
+def _allocation_history_job_get(fund_code: str, lookback_days: int, job_id: str) -> Optional[Dict[str, Any]]:
+    value = _get_cache().get(f"{_allocation_history_job_key(fund_code, lookback_days)}:{job_id}")
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _allocation_history_job_set(job: Dict[str, Any]) -> None:
+    _get_cache().set(
+        f"{_allocation_history_job_key(str(job['fund_code']), int(job['lookback_days']))}:{job['job_id']}",
+        job,
+        ttl_seconds=_FUND_ALLOCATION_HISTORY_JOB_TTL_SECONDS,
+    )
+
+
+def _allocation_history_job_public(job: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not job:
+        return None
+    return {
+        key: job.get(key)
+        for key in ("job_id", "fund_code", "lookback_days", "status", "requested_at", "started_at", "finished_at", "error")
+    }
+
+
+def _run_allocation_history_refresh_job(fund_code: str, lookback_days: int, job_id: str) -> None:
+    from app.fund_service import refresh_fund_allocations_history
+
+    normalized = fund_code.strip().upper()
+    backend = _get_cache()
+    job = _allocation_history_job_get(normalized, lookback_days, job_id)
+    if not job:
+        return
+    active_key = _allocation_history_active_key(normalized, lookback_days)
+    lease_key = f"{active_key}:lease"
+    owner = uuid.uuid4().hex
+    if not backend.set_if_absent(lease_key, owner, ttl_seconds=_FUND_ALLOCATION_HISTORY_LEASE_TTL_SECONDS):
+        # A different worker has the shared lease. Its result will populate the
+        # same file/cache; keep this job informational rather than duplicating
+        # upstream TEFAS traffic.
+        job.update({"status": "superseded", "finished_at": _fund_refresh_now_iso(), "error": None})
+        _allocation_history_job_set(job)
+        return
+
+    heartbeat_stop = threading.Event()
+
+    def heartbeat() -> None:
+        while not heartbeat_stop.wait(max(1.0, _FUND_ALLOCATION_HISTORY_HEARTBEAT_INTERVAL_SECONDS)):
+            backend.renew_if_owner(
+                lease_key,
+                owner,
+                ttl_seconds=_FUND_ALLOCATION_HISTORY_LEASE_TTL_SECONDS,
+            )
+            backend.renew_if_owner(
+                active_key,
+                job_id,
+                ttl_seconds=_FUND_ALLOCATION_HISTORY_JOB_TTL_SECONDS,
+            )
+
+    heartbeat_thread = threading.Thread(
+        target=heartbeat,
+        name=f"fund-allocation-history-heartbeat-{normalized}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        job.update({"status": "running", "started_at": _fund_refresh_now_iso(), "error": None})
+        _allocation_history_job_set(job)
+        refresh_fund_allocations_history(
+            CONFIG.paths.processed_dir,
+            normalized,
+            lookback_days=lookback_days,
+            allow_daily_fallback=True,
+        )
+        job.update({"status": "succeeded", "finished_at": _fund_refresh_now_iso(), "error": None})
+        _allocation_history_job_set(job)
+    except Exception as exc:
+        job.update({"status": "failed", "finished_at": _fund_refresh_now_iso(), "error": str(exc)})
+        _allocation_history_job_set(job)
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=max(1.0, _FUND_ALLOCATION_HISTORY_HEARTBEAT_INTERVAL_SECONDS))
+        backend.release_if_owner(lease_key, owner)
+        if backend.get(active_key) == job_id:
+            backend.delete(active_key)
+
+
+def _start_allocation_history_refresh_job(fund_code: str, lookback_days: int) -> Dict[str, Any]:
+    """Start at most one allocation-history refresh for a fund/range pair."""
+
+    normalized = fund_code.strip().upper()
+    bounded_lookback = max(1, min(365, int(lookback_days)))
+    backend = _get_cache()
+    active_key = _allocation_history_active_key(normalized, bounded_lookback)
+    with backend.lock(f"fund-allocation-history-state:{normalized}:{bounded_lookback}", timeout=5.0) as acquired:
+        if acquired:
+            active_id = backend.get(active_key)
+            if active_id:
+                existing = _allocation_history_job_get(normalized, bounded_lookback, str(active_id))
+                if existing and str(existing.get("status")) in {"queued", "running"}:
+                    return existing
+            job = {
+                "job_id": uuid.uuid4().hex,
+                "fund_code": normalized,
+                "lookback_days": bounded_lookback,
+                "status": "queued",
+                "requested_at": _fund_refresh_now_iso(),
+                "started_at": None,
+                "finished_at": None,
+                "error": None,
+            }
+            _allocation_history_job_set(job)
+            backend.set(active_key, job["job_id"], ttl_seconds=_FUND_ALLOCATION_HISTORY_JOB_TTL_SECONDS)
+            try:
+                _FUND_ALLOCATION_HISTORY_EXECUTOR.submit(
+                    _run_allocation_history_refresh_job,
+                    normalized,
+                    bounded_lookback,
+                    str(job["job_id"]),
+                )
+            except Exception as exc:
+                job.update({"status": "failed", "finished_at": _fund_refresh_now_iso(), "error": str(exc)})
+                _allocation_history_job_set(job)
+                backend.delete(active_key)
+            return job
+    active_id = backend.get(active_key)
+    if active_id:
+        existing = _allocation_history_job_get(normalized, bounded_lookback, str(active_id))
+        if existing:
+            return existing
+    # A short lock contention should never turn into synchronous TEFAS work.
+    return {
+        "job_id": None,
+        "fund_code": normalized,
+        "lookback_days": bounded_lookback,
+        "status": "pending",
+        "requested_at": _fund_refresh_now_iso(),
+        "started_at": None,
+        "finished_at": None,
+        "error": "allocation refresh queue is busy",
+    }
+
+
 @app.get("/funds/{fund_code}/allocations/history")
 def fund_allocations_history(
     fund_code: str,
     lookback_days: int = Query(30, ge=1, le=365),
-) -> Dict[str, Any]:
+) -> Any:
     from app.fund_service import get_fund_allocations_history_payload
 
-    return get_fund_allocations_history_payload(
+    normalized = _require_known_fund_code(fund_code)
+    payload = get_fund_allocations_history_payload(
         CONFIG.paths.processed_dir,
-        fund_code,
+        normalized,
         lookback_days=lookback_days,
+        auto_refresh=False,
     )
+    needs_refresh = bool(payload.get("stale")) or str(payload.get("status")) == "pending"
+    if not needs_refresh:
+        payload["refresh_pending"] = False
+        return payload
+    job = _start_allocation_history_refresh_job(normalized, lookback_days)
+    response = dict(payload)
+    response["refresh_pending"] = str(job.get("status")) in {"queued", "running", "pending"}
+    metadata = dict(response.get("source_metadata") or {})
+    metadata["allocation_history_job"] = _allocation_history_job_public(job)
+    response["source_metadata"] = metadata
+    if not response.get("history"):
+        return JSONResponse(status_code=202, content=response)
+    return response
 
 
 @app.get("/funds/{fund_code}")
@@ -2678,6 +2909,19 @@ def admin_refresh_funds_snapshot(
     )
     payload["refresh_job"] = job
     return payload
+
+
+def _require_known_fund_code(fund_code: str) -> str:
+    """Reject arbitrary cache/job keys before an upstream refresh is queued."""
+
+    from app.fund_service import get_fund_detail_payload, normalize_fund_code
+
+    normalized = normalize_fund_code(fund_code)
+    try:
+        get_fund_detail_payload(CONFIG.paths.processed_dir, normalized)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Fon bulunamadi: {normalized}") from exc
+    return normalized
 
 
 @app.get("/admin/funds/refresh-snapshot/status")
@@ -2740,11 +2984,13 @@ def _invalidate_single_fund_response_cache(normalized: str) -> None:
 
 @app.post("/admin/funds/collect-prices")
 def admin_collect_fund_prices(
+    request: Request,
     lookback_days: int = Query(10, ge=1, le=45),
     as_of: Optional[date] = Query(None),
 ) -> Dict[str, Any]:
     from app.fund_service import collect_daily_fund_prices
 
+    _require_admin_refresh_access(request)
     return collect_daily_fund_prices(
         CONFIG.paths.processed_dir,
         as_of=as_of,
@@ -2754,16 +3000,24 @@ def admin_collect_fund_prices(
 
 @app.post("/admin/funds/{fund_code}/refresh-performance")
 def admin_refresh_fund_performance(
+    request: Request,
     fund_code: str,
     start_date: date = Query(...),
     end_date: Optional[date] = Query(None),
 ) -> Dict[str, Any]:
     from app.fund_service import FundUpstreamError, refresh_fund_performance, normalize_fund_code
 
+    _require_admin_refresh_access(request)
     normalized = normalize_fund_code(fund_code)
     effective_end_date = end_date or date.today()
     if start_date > effective_end_date:
         raise HTTPException(status_code=400, detail="start_date end_date sonrasinda olamaz")
+    if (effective_end_date - start_date).days > _ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"start_date en fazla {_ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS} gun geriye gidebilir",
+        )
+    _require_known_fund_code(normalized)
     try:
         result = refresh_fund_performance(
             CONFIG.paths.processed_dir,
@@ -2779,12 +3033,15 @@ def admin_refresh_fund_performance(
 
 @app.post("/admin/funds/{fund_code}/refresh-allocations")
 def admin_refresh_fund_allocations(
+    request: Request,
     fund_code: str,
     as_of: Optional[date] = Query(None),
 ) -> Dict[str, Any]:
     from app.fund_service import FundUpstreamError, normalize_fund_code, refresh_fund_allocations
 
+    _require_admin_refresh_access(request)
     normalized = normalize_fund_code(fund_code)
+    _require_known_fund_code(normalized)
     try:
         result = refresh_fund_allocations(CONFIG.paths.processed_dir, normalized, as_of=as_of)
     except FundUpstreamError as exc:

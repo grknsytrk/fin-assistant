@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -100,6 +101,7 @@ TEFAS_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_TEFAS_TIMEOUT_SECONDS", "60"))
 TEFAS_HTTP_RETRY_ATTEMPTS = int(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_ATTEMPTS", "5"))
 TEFAS_HTTP_RETRY_BASE_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_BASE_SECONDS", "5"))
 TEFAS_HTTP_RETRY_MAX_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_MAX_SECONDS", "45"))
+TEFAS_HTTP_RETRY_AFTER_MAX_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_AFTER_MAX_SECONDS", "300"))
 TEFAS_FUND_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_TEFAS_FUND_HISTORY_CHUNK_DAYS", "31"))
 TEFAS_DIRECT_PAGE_SIZE = int(os.getenv("RAGFIN_TEFAS_DIRECT_PAGE_SIZE", "1000"))
 TEFAS_DIRECT_PAGE_DELAY_SECONDS = float(os.getenv("RAGFIN_TEFAS_DIRECT_PAGE_DELAY_SECONDS", "1"))
@@ -140,6 +142,12 @@ FUNDS_ALLOCATION_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_ALLOCATION_TTL_SECOND
 # TEFAS, but we keep the empty TTL much shorter than the populated one so the
 # UI eventually recovers when upstream data becomes available again.
 FUNDS_ALLOCATION_EMPTY_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_ALLOCATION_EMPTY_TTL_SECONDS", str(15 * 60)))
+FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_REQUESTS = int(
+    os.getenv("RAGFIN_FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_REQUESTS", "30")
+)
+FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS = int(
+    os.getenv("RAGFIN_FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS", "2")
+)
 FUNDS_HOLDINGS_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_TTL_SECONDS", str(7 * 24 * 60 * 60)))
 FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS", str(6 * 60 * 60)))
 FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS", str(30 * 60)))
@@ -1068,10 +1076,14 @@ def _tefas_retry_after_seconds(headers: Dict[str, str]) -> Optional[float]:
 
 def _tefas_retry_delay_seconds(attempt: int, retry_after_seconds: Optional[float] = None) -> float:
     if retry_after_seconds is not None:
-        return min(max(0.0, retry_after_seconds), max(0.0, TEFAS_HTTP_RETRY_MAX_SECONDS))
+        # Retry-After is a provider instruction, not an exponential-backoff
+        # hint.  Keep a separately configurable safety ceiling so a malformed
+        # multi-day header cannot pin a worker indefinitely.
+        return min(max(0.0, retry_after_seconds), max(0.0, TEFAS_HTTP_RETRY_AFTER_MAX_SECONDS))
     base = max(0.0, TEFAS_HTTP_RETRY_BASE_SECONDS)
     delay = base * (2 ** max(0, attempt - 1))
-    return min(delay, max(0.0, TEFAS_HTTP_RETRY_MAX_SECONDS))
+    bounded = min(delay, max(0.0, TEFAS_HTTP_RETRY_MAX_SECONDS))
+    return bounded * random.uniform(0.8, 1.2)
 
 
 def _is_tefas_rate_limit(exc: BaseException) -> bool:
@@ -7327,6 +7339,7 @@ def refresh_fund_allocations_history(
     *,
     lookback_days: int = 30,
     as_of: Optional[date] = None,
+    allow_daily_fallback: bool = True,
 ) -> Dict[str, Any]:
     normalized = normalize_fund_code(fund_code)
     bounded_lookback = max(1, min(365, int(lookback_days)))
@@ -7346,13 +7359,21 @@ def refresh_fund_allocations_history(
         rows = []
         warnings = [f"tefasfon_portfolio_history failed: {exc}"]
         rate_limited = _is_tefas_rate_limit(exc)
-    if not rows and not rate_limited:
+    if not rows and not rate_limited and allow_daily_fallback:
         daily_dates: List[date] = []
         target_date = start_date
         while target_date <= effective_as_of:
             if target_date.weekday() < 5:
                 daily_dates.append(target_date)
             target_date += timedelta(days=1)
+        max_daily_requests = max(0, FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_REQUESTS)
+        if len(daily_dates) > max_daily_requests:
+            warnings.append(
+                "tefasfon_portfolio_history range query was empty; "
+                f"daily fallback skipped because it needs {len(daily_dates)} requests "
+                f"(budget: {max_daily_requests})"
+            )
+            daily_dates = []
         daily_rows: List[Dict[str, Any]] = []
         daily_warnings: List[str] = []
 
@@ -7362,14 +7383,25 @@ def refresh_fund_allocations_history(
             except TefasUpstreamError as exc:
                 return day, [], f"tefasfon_portfolio_history failed for {day.isoformat()}: {exc}"
 
-        max_workers = max(1, min(8, FUNDS_DETAIL_MAX_WORKERS, len(daily_dates) or 1))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="tefas-portfolio-history") as executor:
-            futures = [executor.submit(fetch_daily_portfolio, day) for day in daily_dates]
-            for future in concurrent.futures.as_completed(futures):
-                _day, day_rows, warning = future.result()
-                daily_rows.extend(day_rows)
-                if warning:
-                    daily_warnings.append(warning)
+        if daily_dates:
+            max_workers = max(
+                1,
+                min(
+                    FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS,
+                    FUNDS_DETAIL_MAX_WORKERS,
+                    len(daily_dates),
+                ),
+            )
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="tefas-portfolio-history",
+            ) as executor:
+                futures = [executor.submit(fetch_daily_portfolio, day) for day in daily_dates]
+                for future in concurrent.futures.as_completed(futures):
+                    _day, day_rows, warning = future.result()
+                    daily_rows.extend(day_rows)
+                    if warning:
+                        daily_warnings.append(warning)
 
         if daily_rows:
             warnings.append("tefasfon_portfolio_history range query was empty; used daily snapshots")
@@ -7432,6 +7464,7 @@ def get_fund_allocations_history_payload(
     fund_code: str,
     *,
     lookback_days: int = 30,
+    auto_refresh: bool = True,
 ) -> Dict[str, Any]:
     normalized = normalize_fund_code(fund_code)
     bounded_lookback = max(1, min(365, int(lookback_days)))
@@ -7451,6 +7484,37 @@ def get_fund_allocations_history_payload(
             payload["stale"] = False
             payload["source_metadata"] = meta
             return payload
+
+    if not auto_refresh:
+        if payload:
+            meta = dict(payload.get("source_metadata") or {})
+            meta["cache_hit"] = True
+            meta["stale"] = True
+            meta["warning"] = "allocation history refresh is pending"
+            payload = dict(payload)
+            payload["stale"] = True
+            payload["source_metadata"] = meta
+            return payload
+        return {
+            "fund_code": normalized,
+            "status": "pending",
+            "lookback_days": bounded_lookback,
+            "history": [],
+            "source": TEFASFON_PORTFOLIO_SOURCE,
+            "stale": True,
+            "source_metadata": {
+                "source": TEFASFON_PORTFOLIO_SOURCE,
+                "source_url": TEFASFON_SOURCE_URL,
+                "fetched_at": None,
+                "as_of": None,
+                "cache_hit": False,
+                "stale": True,
+                "parse_status": "pending_allocation_history_refresh",
+                "source_policy": "tefasfon_primary",
+                "fallback_used": False,
+                "warnings": ["allocation history refresh is pending"],
+            },
+        }
 
     fresh = refresh_fund_allocations_history(processed_dir, normalized, lookback_days=bounded_lookback)
     if fresh.get("history"):

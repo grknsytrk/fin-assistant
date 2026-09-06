@@ -47,7 +47,6 @@ import type {
     FundHoldingsResponse,
     FundPerformanceResponse,
     FundPortfolioPosition,
-    FundRefreshJob,
     FundPricePoint,
     FundSummary,
     FundYieldSummaryResponse,
@@ -63,6 +62,12 @@ import { FinLoader } from '../components/FinLoader';
 import { STOCK_LOGO_DOMAIN_MAP } from '../components/symbolLogoMaps';
 import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useWatchlist } from '../hooks/useWatchlist';
+import {
+    canonicalFundPrice,
+    formatFundQuotePrice,
+    formatFundReportDate,
+    hasFundRangeStartCoverage,
+} from '../utils/fundPresentation';
 import type { FundTab } from '../routing/routes';
 import './FundsPage.css';
 
@@ -109,7 +114,8 @@ const FUND_TABS: Array<{ key: FundTab; label: string; icon: typeof BarChart3 }> 
 
 type FundHistorySubtab = 'prices' | 'allocation';
 
-const FUND_HOLDINGS_LIVE_REFRESH_MS = 3000;
+const FUND_HOLDINGS_LIVE_REFRESH_MS = 15_000;
+const FUND_HOLDINGS_LIVE_MAX_BACKOFF_MS = 60_000;
 const FUND_HOLDINGS_LIVE_FLASH_MS = 900;
 // The first chart view is six months. The backend may still warm the shared
 // history job up to one year, but that wider fetch must not change the UI range.
@@ -285,10 +291,7 @@ const FundsSearchInput = memo(function FundsSearchInput({
 });
 
 function formatDate(value: string | null | undefined): string {
-    if (!value) return '-';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleDateString('tr-TR', { day: '2-digit', month: 'short', year: 'numeric' });
+    return formatFundReportDate(value);
 }
 
 function isoDateDaysAgo(days: number): string {
@@ -337,33 +340,43 @@ function formatSignedCompactCurrency(value: number | null | undefined): string {
     return formatCompactCurrency(value);
 }
 
-function formatQuotePrice(value: number | null | undefined): string {
-    if (value == null || !Number.isFinite(value)) return '-';
-    return value.toLocaleString('tr-TR', {
-        minimumFractionDigits: 4,
-        maximumFractionDigits: 6,
-    });
+function formatQuotePrice(value: number | null | undefined, currency = 'TRY'): string {
+    return formatFundQuotePrice(value, currency);
 }
 
-function formatHoldingPrice(value: number | null | undefined): string {
+function isBistMarketOpen(now = new Date()): boolean {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/Istanbul',
+        weekday: 'short',
+        hour: '2-digit',
+        hourCycle: 'h23',
+    }).formatToParts(now);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    const weekday = values.weekday;
+    const hour = Number(values.hour);
+    return !['Sat', 'Sun'].includes(weekday) && Number.isFinite(hour) && hour >= 10 && hour < 18;
+}
+
+function formatHoldingPrice(value: number | null | undefined, currency: string | null | undefined): string {
     if (value == null || !Number.isFinite(value)) return '-';
     const abs = Math.abs(value);
+    const prefix = currency === 'TRY' ? '₺' : currency ? `${currency} ` : '';
     if (abs >= 100) {
-        return value.toLocaleString('tr-TR', {
+        return `${prefix}${value.toLocaleString('tr-TR', {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
-        });
+        })}`;
     }
     if (abs >= 10) {
-        return value.toLocaleString('tr-TR', {
+        return `${prefix}${value.toLocaleString('tr-TR', {
             minimumFractionDigits: 2,
             maximumFractionDigits: 4,
-        });
+        })}`;
     }
-    return value.toLocaleString('tr-TR', {
+    return `${prefix}${value.toLocaleString('tr-TR', {
         minimumFractionDigits: 4,
         maximumFractionDigits: 6,
-    });
+    })}`;
 }
 
 function formatYieldBounds(
@@ -560,14 +573,8 @@ type FundsCatalogPayload = {
 type FundsCatalogMemoryCache = FundsCatalogPayload & { fetchedAt: number };
 
 const FUNDS_CATALOG_MEMORY_TTL_MS = 5 * 60 * 1000;
-const FUND_REFRESH_POLL_INTERVAL_MS = 2000;
-const FUND_REFRESH_POLL_MAX_MS = 20 * 60 * 1000;
 let fundsCatalogMemoryCache: FundsCatalogMemoryCache | null = null;
 let fundsCatalogInFlight: Promise<FundsCatalogPayload> | null = null;
-
-function isActiveFundRefreshJob(job: FundRefreshJob | null | undefined): boolean {
-    return job?.status === 'queued' || job?.status === 'running';
-}
 
 async function fetchFundsCatalog(options: { bypassMemoryCache?: boolean } = {}): Promise<FundsCatalogPayload> {
     const bypassMemoryCache = Boolean(options.bypassMemoryCache);
@@ -2026,7 +2033,7 @@ function FundPerformanceChart({
                         <g className="fund-chart-tooltip" style={{ transform: `translate(${tooltipX}px, ${tooltipY}px)` }}>
                             <rect width={tooltipWidth} height={tooltipHeight} rx="6" className="fund-chart-tooltip-bg" />
                             <text x="10" y="20" className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
-                            <text x="10" y="43" className="fund-chart-tooltip-value">{formatCurrency(hoverPoint.price, 'TRY')}</text>
+                            <text x="10" y="43" className="fund-chart-tooltip-value">{formatCurrency(hoverPoint.price, currency || 'TRY')}</text>
                         </g>
                     </g>
                 )}
@@ -2451,6 +2458,8 @@ function FundAllocationHistoryPanel({
                 <FinLoader message="Dağılım geçmişi yükleniyor" />
             ) : error ? (
                 <div className="funds-state funds-state-error">{error}</div>
+            ) : history?.refresh_pending && !trends.length ? (
+                <div className="funds-state">Dağılım geçmişi arka planda hazırlanıyor. Bu ekran otomatik güncellenecek.</div>
             ) : trends.length ? (
                 <>
                     <div className="fund-allocation-history-range">
@@ -3270,7 +3279,7 @@ function FundHoldingsPanel({
                                                         )}
                                                     </td>
                                                     <FundLiveValueCell value={position.price} className="fund-holding-price">
-                                                        {formatHoldingPrice(position.price)}
+                                                        {formatHoldingPrice(position.price, position.price_currency)}
                                                     </FundLiveValueCell>
                                                     <FundLiveValueCell value={position.return_pct} className={`fund-holding-return ${pctClass(position.return_pct)}`}>
                                                         {formatPct(position.return_pct)}
@@ -3522,6 +3531,12 @@ function returnForRange(points: FundPricePoint[], range: FundCompareRange, endIs
     const latest = ordered[ordered.length - 1];
     const startIso = fundCompareRangeStart(range, endIso);
     const base = range === 'all' ? ordered[0] : nearestPointOnOrAfter(ordered, startIso);
+    if (range !== 'all' && base) {
+        // A weekend/short holiday gap is expected. Anything beyond a trading
+        // week is incomplete history and must not masquerade as the selected
+        // one-year/three-year range.
+        if (!hasFundRangeStartCoverage(startIso, base.date)) return null;
+    }
     return returnBetween(finiteNumber(latest.price), finiteNumber(base?.price));
 }
 
@@ -4177,7 +4192,10 @@ function FundComparisonPage({
     const basicRows: FundCompareTableRow[] = [
         {
             label: 'Fon Fiyatı',
-            values: selectedFunds.map((fund) => valueForFund(fund, (dataset, item) => comparisonCell(formatQuotePrice(dataset?.detail?.price ?? item.price), formatDate(dataset?.detail?.as_of || item.as_of)))),
+            values: selectedFunds.map((fund) => valueForFund(fund, (dataset, item) => comparisonCell(
+                formatQuotePrice(dataset?.detail?.price ?? item.price, dataset?.detail?.currency || item.currency),
+                formatDate(dataset?.detail?.as_of || item.as_of),
+            ))),
         },
         { label: 'Kurucu', values: selectedFunds.map((fund) => comparisonCell((datasets[fund.fund_code]?.detail || fund).founder_company)) },
         { label: 'Şemsiye', values: selectedFunds.map((fund) => comparisonCell(fundUmbrellaLabel((datasets[fund.fund_code]?.detail || fund).fund_type))) },
@@ -5177,7 +5195,6 @@ export default function FundsPage({
     const [holdings, setHoldings] = useState<FundHoldingsResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
-    const [refreshJob, setRefreshJob] = useState<FundRefreshJob | null>(null);
     const [detailLoading, setDetailLoading] = useState(false);
     const [performanceLoading, setPerformanceLoading] = useState(false);
     const [yieldLoading, setYieldLoading] = useState(false);
@@ -5207,7 +5224,6 @@ export default function FundsPage({
     const mountedRef = useRef(false);
     const holdingsRef = useRef<FundHoldingsResponse | null>(null);
     const activeFundCodeRef = useRef('');
-    const allocationRefreshAttemptedRef = useRef(new Set<string>());
     const comparisonPanelRef = useRef<HTMLDivElement | null>(null);
     const fundsPageRef = useRef<HTMLDivElement | null>(null);
     const [comparisonHistory, setComparisonHistory] = useState<MarketComparisonHistoryResponse | null>(null);
@@ -5218,7 +5234,8 @@ export default function FundsPage({
     const holdingsFetchAttemptedRef = useRef(new Set<string>());
     const holdingsRefreshInFlightRef = useRef(false);
     const holdingsLiveInFlightRef = useRef(false);
-    const refreshMonitorInFlightRef = useRef<string | null>(null);
+    const holdingsLiveFailureCountRef = useRef(0);
+    const chartRequestIdRef = useRef(0);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -5241,66 +5258,16 @@ export default function FundsPage({
         holdingsRef.current = holdings;
     }, [holdings]);
 
-    const monitorRefreshJob = useCallback(async (initialJob: FundRefreshJob) => {
-        if (refreshMonitorInFlightRef.current === initialJob.job_id) return;
-        refreshMonitorInFlightRef.current = initialJob.job_id;
-        let currentJob = initialJob;
-        const deadline = Date.now() + FUND_REFRESH_POLL_MAX_MS;
-        try {
-            while (isActiveFundRefreshJob(currentJob) && Date.now() < deadline) {
-                await new Promise((resolve) => window.setTimeout(resolve, FUND_REFRESH_POLL_INTERVAL_MS));
-                const response = await apiClient.fundRefreshSnapshotStatus(initialJob.job_id);
-                currentJob = response.refresh_job;
-                if (mountedRef.current) setRefreshJob(currentJob);
-            }
-
-            if (currentJob.status === 'succeeded') {
-                const { funds: fundPayload, categories: categoryPayload } = await fetchFundsCatalog({
-                    bypassMemoryCache: true,
-                });
-                if (!mountedRef.current) return;
-                setFunds(fundPayload);
-                setCategories(categoryPayload);
-                setRefreshJob(null);
-                return;
-            }
-            if (currentJob.status === 'failed') {
-                if (mountedRef.current) {
-                    setRefreshError(currentJob.error || 'Fon yenilemesi başarısız oldu. Mevcut veriler korunuyor.');
-                }
-                return;
-            }
-            if (mountedRef.current) {
-                setRefreshJob(null);
-                setRefreshError('Fon yenilemesi arka planda devam ediyor. Mevcut veriler gösteriliyor.');
-            }
-        } catch (err) {
-            if (mountedRef.current) {
-                setRefreshJob(null);
-                setRefreshError(err instanceof Error ? err.message : 'Fon yenileme durumu alınamadı.');
-            }
-        } finally {
-            if (refreshMonitorInFlightRef.current === initialJob.job_id) {
-                refreshMonitorInFlightRef.current = null;
-            }
-        }
-    }, []);
-
     const refreshSnapshot = useCallback(async (options: { rethrow?: boolean } = {}) => {
         setRefreshing(true);
         setRefreshError(null);
         try {
-            // The backend returns the current canonical list immediately and
-            // runs the expensive TEFAS work as a background job.
+            // Snapshot refresh remains an admin/workflow operation. Public
+            // clients reread the current canonical list without a secret.
             const { funds: fundPayload, categories: categoryPayload } = await fetchFundsCatalog({ bypassMemoryCache: true });
             if (!mountedRef.current) return;
             setFunds(fundPayload);
             setCategories(categoryPayload);
-            const nextJob = fundPayload.refresh_job || null;
-            setRefreshJob(nextJob);
-            if (nextJob && isActiveFundRefreshJob(nextJob)) {
-                void monitorRefreshJob(nextJob);
-            }
             return { fundPayload, categoryPayload };
         } catch (err) {
             if (!mountedRef.current) return;
@@ -5312,7 +5279,7 @@ export default function FundsPage({
         } finally {
             if (mountedRef.current) setRefreshing(false);
         }
-    }, [monitorRefreshJob]);
+    }, []);
 
     const loadHoldings = useCallback(async (
         normalizedCode: string,
@@ -5344,18 +5311,22 @@ export default function FundsPage({
         }
     }, []);
 
-    const loadHoldingsLive = useCallback(async (normalizedCode: string) => {
-        if (!normalizedCode || holdingsLiveInFlightRef.current) return;
+    const loadHoldingsLive = useCallback(async (normalizedCode: string): Promise<boolean> => {
+        if (!normalizedCode || holdingsLiveInFlightRef.current) return false;
         holdingsLiveInFlightRef.current = true;
         try {
             const payload = await apiClient.fundHoldingsLive(normalizedCode);
-            if (!mountedRef.current || activeFundCodeRef.current !== normalizedCode) return;
+            if (!mountedRef.current || activeFundCodeRef.current !== normalizedCode) return false;
             setHoldings((current) => {
                 if (!current || current.fund_code !== normalizedCode) return current;
                 return mergeFundHoldingsLivePayload(current, payload);
             });
+            holdingsLiveFailureCountRef.current = 0;
+            return true;
         } catch {
             // Live fiyat/KZ güncellemesi statik KAP tablosunu düşürmemeli.
+            holdingsLiveFailureCountRef.current += 1;
+            return false;
         } finally {
             holdingsLiveInFlightRef.current = false;
         }
@@ -5371,11 +5342,6 @@ export default function FundsPage({
         if (hasUsableCachedCatalog && cachedCatalog) {
             setFunds(cachedCatalog.funds);
             setCategories(cachedCatalog.categories);
-            const cachedJob = cachedCatalog.funds.refresh_job || null;
-            setRefreshJob(cachedJob);
-            if (cachedJob && isActiveFundRefreshJob(cachedJob)) {
-                void monitorRefreshJob(cachedJob);
-            }
             setLoading(false);
         } else {
             setLoading(true);
@@ -5387,11 +5353,6 @@ export default function FundsPage({
                 if (!alive) return;
                 setFunds(fundPayload);
                 setCategories(categoryPayload);
-                const nextJob = fundPayload.refresh_job || null;
-                setRefreshJob(nextJob);
-                if (nextJob && isActiveFundRefreshJob(nextJob)) {
-                    void monitorRefreshJob(nextJob);
-                }
             } catch (err) {
                 if (!alive) return;
                 setError(err instanceof Error ? err.message : 'Fon listesi alınamadı.');
@@ -5409,7 +5370,7 @@ export default function FundsPage({
         return () => {
             alive = false;
         };
-    }, [monitorRefreshJob]);
+    }, []);
 
     useEffect(() => {
         activeFundCodeRef.current = fundCode?.trim().toUpperCase() || '';
@@ -5511,14 +5472,17 @@ export default function FundsPage({
         const normalizedCode = fundCode.trim().toUpperCase();
         const requestedStart = historyJob.requested_start || performance?.source_metadata?.requested_start_date || undefined;
         const requestedEnd = historyJob.requested_end || performance?.source_metadata?.requested_end_date || undefined;
-        const deadline = Date.now() + 120_000;
+        // Backend history jobs are retained for 30 minutes. Keep polling for
+        // that same contract instead of declaring a cold TEFAS backfill dead
+        // after two minutes.
+        const deadline = Date.now() + 30 * 60 * 1000;
         let alive = true;
         let timer: number | null = null;
         let inFlight = false;
         let continuePolling = true;
 
         const schedule = () => {
-            if (alive && continuePolling) timer = window.setTimeout(poll, 2000);
+            if (alive && continuePolling) timer = window.setTimeout(poll, 5000);
         };
         const poll = async () => {
             if (!alive || inFlight) return;
@@ -5628,18 +5592,6 @@ export default function FundsPage({
             .then((payload) => {
                 if (!alive) return;
                 setAllocations(payload);
-                const shouldRefresh = payload.status === 'unavailable' || payload.stale;
-                if (shouldRefresh && !allocationRefreshAttemptedRef.current.has(normalizedCode)) {
-                    allocationRefreshAttemptedRef.current.add(normalizedCode);
-                    void apiClient
-                        .refreshFundAllocations(normalizedCode, detail?.as_of || undefined)
-                        .then((freshPayload) => {
-                            if (alive) setAllocations(freshPayload);
-                        })
-                        .catch(() => {
-                            if (alive) setAllocations(payload);
-                        });
-                }
             })
             .catch(() => {
                 if (alive) setAllocations(null);
@@ -5650,7 +5602,7 @@ export default function FundsPage({
         return () => {
             alive = false;
         };
-    }, [fundCode, detail?.as_of]);
+    }, [fundCode]);
 
     useEffect(() => {
         if (!fundCode) {
@@ -5677,19 +5629,34 @@ export default function FundsPage({
         if (!fundCode) return;
         if (activeTab !== 'overview' && activeTab !== 'allocation') return;
         const normalizedCode = fundCode.trim().toUpperCase();
-        const refreshVisibleHoldings = () => {
-            if (document.visibilityState !== 'visible') return;
-            if (!holdingsRef.current || holdingsRef.current.fund_code !== normalizedCode) return;
-            void loadHoldingsLive(normalizedCode);
+        let timer: number | null = null;
+        let alive = true;
+        const schedule = (delay: number) => {
+            if (alive) timer = window.setTimeout(refreshVisibleHoldings, delay);
         };
-        refreshVisibleHoldings();
-        const intervalId = window.setInterval(refreshVisibleHoldings, FUND_HOLDINGS_LIVE_REFRESH_MS);
-        window.addEventListener('focus', refreshVisibleHoldings);
-        document.addEventListener('visibilitychange', refreshVisibleHoldings);
+        const refreshVisibleHoldings = async () => {
+            if (document.visibilityState !== 'visible' || !isBistMarketOpen()) {
+                schedule(FUND_HOLDINGS_LIVE_MAX_BACKOFF_MS);
+                return;
+            }
+            if (!holdingsRef.current || holdingsRef.current.fund_code !== normalizedCode) return;
+            const succeeded = await loadHoldingsLive(normalizedCode);
+            const failures = holdingsLiveFailureCountRef.current;
+            const delay = succeeded
+                ? FUND_HOLDINGS_LIVE_REFRESH_MS
+                : Math.min(FUND_HOLDINGS_LIVE_MAX_BACKOFF_MS, FUND_HOLDINGS_LIVE_REFRESH_MS * (2 ** Math.max(0, failures)));
+            schedule(delay);
+        };
+        const onFocus = () => { void refreshVisibleHoldings(); };
+        const onVisibilityChange = () => { void refreshVisibleHoldings(); };
+        void refreshVisibleHoldings();
+        window.addEventListener('focus', onFocus);
+        document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
-            window.clearInterval(intervalId);
-            window.removeEventListener('focus', refreshVisibleHoldings);
-            document.removeEventListener('visibilitychange', refreshVisibleHoldings);
+            alive = false;
+            if (timer !== null) window.clearTimeout(timer);
+            window.removeEventListener('focus', onFocus);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
         };
     }, [fundCode, activeTab, loadHoldingsLive]);
 
@@ -5739,11 +5706,10 @@ export default function FundsPage({
             .sort((a, b) => Math.abs(Number(b.weight || 0)) - Math.abs(Number(a.weight || 0))),
         [allocations],
     );
-    const latestPerformancePrice = performancePoints.length ? Number(performancePoints[performancePoints.length - 1].price) : null;
     const selectedFundPrice = Number(selectedFund?.price);
-    const detailLatestPrice = latestPerformancePrice != null && Number.isFinite(latestPerformancePrice) && latestPerformancePrice > 0
-        ? latestPerformancePrice
-        : (Number.isFinite(selectedFundPrice) && selectedFundPrice > 0 ? selectedFundPrice : null);
+    // Price, daily return and as-of in the hero must describe the same
+    // canonical snapshot. Performance points remain chart-only data.
+    const detailLatestPrice = canonicalFundPrice(selectedFundPrice);
     const detailPeriodReturns = useMemo(
         () => {
             const fromSummary = periodReturnsFromYieldSummary(yieldSummary, detailLatestPrice);
@@ -5868,7 +5834,6 @@ export default function FundsPage({
     }, [fundCode, historyBackfillError, performance, performanceError, performanceLoading, yieldError, yieldLoading, yieldSummary]);
     const visibleFundTypes = categories?.fund_types.length ? categories.fund_types : Array.from(new Set((funds?.rows || []).map((row) => row.fund_type).filter(Boolean))) as string[];
     const visibleRiskValues = categories?.risk_values.length ? categories.risk_values : Array.from(new Set((funds?.rows || []).map((row) => row.risk_value).filter((value): value is number => typeof value === 'number'))).sort((a, b) => a - b);
-    const activeRefreshJob = isActiveFundRefreshJob(refreshJob);
     const setTableSort = useCallback((key: FundSortKey) => {
         if (sortKey === key) {
             setSortOrder((currentOrder) => (currentOrder === 'asc' ? 'desc' : 'asc'));
@@ -5888,11 +5853,11 @@ export default function FundsPage({
         });
     }, [selectedFund?.name, selectedFundCode, watchlist]);
 
-    const loadAllocationHistory = useCallback(() => {
+    const loadAllocationHistory = useCallback((force = false) => {
         if (!fundCode) return;
         const normalizedCode = fundCode.trim().toUpperCase();
         setAllocationHistoryError(null);
-        if (allocationHistory?.fund_code === normalizedCode && allocationHistory.lookback_days === 30) {
+        if (!force && allocationHistory?.fund_code === normalizedCode && allocationHistory.lookback_days === 30) {
             return;
         }
         if (allocationHistoryLoading) {
@@ -5941,9 +5906,26 @@ export default function FundsPage({
         loadAllocationHistory,
     ]);
 
+    useEffect(() => {
+        if (
+            activeTab !== 'history'
+            || historySubtab !== 'allocation'
+            || !allocationHistory?.refresh_pending
+            || allocationHistoryLoading
+        ) {
+            return;
+        }
+        const timer = window.setTimeout(() => {
+            void loadAllocationHistory(true);
+        }, 5000);
+        return () => window.clearTimeout(timer);
+    }, [activeTab, allocationHistory?.refresh_pending, allocationHistoryLoading, historySubtab, loadAllocationHistory]);
+
     const refreshChartRange = useCallback((range: FundChartRange, nextCustomStart = customStartDate, nextCustomEnd = customEndDate) => {
         if (!fundCode) return;
         const normalizedCode = fundCode.trim().toUpperCase();
+        const requestId = chartRequestIdRef.current + 1;
+        chartRequestIdRef.current = requestId;
         if (range === 'all') {
             setChartRange(range);
             setChartRangeError(null);
@@ -5954,14 +5936,17 @@ export default function FundsPage({
             apiClient
                 .fundPerformance(normalizedCode)
                 .then((payload) => {
+                    if (chartRequestIdRef.current !== requestId) return;
                     setPerformance(payload);
                 })
                 .catch((err) => {
+                    if (chartRequestIdRef.current !== requestId) return;
                     const message = err instanceof Error ? err.message : 'Grafik verisi alınamadı.';
                     setChartRangeError(message);
                     setPerformanceError(message);
                 })
                 .finally(() => {
+                    if (chartRequestIdRef.current !== requestId) return;
                     setPendingChartRange(null);
                     setPerformanceLoading(false);
                 });
@@ -5984,14 +5969,17 @@ export default function FundsPage({
         apiClient
             .fundPerformance(normalizedCode, { startDate: startIso, endDate: endIso })
             .then((payload) => {
+                if (chartRequestIdRef.current !== requestId) return;
                 setPerformance(payload);
             })
             .catch((err) => {
+                if (chartRequestIdRef.current !== requestId) return;
                 const message = err instanceof Error ? err.message : 'Grafik verisi alınamadı.';
                 setChartRangeError(message);
                 setPerformanceError(message);
             })
             .finally(() => {
+                if (chartRequestIdRef.current !== requestId) return;
                 setPendingChartRange(null);
                 setPerformanceLoading(false);
             });
@@ -6056,18 +6044,14 @@ export default function FundsPage({
                                 </div>
                             </header>
 
-                            {(activeRefreshJob || Boolean(refreshError) || refreshJob?.status === 'failed' || funds?.stale || funds?.degraded || funds?.warnings?.length) && (
+                            {(Boolean(refreshError) || funds?.stale || funds?.degraded || funds?.warnings?.length) && (
                                 <div className="funds-source-warning">
                                     <ShieldAlert size={17} aria-hidden="true" />
                                     <span>
                                         {refreshError
                                             ? `Fon listesi yenilenemedi: ${refreshError}`
-                                            : activeRefreshJob
-                                              ? 'Fon yenilemesi arka planda çalışıyor. Mevcut veriler gösteriliyor.'
-                                              : refreshing
-                                              ? 'Fon yenilemesi başlatılıyor.'
-                                              : refreshJob?.status === 'failed'
-                                              ? `Fon yenilemesi başarısız oldu: ${refreshJob.error || 'TEFAS güncel veri döndürmedi.'}`
+                                            : refreshing
+                                              ? 'Fon listesi yeniden yükleniyor.'
                                               : funds?.degraded
                                             ? 'Fon snapshot cache boş veya kullanılamıyor.'
                                             : funds?.stale && funds?.source_metadata?.snapshot_as_of && funds?.source_metadata?.price_history_as_of
@@ -6082,11 +6066,11 @@ export default function FundsPage({
                                         type="button"
                                         className="funds-refresh-button"
                                         onClick={() => { void refreshSnapshot(); }}
-                                        disabled={refreshing || activeRefreshJob}
-                                        title="Fon listesini yenile"
+                                        disabled={refreshing}
+                                        title="Fon listesini yeniden yükle"
                                     >
-                                        <RefreshCw size={15} aria-hidden="true" className={refreshing || activeRefreshJob ? 'funds-spin' : undefined} />
-                                        {refreshing ? 'Başlatılıyor' : activeRefreshJob ? 'Arka planda' : 'Yenile'}
+                                        <RefreshCw size={15} aria-hidden="true" className={refreshing ? 'funds-spin' : undefined} />
+                                        {refreshing ? 'Yükleniyor' : 'Veriyi yeniden yükle'}
                                     </button>
                                 </div>
                             )}
@@ -6129,7 +6113,7 @@ export default function FundsPage({
                                     <div className="funds-state funds-state-error">{error}</div>
                                 ) : filteredFunds.length === 0 ? (
                                     <div className="funds-state">
-                                        {activeRefreshJob ? 'Fon verileri hazırlanıyor. Mevcut TEFAS kaydı bekleniyor.' : 'Fon bulunamadı.'}
+                                        Fon bulunamadı.
                                     </div>
                                 ) : (
                                     <FundsTable
@@ -6208,10 +6192,10 @@ export default function FundsPage({
 
                                             <div className="fund-market-quote">
                                                 <div>
-                                                    <strong>{formatQuotePrice(detailLatestPrice)}</strong>
+                                                    <strong>{formatQuotePrice(detailLatestPrice, selectedFund.currency)}</strong>
                                                     <span className={pctClass(selectedFund.daily_return)}>{formatPct(selectedFund.daily_return)}</span>
                                                 </div>
-                                                <small>{formatDate(selectedFund.as_of)}</small>
+                                                <small>{formatDate(selectedFund.as_of)} · {selectedFund.source || 'TEFAS'}</small>
                                             </div>
                                         </div>
 

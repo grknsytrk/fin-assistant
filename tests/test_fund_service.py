@@ -73,6 +73,14 @@ def test_tefas_client_fetch_fund_range_retries_rate_limit(monkeypatch) -> None:
     assert rows[0]["investor_count"] == 90_110
 
 
+def test_tefas_retry_after_is_honored_with_a_separate_safety_ceiling(monkeypatch) -> None:
+    monkeypatch.setattr(fund_service, "TEFAS_HTTP_RETRY_AFTER_MAX_SECONDS", 300.0)
+    monkeypatch.setattr(fund_service.random, "uniform", lambda *_args: 1.0)
+
+    assert fund_service._tefas_retry_delay_seconds(1, 120.0) == 120.0
+    assert fund_service._tefas_retry_delay_seconds(1, 999.0) == 300.0
+
+
 def test_tefas_client_history_does_not_daily_fanout_after_rate_limit(monkeypatch) -> None:
     client = fund_service.TefasClient()
 

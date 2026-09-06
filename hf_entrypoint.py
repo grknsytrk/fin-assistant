@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import os
 
-from starlette.middleware.gzip import GZipMiddleware
 import uvicorn
 
 os.environ.setdefault("RAGFIN_FUND_COLLECTOR_ENABLED", "0")
 
-from app.api import app as api_app, bootstrap_application_storage
+from app.api import app as api_app, bootstrap_application_storage, configure_http_middleware
 
 try:
     import gradio as gr
@@ -28,7 +27,7 @@ if gr is not None and spaces is not None:
     demo = gr.Server()
     # The API router is mounted into Gradio's FastAPI server on Spaces, so
     # middleware registered on app.api does not wrap these requests.
-    demo.add_middleware(GZipMiddleware, minimum_size=1024)
+    configure_http_middleware(demo)
     demo.include_router(api_app.router)
 
     @spaces.GPU

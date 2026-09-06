@@ -393,6 +393,114 @@ def test_admin_refresh_auth_distinguishes_missing_secret_and_bad_token(monkeypat
     ).status_code == 401
 
 
+def test_legacy_admin_refresh_endpoints_require_the_same_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TestClient(app)
+    for path in (
+        "/admin/funds/collect-prices",
+        "/admin/funds/TLY/refresh-performance?start_date=2026-01-01",
+        "/admin/funds/TLY/refresh-allocations",
+    ):
+        assert client.post(path).status_code == 401
+
+    monkeypatch.setattr(fund_service_module, "collect_daily_fund_prices", lambda *_args, **_kwargs: {"status": "ok"})
+    response = client.post(
+        "/admin/funds/collect-prices",
+        headers={"Authorization": "Bearer test-admin-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_snapshot_refresh_still_returns_the_current_payload_and_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_start_fund_refresh_job",
+        lambda _lookback_days: {"job_id": "refresh-job", "status": "queued"},
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "get_funds_payload",
+        lambda *_args, **_kwargs: {"status": "ok", "rows": []},
+    )
+
+    response = TestClient(app).post(
+        "/admin/funds/refresh-snapshot",
+        headers={"Authorization": "Bearer test-admin-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["refresh_job"]["job_id"] == "refresh-job"
+
+
+def test_api_allocation_history_returns_pending_without_synchronous_upstream_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api_module, "_require_known_fund_code", lambda fund_code: "TLY")
+    monkeypatch.setattr(
+        fund_service_module,
+        "get_fund_allocations_history_payload",
+        lambda *_args, **_kwargs: {
+            "fund_code": "TLY",
+            "status": "pending",
+            "lookback_days": 30,
+            "history": [],
+            "source": "tefasfon_portfolio",
+            "stale": True,
+            "source_metadata": {"source": "tefasfon_portfolio"},
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_start_allocation_history_refresh_job",
+        lambda *_args, **_kwargs: {
+            "job_id": "job-1",
+            "fund_code": "TLY",
+            "lookback_days": 30,
+            "status": "queued",
+            "requested_at": "2026-09-06T12:00:00+00:00",
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+        },
+    )
+
+    response = TestClient(app).get("/funds/TLY/allocations/history?lookback_days=30")
+
+    assert response.status_code == 202
+    assert response.json()["refresh_pending"] is True
+    assert response.json()["source_metadata"]["allocation_history_job"]["job_id"] == "job-1"
+
+
+def test_allocation_history_refresh_job_is_coalesced_per_fund_and_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    submitted: list[tuple[Any, ...]] = []
+
+    class FakeExecutor:
+        def submit(self, *args: Any) -> None:
+            submitted.append(args)
+
+    monkeypatch.setattr(api_module, "_FUND_ALLOCATION_HISTORY_EXECUTOR", FakeExecutor())
+
+    first = api_module._start_allocation_history_refresh_job("TLY", 30)
+    second = api_module._start_allocation_history_refresh_job("TLY", 30)
+
+    assert first["job_id"] == second["job_id"]
+    assert len(submitted) == 1
+
+
+def test_unknown_fund_cannot_enqueue_allocation_history_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unknown(_fund_code: str) -> str:
+        raise HTTPException(status_code=404, detail="Fon bulunamadi")
+
+    monkeypatch.setattr(api_module, "_require_known_fund_code", unknown)
+    monkeypatch.setattr(
+        api_module,
+        "_start_allocation_history_refresh_job",
+        lambda *_args, **_kwargs: pytest.fail("unknown funds must not enqueue upstream work"),
+    )
+
+    response = TestClient(app).get("/funds/NOTREAL/allocations/history")
+
+    assert response.status_code == 404
+
+
 def test_fenced_snapshot_commit_checks_ownership_before_upsert(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr(database_module, "database_enabled", lambda: True)
     monkeypatch.setattr(database_module, "ensure_refresh_lease_schema", lambda: None)
@@ -2764,7 +2872,13 @@ def test_api_fund_holdings_partial_when_pdf_not_parsed(
 
 
 def test_api_fund_allocations_history_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_history(processed_dir: Any, fund_code: str, *, lookback_days: int = 30) -> Dict[str, Any]:
+    def fake_history(
+        processed_dir: Any,
+        fund_code: str,
+        *,
+        lookback_days: int = 30,
+        auto_refresh: bool = True,
+    ) -> Dict[str, Any]:
         return {
             "fund_code": fund_code,
             "status": "ok",

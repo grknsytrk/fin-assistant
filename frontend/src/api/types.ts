@@ -503,6 +503,7 @@ export interface FundAllocationsHistoryResponse {
   history: FundAllocationHistoryDay[];
   source: string;
   stale?: boolean;
+  refresh_pending?: boolean;
   source_metadata: FundSourceMetadata;
 }
 
