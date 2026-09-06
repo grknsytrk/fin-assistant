@@ -4431,6 +4431,44 @@ def _market_flow_payload(
     *,
     force_refresh: bool = False,
 ) -> Dict[str, Any]:
+    # Use the expanded budget in the cache key, then trim the shared result per
+    # caller.  This prevents a small-list request from poisoning a larger one.
+    effective_budget = max(
+        _VYK_DEFAULT_DETAIL_BUDGET,
+        min(_VYK_DEFAULT_DETAIL_BUDGET_MAX, int(limit)),
+    )
+    shared_key = f"api:kap:market-flow:category={category or ''}:budget={effective_budget}:v2"
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key=shared_key,
+        factory=lambda: _build_market_flow_payload(
+            limit=effective_budget,
+            category=category,
+            force_refresh=True,
+        ),
+        fresh_ttl_seconds=_FLOW_CACHE_TTL,
+        stale_ttl_seconds=max(_MARKET_SWR_STALE_TTL_SECONDS, _FLOW_CACHE_TTL * 2),
+        local_cache=_FLOW_CACHE,
+        local_key=f"all::{category or ''}::b{effective_budget}",
+        force_revalidate=force_refresh,
+    )
+    if payload is None:
+        raise HTTPException(status_code=503, detail="KAP piyasa akışı yenileniyor. Lütfen kısa süre sonra tekrar deneyin.")
+    response = _with_market_cache_metadata(
+        payload,
+        cache_status=cache_status,
+        stale=stale,
+        refresh_pending=refresh_pending,
+    )
+    response["items"] = list(response.get("items") or [])[:limit]
+    return response
+
+
+def _build_market_flow_payload(
+    limit: int = 40,
+    category: Optional[str] = None,
+    *,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
     started = time.time()
     # Kullanici 'kac kayit' ayarini UI'dan degistirince backend'in VYK detay
     # butcesini de ona gore genisletmek istiyoruz; ayni zamanda cache'i bu
@@ -4440,22 +4478,6 @@ def _market_flow_payload(
         min(_VYK_DEFAULT_DETAIL_BUDGET_MAX, int(limit)),
     )
     effective_pages = max(1, min(10, (effective_budget + 49) // 50))
-    cache_key = f"all::{category or ''}::b{effective_budget}"
-    now = time.time()
-    cached = _FLOW_CACHE.get(cache_key)
-    if cached and not force_refresh:
-        cached_data = cached["data"]
-        ttl = _FLOW_DEGRADED_TTL if cached_data.get("degraded_mode") else _FLOW_CACHE_TTL
-        if now - cached.get("_ts", 0) < ttl:
-            return {**cached_data, "items": cached_data["items"][:limit]}
-    shared_key = f"api:kap:market-flow:category={category or ''}:budget={effective_budget}:v1"
-    if not force_refresh:
-        shared_cached = _shared_cache_get_dict(shared_key)
-        if shared_cached is not None:
-            ttl = _FLOW_DEGRADED_TTL if shared_cached.get("degraded_mode") else _FLOW_CACHE_TTL
-            _FLOW_CACHE[cache_key] = {"_ts": now, "data": shared_cached}
-            return {**shared_cached, "items": list(shared_cached.get("items") or [])[:limit]}
-
     # Resmi KAP VYK akisi: credential'lar varsa en oncelikli kaynak.
     # UYARI: Kullanici kap.org.tr uzerinden canli veri istedigi icin VYK akisi gecici olarak devre disi birakildi.
     vyk_items: List[Dict[str, Any]] = []
@@ -4517,9 +4539,6 @@ def _market_flow_payload(
         "public_error": public_error,
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
-    _FLOW_CACHE[cache_key] = {"_ts": now, "data": data}
-    flow_ttl = _FLOW_DEGRADED_TTL if degraded else _FLOW_CACHE_TTL
-    _shared_cache_set(shared_key, data, ttl_seconds=flow_ttl)
     # region agent log
     _debug_log(
         "H2",
@@ -4540,7 +4559,7 @@ def _market_flow_payload(
         },
     )
     # endregion
-    return {**data, "items": data["items"][:limit]}
+    return data
 
 
 @app.get("/market/flow")
