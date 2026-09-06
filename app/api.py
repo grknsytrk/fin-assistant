@@ -1123,38 +1123,39 @@ _UNIVERSE_CACHE: Dict[str, Any] = {}
 
 
 def _market_universe_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
+    started_at = time.perf_counter()
+    normalized_index = _normalize_stock_index(index_name)
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key=f"api:market:universe:{normalized_index}:v3",
+        factory=lambda: _build_market_universe_payload(index_name=normalized_index, force_refresh=True),
+        fresh_ttl_seconds=_MARKET_UNIVERSE_CACHE_TTL,
+        stale_ttl_seconds=max(_MARKET_SWR_STALE_TTL_SECONDS, _MARKET_UNIVERSE_CACHE_TTL * 2),
+        local_cache=_UNIVERSE_CACHE,
+        local_key=f"payload:{normalized_index}",
+        force_revalidate=force_refresh,
+    )
+    if payload is None:
+        raise HTTPException(status_code=503, detail="Piyasa evreni yenileniyor. Lütfen kısa süre sonra tekrar deneyin.")
+    _log_market_cache_event(
+        endpoint="market/universe",
+        index=normalized_index,
+        cache_status=cache_status,
+        upstream_called=cache_status == "miss",
+        stale=stale,
+        started_at=started_at,
+    )
+    return _with_market_cache_metadata(
+        payload,
+        cache_status=cache_status,
+        stale=stale,
+        refresh_pending=refresh_pending,
+    )
+
+
+def _build_market_universe_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
     from app.kap_service import get_bist_index_universe
 
-    started_at = time.perf_counter()
-    now_ts = time.time()
     normalized_index = _normalize_stock_index(index_name)
-    cache_key = f"payload:{normalized_index}"
-    cached = _UNIVERSE_CACHE.get(cache_key)
-    if cached and not force_refresh and now_ts - cached.get("_ts", 0) < _MARKET_UNIVERSE_CACHE_TTL:
-        _log_market_cache_event(
-            endpoint="market/universe",
-            index=normalized_index,
-            cache_status="hit",
-            upstream_called=False,
-            stale=False,
-            started_at=started_at,
-        )
-        return cached["data"]
-    shared_key = f"api:market:universe:{normalized_index}:v2"
-    if not force_refresh:
-        shared_cached = _shared_cache_get_dict(shared_key)
-        if shared_cached is not None:
-            _UNIVERSE_CACHE[cache_key] = {"_ts": now_ts, "data": shared_cached}
-            _log_market_cache_event(
-                endpoint="market/universe",
-                index=normalized_index,
-                cache_status="shared_hit",
-                upstream_called=False,
-                stale=False,
-                started_at=started_at,
-            )
-            return dict(shared_cached)
-
     universe = get_bist_index_universe(normalized_index, force_refresh=force_refresh)
     symbols = list(universe.get("symbols") or [])
     try:
@@ -1240,16 +1241,6 @@ def _market_universe_payload(*, index_name: str = "XUTUM", force_refresh: bool =
         "rows": rows,
         "coverage_rows": coverage_rows,
     }
-    _UNIVERSE_CACHE[cache_key] = {"_ts": now_ts, "data": data}
-    _shared_cache_set(shared_key, data, ttl_seconds=_MARKET_UNIVERSE_CACHE_TTL)
-    _log_market_cache_event(
-        endpoint="market/universe",
-        index=normalized_index,
-        cache_status="miss",
-        upstream_called=False,
-        stale=False,
-        started_at=started_at,
-    )
     return data
 
 
@@ -8570,88 +8561,95 @@ def _watch_index_item(
 
 
 def _market_watch_global_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
-    now = time.time()
-    cached = _WATCH_GLOBAL_CACHE.get("payload")
-    if cached and not force_refresh and now - cached.get("_ts", 0) < _WATCH_GLOBAL_CACHE_TTL:
-        return cached["data"]
-    shared_key = "api:market:watch-global:v1"
-    if not force_refresh:
-        shared_cached = _shared_cache_get_dict(shared_key)
-        if shared_cached is not None:
-            _WATCH_GLOBAL_CACHE["payload"] = {"_ts": now, "data": shared_cached}
-            return dict(shared_cached)
+    def build() -> Dict[str, Any]:
+        from concurrent.futures import ThreadPoolExecutor
 
-    from concurrent.futures import ThreadPoolExecutor
+        def _one(entry: tuple[str, str, List[str]]) -> Dict[str, Any]:
+            symbol, label, yahoo_candidates = entry
+            return _watch_index_item(
+                symbol=symbol,
+                label=label,
+                yahoo_candidates=yahoo_candidates,
+                fallback_currency="",
+            )
 
-    def _one(entry: tuple[str, str, List[str]]) -> Dict[str, Any]:
-        symbol, label, yahoo_candidates = entry
-        return _watch_index_item(
-            symbol=symbol,
-            label=label,
-            yahoo_candidates=yahoo_candidates,
-            fallback_currency="",
-        )
+        try:
+            with ThreadPoolExecutor(max_workers=min(8, len(_WATCH_GLOBAL_INDEX_CANDIDATES))) as pool:
+                items = list(pool.map(_one, _WATCH_GLOBAL_INDEX_CANDIDATES))
+        except Exception:
+            items = [_one(entry) for entry in _WATCH_GLOBAL_INDEX_CANDIDATES]
+        return {
+            "items": items,
+            "source": "yahoo_finance_chart",
+            "delay_note": _WATCH_DELAY_NOTE,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
 
-    items: List[Dict[str, Any]] = []
-    try:
-        with ThreadPoolExecutor(max_workers=min(8, len(_WATCH_GLOBAL_INDEX_CANDIDATES))) as pool:
-            items = list(pool.map(_one, _WATCH_GLOBAL_INDEX_CANDIDATES))
-    except Exception:
-        items = [_one(entry) for entry in _WATCH_GLOBAL_INDEX_CANDIDATES]
-
-    data = {
-        "items": items,
-        "source": "yahoo_finance_chart",
-        "delay_note": _WATCH_DELAY_NOTE,
-        "as_of": datetime.now(timezone.utc).isoformat(),
-    }
-    _WATCH_GLOBAL_CACHE["payload"] = {"_ts": now, "data": data}
-    _shared_cache_set(shared_key, data, ttl_seconds=_WATCH_GLOBAL_CACHE_TTL)
-    return data
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key="api:market:watch-global:v2",
+        factory=build,
+        fresh_ttl_seconds=_WATCH_GLOBAL_CACHE_TTL,
+        stale_ttl_seconds=max(_MARKET_SWR_STALE_TTL_SECONDS, _WATCH_GLOBAL_CACHE_TTL * 2),
+        local_cache=_WATCH_GLOBAL_CACHE,
+        local_key="payload",
+        force_revalidate=force_refresh,
+    )
+    if payload is None:
+        payload = {"items": [], "source": "yahoo_finance_chart", "as_of": datetime.now(timezone.utc).isoformat()}
+    return _with_market_cache_metadata(
+        payload,
+        cache_status=cache_status,
+        stale=stale,
+        refresh_pending=refresh_pending,
+    )
 
 
 def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
-    now = time.time()
-    cached = _WATCH_CACHE.get("payload")
-    if cached and not force_refresh and now - cached.get("_ts", 0) < _WATCH_CACHE_TTL:
-        return cached["data"]
-    if not force_refresh:
-        shared_cached = _shared_cache_get_dict(_WATCH_RESPONSE_CACHE_KEY)
-        if shared_cached is not None:
-            _WATCH_CACHE["payload"] = {"_ts": now, "data": shared_cached}
-            return dict(shared_cached)
+    def build() -> Dict[str, Any]:
+        fx_payload = _market_fx_payload()
+        commodity_payload = _market_commodities_payload()
+        indices = [
+            _watch_index_item(symbol=symbol, label=label, yahoo_candidates=yahoo_candidates)
+            for symbol, label, yahoo_candidates in _WATCH_INDEX_CANDIDATES
+        ]
+        fx_items = _pick_watch_items(
+            items=list(fx_payload.get("items") or []),
+            symbols=_WATCH_FX_SYMBOLS,
+            fallback_labels=_WATCH_FX_LABELS,
+        )
+        commodity_items = _pick_watch_items(
+            items=list(commodity_payload.get("items") or []),
+            symbols=_WATCH_COMMODITY_SYMBOLS,
+            fallback_labels=_WATCH_COMMODITY_LABELS,
+        )
+        return {
+            "sections": {
+                "indices": indices,
+                "fx": fx_items,
+                "commodities": commodity_items,
+            },
+            "source": "yahoo_finance_chart",
+            "delay_note": _WATCH_DELAY_NOTE,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
 
-    fx_payload = _market_fx_payload()
-    commodity_payload = _market_commodities_payload()
-
-    indices = [
-        _watch_index_item(symbol=symbol, label=label, yahoo_candidates=yahoo_candidates)
-        for symbol, label, yahoo_candidates in _WATCH_INDEX_CANDIDATES
-    ]
-    fx_items = _pick_watch_items(
-        items=list(fx_payload.get("items") or []),
-        symbols=_WATCH_FX_SYMBOLS,
-        fallback_labels=_WATCH_FX_LABELS,
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key="api:market:watch:v2",
+        factory=build,
+        fresh_ttl_seconds=_WATCH_CACHE_TTL,
+        stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
+        local_cache=_WATCH_CACHE,
+        local_key="payload",
+        force_revalidate=force_refresh,
     )
-    commodity_items = _pick_watch_items(
-        items=list(commodity_payload.get("items") or []),
-        symbols=_WATCH_COMMODITY_SYMBOLS,
-        fallback_labels=_WATCH_COMMODITY_LABELS,
+    if payload is None:
+        payload = {"sections": {}, "source": "yahoo_finance_chart", "as_of": datetime.now(timezone.utc).isoformat()}
+    return _with_market_cache_metadata(
+        payload,
+        cache_status=cache_status,
+        stale=stale,
+        refresh_pending=refresh_pending,
     )
-
-    data = {
-        "sections": {
-            "indices": indices,
-            "fx": fx_items,
-            "commodities": commodity_items,
-        },
-        "source": "yahoo_finance_chart",
-        "delay_note": _WATCH_DELAY_NOTE,
-        "as_of": datetime.now(timezone.utc).isoformat(),
-    }
-    _WATCH_CACHE["payload"] = {"_ts": now, "data": data}
-    _shared_cache_set(_WATCH_RESPONSE_CACHE_KEY, data, ttl_seconds=_WATCH_CACHE_TTL)
-    return data
 
 
 @app.get("/market/watch")
