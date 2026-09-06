@@ -44,6 +44,9 @@ def _reset_flow_state(monkeypatch: pytest.MonkeyPatch) -> None:
     api_module._MARKET_INDEX_QUOTE_CACHE.clear()
     api_module._MARKET_INDEX_INTRADAY_CACHE.clear()
     api_module._MARKET_INDEX_RETURN_CACHE.clear()
+    api_module._COMMODITY_CACHE.clear()
+    api_module._FX_CACHE.clear()
+    api_module._FX_RETURN_CACHE.clear()
     api_module._KAP_MARKET_METADATA_CACHE.clear()
     api_module._STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE.clear()
     api_module._FUND_HOLDING_SECTOR_MAP_CACHE.clear()
@@ -380,6 +383,90 @@ def test_market_stocks_serves_stale_quote_when_upstream_fails(monkeypatch: pytes
     assert payload["rows"][0]["price"] == 25.0
 
 
+def test_market_indices_use_shared_stale_while_revalidate_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[str] = []
+
+    def fake_row(index_code: str, **_kwargs: Any) -> Dict[str, Any]:
+        calls.append(index_code)
+        return {"symbol": index_code, "price": 100.0}
+
+    monkeypatch.setattr(api_module, "_market_index_row", fake_row)
+
+    first = api_module._market_indices_payload()
+    second = api_module._market_indices_payload()
+
+    assert len(calls) == len(api_module._MARKET_INDEX_ORDER)
+    assert first["cache_status"] == "miss"
+    assert second["cache_status"] == "local_hit"
+    assert second["stale"] is False
+
+
+def test_market_fx_shared_cache_collapses_quote_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[str] = []
+
+    def fake_quote(symbol: str) -> Dict[str, Any]:
+        calls.append(symbol)
+        return {
+            "ok": True,
+            "price": 10.0,
+            "prev_close": 9.0,
+            "change": 1.0,
+            "change_pct": 11.1,
+            "currency": "TRY",
+            "market_state": "REGULAR",
+            "as_of": "2026-09-06T10:00:00+00:00",
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_quote", fake_quote)
+
+    first = api_module._market_fx_payload()
+    second = api_module._market_fx_payload()
+
+    assert len(calls) == len(api_module._FX_DIRECT_MAP)
+    assert first["cache_status"] == "miss"
+    assert second["cache_status"] == "local_hit"
+
+
+def test_comparison_history_cache_excludes_id_and_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def fake_history(
+        asset: Any,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> Dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {
+            "id": asset.id or "default",
+            "kind": "stock",
+            "symbol": "YKBNK",
+            "label": "Yapı Kredi",
+            "points": [{"date": start_date.isoformat(), "value": 10.0}],
+            "source": "test",
+            "error": None,
+        }
+
+    monkeypatch.setattr(api_module, "_stock_comparison_history", fake_history)
+    client = TestClient(app)
+    body = {
+        "start_date": "2025-01-01",
+        "end_date": "2025-12-31",
+        "assets": [{"id": "first", "kind": "stock", "symbol": "YKBNK", "label": "İlk etiket"}],
+    }
+    first = client.post("/market/comparison-history", json=body)
+    body["assets"][0]["id"] = "second"
+    body["assets"][0]["label"] = "İkinci etiket"
+    second = client.post("/market/comparison-history", json=body)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert calls == 1
+    assert second.json()["assets"][0]["id"] == "second"
+    assert second.json()["assets"][0]["label"] == "İkinci etiket"
+
+
 def test_admin_refresh_auth_distinguishes_missing_secret_and_bad_token(monkeypatch: pytest.MonkeyPatch) -> None:
     client = TestClient(app)
     monkeypatch.delenv("RAGFIN_ADMIN_REFRESH_TOKEN", raising=False)
@@ -566,7 +653,7 @@ def test_fenced_snapshot_commit_checks_ownership_before_upsert(monkeypatch: pyte
     assert len([query for query in connection.queries if "INSERT INTO ragfin_json_cache" in query]) == 1
 
 
-def test_kap_snapshot_response_cache_uses_schema_and_refresh_bypasses(
+def test_kap_snapshot_response_cache_revalidates_without_public_bypass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.kap_fetcher import KAP_CACHE_SCHEMA_VERSION
@@ -606,8 +693,9 @@ def test_kap_snapshot_response_cache_uses_schema_and_refresh_bypasses(
     assert refreshed.status_code == 200
     assert first.json()["response_cache_hit"] is False
     assert second.json()["response_cache_hit"] is True
-    assert refreshed.json()["response_cache_hit"] is False
-    assert calls == [False, True]
+    assert refreshed.json()["response_cache_hit"] is True
+    assert isinstance(refreshed.json()["refresh_pending"], bool)
+    assert calls[0] is True
     assert f"schema={KAP_CACHE_SCHEMA_VERSION}" in api_module._kap_snapshot_response_cache_key("AKBNK", 20)
 
 

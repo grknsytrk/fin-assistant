@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -65,6 +65,9 @@ CONFIG = load_config(ROOT / "config.yaml")
 LOGGER = logging.getLogger("uvicorn.error")
 _FUND_COLLECTOR_TASK: Optional[asyncio.Task[None]] = None
 _KAP_SNAPSHOT_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_KAP_SNAPSHOT_RESPONSE_CACHE_TTL_SECONDS", "300"))
+_KAP_SNAPSHOT_RESPONSE_STALE_TTL = int(
+    os.getenv("RAGFIN_KAP_SNAPSHOT_RESPONSE_STALE_TTL_SECONDS", str(30 * 60))
+)
 _KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT_SECONDS", "120"))
 _FUND_YIELD_SUMMARY_CACHE_TTL = int(os.getenv("RAGFIN_FUND_YIELD_SUMMARY_CACHE_TTL_SECONDS", "900"))
 _FUND_HOLDINGS_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_CACHE_TTL_SECONDS", str(60 * 60)))
@@ -143,6 +146,16 @@ _MARKET_QUOTES_WAIT_TIMEOUT_SECONDS = float(
 _MARKET_QUOTES_POLL_INTERVAL_SECONDS = float(
     os.getenv("RAGFIN_MARKET_QUOTES_POLL_INTERVAL_SECONDS", "0.05")
 )
+_MARKET_SWR_STALE_TTL_SECONDS = int(os.getenv("RAGFIN_MARKET_SWR_STALE_TTL_SECONDS", "120"))
+_MARKET_SWR_LOCK_TTL_SECONDS = float(os.getenv("RAGFIN_MARKET_SWR_LOCK_TTL_SECONDS", "60"))
+_MARKET_SWR_WAIT_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_MARKET_SWR_WAIT_TIMEOUT_SECONDS", "3"))
+_MARKET_SWR_REVALIDATION_LEASE_TTL_SECONDS = int(
+    os.getenv("RAGFIN_MARKET_SWR_REVALIDATION_LEASE_TTL_SECONDS", "90")
+)
+_MARKET_SWR_REVALIDATION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=max(1, int(os.getenv("RAGFIN_MARKET_SWR_REVALIDATION_WORKERS", "2"))),
+    thread_name_prefix="market-cache-revalidate",
+)
 
 
 def _truthy_env(name: str, default: str = "1") -> bool:
@@ -191,6 +204,237 @@ def _shared_cache_get_dict(key: str) -> Optional[Dict[str, Any]]:
 def _shared_cache_set(key: str, value: Any, ttl_seconds: int) -> None:
     if isinstance(value, dict):
         _cache_set_json(key, value, ttl_seconds=ttl_seconds)
+
+
+def _swr_cache_entry(payload: Dict[str, Any], *, fresh_ttl_seconds: int, stale_ttl_seconds: int) -> Dict[str, Any]:
+    """Wrap a response with explicit fresh and stale deadlines.
+
+    Redis TTL keeps the entry only until the stale deadline.  A caller can
+    therefore keep serving the last known-good response while one shared
+    worker refreshes it, without treating a provider failure as a cache miss.
+    """
+
+    now = time.time()
+    fresh_ttl = max(1, int(fresh_ttl_seconds))
+    stale_ttl = max(fresh_ttl, int(stale_ttl_seconds))
+    return {
+        "payload": payload,
+        "fresh_until": now + fresh_ttl,
+        "stale_until": now + stale_ttl,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _swr_entry_is_fresh(entry: Any) -> bool:
+    if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+        return False
+    try:
+        return float(entry.get("fresh_until") or 0.0) > time.time()
+    except (TypeError, ValueError):
+        return False
+
+
+def _swr_entry_is_stale(entry: Any) -> bool:
+    if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+        return False
+    try:
+        return float(entry.get("stale_until") or 0.0) > time.time()
+    except (TypeError, ValueError):
+        return False
+
+
+def _swr_entry_payload(entry: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+        return None
+    return dict(entry["payload"])
+
+
+def _schedule_swr_revalidation(
+    *,
+    cache_key: str,
+    fresh_ttl_seconds: int,
+    stale_ttl_seconds: int,
+    factory: Callable[[], Optional[Dict[str, Any]]],
+) -> bool:
+    """Queue at most one cross-worker best-effort cache refresh.
+
+    The small lease prevents request storms from filling this process's
+    executor.  The actual refresh is still protected by the heartbeat-backed
+    single-flight lock, so a lease expiry cannot create duplicate upstream
+    work.
+    """
+
+    backend = _get_cache()
+    owner = uuid.uuid4().hex
+    lease_key = f"swr-revalidate:{cache_key}"
+    try:
+        acquired = backend.set_if_absent(
+            lease_key,
+            owner,
+            ttl_seconds=max(1, _MARKET_SWR_REVALIDATION_LEASE_TTL_SECONDS),
+        )
+    except Exception:
+        return False
+    if not acquired:
+        # Another worker already owns the queued revalidation; callers should
+        # still present the result as pending rather than scheduling a storm.
+        return True
+
+    def refresh() -> None:
+        def build_entry() -> Optional[Dict[str, Any]]:
+            payload = factory()
+            if not isinstance(payload, dict):
+                return None
+            return _swr_cache_entry(
+                payload,
+                fresh_ttl_seconds=fresh_ttl_seconds,
+                stale_ttl_seconds=stale_ttl_seconds,
+            )
+
+        try:
+            _get_or_set_single_flight(
+                cache_key,
+                ttl_seconds=max(1, stale_ttl_seconds),
+                factory=build_entry,
+                lock_key=f"single-flight:{cache_key}",
+                lock_ttl_seconds=_MARKET_SWR_LOCK_TTL_SECONDS,
+                wait_timeout_seconds=_MARKET_SWR_WAIT_TIMEOUT_SECONDS,
+                cache_usable=lambda _entry: False,
+                allow_cached=False,
+            )
+        except Exception:
+            LOGGER.warning("market cache revalidation failed for %s", cache_key, exc_info=True)
+        finally:
+            try:
+                backend.release_if_owner(lease_key, owner)
+            except Exception:
+                LOGGER.debug("market cache revalidation unlock failed for %s", cache_key)
+
+    try:
+        _MARKET_SWR_REVALIDATION_EXECUTOR.submit(refresh)
+    except Exception:
+        try:
+            backend.release_if_owner(lease_key, owner)
+        except Exception:
+            pass
+        return False
+    return True
+
+
+def _shared_swr_payload(
+    *,
+    cache_key: str,
+    factory: Callable[[], Optional[Dict[str, Any]]],
+    fresh_ttl_seconds: int,
+    stale_ttl_seconds: int,
+    local_cache: Optional[Dict[str, Any]] = None,
+    local_key: Optional[str] = None,
+    force_revalidate: bool = False,
+) -> tuple[Optional[Dict[str, Any]], str, bool, bool]:
+    """Read a shared stale-while-revalidate cache without public bypasses.
+
+    Returns ``payload, status, stale, refresh_pending``.  A public
+    ``refresh=true`` is only a revalidation request: it never performs an
+    additional synchronous upstream fetch while usable data already exists.
+    """
+
+    local_entry = local_cache.get(local_key) if local_cache is not None and local_key else None
+    shared_entry = _shared_cache_get_dict(cache_key)
+
+    if _swr_entry_is_fresh(local_entry):
+        pending = _schedule_swr_revalidation(
+            cache_key=cache_key,
+            fresh_ttl_seconds=fresh_ttl_seconds,
+            stale_ttl_seconds=stale_ttl_seconds,
+            factory=factory,
+        ) if force_revalidate else False
+        return _swr_entry_payload(local_entry), "local_hit", False, pending
+
+    if _swr_entry_is_fresh(shared_entry):
+        if local_cache is not None and local_key:
+            local_cache[local_key] = shared_entry
+        pending = _schedule_swr_revalidation(
+            cache_key=cache_key,
+            fresh_ttl_seconds=fresh_ttl_seconds,
+            stale_ttl_seconds=stale_ttl_seconds,
+            factory=factory,
+        ) if force_revalidate else False
+        return _swr_entry_payload(shared_entry), "shared_hit", False, pending
+
+    stale_entry = shared_entry if _swr_entry_is_stale(shared_entry) else local_entry
+    if _swr_entry_is_stale(stale_entry):
+        if local_cache is not None and local_key:
+            local_cache[local_key] = stale_entry
+        pending = _schedule_swr_revalidation(
+            cache_key=cache_key,
+            fresh_ttl_seconds=fresh_ttl_seconds,
+            stale_ttl_seconds=stale_ttl_seconds,
+            factory=factory,
+        )
+        return _swr_entry_payload(stale_entry), "stale", True, pending
+
+    def build_entry() -> Optional[Dict[str, Any]]:
+        built = factory()
+        if not isinstance(built, dict):
+            return None
+        return _swr_cache_entry(
+            built,
+            fresh_ttl_seconds=fresh_ttl_seconds,
+            stale_ttl_seconds=stale_ttl_seconds,
+        )
+
+    entry, status = _get_or_set_single_flight(
+        cache_key,
+        ttl_seconds=max(1, stale_ttl_seconds),
+        factory=build_entry,
+        lock_key=f"single-flight:{cache_key}",
+        lock_ttl_seconds=_MARKET_SWR_LOCK_TTL_SECONDS,
+        wait_timeout_seconds=_MARKET_SWR_WAIT_TIMEOUT_SECONDS,
+        cache_usable=_swr_entry_is_fresh,
+    )
+    payload = _swr_entry_payload(entry)
+    if payload is not None and local_cache is not None and local_key:
+        local_cache[local_key] = entry
+    return payload, status, False, status == "pending"
+
+
+def _with_market_cache_metadata(
+    payload: Dict[str, Any],
+    *,
+    cache_status: str,
+    stale: bool,
+    refresh_pending: bool,
+) -> Dict[str, Any]:
+    out = dict(payload)
+    out["cache_status"] = cache_status
+    out["stale"] = stale
+    out["refresh_pending"] = refresh_pending
+    return out
+
+
+def _normalized_cache_text(value: Optional[str], *, max_length: int = 120) -> str:
+    """Keep user-controlled response-cache keys bounded and canonical."""
+
+    return " ".join(str(value or "").split()).casefold()[:max_length]
+
+
+def _fund_listing_cache_key(
+    *,
+    q: Optional[str],
+    fund_type: Optional[str],
+    founder: Optional[str],
+    manager: Optional[str],
+    risk: Optional[str],
+    sort: str,
+    order: str,
+) -> str:
+    return (
+        "api:funds:v3:"
+        f"q={_normalized_cache_text(q, max_length=80)}|type={_normalized_cache_text(fund_type, max_length=32)}"
+        f"|founder={_normalized_cache_text(founder)}|manager={_normalized_cache_text(manager)}"
+        f"|risk={_normalized_cache_text(risk, max_length=32)}|sort={_normalized_cache_text(sort, max_length=32)}"
+        f"|order={_normalized_cache_text(order, max_length=8)}"
+    )
 
 
 def _fund_refresh_job_key(job_id: str) -> str:
@@ -672,8 +916,8 @@ configure_http_middleware(app)
 class MarketComparisonHistoryAsset(BaseModel):
     id: Optional[str] = None
     kind: Literal["fund", "stock", "index", "fx"]
-    symbol: str = Field(..., min_length=1)
-    label: Optional[str] = None
+    symbol: str = Field(..., min_length=1, max_length=32)
+    label: Optional[str] = Field(default=None, max_length=160)
 
 
 class MarketComparisonHistoryRequest(BaseModel):
@@ -1093,13 +1337,13 @@ def market_index_detail(index_code: str, refresh: bool = Query(False)) -> Dict[s
 
 @app.get("/funds")
 def funds(
-    q: Optional[str] = Query(None),
-    fund_type: Optional[str] = Query(None),
-    founder: Optional[str] = Query(None),
-    manager: Optional[str] = Query(None),
-    risk: Optional[str] = Query(None),
-    sort: str = Query("fund_code"),
-    order: str = Query("asc"),
+    q: Optional[str] = Query(None, max_length=80),
+    fund_type: Optional[str] = Query(None, max_length=32),
+    founder: Optional[str] = Query(None, max_length=120),
+    manager: Optional[str] = Query(None, max_length=120),
+    risk: Optional[str] = Query(None, max_length=32),
+    sort: str = Query("fund_code", max_length=32),
+    order: str = Query("asc", max_length=8),
 ) -> Dict[str, Any]:
     return _funds_listing_payload(
         q=q,
@@ -1113,11 +1357,7 @@ def funds(
 
 
 @_cached_response(
-    key_fn=lambda *, q, fund_type, founder, manager, risk, sort, order: (
-        "api:funds:v2:"
-        f"q={q or ''}|type={fund_type or ''}|founder={founder or ''}|manager={manager or ''}"
-        f"|risk={risk or ''}|sort={sort}|order={order}"
-    ),
+    key_fn=_fund_listing_cache_key,
     ttl_seconds=45,
 )
 def _funds_listing_payload(
@@ -1149,7 +1389,7 @@ def _funds_listing_payload(
 
 
 @app.get("/funds/search")
-def funds_search(q: str = Query("", min_length=0), limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
+def funds_search(q: str = Query("", min_length=0, max_length=80), limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
     payload = _funds_search_payload(q=q)
     rows = list(payload.get("rows") or [])[:limit]
     # Trim and clone so each caller gets the right slice without mutating the
@@ -1161,7 +1401,7 @@ def funds_search(q: str = Query("", min_length=0), limit: int = Query(50, ge=1, 
 
 
 @_cached_response(
-    key_fn=lambda *, q: f"api:funds-search:q={q or ''}",
+    key_fn=lambda *, q: f"api:funds-search:v2:q={_normalized_cache_text(q, max_length=80)}",
     ttl_seconds=60,
 )
 def _funds_search_payload(*, q: str) -> Dict[str, Any]:
@@ -4426,30 +4666,27 @@ def kap_snapshot(
 ) -> Dict[str, Any]:
     if not getattr(CONFIG, "kap", None) or not getattr(CONFIG.kap, "enabled", False):
         raise HTTPException(status_code=503, detail="KAP modülü devre dışı.")
-
     cache_key = _kap_snapshot_response_cache_key(company, max_quarters)
-    cache = _get_cache()
-    if not refresh:
-        cached = cache.get(cache_key)
-        if isinstance(cached, dict):
-            return _annotate_kap_response_cache(cached, cache_hit=True)
-
-    with cache.lock(f"kap-snapshot-response:{cache_key}", timeout=_KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT) as acquired:
-        if acquired and not refresh:
-            cached = cache.get(cache_key)
-            if isinstance(cached, dict):
-                return _annotate_kap_response_cache(cached, cache_hit=True)
-        if not acquired and not refresh:
-            deadline = time.time() + min(5.0, max(0.1, _KAP_SNAPSHOT_RESPONSE_LOCK_TIMEOUT))
-            while time.time() < deadline:
-                time.sleep(0.05)
-                cached = cache.get(cache_key)
-                if isinstance(cached, dict):
-                    return _annotate_kap_response_cache(cached, cache_hit=True)
-        normalized = _build_kap_snapshot_response(company, refresh=refresh, max_quarters=max_quarters)
-        payload = _annotate_kap_response_cache(normalized, cache_hit=False)
-        cache.set(cache_key, payload, ttl_seconds=_KAP_SNAPSHOT_RESPONSE_CACHE_TTL)
-        return payload
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key=cache_key,
+        # Snapshot cache expiry is the only time a public caller may trigger a
+        # provider refresh.  The caller itself receives fresh/stale cached data
+        # immediately, never an upstream cache-bypass request.
+        factory=lambda: _build_kap_snapshot_response(company, refresh=True, max_quarters=max_quarters),
+        fresh_ttl_seconds=_KAP_SNAPSHOT_RESPONSE_CACHE_TTL,
+        stale_ttl_seconds=_KAP_SNAPSHOT_RESPONSE_STALE_TTL,
+        force_revalidate=refresh,
+    )
+    if payload is None:
+        raise HTTPException(status_code=503, detail="KAP snapshot yenileniyor. Lütfen kısa süre sonra tekrar deneyin.")
+    response = _annotate_kap_response_cache(
+        payload,
+        cache_hit=cache_status in {"local_hit", "shared_hit", "coalesced", "stale"},
+    )
+    response["response_cache_status"] = cache_status
+    response["response_cache_stale"] = stale
+    response["refresh_pending"] = refresh_pending
+    return response
 
 
 def _quarter_sort_key(quarter: Dict[str, Any]) -> tuple[int, int]:
@@ -5409,11 +5646,34 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
     started_at = time.perf_counter()
     local_key = f"payload:{normalized_index}"
     shared_key = f"api:market:stocks:{normalized_index}:v2"
+
+    def revalidate_factory() -> Optional[Dict[str, Any]]:
+        built = _build_market_stocks_payload(index_name=normalized_index, force_refresh=True)
+        rows = built.get("rows") if isinstance(built.get("rows"), list) else []
+        has_quote = not rows or any(row.get("price") is not None for row in rows if isinstance(row, dict))
+        return built if has_quote else None
+
+    refresh_pending = False
+    if force_refresh:
+        refresh_pending = _schedule_swr_revalidation(
+            cache_key=shared_key,
+            fresh_ttl_seconds=_MARKET_QUOTES_FRESH_TTL,
+            stale_ttl_seconds=_MARKET_QUOTES_STALE_TTL,
+            factory=revalidate_factory,
+        )
+        # A public refresh is a revalidation signal, never a cache bypass.
+        force_refresh = False
     local_entry = _STOCKS_CACHE.get(local_key, {}).get("entry")
 
     if not force_refresh and _market_quote_entry_is_fresh(local_entry):
         payload = _market_quote_entry_payload(local_entry) or {}
-        payload.update({"cache_status": "hit", "quote_status": "fresh", "stale": False, "quote_error": None})
+        payload.update({
+            "cache_status": "hit",
+            "quote_status": "fresh",
+            "stale": False,
+            "quote_error": None,
+            "refresh_pending": refresh_pending,
+        })
         _log_market_cache_event(
             endpoint="market/stocks",
             index=normalized_index,
@@ -5431,7 +5691,13 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
     if not force_refresh and _market_quote_entry_is_fresh(shared_entry):
         _STOCKS_CACHE[local_key] = {"_ts": time.time(), "entry": shared_entry}
         payload = _market_quote_entry_payload(shared_entry) or {}
-        payload.update({"cache_status": "shared_hit", "quote_status": "fresh", "stale": False, "quote_error": None})
+        payload.update({
+            "cache_status": "shared_hit",
+            "quote_status": "fresh",
+            "stale": False,
+            "quote_error": None,
+            "refresh_pending": refresh_pending,
+        })
         _log_market_cache_event(
             endpoint="market/stocks",
             index=normalized_index,
@@ -5480,6 +5746,7 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
             "quote_status": "fresh",
             "stale": False,
             "quote_error": None,
+            "refresh_pending": refresh_pending,
         })
         _log_market_cache_event(
             endpoint="market/stocks",
@@ -5498,6 +5765,7 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
             "quote_status": "stale",
             "stale": True,
             "quote_error": "Piyasa fiyat kaynağına ulaşılamadı.",
+            "refresh_pending": refresh_pending or cache_status == "pending",
         })
         _log_market_cache_event(
             endpoint="market/stocks",
@@ -5515,6 +5783,7 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
         "quote_status": "unavailable",
         "stale": False,
         "quote_error": "Piyasa fiyat kaynağına ulaşılamadı.",
+        "refresh_pending": refresh_pending or cache_status == "pending",
     })
     _log_market_cache_event(
         endpoint="market/stocks",
@@ -5734,52 +6003,68 @@ def _fetch_stock_card_chart(symbol: str, chart_range: str, *, force_refresh: boo
     normalized_range = _normalize_stock_card_chart_range(chart_range)
     config = _MARKET_STOCK_CARD_CHART_RANGES[normalized_range]
     cache_key = _stock_card_chart_cache_key(ticker, normalized_range)
-    now = time.time()
-    cached = _MARKET_STOCK_CARD_CHART_CACHE.get(cache_key)
-    if cached and not force_refresh and now - cached.get("_ts", 0) < config["ttl"]:
-        payload = dict(cached.get("data") or {})
-        payload["source"] = "yahoo_cache"
-        return payload
     shared_key = f"api:market:stock-card-chart:{ticker}:range={normalized_range}:v4"
-    if not force_refresh:
-        shared_cached = _shared_cache_get_dict(shared_key)
-        if shared_cached is not None:
-            _MARKET_STOCK_CARD_CHART_CACHE[cache_key] = {"_ts": now, "data": shared_cached}
-            payload = dict(shared_cached)
-            payload["source"] = "yahoo_cache"
-            return payload
 
-    yahoo_symbol = f"{ticker}.IS"
-    fetched_at = datetime.now(timezone.utc).isoformat()
-    chart = _fetch_yahoo_chart_raw(yahoo_symbol, interval=config["interval"], range_=config["range"])
-    points = _normalize_stock_card_line_points(chart.get("points") if chart.get("ok") else [])
-    source = "yahoo_live"
-    if normalized_range == "1d" and chart.get("ok") and not points:
-        fallback_chart = _fetch_previous_stock_card_intraday_chart(yahoo_symbol)
-        fallback_points = _normalize_stock_card_line_points(fallback_chart.get("points") if fallback_chart.get("ok") else [])
-        if fallback_points:
-            chart = fallback_chart
-            points = fallback_points
-            source = "yahoo_previous_session"
-    session_state = _stock_card_session_state(
-        points,
-        market_state=(chart.get("meta") or {}).get("marketState"),
-        source=source,
+    def build() -> Dict[str, Any]:
+        yahoo_symbol = f"{ticker}.IS"
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        chart = _fetch_yahoo_chart_raw(yahoo_symbol, interval=config["interval"], range_=config["range"])
+        points = _normalize_stock_card_line_points(chart.get("points") if chart.get("ok") else [])
+        source = "yahoo_live"
+        if normalized_range == "1d" and chart.get("ok") and not points:
+            fallback_chart = _fetch_previous_stock_card_intraday_chart(yahoo_symbol)
+            fallback_points = _normalize_stock_card_line_points(fallback_chart.get("points") if fallback_chart.get("ok") else [])
+            if fallback_points:
+                chart = fallback_chart
+                points = fallback_points
+                source = "yahoo_previous_session"
+        session_state = _stock_card_session_state(
+            points,
+            market_state=(chart.get("meta") or {}).get("marketState"),
+            source=source,
+        )
+        return {
+            "symbol": ticker,
+            "range": normalized_range,
+            "yahoo_symbol": yahoo_symbol,
+            "line_points": points,
+            "source": source,
+            "as_of": fetched_at,
+            "error": None if chart.get("ok") and points else chart.get("error") or "chart_unavailable",
+            "meta": chart.get("meta") or {},
+            **session_state,
+        }
+
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key=shared_key,
+        factory=build,
+        fresh_ttl_seconds=int(config["ttl"]),
+        stale_ttl_seconds=max(_MARKET_SWR_STALE_TTL_SECONDS, int(config["ttl"]) * 2),
+        local_cache=_MARKET_STOCK_CARD_CHART_CACHE,
+        local_key=cache_key,
+        force_revalidate=force_refresh,
     )
-    payload = {
-        "symbol": ticker,
-        "range": normalized_range,
-        "yahoo_symbol": yahoo_symbol,
-        "line_points": points,
-        "source": source,
-        "as_of": fetched_at,
-        "error": None if chart.get("ok") and points else chart.get("error") or "chart_unavailable",
-        "meta": chart.get("meta") or {},
-        **session_state,
-    }
-    _MARKET_STOCK_CARD_CHART_CACHE[cache_key] = {"_ts": now, "data": payload}
-    _shared_cache_set(shared_key, payload, ttl_seconds=int(config["ttl"]))
-    return dict(payload)
+    if payload is None:
+        return {
+            "symbol": ticker,
+            "range": normalized_range,
+            "yahoo_symbol": f"{ticker}.IS",
+            "line_points": [],
+            "source": "yahoo_cache",
+            "as_of": None,
+            "error": "chart_refresh_pending",
+            "meta": {},
+            "cache_status": cache_status,
+            "stale": False,
+            "refresh_pending": True,
+        }
+    result = dict(payload)
+    if cache_status in {"local_hit", "shared_hit", "coalesced", "stale"}:
+        result["source"] = "yahoo_cache"
+    result["cache_status"] = cache_status
+    result["stale"] = stale
+    result["refresh_pending"] = refresh_pending
+    return result
 
 
 def _market_stock_card_chart_payload(*, symbol: str, chart_range: str, force_refresh: bool = False) -> Dict[str, Any]:
@@ -7392,6 +7677,74 @@ def _fx_comparison_history(
     )
 
 
+def _comparison_history_cache_key(
+    asset: MarketComparisonHistoryAsset,
+    *,
+    start_date: date,
+    end_date: date,
+) -> str:
+    """Build a bounded key that intentionally excludes presentation fields."""
+
+    symbol = re.sub(r"[^A-Z0-9/_-]", "", str(asset.symbol or "").strip().upper())[:32]
+    return (
+        "api:market:comparison-history:v2:"
+        f"kind={asset.kind}:symbol={symbol}:from={start_date.isoformat()}:to={end_date.isoformat()}"
+    )
+
+
+def _comparison_history_cached_asset(
+    asset: MarketComparisonHistoryAsset,
+    *,
+    start_date: date,
+    end_date: date,
+    handler: Callable[..., Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Cache a single normalized series, not the user-specific POST body."""
+
+    latest_result: Optional[Dict[str, Any]] = None
+
+    def build() -> Optional[Dict[str, Any]]:
+        nonlocal latest_result
+        latest_result = handler(asset, start_date=start_date, end_date=end_date)
+        # A first-request provider failure must not become a multi-day negative
+        # cache.  Existing stale success data is still served by the wrapper.
+        return latest_result if not latest_result.get("error") else None
+
+    historical_range = end_date < date.today()
+    fresh_ttl = 24 * 60 * 60 if historical_range else 60
+    stale_ttl = 7 * 24 * 60 * 60 if historical_range else 10 * 60
+    cached, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key=_comparison_history_cache_key(asset, start_date=start_date, end_date=end_date),
+        factory=build,
+        fresh_ttl_seconds=fresh_ttl,
+        stale_ttl_seconds=stale_ttl,
+    )
+    if cached is not None:
+        result = dict(cached)
+    elif latest_result is not None:
+        result = dict(latest_result)
+    else:
+        # A waiter must not repeat the provider request after the bounded
+        # single-flight wait.  The client can retain its prior chart and retry.
+        result = _comparison_history_result(
+            asset,
+            symbol=str(asset.symbol or "").strip().upper(),
+            label=asset.label,
+            points=[],
+            source="mixed",
+            error="refresh_pending",
+        )
+    # ``id`` and ``label`` are caller presentation choices, so they must not
+    # fragment the expensive provider-series cache.
+    symbol = str(result.get("symbol") or asset.symbol).strip().upper()
+    result["id"] = asset.id or f"{asset.kind}:{symbol}"
+    result["label"] = asset.label or result.get("label") or symbol
+    result["cache_status"] = cache_status
+    result["stale"] = stale
+    result["refresh_pending"] = refresh_pending
+    return result
+
+
 def _market_comparison_history_payload(request: MarketComparisonHistoryRequest) -> Dict[str, Any]:
     handlers = {
         "fund": _fund_comparison_history,
@@ -7403,7 +7756,12 @@ def _market_comparison_history_payload(request: MarketComparisonHistoryRequest) 
         "start_date": request.start_date.isoformat(),
         "end_date": request.end_date.isoformat(),
         "assets": [
-            handlers[asset.kind](asset, start_date=request.start_date, end_date=request.end_date)
+            _comparison_history_cached_asset(
+                asset,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                handler=handlers[asset.kind],
+            )
             for asset in request.assets
         ],
         "source": "mixed",
@@ -7412,25 +7770,42 @@ def _market_comparison_history_payload(request: MarketComparisonHistoryRequest) 
 
 
 def _market_indices_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
-    now = time.time()
-    cached = _MARKET_INDICES_CACHE.get("payload")
-    if cached and not force_refresh and now - cached.get("_ts", 0) < _MARKET_INDICES_CACHE_TTL:
-        return cached["data"]
+    def build() -> Dict[str, Any]:
+        from concurrent.futures import ThreadPoolExecutor
 
-    from concurrent.futures import ThreadPoolExecutor
+        try:
+            with ThreadPoolExecutor(max_workers=min(8, len(_MARKET_INDEX_ORDER))) as pool:
+                rows = list(pool.map(_market_index_row, _MARKET_INDEX_ORDER))
+        except Exception:
+            rows = [_market_index_row(index_code) for index_code in _MARKET_INDEX_ORDER]
+        return {
+            "rows": rows,
+            "source": "yahoo_finance_chart",
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
 
-    try:
-        with ThreadPoolExecutor(max_workers=min(8, len(_MARKET_INDEX_ORDER))) as pool:
-            rows = list(pool.map(_market_index_row, _MARKET_INDEX_ORDER))
-    except Exception:
-        rows = [_market_index_row(index_code) for index_code in _MARKET_INDEX_ORDER]
-    data = {
-        "rows": rows,
-        "source": "yahoo_finance_chart",
-        "as_of": datetime.now(timezone.utc).isoformat(),
-    }
-    _MARKET_INDICES_CACHE["payload"] = {"_ts": now, "data": data}
-    return data
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key="api:market:indices:v2",
+        factory=build,
+        fresh_ttl_seconds=_MARKET_INDICES_CACHE_TTL,
+        stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
+        local_cache=_MARKET_INDICES_CACHE,
+        local_key="payload",
+        force_revalidate=force_refresh,
+    )
+    if payload is None:
+        payload = {
+            "rows": [],
+            "source": "yahoo_finance_chart",
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "error": "market_indices_refresh_pending",
+        }
+    return _with_market_cache_metadata(
+        payload,
+        cache_status=cache_status,
+        stale=stale,
+        refresh_pending=refresh_pending,
+    )
 
 
 def _index_intraday_payload(index_code: str) -> Dict[str, Any]:
@@ -7656,84 +8031,113 @@ def _index_constituents(index_code: str, *, index_level: Any) -> tuple[List[Dict
 
 def _market_index_detail_payload(index_code: str, *, force_refresh: bool = False) -> Dict[str, Any]:
     normalized = _normalize_market_index(index_code)
-    now = time.time()
-    cached = _MARKET_INDEX_DETAIL_CACHE.get(normalized)
-    if cached and not force_refresh and now - cached.get("_ts", 0) < _MARKET_INDEX_DETAIL_CACHE_TTL:
-        return cached["data"]
 
-    quote = _fetch_index_quote(normalized)
-    row = _market_index_row(normalized, quote=quote)
-    intraday = _index_intraday_payload(normalized)
-    constituents, weight_status = _index_constituents(normalized, index_level=row.get("price"))
-    data = {
-        **row,
-        "high": row.get("high") if row.get("high") is not None else intraday.get("high"),
-        "low": row.get("low") if row.get("low") is not None else intraday.get("low"),
-        "prev_close": row.get("prev_close") if row.get("prev_close") is not None else intraday.get("prev_close"),
-        "line_points": intraday.get("line_points") or [],
-        "constituents": constituents,
-        "weight_status": weight_status,
-        "weight_note": (
-            "Tahmini ağırlık: İş Yatırım halka açıklık oranı ve ağırlık katsayısı 1 varsayımıyla hesaplandı."
-            if weight_status == "available"
-            else "Ağırlık verisi bulunamadı: pay sayısı, FDPO ve ağırlık katsayısı eksiksiz olmadığı için puan etkisi hesaplanamadı."
-        ),
-        "source": "yahoo_finance_chart",
-        "as_of": row.get("as_of") or datetime.now(timezone.utc).isoformat(),
-    }
-    _MARKET_INDEX_DETAIL_CACHE[normalized] = {"_ts": now, "data": data}
-    return data
-
-
-def _market_commodities_payload() -> Dict[str, Any]:
-    now = time.time()
-    cached = _COMMODITY_CACHE.get("payload")
-    if cached and now - cached.get("_ts", 0) < _COMMODITY_CACHE_TTL:
-        return cached["data"]
-
-    from concurrent.futures import ThreadPoolExecutor
-
-    def _one(entry: tuple[str, str, str, Optional[str]]) -> Dict[str, Any]:
-        symbol, yahoo_symbol, label, forced_currency = entry
-        quote = _fetch_yahoo_quote(yahoo_symbol)
+    def build() -> Dict[str, Any]:
+        quote = _fetch_index_quote(normalized)
+        row = _market_index_row(normalized, quote=quote)
+        intraday = _index_intraday_payload(normalized)
+        constituents, weight_status = _index_constituents(normalized, index_level=row.get("price"))
         return {
-            "symbol": symbol,
-            "label": label,
-            "yahoo_symbol": yahoo_symbol,
-            "price": quote.get("price") if quote.get("ok") else None,
-            "prev_close": quote.get("prev_close") if quote.get("ok") else None,
-            "change": quote.get("change") if quote.get("ok") else None,
-            "change_pct": quote.get("change_pct") if quote.get("ok") else None,
-            "currency": forced_currency or quote.get("currency") or "USD",
-            "market_state": quote.get("market_state") if quote.get("ok") else "",
-            "as_of": quote.get("as_of") if quote.get("ok") else None,
-            "error": None if quote.get("ok") else quote.get("error"),
-            "logo_url": None,
-            "logo_source": None,
+            **row,
+            "high": row.get("high") if row.get("high") is not None else intraday.get("high"),
+            "low": row.get("low") if row.get("low") is not None else intraday.get("low"),
+            "prev_close": row.get("prev_close") if row.get("prev_close") is not None else intraday.get("prev_close"),
+            "line_points": intraday.get("line_points") or [],
+            "constituents": constituents,
+            "weight_status": weight_status,
+            "weight_note": (
+                "Tahmini ağırlık: İş Yatırım halka açıklık oranı ve ağırlık katsayısı 1 varsayımıyla hesaplandı."
+                if weight_status == "available"
+                else "Ağırlık verisi bulunamadı: pay sayısı, FDPO ve ağırlık katsayısı eksiksiz olmadığı için puan etkisi hesaplanamadı."
+            ),
+            "source": "yahoo_finance_chart",
+            "as_of": row.get("as_of") or datetime.now(timezone.utc).isoformat(),
         }
 
-    items: List[Dict[str, Any]] = []
-    try:
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            for row in pool.map(_one, _COMMODITY_MAP):
-                items.append(row)
-    except Exception:
-        for entry in _COMMODITY_MAP:
-            items.append(_one(entry))
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key=f"api:market:index-detail:{normalized}:v2",
+        factory=build,
+        fresh_ttl_seconds=_MARKET_INDEX_DETAIL_CACHE_TTL,
+        stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
+        local_cache=_MARKET_INDEX_DETAIL_CACHE,
+        local_key=normalized,
+        force_revalidate=force_refresh,
+    )
+    if payload is None:
+        raise HTTPException(status_code=503, detail="Endeks verisi yenileniyor. Lütfen kısa süre sonra tekrar deneyin.")
+    return _with_market_cache_metadata(
+        payload,
+        cache_status=cache_status,
+        stale=stale,
+        refresh_pending=refresh_pending,
+    )
 
-    data = {
-        "items": items,
-        "source": "yahoo_finance_chart",
-        "delay_note": "Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).",
-        "as_of": datetime.now(timezone.utc).isoformat(),
-    }
-    _COMMODITY_CACHE["payload"] = {"_ts": now, "data": data}
-    return data
+
+def _market_commodities_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
+    def build() -> Dict[str, Any]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _one(entry: tuple[str, str, str, Optional[str]]) -> Dict[str, Any]:
+            symbol, yahoo_symbol, label, forced_currency = entry
+            quote = _fetch_yahoo_quote(yahoo_symbol)
+            return {
+                "symbol": symbol,
+                "label": label,
+                "yahoo_symbol": yahoo_symbol,
+                "price": quote.get("price") if quote.get("ok") else None,
+                "prev_close": quote.get("prev_close") if quote.get("ok") else None,
+                "change": quote.get("change") if quote.get("ok") else None,
+                "change_pct": quote.get("change_pct") if quote.get("ok") else None,
+                "currency": forced_currency or quote.get("currency") or "USD",
+                "market_state": quote.get("market_state") if quote.get("ok") else "",
+                "as_of": quote.get("as_of") if quote.get("ok") else None,
+                "error": None if quote.get("ok") else quote.get("error"),
+                "logo_url": None,
+                "logo_source": None,
+            }
+
+        items: List[Dict[str, Any]] = []
+        try:
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                for row in pool.map(_one, _COMMODITY_MAP):
+                    items.append(row)
+        except Exception:
+            for entry in _COMMODITY_MAP:
+                items.append(_one(entry))
+        return {
+            "items": items,
+            "source": "yahoo_finance_chart",
+            "delay_note": "Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).",
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key="api:market:commodities:v2",
+        factory=build,
+        fresh_ttl_seconds=_COMMODITY_CACHE_TTL,
+        stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
+        local_cache=_COMMODITY_CACHE,
+        local_key="payload",
+        force_revalidate=force_refresh,
+    )
+    if payload is None:
+        payload = {
+            "items": [],
+            "source": "yahoo_finance_chart",
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "error": "market_commodities_refresh_pending",
+        }
+    return _with_market_cache_metadata(
+        payload,
+        cache_status=cache_status,
+        stale=stale,
+        refresh_pending=refresh_pending,
+    )
 
 
 @app.get("/market/commodities")
-def market_commodities() -> Dict[str, Any]:
-    return _market_commodities_payload()
+def market_commodities(refresh: bool = Query(False)) -> Dict[str, Any]:
+    return _market_commodities_payload(force_refresh=refresh)
 
 
 # ── FX (Döviz) ────────────────────────────────────────────
@@ -7953,52 +8357,68 @@ def _fx_derived_item(
     }
 
 
-def _market_fx_payload() -> Dict[str, Any]:
-    now = time.time()
-    cached = _FX_CACHE.get("payload")
-    if cached and now - cached.get("_ts", 0) < _FX_CACHE_TTL:
-        return cached["data"]
+def _market_fx_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
+    def build() -> Dict[str, Any]:
+        from concurrent.futures import ThreadPoolExecutor
 
-    from concurrent.futures import ThreadPoolExecutor
-
-    items_by_symbol: Dict[str, Dict[str, Any]] = {}
-    try:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            for row in pool.map(_fx_direct_item, _FX_DIRECT_MAP):
+        items_by_symbol: Dict[str, Dict[str, Any]] = {}
+        try:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                for row in pool.map(_fx_direct_item, _FX_DIRECT_MAP):
+                    items_by_symbol[str(row.get("symbol") or "")] = row
+        except Exception:
+            for entry in _FX_DIRECT_MAP:
+                row = _fx_direct_item(entry)
                 items_by_symbol[str(row.get("symbol") or "")] = row
-    except Exception:
-        for entry in _FX_DIRECT_MAP:
-            row = _fx_direct_item(entry)
-            items_by_symbol[str(row.get("symbol") or "")] = row
 
-    for symbol, label, numerator_symbol, denominator_symbol in _FX_DERIVED_MAP:
-        items_by_symbol[symbol] = _fx_derived_item(
-            symbol,
-            label,
-            numerator_symbol,
-            denominator_symbol,
-            items_by_symbol,
-        )
+        for symbol, label, numerator_symbol, denominator_symbol in _FX_DERIVED_MAP:
+            items_by_symbol[symbol] = _fx_derived_item(
+                symbol,
+                label,
+                numerator_symbol,
+                denominator_symbol,
+                items_by_symbol,
+            )
 
-    items = [
-        items_by_symbol[symbol]
-        for symbol in _FX_ORDER
-        if symbol in items_by_symbol
-    ]
+        items = [
+            items_by_symbol[symbol]
+            for symbol in _FX_ORDER
+            if symbol in items_by_symbol
+        ]
+        return {
+            "items": items,
+            "source": "yahoo_finance_chart",
+            "delay_note": "Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).",
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
 
-    data = {
-        "items": items,
-        "source": "yahoo_finance_chart",
-        "delay_note": "Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).",
-        "as_of": datetime.now(timezone.utc).isoformat(),
-    }
-    _FX_CACHE["payload"] = {"_ts": now, "data": data}
-    return data
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key="api:market:fx:v2",
+        factory=build,
+        fresh_ttl_seconds=_FX_CACHE_TTL,
+        stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
+        local_cache=_FX_CACHE,
+        local_key="payload",
+        force_revalidate=force_refresh,
+    )
+    if payload is None:
+        payload = {
+            "items": [],
+            "source": "yahoo_finance_chart",
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "error": "market_fx_refresh_pending",
+        }
+    return _with_market_cache_metadata(
+        payload,
+        cache_status=cache_status,
+        stale=stale,
+        refresh_pending=refresh_pending,
+    )
 
 
 @app.get("/market/fx")
-def market_fx() -> Dict[str, Any]:
-    return _market_fx_payload()
+def market_fx(refresh: bool = Query(False)) -> Dict[str, Any]:
+    return _market_fx_payload(force_refresh=refresh)
 
 
 # ── Market watch strip (single endpoint for Markets page) ────────────────
