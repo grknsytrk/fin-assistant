@@ -794,6 +794,64 @@ def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen_kwargs["auto_refresh"] is False
 
 
+def test_stale_fund_catalogue_schedules_one_background_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    jobs: list[int] = []
+    monkeypatch.setattr(
+        api_module,
+        "_start_fund_refresh_job",
+        lambda lookback_days: jobs.append(lookback_days) or {
+            "job_id": "auto-refresh-job",
+            "status": "queued",
+            "requested_at": "2026-09-07T12:00:00+00:00",
+        },
+    )
+    backend = cache_module.get_cache()
+    backend.delete(f"{api_module._FUND_REFRESH_AUTO_KEY_PREFIX}:2026-09-07")
+    payload = {
+        "status": "ok",
+        "rows": [{"fund_code": "TLY"}],
+        "total_count": 1,
+        "as_of": "2026-09-04",
+        "stale": True,
+        "source_metadata": {
+            "snapshot_as_of": "2026-09-04",
+            "snapshot_target_date": "2026-09-07",
+            "snapshot_as_of_lag_days": 3,
+        },
+    }
+
+    first = api_module._maybe_schedule_fund_snapshot_refresh(payload)
+    second = api_module._maybe_schedule_fund_snapshot_refresh(payload)
+
+    assert jobs == [api_module._FUND_REFRESH_MAX_LOOKBACK_DAYS]
+    assert first["refresh_pending"] is True
+    assert first["refresh_job"]["job_id"] == "auto-refresh-job"
+    assert "owner_token" not in first["refresh_job"]
+    assert "refresh_job" not in second
+
+
+def test_current_weekend_fund_catalogue_does_not_schedule_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_start_fund_refresh_job",
+        lambda _lookback_days: pytest.fail("current market snapshot should not schedule a refresh"),
+    )
+    payload = {
+        "status": "ok",
+        "rows": [{"fund_code": "TLY"}],
+        "total_count": 1,
+        "as_of": "2026-09-04",
+        "stale": True,
+        "source_metadata": {
+            "snapshot_as_of": "2026-09-04",
+            "snapshot_target_date": "2026-09-04",
+            "snapshot_as_of_lag_days": 0,
+        },
+    }
+
+    assert api_module._maybe_schedule_fund_snapshot_refresh(payload) is payload
+
+
 def test_api_funds_search_keeps_full_universe(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_kwargs: Dict[str, Any] = {}
 

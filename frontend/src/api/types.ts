@@ -425,6 +425,7 @@ export interface FundsResponse {
   degraded: boolean;
   warnings: string[];
   source_metadata: FundSourceMetadata;
+  refresh_pending?: boolean;
   refresh_job?: FundRefreshJob;
 }
 

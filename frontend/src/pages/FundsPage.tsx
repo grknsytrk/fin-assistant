@@ -5280,6 +5280,16 @@ export default function FundsPage({
         }
     }, []);
 
+    useEffect(() => {
+        const jobStatus = funds?.refresh_job?.status;
+        const refreshPending = funds?.refresh_pending || jobStatus === 'queued' || jobStatus === 'running';
+        if (!refreshPending || refreshing) return;
+        const timer = window.setTimeout(() => {
+            void refreshSnapshot();
+        }, 5000);
+        return () => window.clearTimeout(timer);
+    }, [funds?.refresh_job?.status, funds?.refresh_pending, refreshSnapshot, refreshing]);
+
     const loadHoldings = useCallback(async (
         normalizedCode: string,
         options: { silent?: boolean; force?: boolean } = {},
@@ -6056,6 +6066,8 @@ export default function FundsPage({
                                             ? `Fon listesi yenilenemedi: ${refreshError}`
                                             : refreshing
                                               ? 'Fon listesi yeniden yükleniyor.'
+                                              : funds?.refresh_pending
+                                                ? 'Fon kataloğu arka planda otomatik yenileniyor.'
                                               : funds?.degraded
                                             ? 'Fon snapshot cache boş veya kullanılamıyor.'
                                             : funds?.stale && funds?.source_metadata?.snapshot_as_of && funds?.source_metadata?.price_history_as_of

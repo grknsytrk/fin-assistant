@@ -86,6 +86,10 @@ _FUND_HOLDING_SECTOR_MAP_CACHE_TTL = 6 * 60 * 60
 _FUND_REFRESH_JOB_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_REFRESH_JOB_TTL_SECONDS", str(30 * 60)))
 _FUND_REFRESH_MAX_LOOKBACK_DAYS = 14
 _FUND_REFRESH_RESOURCE_KEY = "funds_snapshot"
+_FUND_REFRESH_AUTO_COOLDOWN_SECONDS = int(
+    os.getenv("RAGFIN_FUND_REFRESH_AUTO_COOLDOWN_SECONDS", str(30 * 60))
+)
+_FUND_REFRESH_AUTO_KEY_PREFIX = "api:funds-refresh:auto"
 _FUND_REFRESH_LEASE_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_REFRESH_LEASE_TTL_SECONDS", "90"))
 _FUND_REFRESH_ACTIVE_KEY = "api:funds-refresh:active"
 _FUND_REFRESH_HEARTBEAT_INTERVAL_SECONDS = float(
@@ -761,6 +765,83 @@ def _start_fund_refresh_job(lookback_days: int) -> Dict[str, Any]:
     return job
 
 
+def _fund_snapshot_needs_background_refresh(payload: Dict[str, Any]) -> bool:
+    """Return whether the canonical catalogue is behind its market target."""
+
+    metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+    total_count = payload.get("total_count")
+    try:
+        has_catalogue = int(total_count) > 0
+    except (TypeError, ValueError):
+        has_catalogue = bool(payload.get("rows"))
+    if not has_catalogue:
+        return True
+
+    lag = metadata.get("snapshot_as_of_lag_days")
+    try:
+        return int(lag) > 0
+    except (TypeError, ValueError):
+        pass
+
+    snapshot_as_of = str(metadata.get("snapshot_as_of") or payload.get("as_of") or "").strip()
+    target_date = str(metadata.get("snapshot_target_date") or "").strip()
+    return bool(snapshot_as_of and target_date and snapshot_as_of < target_date)
+
+
+def _public_fund_refresh_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    fields = (
+        "job_id",
+        "status",
+        "requested_at",
+        "started_at",
+        "finished_at",
+        "as_of",
+        "row_count",
+        "error",
+        "resolution_status",
+        "snapshot_action",
+    )
+    return {field: job.get(field) for field in fields}
+
+
+def _maybe_schedule_fund_snapshot_refresh(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Self-heal a missed external schedule without blocking the list request."""
+
+    if not _fund_snapshot_needs_background_refresh(payload):
+        return payload
+
+    metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+    target_date = str(metadata.get("snapshot_target_date") or "unknown").strip()
+    backend = _get_cache()
+    job = _active_fund_refresh_job()
+    if job is None:
+        cooldown_key = f"{_FUND_REFRESH_AUTO_KEY_PREFIX}:{target_date}"
+        claimed = backend.set_if_absent(
+            cooldown_key,
+            {"scheduled_at": _fund_refresh_now_iso()},
+            ttl_seconds=max(60, _FUND_REFRESH_AUTO_COOLDOWN_SECONDS),
+        )
+        if claimed:
+            try:
+                job = _start_fund_refresh_job(_FUND_REFRESH_MAX_LOOKBACK_DAYS)
+                LOGGER.info(
+                    "stale fund catalogue scheduled background refresh: target=%s job_id=%s",
+                    target_date,
+                    job.get("job_id"),
+                )
+            except Exception:
+                backend.delete(cooldown_key)
+                LOGGER.exception("stale fund catalogue background refresh could not be scheduled")
+
+    if job is None:
+        return payload
+
+    out = dict(payload)
+    out["refresh_pending"] = str(job.get("status") or "") in {"queued", "running"}
+    out["refresh_job"] = _public_fund_refresh_job(job)
+    return out
+
+
 async def _fund_price_collector_loop() -> None:
     from app.fund_service import collect_daily_fund_prices
 
@@ -1337,7 +1418,7 @@ def funds(
     sort: str = Query("fund_code", max_length=32),
     order: str = Query("asc", max_length=8),
 ) -> Dict[str, Any]:
-    return _funds_listing_payload(
+    payload = _funds_listing_payload(
         q=q,
         fund_type=fund_type,
         founder=founder,
@@ -1346,6 +1427,7 @@ def funds(
         sort=sort,
         order=order,
     )
+    return _maybe_schedule_fund_snapshot_refresh(payload)
 
 
 @_cached_response(
