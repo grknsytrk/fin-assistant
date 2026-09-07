@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { ArrowLeft, BarChart3, BookOpen, ChevronRight, FileText, Info, Star } from 'lucide-react';
 import './StockDetailPage.css';
-import { apiClient } from '../api/client';
+import { apiClient, cachedKapSnapshot } from '../api/client';
 import type {
     KapSnapshotResponse,
     KapQuarter,
@@ -172,6 +172,7 @@ function StockDetailPriceChart({
         Partial<Record<MarketStockCardChartRange, MarketStockCardChartResponse>>
     >({});
     const [rangeErrors, setRangeErrors] = useState<Partial<Record<MarketStockCardChartRange, string | null>>>({});
+    const lastChartPointsRef = useRef<MarketIndexLinePoint[]>([]);
     const chartAbortRef = useRef<AbortController | null>(null);
     const chartRequestIdRef = useRef(0);
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
@@ -193,6 +194,7 @@ function StockDetailPriceChart({
                 if (controller.signal.aborted || requestId !== chartRequestIdRef.current) return;
                 setChartDataByRange((previous) => ({ ...previous, [selectedRange]: payload }));
                 const nextPoints = payload.line_points ?? [];
+                if (nextPoints.length >= 2) lastChartPointsRef.current = nextPoints;
                 setRangeErrors((previous) => ({
                     ...previous,
                     [selectedRange]: payload.error || nextPoints.length < 2 ? payload.error || 'Grafik verisi yok' : null,
@@ -265,10 +267,26 @@ function StockDetailPriceChart({
     );
 
     if (isLoading) {
+        const previousValues = lastChartPointsRef.current
+            .filter(point => Number.isFinite(Number(point.close)) && Number.isFinite(Date.parse(point.time)))
+            .sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
+            .map(point => Number(point.close));
+        const values = previousValues.length >= 2 ? previousValues : [18, 22, 20, 27, 24, 30, 26, 34, 32, 38, 35, 42];
+        const min = Math.min(...values);
+        const span = Math.max(0.01, Math.max(...values) - min);
+        const line = values.map((value, index) =>
+            `${index === 0 ? 'M' : 'L'} ${16 + index / (values.length - 1) * 1028} ${340 - (value - min) / span * 280}`,
+        ).join(' ');
         return (
-            <section className="sd-price-chart-panel" aria-label={`${ticker} fiyat grafiği`}>
+            <section className="sd-price-chart-panel" aria-label={`${ticker} fiyat grafiği`} aria-busy="true">
                 {controls}
-                <div className="sd-price-chart-state">Grafik verisi yükleniyor...</div>
+                <svg className="sd-price-chart-svg sd-price-chart-loading" viewBox="0 0 1120 400" role="img" aria-label="Grafik yükleniyor">
+                    {[70, 150, 230, 310].map(y => (
+                        <line key={y} className="sd-price-chart-gridline" x1="16" x2="1044" y1={y} y2={y} />
+                    ))}
+                    <path className="sd-price-chart-loading-track" d={line} />
+                    <path className="sd-price-chart-loading-line" d={line} pathLength={100} />
+                </svg>
             </section>
         );
     }
@@ -595,7 +613,7 @@ export default function StockDetailPage({
     const [snapshot, setSnapshot] = useState<KapSnapshotResponse | null>(null);
     const [quarters, setQuarters] = useState<KapQuarter[]>([]);
     const [loading, setLoading] = useState(false);
-    const [snapshotQuarterDepth, setSnapshotQuarterDepth] = useState(0);
+    const [historyLoading, setHistoryLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [navCollapsed, setNavCollapsed] = useState(false);
     const [priceData, setPriceData] = useState<StockPriceData | null>(null);
@@ -612,54 +630,68 @@ export default function StockDetailPage({
     };
 
     useEffect(() => {
-        let mounted = true;
-        setSnapshot(null);
-        setQuarters([]);
-        setSnapshotQuarterDepth(0);
+        const controller = new AbortController();
+        let timer: number | undefined;
+        const cached = cachedKapSnapshot(ticker);
+        setSnapshot(cached);
+        setQuarters(cached ? prepareOrderedQuarters(cached) : []);
         setError(null);
-        setLoading(true);
-        // Genel Bakış tab'ında 5/10/15/20 çeyrek seçenekleri var; ilk istekte
-        // de tam 20 çeyrek çekiyoruz ki 15c/20c butonları boş görünmesin. KAP
-        // cache'i taze ise tek istekte gelir, soğuk ise tek seferde uzun ama
-        // sonraki tab geçişlerinde yeniden istek atılmaz.
-        const initialQuarterCount = FULL_KAP_QUARTER_COUNT;
-        apiClient.kapSnapshot(ticker, false, initialQuarterCount)
-            .then(data => {
-                if (mounted) {
+        setLoading(!cached);
+        setHistoryLoading(false);
+        const started = performance.now();
+        let displayed = Boolean(cached);
+        let attempts = 0;
+        const load = async (depth: number) => {
+            if (controller.signal.aborted) return;
+            if (document.visibilityState === 'hidden') {
+                timer = window.setTimeout(() => void load(depth), 5000);
+                return;
+            }
+            try {
+                const data = await apiClient.kapSnapshot(ticker, false, depth, controller.signal);
+                if (controller.signal.aborted) return;
+                if (data.ok && data.quarters.length) {
                     setSnapshot(data);
                     setQuarters(prepareOrderedQuarters(data));
-                    setSnapshotQuarterDepth(initialQuarterCount);
-                    if (!data.ok && data.error) setError(data.error);
+                    setLoading(false);
+                    setError(null);
+                    if (!displayed) {
+                        performance.measure('stock-detail-first-data', { start: started, end: performance.now() });
+                        displayed = true;
+                    }
                 }
-            })
-            .catch(err => {
-                if (mounted) setError(err.message || 'Veri alınamadı');
-            })
-            .finally(() => {
-                if (mounted) setLoading(false);
-            });
-        
-        return () => { mounted = false; };
+                if (data.pending || data.refresh_pending) {
+                    setLoading(!displayed);
+                    setError(null);
+                }
+                // Keep the summary visible while the deeper history is prepared.
+                if (depth < FULL_KAP_QUARTER_COUNT && displayed) {
+                    attempts = 0;
+                    setHistoryLoading(true);
+                    timer = window.setTimeout(() => void load(FULL_KAP_QUARTER_COUNT), 300);
+                } else if (data.pending || data.refresh_pending) {
+                    attempts += 1;
+                    setHistoryLoading(displayed);
+                    timer = window.setTimeout(() => void load(depth), Math.min(30000, 1000 + attempts * 1000));
+                } else {
+                    setLoading(false);
+                    setHistoryLoading(false);
+                    if (!displayed) {
+                        setError(data.error || 'Finansal verilere şu an ulaşılamıyor. Bağlantı otomatik kontrol ediliyor.');
+                        timer = window.setTimeout(() => void load(depth), 15000);
+                    }
+                }
+            } catch (err) {
+                if (controller.signal.aborted) return;
+                setLoading(false);
+                setHistoryLoading(false);
+                setError(err instanceof Error ? err.message : 'Veri alınamadı');
+                timer = window.setTimeout(() => void load(depth), 15000);
+            }
+        };
+        void load(5);
+        return () => { controller.abort(); window.clearTimeout(timer); };
     }, [ticker]);
-
-    useEffect(() => {
-        if (selectedTab !== 'financials' && selectedTab !== 'kap') return;
-        if (!snapshot) return;
-        if (snapshotQuarterDepth >= FULL_KAP_QUARTER_COUNT) return;
-        let mounted = true;
-        apiClient.kapSnapshot(ticker, false, FULL_KAP_QUARTER_COUNT)
-            .then(data => {
-                if (!mounted) return;
-                setSnapshot(data);
-                setQuarters(prepareOrderedQuarters(data));
-                setSnapshotQuarterDepth(FULL_KAP_QUARTER_COUNT);
-                if (!data.ok && data.error) setError(data.error);
-            })
-            .catch(() => {
-                // İlk özet snapshot ekranda kalır; derin veri yüklenemese de fiyat akışı bloklanmaz.
-            });
-        return () => { mounted = false; };
-    }, [selectedTab, snapshot, snapshotQuarterDepth, ticker]);
 
     useEffect(() => {
         let cancelled = false;
@@ -683,14 +715,14 @@ export default function StockDetailPage({
 
     const renderContent = () => {
         if (loading && !snapshot) {
-            return <div className="sd-loading"><div className="spinner" /> Veriler yükleniyor...</div>;
+            return <div className="sd-loading" role="status" aria-live="polite"><div className="spinner" aria-hidden="true" /> Finansal veriler yükleniyor…</div>;
         }
         
         if (!snapshot) return null;
 
         switch (selectedTab) {
             case 'overview':
-                return <StockOverview snapshot={snapshot} quarters={quarters} />;
+                return <StockOverview snapshot={snapshot} quarters={quarters} historyLoading={historyLoading} />;
             case 'financials':
                 return <StockFinancials quarters={quarters} analysisNote={snapshot.analysis_note} />;
             case 'kap':
@@ -703,7 +735,7 @@ export default function StockDetailPage({
     const valuation = snapshot?.valuation;
     const displayPrice = priceData?.ok && priceData.price != null ? priceData.price : valuation?.price;
     const displayCurrency = priceData?.currency || valuation?.price_currency;
-    const displayAsOf = priceData?.as_of || valuation?.price_as_of || snapshot?.fetched_at;
+    const displayAsOf = priceData?.as_of || valuation?.price_as_of;
     const displayChangePct = priceData?.ok ? priceData.change_pct : null;
     const selectedTabLabel = STOCK_DETAIL_TABS.find((tab) => tab.key === selectedTab)?.label;
     const quoteTitle = [

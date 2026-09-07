@@ -1214,3 +1214,37 @@
         min-width: 0;
     }
 }
+
+.kap-summary-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+}
+
+.kap-history-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 400;
+}
+
+.kap-history-progress-spinner {
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid var(--surface-border);
+    border-top-color: var(--text-secondary);
+    border-radius: 50%;
+    animation: kap-history-spin 0.9s linear infinite;
+}
+
+@keyframes kap-history-spin {
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .kap-history-progress-spinner { animation: none; }
+}

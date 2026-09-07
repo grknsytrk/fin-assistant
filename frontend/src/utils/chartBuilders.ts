@@ -1,3 +1,4 @@
+import { ttmSum } from './financialMetrics';
 import type { KapQuarter } from '../api/types';
 import { _resolveMetricValue, _resolveMetricDisplay, _periodLabel, intSafe } from './formatters';
 
@@ -93,18 +94,10 @@ export function _buildAnnualizedRoeSeries(
     denominatorKey: string,
     suffixFormatter: (val: number) => string,
 ): SeriesPoint[] {
-    const TTM_LOOKBACK = 4;
     return quarters
         .map((q, idx) => {
-            // Son 4 çeyreklik akımın toplamını al; eksik çeyrek varsa hesabı atla.
-            let ttmFlow = 0;
-            for (let lookback = 0; lookback < TTM_LOOKBACK; lookback += 1) {
-                const cursor = idx - lookback;
-                if (cursor < 0) return null;
-                const value = _resolveMetricValue(quarters, cursor, numeratorKey, true);
-                if (value === null) return null;
-                ttmFlow += value;
-            }
+            const ttmFlow = ttmSum(quarters.slice(Math.max(0, idx - 3), idx + 1), numeratorKey);
+            if (ttmFlow === null) return null;
 
             // Ortalama özkaynak: dönem sonu ile bir önceki çeyrek dönem sonunun
             // ortalaması. Önceki çeyrek yoksa yalnız dönem sonu kullanılır.

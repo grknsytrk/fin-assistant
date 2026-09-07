@@ -613,3 +613,37 @@
         padding: 0 0.95rem;
     }
 }
+
+.sd-price-chart-loading-track,
+.sd-price-chart-loading-line {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.15;
+}
+
+.sd-price-chart-loading-track {
+    stroke: color-mix(in srgb, var(--text-secondary) 16%, transparent);
+}
+
+.sd-price-chart-loading-line {
+    stroke: color-mix(in srgb, var(--text-secondary) 78%, #dbe4f0);
+    stroke-dasharray: 100;
+    stroke-dashoffset: 100;
+    animation: sd-chart-line-draw 2.05s linear infinite;
+}
+
+@keyframes sd-chart-line-draw {
+    0% { stroke-dashoffset: 100; opacity: 0; }
+    12% { opacity: 0.9; }
+    72%, 88% { stroke-dashoffset: 0; opacity: 0.92; }
+    100% { stroke-dashoffset: 0; opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .sd-price-chart-loading-line {
+        animation: none;
+        stroke-dashoffset: 0;
+        opacity: 0.5;
+    }
+}

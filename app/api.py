@@ -255,6 +255,7 @@ def _schedule_swr_revalidation(
     fresh_ttl_seconds: int,
     stale_ttl_seconds: int,
     factory: Callable[[], Optional[Dict[str, Any]]],
+    coordination_key: Optional[str] = None,
 ) -> bool:
     """Queue at most one cross-worker best-effort cache refresh.
 
@@ -266,7 +267,7 @@ def _schedule_swr_revalidation(
 
     backend = _get_cache()
     owner = uuid.uuid4().hex
-    lease_key = f"swr-revalidate:{cache_key}"
+    lease_key = f"swr-revalidate:{coordination_key or cache_key}"
     try:
         acquired = backend.set_if_absent(
             lease_key,
@@ -296,7 +297,7 @@ def _schedule_swr_revalidation(
                 cache_key,
                 ttl_seconds=max(1, stale_ttl_seconds),
                 factory=build_entry,
-                lock_key=f"single-flight:{cache_key}",
+                lock_key=f"single-flight:{coordination_key or cache_key}",
                 lock_ttl_seconds=_MARKET_SWR_LOCK_TTL_SECONDS,
                 wait_timeout_seconds=_MARKET_SWR_WAIT_TIMEOUT_SECONDS,
                 cache_usable=lambda _entry: False,
@@ -4627,7 +4628,7 @@ def _kap_snapshot_response_cache_key(company: str, max_quarters: int) -> str:
     from src.kap_fetcher import KAP_CACHE_SCHEMA_VERSION
 
     normalized = normalize_kap_symbol(str(company or "").strip().upper().replace(".", ""))
-    return f"api:kap-snapshot:{normalized}:quarters={max_quarters}:schema={KAP_CACHE_SCHEMA_VERSION}"
+    return f"api:kap-snapshot:{normalized}:quarters={max_quarters}:schema={KAP_CACHE_SCHEMA_VERSION}:v2"
 
 
 def _annotate_kap_response_cache(
@@ -4655,15 +4656,41 @@ def _build_kap_snapshot_response(company: str, *, refresh: bool, max_quarters: i
         max_quarters=max_quarters,
         use_cache_when_complete=not refresh,
     )
+    if not raw.get("ok"):
+        raise RuntimeError(raw.get("error") or "KAP snapshot unavailable")
     _upsert_stock_reference_from_kap_payload(company, raw, source="kap")
     normalized = normalize_snapshot_for_frontend(raw)
 
-    price_payload = _fetch_kap_price_payload(normalized.get("stock_code") or company)
-    isyatirim_payload = _fetch_isyatirim_multiples(normalized.get("stock_code") or company)
+    symbol = normalized.get("stock_code") or company
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        price_future = executor.submit(_fetch_kap_price_payload, symbol)
+        multiples_future = executor.submit(_fetch_isyatirim_multiples, symbol)
+        price_payload = price_future.result()
+        isyatirim_payload = multiples_future.result()
     normalized["valuation"] = _build_kap_valuation_payload(
         snapshot=normalized,
         price_payload=price_payload,
         isyatirim_payload=isyatirim_payload,
+    )
+    return normalized
+
+
+def _cached_kap_snapshot_response(company: str) -> Optional[Dict[str, Any]]:
+    """Read persisted statements and quote caches without contacting providers."""
+    from app.kap_service import normalize_kap_symbol, normalize_snapshot_for_frontend
+    from src.kap_fetcher import _read_first_cache, KAP_CACHE_SCHEMA_VERSION
+
+    symbol = normalize_kap_symbol(company)
+    _, raw = _read_first_cache(CONFIG.paths.processed_dir, symbol)
+    if not raw or raw.get("schema_version") != KAP_CACHE_SCHEMA_VERSION or not raw.get("quarters"):
+        return None
+    normalized = normalize_snapshot_for_frontend(raw, allow_network=False)
+    normalized["cache_hit"] = True
+    normalized["cache_stale"] = True
+    price = _shared_cache_get_dict(f"api:market:stock-price:{symbol}:v1") or {}
+    multiples = _shared_cache_get_dict(f"api:isyatirim-multiples:{symbol}") or {}
+    normalized["valuation"] = _build_kap_valuation_payload(
+        snapshot=normalized, price_payload=price, isyatirim_payload=multiples,
     )
     return normalized
 
@@ -4677,21 +4704,39 @@ def kap_snapshot(
     if not getattr(CONFIG, "kap", None) or not getattr(CONFIG.kap, "enabled", False):
         raise HTTPException(status_code=503, detail="KAP modülü devre dışı.")
     cache_key = _kap_snapshot_response_cache_key(company, max_quarters)
-    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
-        cache_key=cache_key,
-        # Snapshot cache expiry is the only time a public caller may trigger a
-        # provider refresh.  The caller itself receives fresh/stale cached data
-        # immediately, never an upstream cache-bypass request.
-        factory=lambda: _build_kap_snapshot_response(company, refresh=True, max_quarters=max_quarters),
-        fresh_ttl_seconds=_KAP_SNAPSHOT_RESPONSE_CACHE_TTL,
-        stale_ttl_seconds=_KAP_SNAPSHOT_RESPONSE_STALE_TTL,
-        force_revalidate=refresh,
-    )
+    # A missing response cache must never make the browser fetch KAP reports.
+    # Disk snapshots survive response-cache expiry and are safe to serve while
+    # the single-flight worker checks for new filings or additional quarters.
+    started = time.perf_counter()
+    entry = _shared_cache_get_dict(cache_key)
+    payload = _swr_entry_payload(entry) if _swr_entry_is_stale(entry) else None
+    stale = not _swr_entry_is_fresh(entry)
+    cache_status = "shared_hit" if payload is not None and not stale else "stale"
     if payload is None:
-        raise HTTPException(status_code=503, detail="KAP snapshot yenileniyor. Lütfen kısa süre sonra tekrar deneyin.")
+        payload = _cached_kap_snapshot_response(company)
+        cache_status = "disk_hit" if payload else "pending"
+    refresh_pending = False
+    if stale or refresh:
+        refresh_pending = _schedule_swr_revalidation(
+            cache_key=cache_key,
+            coordination_key=cache_key.split(":quarters=")[0],
+            factory=lambda: _build_kap_snapshot_response(company, refresh=False, max_quarters=max_quarters),
+            fresh_ttl_seconds=_KAP_SNAPSHOT_RESPONSE_CACHE_TTL,
+            stale_ttl_seconds=_KAP_SNAPSHOT_RESPONSE_STALE_TTL,
+        )
+    if payload is None:
+        payload = {
+            "ok": False, "company": company, "stock_code": company,
+            "company_title": "", "quarters": [], "summary": {},
+            "latest_quarter": None, "fetched_at": "", "cache_hit": False,
+            "pending": refresh_pending,
+            "error": "Finansal veriler hazırlanıyor. Kısa süre sonra yeniden deneyebilirsiniz.",
+        }
+    LOGGER.info("kap snapshot company=%s cache=%s elapsed_ms=%.1f",
+                company, cache_status, (time.perf_counter() - started) * 1000)
     response = _annotate_kap_response_cache(
         payload,
-        cache_hit=cache_status in {"local_hit", "shared_hit", "coalesced", "stale"},
+        cache_hit=cache_status in {"local_hit", "shared_hit", "coalesced", "stale", "disk_hit"},
     )
     response["response_cache_status"] = cache_status
     response["response_cache_stale"] = stale
@@ -4725,21 +4770,26 @@ def _extract_quarter_metric(
 
 
 def _build_ttm_sum(quarters_asc: List[Dict[str, Any]], metric_key: str) -> Optional[float]:
-    if not quarters_asc:
+    if len(quarters_asc) < 4:
         return None
     tail = quarters_asc[-4:]
-    required = min(4, len(quarters_asc))
-    values: List[float] = []
+    periods = []
+    values = []
     for quarter in tail:
-        value = _extract_quarter_metric(
-            quarter,
-            metric_key,
-            priority=["metrics_quarterly", "metrics"],
-        )
-        if value is None:
-            continue
+        try:
+            year, period = int(quarter.get("year") or 0), int(quarter.get("period") or 0)
+        except (ValueError, TypeError):
+            return None
+        if year <= 0 or period not in (1, 2, 3, 4):
+            return None
+        periods.append(year * 4 + period)
+        # Only standalone quarterly flows are additive. YTD/ambiguous metrics
+        # must not silently replace a missing quarterly value.
+        value = _extract_quarter_metric(quarter, metric_key, priority=["metrics_quarterly"])
+        if value is None or not math.isfinite(value):
+            return None
         values.append(value)
-    if len(values) != required:
+    if any(b != a + 1 for a, b in zip(periods, periods[1:])):
         return None
     return float(sum(values))
 
@@ -4750,6 +4800,7 @@ def _build_kap_valuation_payload(
     price_payload: Dict[str, Any],
     isyatirim_payload: Dict[str, Any],
 ) -> Dict[str, Any]:
+    financial_company = snapshot.get("company_kind") in {"bank", "insurance"}
     quarters_raw = snapshot.get("quarters")
     quarters = [q for q in quarters_raw if isinstance(q, dict)] if isinstance(quarters_raw, list) else []
     quarters_sorted = sorted(quarters, key=_quarter_sort_key)
@@ -4809,6 +4860,11 @@ def _build_kap_valuation_payload(
     pd_dd = _parse_tr_decimal(isyatirim_payload.get("pd_dd")) if isyatirim_payload.get("ok") else None
     fd_favok = _parse_tr_decimal(isyatirim_payload.get("fd_favok")) if isyatirim_payload.get("ok") else None
 
+    if financial_company:
+        fd_favok = None
+        enterprise_value = None
+        ttm_favok = None
+
     return {
         "price": price,
         "price_currency": price_currency,
@@ -4828,7 +4884,7 @@ def _build_kap_valuation_payload(
         if isyatirim_payload.get("ok")
         else None,
         "fd_favok_prim_iskonto_pct": _parse_tr_decimal(isyatirim_payload.get("fd_favok_prim_iskonto_pct"))
-        if isyatirim_payload.get("ok")
+        if isyatirim_payload.get("ok") and not financial_company
         else None,
         "pd_dd_prim_iskonto_pct": _parse_tr_decimal(isyatirim_payload.get("pd_dd_prim_iskonto_pct"))
         if isyatirim_payload.get("ok")
@@ -6273,7 +6329,7 @@ def _stock_card_financial_snapshot_from_cache(symbol: str) -> Dict[str, Any]:
         cached = _STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE.get(cache_key)
         if cached and cached.get("signature") == signature:
             return dict(cached.get("data") or {})
-        shared_key = f"api:kap:financial-snapshot:{normalized_symbol}:mtime={stat.st_mtime_ns}:size={stat.st_size}:v1"
+        shared_key = f"api:kap:financial-snapshot:{normalized_symbol}:mtime={stat.st_mtime_ns}:size={stat.st_size}:v2"
         shared_cached = _shared_cache_get_dict(shared_key)
         if shared_cached is not None:
             snapshot = dict(shared_cached)
@@ -6312,12 +6368,14 @@ def _stock_card_financial_snapshot_from_cache(symbol: str) -> Dict[str, Any]:
     ozkaynaklar = _extract_quarter_metric(latest, "ozkaynaklar", priority=["metrics", "metrics_ytd"])
     net_borc = _extract_quarter_metric(latest, "net_borc", priority=["metrics", "metrics_ytd"])
     latest_quarter = str(latest.get("quarter") or "").strip().upper() or None
+    from src.kap_fetcher import classify_kap_company_kind
     snapshot = {
         "symbol": str(payload.get("company") or payload.get("stock_code") or normalized_symbol or "").strip().upper(),
         "latest_quarter": latest_quarter,
         "quarter_count": len(quarters_sorted),
         "ttm_net_kar": ttm_net_kar,
         "ttm_favok": ttm_favok,
+        "company_kind": payload.get("company_kind") or classify_kap_company_kind(normalized_symbol, payload.get("company_title")),
         "ozkaynaklar": ozkaynaklar,
         "net_borc": net_borc,
         "source": "kap_cache",
@@ -6334,6 +6392,7 @@ def _stock_card_financial_snapshot_from_cache(symbol: str) -> Dict[str, Any]:
 
 
 def _stock_card_financial_ratios_from_snapshot(snapshot: Dict[str, Any], *, market_cap: Any) -> Dict[str, Any]:
+    financial_company = snapshot.get("company_kind") in {"bank", "insurance"}
     market_cap_value = _positive_float(market_cap)
     ttm_net_kar = _as_finite_float(snapshot.get("ttm_net_kar"))
     ttm_favok = _as_finite_float(snapshot.get("ttm_favok"))
@@ -6348,9 +6407,9 @@ def _stock_card_financial_ratios_from_snapshot(snapshot: Dict[str, Any], *, mark
     return {
         "fk": _round_market_ratio(market_cap_value, ttm_net_kar),
         "pd_dd": _round_market_ratio(market_cap_value, ozkaynaklar),
-        "fd_favok": _round_market_ratio(enterprise_value, ttm_favok),
-        "net_borc_favok": _round_market_ratio(net_borc, ttm_favok),
-        "enterprise_value": enterprise_value,
+        "fd_favok": None if financial_company else _round_market_ratio(enterprise_value, ttm_favok),
+        "net_borc_favok": None if financial_company else _round_market_ratio(net_borc, ttm_favok),
+        "enterprise_value": None if financial_company else enterprise_value,
     }
 
 
@@ -6397,6 +6456,11 @@ def _resolve_market_card_valuation_from_cached_data(
         if isinstance(fallback_ratios, dict):
             net_borc_favok = fallback_ratios.get("net_borc_favok")
 
+    if snapshot.get("company_kind") in {"bank", "insurance"}:
+        values["fd_favok"] = None
+        sources.pop("fd_favok", None)
+        net_borc_favok = None
+
     return {
         **values,
         "net_borc_favok": net_borc_favok,
@@ -6418,7 +6482,7 @@ def _resolve_market_card_valuation(symbol: str, *, market_cap: Any) -> Dict[str,
             {**cached, "_cache_hit": True},
             market_cap=market_cap,
         )
-    shared_key = f"api:stock-card-valuation:{ticker}"
+    shared_key = f"api:stock-card-valuation:{ticker}:v2"
     shared_cached = _shared_cache_get_dict(shared_key)
     if shared_cached:
         _STOCK_CARD_VALUATION_CACHE[ticker] = {**shared_cached, "_ts": now}
@@ -6428,8 +6492,11 @@ def _resolve_market_card_valuation(symbol: str, *, market_cap: Any) -> Dict[str,
         )
 
     snapshot = _stock_card_financial_snapshot_from_cache(ticker)
+    from src.kap_fetcher import classify_kap_company_kind
+    snapshot.setdefault("company_kind", classify_kap_company_kind(ticker))
     computed = _stock_card_financial_ratios_from_snapshot(snapshot, market_cap=market_cap)
-    needs_provider = any(_is_missing_market_ratio(computed.get(key)) for key in ("fk", "pd_dd", "fd_favok"))
+    ratio_keys = ("fk", "pd_dd") if snapshot.get("company_kind") in {"bank", "insurance"} else ("fk", "pd_dd", "fd_favok")
+    needs_provider = any(_is_missing_market_ratio(computed.get(key)) for key in ratio_keys)
 
     provider_payload: Dict[str, Any] = {}
     provider_ratios: Dict[str, Optional[float]] = {}

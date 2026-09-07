@@ -243,7 +243,7 @@ export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters
         { title: 'Net Kâr Marjı', kind: 'line' as const, series: _takeLastSeries(ratioSeries.netKarMarji, window) },
         { title: 'Cari Oran', kind: 'line' as const, series: _takeLastSeries(ratioSeries.cariOran, window) },
         { title: 'Özkaynak Karlılığı (ROE)', kind: 'line' as const, series: _takeLastSeries(ratioSeries.roe, window) },
-    ].filter((item) => item.series.length > 0);
+    ].filter((item) => item.series.length > 0 && (!(isBankLike || isInsuranceLike) || item.title === 'Özkaynak Karlılığı (ROE)'));
 
     return [...barCharts, ...lineCharts];
 }

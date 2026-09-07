@@ -590,8 +590,7 @@ async function fetchFundsCatalog(options: { bypassMemoryCache?: boolean } = {}):
     const task = (async () => {
         // Refresh is an admin/workflow operation. Public clients only reread
         // the current canonical snapshot and never carry an admin token.
-        const fundPayload = await apiClient.funds();
-        const categoryPayload = await apiClient.fundCategories();
+        const [fundPayload, categoryPayload] = await Promise.all([apiClient.funds(), apiClient.fundCategories()]);
         const result = { funds: fundPayload, categories: categoryPayload };
         fundsCatalogMemoryCache = { ...result, fetchedAt: Date.now() };
         return result;
@@ -5406,6 +5405,11 @@ export default function FundsPage({
         setChartRange('1w');
         setPendingChartRange(null);
         setChartRangeError(null);
+        setYieldSummary(null);
+        setYieldError(null);
+        setAllocations(null);
+        setAllocationHistory(null);
+        setAllocationHistoryError(null);
         setHistorySubtab('prices');
         setCustomStartDate(isoDateMonthsAgo(6));
         setCustomEndDate(new Date().toISOString().slice(0, 10));
@@ -5551,6 +5555,7 @@ export default function FundsPage({
             setYieldError(null);
             return;
         }
+        if (activeTab !== 'overview' || yieldSummary?.fund_code === fundCode.trim().toUpperCase()) return;
         let alive = true;
         const normalizedCode = fundCode.trim().toUpperCase();
         setYieldLoading(true);
@@ -5571,7 +5576,7 @@ export default function FundsPage({
         return () => {
             alive = false;
         };
-    }, [fundCode]);
+    }, [fundCode, activeTab, yieldSummary?.fund_code]);
 
     useEffect(() => {
         if (!fundCode) {
@@ -5581,9 +5586,8 @@ export default function FundsPage({
             setAllocationHistoryLoading(false);
             return;
         }
-        setAllocationHistory(null);
-        setAllocationHistoryError(null);
-        setAllocationHistoryLoading(false);
+        if (activeTab !== 'overview' && activeTab !== 'allocation') return;
+        if (allocations?.fund_code === fundCode.trim().toUpperCase()) return;
         let alive = true;
         const normalizedCode = fundCode.trim().toUpperCase();
         setAllocationLoading(true);
@@ -5602,7 +5606,7 @@ export default function FundsPage({
         return () => {
             alive = false;
         };
-    }, [fundCode]);
+    }, [fundCode, activeTab, allocations?.fund_code]);
 
     useEffect(() => {
         if (!fundCode) {

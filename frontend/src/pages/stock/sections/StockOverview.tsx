@@ -520,7 +520,8 @@ function PremiumSeasonalMonthlyChart({ data }: { data: PremiumSeasonalChartData 
     );
 }
 
-export default function StockOverview({ snapshot, quarters }: { snapshot: KapSnapshotResponse, quarters: KapQuarter[] }) {
+export default function StockOverview({ snapshot, quarters, historyLoading = false }: { snapshot: KapSnapshotResponse, quarters: KapQuarter[], historyLoading?: boolean }) {
+    const isRefreshing = historyLoading || Boolean(snapshot.refresh_pending);
     const latestQuarterIdx = quarters.length ? quarters.length - 1 : -1;
     const latestQuarter = latestQuarterIdx >= 0 ? quarters[latestQuarterIdx] : null;
     const prevQuarterIdx = latestQuarterIdx > 0 ? latestQuarterIdx - 1 : -1;
@@ -628,6 +629,7 @@ export default function StockOverview({ snapshot, quarters }: { snapshot: KapSna
     );
 
     const summaryWarnings = useMemo(() => {
+        if (isRefreshing) return [];
         const warnings: string[] = [];
         if (snapshot.cache_stale) {
             warnings.push('Canlı KAP yenilemesi tamamlanamadı; yerel cache gösteriliyor.');
@@ -638,7 +640,7 @@ export default function StockOverview({ snapshot, quarters }: { snapshot: KapSna
             );
         }
         return warnings;
-    }, [latestQuarter, quarters.length, snapshot.cache_stale, snapshot.error]);
+    }, [latestQuarter, quarters.length, snapshot.cache_stale, snapshot.error, isRefreshing]);
 
     useEffect(() => {
         aiRequestIdRef.current += 1;
@@ -767,8 +769,16 @@ export default function StockOverview({ snapshot, quarters }: { snapshot: KapSna
             {latestQuarter && (
                 <div className="kap-summary-panel panel">
                     <div className="kap-summary-head">
-                        <h3>Özet Finansallar</h3>
-                        {snapshot.analysis_note ? (
+                        <div className="kap-summary-title-row">
+                            <h3>Özet Finansallar</h3>
+                            {isRefreshing && (
+                                <span className="kap-history-progress" role="status" aria-live="polite">
+                                    <span className="kap-history-progress-spinner" aria-hidden="true" />
+                                    Geçmiş veriler yükleniyor
+                                </span>
+                            )}
+                        </div>
+                        {!isRefreshing && snapshot.analysis_note ? (
                             <p className="kap-analysis-note">{snapshot.analysis_note}</p>
                         ) : null}
                         {summaryWarnings.length > 0 ? (

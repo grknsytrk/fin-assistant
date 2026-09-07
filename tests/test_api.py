@@ -653,50 +653,87 @@ def test_fenced_snapshot_commit_checks_ownership_before_upsert(monkeypatch: pyte
     assert len([query for query in connection.queries if "INSERT INTO ragfin_json_cache" in query]) == 1
 
 
-def test_kap_snapshot_response_cache_revalidates_without_public_bypass(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.kap_fetcher import KAP_CACHE_SCHEMA_VERSION
-
-    calls: List[bool] = []
-
-    def fake_get_kap_snapshot(**kwargs: Any) -> Dict[str, Any]:
-        calls.append(bool(kwargs.get("force_refresh")))
-        return {
-            "ok": True,
-            "stock_code": str(kwargs.get("company") or "").upper(),
-            "company_title": "Akbank",
-            "quarters": [],
-        }
-
-    def fake_normalize_snapshot(raw: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "stock_code": raw["stock_code"],
-            "latest_quarter": "2026/3",
-            "source_metadata": {"source": "kap"},
-        }
-
-    monkeypatch.setattr(kap_service_module, "get_kap_snapshot", fake_get_kap_snapshot)
-    monkeypatch.setattr(kap_service_module, "normalize_snapshot_for_frontend", fake_normalize_snapshot)
-    monkeypatch.setattr(api_module, "_upsert_stock_reference_from_kap_payload", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(api_module, "_fetch_kap_price_payload", lambda _symbol: {})
-    monkeypatch.setattr(api_module, "_fetch_isyatirim_multiples", lambda _symbol: {})
-    monkeypatch.setattr(api_module, "_build_kap_valuation_payload", lambda **_kwargs: {"ok": True})
+def test_kap_snapshot_response_cache_revalidates_without_public_bypass(monkeypatch):
+    queued = []
+    monkeypatch.setattr(api_module, "_cached_kap_snapshot_response", lambda _: None)
+    monkeypatch.setattr(api_module, "_schedule_swr_revalidation", lambda **kw: queued.append(kw) or True)
     client = TestClient(app)
-
     first = client.get("/kap/snapshot", params={"company": "AKBNK", "max_quarters": 20})
-    second = client.get("/kap/snapshot", params={"company": "AKBNK", "max_quarters": 20})
-    refreshed = client.get("/kap/snapshot", params={"company": "AKBNK", "max_quarters": 20, "refresh": "true"})
-
     assert first.status_code == 200
-    assert second.status_code == 200
-    assert refreshed.status_code == 200
-    assert first.json()["response_cache_hit"] is False
+    assert first.json()["pending"] is True
+    assert len(queued) == 1
+    key = api_module._kap_snapshot_response_cache_key("AKBNK", 20)
+    entry = api_module._swr_cache_entry({"ok": True, "quarters": []}, fresh_ttl_seconds=300, stale_ttl_seconds=1800)
+    api_module._shared_cache_set(key, entry, 1800)
+    second = client.get("/kap/snapshot", params={"company": "AKBNK", "max_quarters": 20})
     assert second.json()["response_cache_hit"] is True
-    assert refreshed.json()["response_cache_hit"] is True
-    assert isinstance(refreshed.json()["refresh_pending"], bool)
-    assert calls[0] is True
-    assert f"schema={KAP_CACHE_SCHEMA_VERSION}" in api_module._kap_snapshot_response_cache_key("AKBNK", 20)
+    assert len(queued) == 1
+    refreshed = client.get("/kap/snapshot", params={"company": "AKBNK", "max_quarters": 20, "refresh": True})
+    assert refreshed.json()["refresh_pending"] is True
+    assert len(queued) == 2
+
+
+@pytest.mark.parametrize("periods,values,expected", [
+    ([(2025, 4), (2026, 1)], [1, 2], None),
+    ([(2025, 2), (2025, 3), (2025, 4), (2026, 1)], [1, 2, 3, 4], 10),
+    ([(2025, 1), (2025, 3), (2025, 4), (2026, 1)], [1, 2, 3, 4], None),
+    ([(2025, 3), (2025, 3), (2025, 4), (2026, 1)], [1, 2, 3, 4], None),
+    ([(2025, 2), (2025, 3), (2025, 4), (2026, 1)], [1, None, 3, 4], None),
+    ([(2025, 2), (2025, 3), (2025, 4), (2026, 1)], [0, 0, 0, 0], 0),
+    ([(2025, 2), (2025, 3), (2025, 4), (2026, 1)], [1, float("inf"), 3, 4], None),
+])
+def test_ttm_requires_complete_consecutive_quarterly_flows(periods, values, expected):
+    quarters = [{"year": y, "period": p, "metrics_quarterly": {"net_kar": v},
+                 "metrics": {"net_kar": 999}} for (y, p), v in zip(periods, values)]
+    assert api_module._build_ttm_sum(quarters, "net_kar") == expected
+
+
+@pytest.mark.parametrize("kind", ["bank", "insurance"])
+def test_sector_ratios_cannot_be_restored_by_provider_fallback(kind):
+    snapshot = {"company_kind": kind, "ttm_net_kar": 10, "ttm_favok": 5,
+                "net_borc": 20, "ozkaynaklar": 50}
+    result = api_module._resolve_market_card_valuation_from_cached_data({
+        "financial_snapshot": snapshot, "provider_ratios": {"fd_favok": 99},
+        "fallback_financial_ratios": {"net_borc_favok": 88},
+    }, market_cap=100)
+    assert result["fk"] == 10
+    assert result["pd_dd"] == 2
+    assert result["fd_favok"] is None
+    assert result["net_borc_favok"] is None
+    assert result["enterprise_value"] is None
+    valuation = api_module._build_kap_valuation_payload(
+        snapshot={"company_kind": kind, "quarters": []}, price_payload={},
+        isyatirim_payload={"ok": True, "fd_favok": 12, "fd_favok_prim_iskonto_pct": 4},
+    )
+    assert valuation["fd_favok"] is None
+    assert valuation["fd_favok_prim_iskonto_pct"] is None
+
+
+def test_kap_disk_response_does_not_wait_for_slow_provider(monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    executor = ThreadPoolExecutor(max_workers=2)
+    monkeypatch.setattr(api_module, "_MARKET_SWR_REVALIDATION_EXECUTOR", executor)
+    calls = []
+    def slow(*args, **kwargs):
+        calls.append(args)
+        entered.set()
+        release.wait(3)
+        return {"ok": True, "quarters": []}
+    monkeypatch.setattr(api_module, "_cached_kap_snapshot_response", lambda _: {"ok": True, "quarters": [{"quarter": "2026Q1"}]})
+    monkeypatch.setattr(api_module, "_build_kap_snapshot_response", slow)
+    try:
+        result = TestClient(app).get("/kap/snapshot", params={"company": "TEST", "max_quarters": 5})
+        assert result.json()["response_cache_status"] == "disk_hit"
+        assert entered.wait(1)
+        assert not release.is_set()
+        # A second depth shares the same background lease.
+        second = TestClient(app).get("/kap/snapshot", params={"company": "TEST", "max_quarters": 20})
+        assert second.json()["refresh_pending"] is True
+        assert len(calls) == 1
+    finally:
+        release.set()
+        executor.shutdown(wait=True)
+
 
 
 def test_kap_snapshot_normalization_exposes_identity_company_kind() -> None:
@@ -5790,3 +5827,23 @@ def test_vyk_feed_empty_when_credentials_missing(monkeypatch: pytest.MonkeyPatch
 
 
 # endregion
+
+
+def test_normalization_does_not_promote_ambiguous_metrics_to_quarterly_flows():
+    result = kap_service_module.normalize_snapshot_for_frontend({
+        "ok": True, "company": "TEST", "quarters": [{
+            "year": 2026, "period": 2, "quarter": "2026Q2",
+            "metrics": {"net_kar": 123}, "metrics_ytd": {"net_kar": 123},
+        }],
+    })
+    assert result["quarters"][0]["metrics_quarterly"]["net_kar"]["value"] is None
+
+
+def test_cached_kap_normalization_never_calls_inflation_provider(monkeypatch):
+    monkeypatch.setattr(kap_service_module, "_load_monthly_inflation_rates", lambda: pytest.fail("cached response contacted TCMB"))
+    result = kap_service_module.normalize_snapshot_for_frontend({
+        "ok": True, "company": "TEST", "quarters": [
+            {"year": 2026, "period": p, "quarter": f"2026Q{p}",
+             "metrics": {"ozkaynaklar": 100}, "metrics_quarterly": {"net_kar": 10}}
+            for p in (1, 2, 3)]}, allow_network=False)
+    assert len(result["quarters"]) == 3

@@ -866,6 +866,8 @@ export interface KapInsurancePremiumDisclosure {
 }
 
 export interface KapSnapshotResponse {
+  pending?: boolean;
+  refresh_pending?: boolean;
   ok: boolean;
   company: string;
   company_title: string;

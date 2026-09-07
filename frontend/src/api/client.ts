@@ -48,15 +48,17 @@ const fundHoldingsMemoryCache = new Map<string, { payload: FundHoldingsResponse;
 const fundHoldingsInFlight = new Map<string, Promise<FundHoldingsResponse>>();
 const fundHoldingsLiveInFlight = new Map<string, Promise<FundHoldingsLiveResponse>>();
 
+const kapSnapshotMemoryCache = new Map<string, { payload: KapSnapshotResponse; at: number }>();
+export function cachedKapSnapshot(company: string): KapSnapshotResponse | null {
+    const entry = kapSnapshotMemoryCache.get(company.trim().toUpperCase());
+    return entry && Date.now() - entry.at < 5 * 60_000 ? entry.payload : null;
+}
+
 type FetchApiOptions = RequestInit & {
     timeoutMs?: number;
     debugLabel?: string;
     exposeErrorDetail?: boolean;
 };
-
-function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function isIdempotentMethod(method?: string): boolean {
     const normalized = (method || 'GET').toUpperCase();
@@ -97,16 +99,29 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
     const url = `${API_BASE}${normalizedEndpoint}`;
     const method = (options.method || 'GET').toUpperCase();
     const allowRetry = isIdempotentMethod(method);
-    const maxAttempts = allowRetry ? 8 : 1;
+    const maxAttempts = allowRetry ? 2 : 1;
     const { timeoutMs, debugLabel, exposeErrorDetail, ...requestOptions } = options;
     const effectiveTimeoutMs = timeoutMs ?? REQUEST_TIMEOUT_MS;
 
+    const deadline = Date.now() + (allowRetry ? Math.min(effectiveTimeoutMs, 20000) : effectiveTimeoutMs);
+    const waitForRetry = async (delay: number) => {
+        if (Date.now() + delay >= deadline) throw new Error(TIMEOUT_MESSAGE);
+        await new Promise<void>((resolve, reject) => {
+            const signal = requestOptions.signal;
+            const abort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+            const timer = window.setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, delay);
+            if (signal?.aborted) abort();
+            else signal?.addEventListener('abort', abort, { once: true });
+        });
+    };
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (Date.now() >= deadline) throw new Error(TIMEOUT_MESSAGE);
         let response: Response;
+        let body: any;
         const controller = new AbortController();
         const externalSignal = requestOptions.signal;
         const startedAt = window.performance?.now?.() ?? Date.now();
-        const timeoutId = window.setTimeout(() => controller.abort(), effectiveTimeoutMs);
+        const timeoutId = window.setTimeout(() => controller.abort(), Math.min(effectiveTimeoutMs, deadline - Date.now()));
         const abortFromExternal = () => controller.abort();
         if (externalSignal?.aborted) {
             controller.abort();
@@ -130,6 +145,11 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
                     ...requestOptions.headers,
                 },
             });
+            body = await response.json().catch((error: unknown) => {
+                if (controller.signal.aborted) throw error;
+                if (response.ok) throw error;
+                return {};
+            });
         } catch (error) {
             const elapsedMs = Math.round((window.performance?.now?.() ?? Date.now()) - startedAt);
             if ((error as Error)?.name === 'AbortError') {
@@ -145,13 +165,13 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
                     throw error;
                 }
                 if (allowRetry && attempt < maxAttempts) {
-                    await sleep(retryDelayMs(attempt));
+                    await waitForRetry(retryDelayMs(attempt));
                     continue;
                 }
                 throw new Error(TIMEOUT_MESSAGE);
             }
             if (allowRetry && isRetryableNetworkError(error) && attempt < maxAttempts) {
-                await sleep(retryDelayMs(attempt));
+                await waitForRetry(retryDelayMs(attempt));
                 continue;
             }
             if (debugLabel) {
@@ -172,11 +192,11 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
         if (!response.ok) {
             const elapsedMs = Math.round((window.performance?.now?.() ?? Date.now()) - startedAt);
             if (allowRetry && RETRYABLE_HTTP_STATUSES.has(response.status) && attempt < maxAttempts) {
-                await sleep(retryDelayMs(attempt, retryAfterMs(response)));
+                await waitForRetry(retryDelayMs(attempt, retryAfterMs(response)));
                 continue;
             }
 
-            const errorData = await response.json().catch(() => ({}));
+            const errorData = body || {};
             if (debugLabel) {
                 console.error(`[api:${debugLabel}] http error`, {
                     url,
@@ -210,7 +230,7 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
                 status: response.status,
             });
         }
-        return response.json();
+        return body as T;
     }
 
     throw new Error(STARTUP_HINT);
@@ -415,10 +435,16 @@ export const apiClient = {
 
     kapCompanies: () => fetchApi<KapCompaniesResponse>('/kap/companies'),
 
-    kapSnapshot: (company: string, refresh = false, maxQuarters = 10) => {
+    kapSnapshot: async (company: string, refresh = false, maxQuarters = 10, signal?: AbortSignal) => {
         const params = new URLSearchParams({ company, max_quarters: String(maxQuarters) });
         if (refresh) params.append('refresh', 'true');
-        return fetchApi<KapSnapshotResponse>(`/kap/snapshot?${params.toString()}`);
+        const payload = await fetchApi<KapSnapshotResponse>(`/kap/snapshot?${params.toString()}`, { signal });
+        if (payload.ok && payload.quarters.length) {
+            const key = company.trim().toUpperCase();
+            if (kapSnapshotMemoryCache.size >= 30) kapSnapshotMemoryCache.delete(kapSnapshotMemoryCache.keys().next().value!);
+            kapSnapshotMemoryCache.set(key, { payload, at: Date.now() });
+        }
+        return payload;
     },
 
     kapOverviewCommentary: (request: KapOverviewCommentaryRequest, options?: { signal?: AbortSignal }) =>

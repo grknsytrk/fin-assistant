@@ -1,3 +1,4 @@
+import { ttmSum } from '../utils/financialMetrics';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, ChevronUp, ChevronDown } from 'lucide-react';
 import { apiClient } from '../api/client';
@@ -76,27 +77,16 @@ function MultiplesRow({ snapshot, quarters }: { snapshot: KapSnapshotResponse; q
         if (!quarters.length) return null;
 
         const latest = quarters[quarters.length - 1];
-        const last4 = quarters.slice(-4);
-        const ttmNetKarFallback = last4.reduce((sum, q) => {
-            const v = _resolveMetricValueByPriority(q, 'net_kar', ['metrics_quarterly', 'metrics']);
-            return v !== null ? sum + v : sum;
-        }, 0);
-        const ttmFavokFallback = last4.reduce((sum, q) => {
-            const v = _resolveMetricValueByPriority(q, 'favok', ['metrics_quarterly', 'metrics']);
-            return v !== null ? sum + v : sum;
-        }, 0);
-        const ttmSatis = last4.reduce((sum, q) => {
-            const v = _resolveMetricValueByPriority(q, 'satis_gelirleri', ['metrics_quarterly', 'metrics']);
-            return v !== null ? sum + v : sum;
-        }, 0);
+        const financialCompany = snapshot.company_kind === 'bank' || snapshot.company_kind === 'insurance';
+        const ttmSatis = ttmSum(quarters, 'satis_gelirleri');
 
         const ozkaynaklar = _resolveMetricValueByPriority(latest, 'ozkaynaklar', ['metrics', 'metrics_ytd']);
         const netBorc = _resolveMetricValueByPriority(latest, 'net_borc', ['metrics', 'metrics_ytd']);
         const donenVarliklar = _resolveMetricValueByPriority(latest, 'donen_varliklar', ['metrics', 'metrics_ytd']);
         const kisaVadeli = _resolveMetricValueByPriority(latest, 'kisa_vadeli_yukumlulukler', ['metrics', 'metrics_ytd']);
 
-        const ttmNetKar = valuation?.ttm_net_kar ?? (ttmNetKarFallback !== 0 ? ttmNetKarFallback : null);
-        const ttmFavok = valuation?.ttm_favok ?? (ttmFavokFallback !== 0 ? ttmFavokFallback : null);
+        const ttmNetKar = valuation ? valuation.ttm_net_kar : ttmSum(quarters, 'net_kar');
+        const ttmFavok = financialCompany ? null : (valuation ? valuation.ttm_favok : ttmSum(quarters, 'favok'));
 
         const marketItems: { label: string; value: string; isNeg?: boolean }[] = [];
         const multipleItems: { label: string; value: string; isNeg?: boolean }[] = [];
@@ -122,17 +112,17 @@ function MultiplesRow({ snapshot, quarters }: { snapshot: KapSnapshotResponse; q
             value: valuation?.pd_dd != null ? _formatRatio(valuation.pd_dd, 'x') : '-',
             isNeg: valuation?.pd_dd != null ? valuation.pd_dd < 0 : false,
         });
-        multipleItems.push({
+        if (!financialCompany) multipleItems.push({
             label: 'FD/FAVÖK',
             value: valuation?.fd_favok != null ? _formatRatio(valuation.fd_favok, 'x') : '-',
             isNeg: valuation?.fd_favok != null ? valuation.fd_favok < 0 : false,
         });
 
-        if (ttmSatis > 0 && ttmNetKar !== null) {
+        if (!financialCompany && ttmSatis !== null && ttmSatis > 0 && ttmNetKar !== null) {
             const margin = (ttmNetKar / ttmSatis) * 100;
             profitabilityItems.push({ label: 'Net Kâr Marjı', value: _formatRatio(margin), isNeg: margin < 0 });
         }
-        if (ttmSatis > 0 && ttmFavok !== null) {
+        if (!financialCompany && ttmSatis !== null && ttmSatis > 0 && ttmFavok !== null) {
             const margin = (ttmFavok / ttmSatis) * 100;
             profitabilityItems.push({ label: 'FAVÖK Marjı', value: _formatRatio(margin), isNeg: margin < 0 });
         }
@@ -140,14 +130,16 @@ function MultiplesRow({ snapshot, quarters }: { snapshot: KapSnapshotResponse; q
             const roe = (ttmNetKar / ozkaynaklar) * 100;
             profitabilityItems.push({ label: 'ROE', value: _formatRatio(roe), isNeg: roe < 0 });
         }
-        if (netBorc !== null && ozkaynaklar && ozkaynaklar > 0) {
+        if (!financialCompany && netBorc !== null && ozkaynaklar && ozkaynaklar > 0) {
             const ratio = netBorc / ozkaynaklar;
             balanceItems.push({ label: 'Borç/Özkaynak', value: _formatRatio(ratio, 'x'), isNeg: ratio > 1 });
         }
-        if (donenVarliklar && kisaVadeli && kisaVadeli !== 0) {
+        if (!financialCompany && donenVarliklar && kisaVadeli && kisaVadeli !== 0) {
             const cari = donenVarliklar / kisaVadeli;
             balanceItems.push({ label: 'Cari Oran', value: _formatRatio(cari, 'x'), isNeg: cari < 1 });
         }
+
+        if (ttmNetKar === null) profitabilityItems.push({ label: 'ROE (TTM) — eksik dönem', value: '—' });
 
         const groups = [
             { title: 'Piyasa', items: marketItems },
@@ -157,7 +149,7 @@ function MultiplesRow({ snapshot, quarters }: { snapshot: KapSnapshotResponse; q
         ].filter((group) => group.items.length > 0);
 
         return groups.length ? groups : null;
-    }, [quarters, valuation]);
+    }, [quarters, valuation, snapshot.company_kind]);
 
     if (!groupedMultiples) return null;
 
@@ -576,17 +568,10 @@ function _buildAnnualizedRoeSeries(
     denominatorKey: string,
     suffix = '%',
 ): SeriesPoint[] {
-    const TTM_LOOKBACK = 4;
     return quarters
         .map((q, idx) => {
-            let ttmFlow = 0;
-            for (let lookback = 0; lookback < TTM_LOOKBACK; lookback += 1) {
-                const cursor = idx - lookback;
-                if (cursor < 0) return null;
-                const flow = _resolveMetricValue(quarters, cursor, numeratorKey, true);
-                if (flow === null) return null;
-                ttmFlow += flow;
-            }
+            const ttmFlow = ttmSum(quarters.slice(Math.max(0, idx - 3), idx + 1), numeratorKey);
+            if (ttmFlow === null) return null;
 
             const denominatorEnd = _resolveMetricValue(quarters, idx, denominatorKey, false);
             if (denominatorEnd === null || denominatorEnd === 0) return null;
@@ -950,7 +935,6 @@ export default function KapPage() {
         if (!selectedCompany) return;
         setLoading(true);
         setError(null);
-        setSnapshot(null);
         try {
             const data = await apiClient.kapSnapshot(selectedCompany, refresh, 10);
             if (!data.ok && data.error) {
@@ -963,6 +947,23 @@ export default function KapPage() {
             setLoading(false);
         }
     }, [selectedCompany]);
+
+    useEffect(() => {
+        if (!snapshot?.pending && !snapshot?.refresh_pending) return;
+        const controller = new AbortController();
+        let timer: number;
+        let attempts = 0;
+        const poll = async () => {
+            try {
+                const data = await apiClient.kapSnapshot(selectedCompany, false, 10, controller.signal);
+                if (controller.signal.aborted) return;
+                if (data.ok && !data.refresh_pending) { setSnapshot(data); setError(null); return; }
+                if (++attempts < 8) timer = window.setTimeout(() => void poll(), 3000);
+            } catch { /* Existing data remains available; the Getir button retries. */ }
+        };
+        timer = window.setTimeout(() => void poll(), 2000);
+        return () => { controller.abort(); window.clearTimeout(timer); };
+    }, [selectedCompany, snapshot?.pending, snapshot?.refresh_pending]);
 
     // Auto-fetch snapshot when a company is selected.
     useEffect(() => {
@@ -1136,8 +1137,8 @@ export default function KapPage() {
             { title: 'Net Kâr Marjı', series: _takeLastSeries(ratioSeries.netKarMarji, CHART_WINDOW_QUARTERS) },
             { title: 'Cari Oran', series: _takeLastSeries(ratioSeries.cariOran, CHART_WINDOW_QUARTERS) },
             { title: 'Özkaynak Karlılığı (ROE)', series: _takeLastSeries(ratioSeries.roe, CHART_WINDOW_QUARTERS) },
-        ].filter(r => r.series.length > 0);
-    }, [ratioSeries]);
+        ].filter(r => r.series.length > 0 && (!(snapshot?.company_kind === 'bank' || snapshot?.company_kind === 'insurance') || r.title === 'Özkaynak Karlılığı (ROE)'));
+    }, [ratioSeries, snapshot?.company_kind]);
 
     return (
         <div className="kap-page">
@@ -1217,7 +1218,7 @@ export default function KapPage() {
                 <div className="kap-empty">Veri hazirlaniyor. Gecikme olursa birkac saniye sonra "Yenile"ye basabilirsiniz.</div>
             )}
 
-            {snapshot && !loading && (
+            {snapshot?.ok && (
                 <>
                     <div className="kap-info-bar">
                         <span className="kap-company-name">{snapshot.company_title || snapshot.company}</span>

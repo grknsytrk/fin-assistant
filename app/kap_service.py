@@ -571,6 +571,9 @@ def _next_month(year: int, month: int) -> tuple[int, int]:
     return year, month + 1
 
 
+_INFLATION_FAILURE_RETRY_AT = 0.0
+
+
 def _derive_same_year_inflation_factor(newer: Dict[str, Any], older: Dict[str, Any]) -> Optional[float]:
     newer_year = int(newer.get("year") or 0)
     older_year = int(older.get("year") or 0)
@@ -580,9 +583,13 @@ def _derive_same_year_inflation_factor(newer: Dict[str, Any], older: Dict[str, A
     if newer_year != older_year or newer_month <= 0 or older_month <= 0 or newer_month <= older_month:
         return None
 
+    global _INFLATION_FAILURE_RETRY_AT
+    if time.monotonic() < _INFLATION_FAILURE_RETRY_AT:
+        return None
     try:
         monthly_rates = _load_monthly_inflation_rates()
     except Exception:
+        _INFLATION_FAILURE_RETRY_AT = time.monotonic() + 60
         return None
 
     factor = 1.0
@@ -607,13 +614,13 @@ def _derive_comparative_factor(newer: Dict[str, Any], older: Dict[str, Any]) -> 
     return _median(candidates)
 
 
-def _derive_adjacent_factor(newer: Dict[str, Any], older: Dict[str, Any]) -> tuple[float, str]:
+def _derive_adjacent_factor(newer: Dict[str, Any], older: Dict[str, Any], *, allow_network: bool = True) -> tuple[float, str]:
     same_year = int(newer.get("year") or 0) == int(older.get("year") or 0)
     if same_year:
         same_year_factor = _derive_same_year_factor(newer, older)
         if same_year_factor is not None:
             return same_year_factor, "same_year_ytd"
-        inflation_factor = _derive_same_year_inflation_factor(newer, older)
+        inflation_factor = _derive_same_year_inflation_factor(newer, older) if allow_network else None
         if inflation_factor is not None:
             return inflation_factor, "same_year_inflation"
         return 1.0, "reported_filing"
@@ -649,6 +656,7 @@ def _merge_metric_override(
 
 def _build_analysis_state(
     quarters: List[Dict[str, Any]],
+    *, allow_network: bool = True,
 ) -> tuple[Dict[tuple[int, int], float], Dict[tuple[int, int], str], Dict[tuple[int, int], Dict[str, Dict[str, Any]]]]:
     ordered = sorted(quarters, key=_period_key)
     if not ordered:
@@ -665,7 +673,7 @@ def _build_analysis_state(
         newer = ordered[idx + 1]
         older_key = _period_key(older)
         newer_key = _period_key(newer)
-        factor, source = _derive_adjacent_factor(newer, older)
+        factor, source = _derive_adjacent_factor(newer, older, allow_network=allow_network)
         multiplier_map[older_key] = multiplier_map.get(newer_key, 1.0) * factor
         source_map[older_key] = source
 
@@ -738,7 +746,7 @@ def _sanitize_comparative_against_filed(
     return cleaned
 
 
-def normalize_snapshot_for_frontend(raw: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_snapshot_for_frontend(raw: Dict[str, Any], *, allow_network: bool = True) -> Dict[str, Any]:
     """Flatten raw snapshot into a frontend-friendly shape."""
     company = raw.get("stock_code") or raw.get("company") or ""
     company_title = raw.get("company_title") or ""
@@ -753,24 +761,24 @@ def normalize_snapshot_for_frontend(raw: Dict[str, Any]) -> Dict[str, Any]:
         "cache_stale": raw.get("cache_stale", False),
         "error": raw.get("error"),
         "analysis_basis": "latest_comparable",
-        "analysis_note": _ANALYSIS_NOTE,
+        "analysis_note": _ANALYSIS_NOTE if allow_network else "Önbellekteki bilanço gösteriliyor. Enflasyon katsayısı bulunmayan dönemlerde raporlanan değerler kullanılır; güncelleme arka planda tamamlanır.",
         "insurance_premium_disclosures": _normalize_insurance_premium_disclosures(
             raw.get("insurance_premium_disclosures") or []
         ),
     }
 
     quarters = raw.get("quarters") or []
-    multiplier_map, source_map, override_map = _build_analysis_state(quarters)
+    multiplier_map, source_map, override_map = _build_analysis_state(quarters, allow_network=allow_network)
     normalized_quarters = []
     for q in quarters:
         quarter_key = _period_key(q)
         factor = multiplier_map.get(quarter_key, 1.0)
         currency = str(q.get("currency", "TL"))
         raw_metrics = q.get("metrics") or {}
-        raw_metrics_quarterly = q.get("metrics_quarterly") or raw_metrics
+        raw_metrics_quarterly = q.get("metrics_quarterly") or {}
         raw_metrics_ytd = q.get("metrics_ytd") or raw_metrics
         raw_metrics_comparative = q.get("metrics_comparative") or {}
-        raw_metrics_quarterly_comparative = q.get("metrics_quarterly_comparative") or raw_metrics_comparative
+        raw_metrics_quarterly_comparative = q.get("metrics_quarterly_comparative") or {}
         raw_metrics_ytd_comparative = q.get("metrics_ytd_comparative") or raw_metrics_comparative
 
         analysis_metrics = _scale_metric_set(raw_metrics, factor)
