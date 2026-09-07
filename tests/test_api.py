@@ -4509,6 +4509,60 @@ def test_market_stock_cards_returns_quotes_and_line_points(monkeypatch: pytest.M
     assert payload["items"][0]["line_points"][1]["close"] == 760.0
 
 
+def test_stock_return_bases_keep_history_before_one_year_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_urls: List[str] = []
+    timestamps = [
+        datetime(2025, 9, 3, tzinfo=timezone.utc).timestamp(),
+        datetime(2025, 9, 8, tzinfo=timezone.utc).timestamp(),
+        datetime(2026, 9, 4, tzinfo=timezone.utc).timestamp(),
+    ]
+    chart_payload = {
+        "chart": {
+            "result": [
+                {
+                    "timestamp": timestamps,
+                    "indicators": {
+                        "quote": [
+                            {
+                                "close": [100.0, 105.0, 150.0],
+                                "high": [101.0, 106.0, 151.0],
+                                "low": [99.0, 104.0, 149.0],
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(chart_payload).encode("utf-8")
+
+    def fake_urlopen(request: Any, **_kwargs: Any) -> FakeResponse:
+        requested_urls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    bases = api_module._fetch_stock_return_bases("BIMAS")
+    returns = api_module._returns_from_bases(150.0, bases)
+
+    assert requested_urls == [
+        "https://query1.finance.yahoo.com/v8/finance/chart/BIMAS.IS?interval=1d&range=2y"
+    ]
+    assert bases["base_1y"] == 100.0
+    assert returns["return_1y_pct"] == 50.0
+
+
 def test_market_stock_cards_falls_back_to_infoyatirim_multiples_when_missing_or_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
