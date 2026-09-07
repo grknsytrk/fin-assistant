@@ -4931,6 +4931,7 @@ _MARKET_STOCK_CARD_CHART_RANGES: Dict[str, Dict[str, Any]] = {
 }
 _STOCK_RETURN_BASE_CACHE: Dict[str, Any] = {}
 _STOCK_RETURN_BASE_CACHE_TTL = 900  # 15 minutes
+_STOCK_RETURN_BASE_CACHE_VERSION = "v2"
 _ISYATIRIM_CACHE: Dict[str, Any] = {}
 _ISYATIRIM_CACHE_TTL = 900  # 15 minutes
 _ISYATIRIM_BASIC_SUMMARY_CACHE: Dict[str, Any] = {}
@@ -5371,6 +5372,10 @@ def _pick_series_value_at_or_after(
     return None
 
 
+def _stock_return_base_cache_key(symbol: str) -> str:
+    return f"api:stock-return-bases:{symbol}:{_STOCK_RETURN_BASE_CACHE_VERSION}"
+
+
 def _fetch_stock_return_bases(symbol: str) -> Dict[str, Any]:
     import urllib.error
     import urllib.request
@@ -5383,7 +5388,8 @@ def _fetch_stock_return_bases(symbol: str) -> Dict[str, Any]:
     cached = _STOCK_RETURN_BASE_CACHE.get(ticker)
     if cached and now - cached.get("_ts", 0) < _STOCK_RETURN_BASE_CACHE_TTL:
         return dict(cached.get("data") or {})
-    shared_cached = _shared_cache_get_dict(f"api:stock-return-bases:{ticker}")
+    shared_key = _stock_return_base_cache_key(ticker)
+    shared_cached = _shared_cache_get_dict(shared_key)
     if shared_cached:
         _STOCK_RETURN_BASE_CACHE[ticker] = {"_ts": now, "data": shared_cached}
         return dict(shared_cached)
@@ -5391,7 +5397,11 @@ def _fetch_stock_return_bases(symbol: str) -> Dict[str, Any]:
     yahoo_symbol = f"{ticker}.IS"
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
-        "?interval=1d&range=1y"
+        # A one-year response can start on the first trading day after the
+        # exact 365-day boundary, leaving no base price at-or-before it.
+        # Two years keeps the displayed return truly one-year while providing
+        # enough history to select the preceding trading session.
+        "?interval=1d&range=2y"
     )
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -5466,7 +5476,7 @@ def _fetch_stock_return_bases(symbol: str) -> Dict[str, Any]:
         "as_of": latest_dt.isoformat(),
     }
     _STOCK_RETURN_BASE_CACHE[ticker] = {"_ts": now, "data": bases}
-    _shared_cache_set(f"api:stock-return-bases:{ticker}", bases, _STOCK_RETURN_BASE_CACHE_TTL)
+    _shared_cache_set(shared_key, bases, _STOCK_RETURN_BASE_CACHE_TTL)
     return dict(bases)
 
 
@@ -5483,7 +5493,7 @@ def _fetch_stock_return_bases_bulk(symbols: List[str]) -> Dict[str, Dict[str, An
         if cached and now - cached.get("_ts", 0) < _STOCK_RETURN_BASE_CACHE_TTL:
             result[symbol] = dict(cached.get("data") or {})
             continue
-        shared_cached = _shared_cache_get_dict(f"api:stock-return-bases:{symbol}")
+        shared_cached = _shared_cache_get_dict(_stock_return_base_cache_key(symbol))
         if shared_cached:
             _STOCK_RETURN_BASE_CACHE[symbol] = {"_ts": now, "data": shared_cached}
             result[symbol] = dict(shared_cached)
@@ -5566,7 +5576,7 @@ def _cached_stock_return_bases_bulk(symbols: List[str]) -> Dict[str, Dict[str, A
         if cached and now - cached.get("_ts", 0) < _STOCK_RETURN_BASE_CACHE_TTL:
             result[normalized] = dict(cached.get("data") or {})
             continue
-        shared_cached = _shared_cache_get_dict(f"api:stock-return-bases:{normalized}")
+        shared_cached = _shared_cache_get_dict(_stock_return_base_cache_key(normalized))
         if shared_cached:
             _STOCK_RETURN_BASE_CACHE[normalized] = {"_ts": now, "data": shared_cached}
             result[normalized] = dict(shared_cached)
