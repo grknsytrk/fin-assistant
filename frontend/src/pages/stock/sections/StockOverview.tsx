@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
-import type { KapSnapshotResponse, KapQuarter, KapInsurancePremiumDisclosure } from '../../../api/types';
+import type {
+    KapSnapshotResponse,
+    KapQuarter,
+    KapInsurancePremiumDisclosure,
+    MarketStockCardItem,
+} from '../../../api/types';
 import type { KapOverviewCommentaryResponse } from '../../../api/types';
 import { apiClient } from '../../../api/client';
 import { BarChartCard } from '../../../components/charts/BarChartCard';
@@ -520,7 +525,17 @@ function PremiumSeasonalMonthlyChart({ data }: { data: PremiumSeasonalChartData 
     );
 }
 
-export default function StockOverview({ snapshot, quarters, historyLoading = false }: { snapshot: KapSnapshotResponse, quarters: KapQuarter[], historyLoading?: boolean }) {
+export default function StockOverview({
+    snapshot,
+    quarters,
+    historyLoading = false,
+    marketCard,
+}: {
+    snapshot: KapSnapshotResponse;
+    quarters: KapQuarter[];
+    historyLoading?: boolean;
+    marketCard?: Pick<MarketStockCardItem, 'fk' | 'pd_dd' | 'fd_favok' | 'net_borc_favok'> | null;
+}) {
     const isRefreshing = historyLoading || Boolean(snapshot.refresh_pending);
     const latestQuarterIdx = quarters.length ? quarters.length - 1 : -1;
     const latestQuarter = latestQuarterIdx >= 0 ? quarters[latestQuarterIdx] : null;
@@ -764,7 +779,7 @@ export default function StockOverview({ snapshot, quarters, historyLoading = fal
 
     return (
         <div className="section-overview fade-in">
-            <MultiplesRow snapshot={snapshot} quarters={quarters} />
+            <MultiplesRow snapshot={snapshot} quarters={quarters} marketCard={marketCard} />
 
             {latestQuarter && (
                 <div className="kap-summary-panel panel">

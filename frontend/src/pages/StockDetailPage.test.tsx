@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({ snapshot: vi.fn() }));
 vi.mock('../api/client', () => ({ cachedKapSnapshot: () => null, apiClient: {
     kapSnapshot: mocks.snapshot,
     kapPrice: () => Promise.resolve({ ok: false }),
+    marketStockCards: () => Promise.resolve({ items: [] }),
     marketStockCardChart: () => Promise.resolve({ line_points: [], error: 'No chart' }),
 } }));
 vi.mock('../components/MarketsNavigation', () => ({ default: () => null }));

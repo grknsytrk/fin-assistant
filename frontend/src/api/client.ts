@@ -266,11 +266,13 @@ export const apiClient = {
             signal: options.signal,
         });
     },
-    marketStockCards: (options: { symbols: string[]; refresh?: boolean }) => {
+    marketStockCards: (options: { symbols: string[]; refresh?: boolean; signal?: AbortSignal }) => {
         const params = new URLSearchParams();
         params.append('symbols', options.symbols.join(','));
         if (options.refresh) params.append('refresh', 'true');
-        return fetchApi<MarketStockCardsResponse>(`/market/stocks/cards?${params.toString()}`);
+        return fetchApi<MarketStockCardsResponse>(`/market/stocks/cards?${params.toString()}`, {
+            signal: options.signal,
+        });
     },
     marketStockCardChart: (
         symbol: string,

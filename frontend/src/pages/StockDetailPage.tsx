@@ -9,6 +9,7 @@ import type {
     MarketIndexLinePoint,
     MarketStockCardChartRange,
     MarketStockCardChartResponse,
+    MarketStockCardItem,
 } from '../api/types';
 import { prepareOrderedQuarters } from '../utils/chartBuilders';
 import SymbolLogo from '../components/SymbolLogo';
@@ -617,6 +618,7 @@ export default function StockDetailPage({
     const [error, setError] = useState<string | null>(null);
     const [navCollapsed, setNavCollapsed] = useState(false);
     const [priceData, setPriceData] = useState<StockPriceData | null>(null);
+    const [marketCard, setMarketCard] = useState<MarketStockCardItem | null>(null);
     const watchlist = useWatchlist();
     const normalizedTicker = ticker.trim().toUpperCase();
 
@@ -713,6 +715,24 @@ export default function StockDetailPage({
         };
     }, [ticker]);
 
+    useEffect(() => {
+        const controller = new AbortController();
+        setMarketCard(null);
+        apiClient.marketStockCards({ symbols: [normalizedTicker], signal: controller.signal })
+            .then((response) => {
+                if (!controller.signal.aborted) {
+                    setMarketCard(response.items.find((item) => item.symbol === normalizedTicker) || null);
+                }
+            })
+            .catch(() => {
+                if (!controller.signal.aborted) {
+                    setMarketCard(null);
+                }
+            });
+
+        return () => controller.abort();
+    }, [normalizedTicker]);
+
     const renderContent = () => {
         if (loading && !snapshot) {
             return <div className="sd-loading" role="status" aria-live="polite"><div className="spinner" aria-hidden="true" /> Finansal veriler yükleniyor…</div>;
@@ -722,7 +742,14 @@ export default function StockDetailPage({
 
         switch (selectedTab) {
             case 'overview':
-                return <StockOverview snapshot={snapshot} quarters={quarters} historyLoading={historyLoading} />;
+                return (
+                    <StockOverview
+                        snapshot={snapshot}
+                        quarters={quarters}
+                        historyLoading={historyLoading}
+                        marketCard={marketCard}
+                    />
+                );
             case 'financials':
                 return <StockFinancials quarters={quarters} analysisNote={snapshot.analysis_note} />;
             case 'kap':
@@ -737,6 +764,8 @@ export default function StockDetailPage({
     const displayCurrency = priceData?.currency || valuation?.price_currency;
     const displayAsOf = priceData?.as_of || valuation?.price_as_of;
     const displayChangePct = priceData?.ok ? priceData.change_pct : null;
+    const displayFk = marketCard ? marketCard.fk : valuation?.fk;
+    const displayPdDd = marketCard ? marketCard.pd_dd : valuation?.pd_dd;
     const selectedTabLabel = STOCK_DETAIL_TABS.find((tab) => tab.key === selectedTab)?.label;
     const quoteTitle = [
         formatTitleCurrency(displayPrice, displayCurrency),
@@ -836,8 +865,8 @@ export default function StockDetailPage({
 
                         <div className="stock-market-stats">
                             <div><span>Piyasa Değeri</span><strong>{formatCompactCurrency(valuation?.market_cap)}</strong></div>
-                            <div><span>F/K</span><strong>{formatRatio(valuation?.fk)}</strong></div>
-                            <div><span>PD/DD</span><strong>{formatRatio(valuation?.pd_dd)}</strong></div>
+                            <div><span>F/K</span><strong>{formatRatio(displayFk)}</strong></div>
+                            <div><span>PD/DD</span><strong>{formatRatio(displayPdDd)}</strong></div>
                             <div><span>Son Dönem</span><strong>{snapshot?.latest_quarter || '-'}</strong></div>
                         </div>
 

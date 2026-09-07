@@ -20,4 +20,19 @@ describe('valuation presentation', () => {
         expect(html).toContain('eksik dönem');
         expect(html).not.toContain('Net Kâr Marjı');
     });
+    it('uses the stock card multiples and includes net debt to EBITDA', () => {
+        const snapshot = { company_kind: 'generic', valuation: { fk: 99, pd_dd: 99, fd_favok: 99 } } as KapSnapshotResponse;
+        const html = renderToStaticMarkup(
+            <MultiplesRow
+                snapshot={snapshot}
+                quarters={rows}
+                marketCard={{ fk: 11.1, pd_dd: 0.7, fd_favok: 2.11, net_borc_favok: 1 }}
+            />,
+        );
+        expect(html).toContain('11.10x');
+        expect(html).toContain('0.70x');
+        expect(html).toContain('2.11x');
+        expect(html).toContain('1.00x');
+        expect(html).not.toContain('99.00x');
+    });
 });

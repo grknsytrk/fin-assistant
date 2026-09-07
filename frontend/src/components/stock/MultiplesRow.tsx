@@ -1,10 +1,20 @@
 import { ttmSum } from '../../utils/financialMetrics';
 import { useMemo } from 'react';
-import type { KapSnapshotResponse, KapQuarter } from '../../api/types';
+import type { KapSnapshotResponse, KapQuarter, MarketStockCardItem } from '../../api/types';
 import { _resolveMetricValueByPriority, _formatRatio, _formatMetric } from '../../utils/formatters';
 import './MultiplesRow.css';
 
-export function MultiplesRow({ snapshot, quarters }: { snapshot: KapSnapshotResponse; quarters: KapQuarter[] }) {
+type MarketCardMultiples = Pick<MarketStockCardItem, 'fk' | 'pd_dd' | 'fd_favok' | 'net_borc_favok'>;
+
+export function MultiplesRow({
+    snapshot,
+    quarters,
+    marketCard,
+}: {
+    snapshot: KapSnapshotResponse;
+    quarters: KapQuarter[];
+    marketCard?: MarketCardMultiples | null;
+}) {
     const valuation = snapshot.valuation;
 
     const groupedMultiples = useMemo(() => {
@@ -36,20 +46,34 @@ export function MultiplesRow({ snapshot, quarters }: { snapshot: KapSnapshotResp
         if (valuation?.market_cap != null) {
             marketItems.push({ label: 'Piyasa Değeri', value: _formatMetric(valuation.market_cap, 'TL') });
         }
+        const fk = marketCard ? marketCard.fk : valuation?.fk;
+        const pdDd = marketCard ? marketCard.pd_dd : valuation?.pd_dd;
+        const fdFavok = marketCard ? marketCard.fd_favok : valuation?.fd_favok;
+        const netBorcFavok = marketCard
+            ? marketCard.net_borc_favok
+            : (!financialCompany && netBorc !== null && ttmFavok !== null && Math.abs(ttmFavok) > 1e-12
+                ? netBorc / ttmFavok
+                : null);
+
         multipleItems.push({
             label: 'F/K',
-            value: valuation?.fk != null ? _formatRatio(valuation.fk, 'x') : '-',
-            isNeg: valuation?.fk != null ? valuation.fk < 0 : false,
+            value: fk != null ? _formatRatio(fk, 'x') : '-',
+            isNeg: fk != null ? fk < 0 : false,
         });
         multipleItems.push({
             label: 'PD/DD',
-            value: valuation?.pd_dd != null ? _formatRatio(valuation.pd_dd, 'x') : '-',
-            isNeg: valuation?.pd_dd != null ? valuation.pd_dd < 0 : false,
+            value: pdDd != null ? _formatRatio(pdDd, 'x') : '-',
+            isNeg: pdDd != null ? pdDd < 0 : false,
         });
         if (!financialCompany) multipleItems.push({
             label: 'FD/FAVÖK',
-            value: valuation?.fd_favok != null ? _formatRatio(valuation.fd_favok, 'x') : '-',
-            isNeg: valuation?.fd_favok != null ? valuation.fd_favok < 0 : false,
+            value: fdFavok != null ? _formatRatio(fdFavok, 'x') : '-',
+            isNeg: fdFavok != null ? fdFavok < 0 : false,
+        });
+        if (!financialCompany) multipleItems.push({
+            label: 'Net Borç/FAVÖK',
+            value: netBorcFavok != null ? _formatRatio(netBorcFavok, 'x') : '-',
+            isNeg: netBorcFavok != null ? netBorcFavok < 0 : false,
         });
 
         if (!financialCompany && ttmSatis !== null && ttmSatis > 0 && ttmNetKar !== null) {
@@ -83,7 +107,7 @@ export function MultiplesRow({ snapshot, quarters }: { snapshot: KapSnapshotResp
         ].filter((group) => group.items.length > 0);
 
         return groups.length ? groups : null;
-    }, [quarters, valuation, snapshot.company_kind]);
+    }, [marketCard, quarters, valuation, snapshot.company_kind]);
 
     if (!groupedMultiples) return null;
 
