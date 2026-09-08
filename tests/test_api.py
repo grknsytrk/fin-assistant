@@ -908,6 +908,47 @@ def test_truncated_current_fund_catalogue_schedules_repair_refresh(monkeypatch: 
     assert refreshed["refresh_job"]["job_id"] == "truncated-repair-job"
 
 
+def test_failed_auto_refresh_does_not_hold_repair_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    jobs: list[int] = []
+    backend = cache_module.get_cache()
+    cooldown_key = f"{api_module._FUND_REFRESH_AUTO_KEY_PREFIX}:2026-09-08"
+    backend.delete(cooldown_key)
+    first_job = {
+        "job_id": "failed-auto-refresh-job",
+        "status": "failed",
+        "requested_at": "2026-09-08T12:00:00+00:00",
+    }
+    api_module._set_fund_refresh_job(first_job)
+    backend.set(cooldown_key, {"job_id": first_job["job_id"]}, ttl_seconds=3600)
+    monkeypatch.setattr(
+        api_module,
+        "_start_fund_refresh_job",
+        lambda lookback_days: jobs.append(lookback_days) or {
+            "job_id": "retry-auto-refresh-job",
+            "status": "queued",
+            "requested_at": "2026-09-08T12:01:00+00:00",
+        },
+    )
+    payload = {
+        "status": "ok",
+        "rows": [{"fund_code": "TLY"}],
+        "total_count": 2041,
+        "as_of": "2026-09-08",
+        "stale": False,
+        "warnings": ["tefasfon snapshot looked truncated (1000 rows vs cached 2041)"],
+        "source_metadata": {
+            "snapshot_as_of": "2026-09-08",
+            "snapshot_target_date": "2026-09-08",
+            "truncated_refresh_observed": True,
+        },
+    }
+
+    refreshed = api_module._maybe_schedule_fund_snapshot_refresh(payload)
+
+    assert jobs == [api_module._FUND_REFRESH_MAX_LOOKBACK_DAYS]
+    assert refreshed["refresh_job"]["job_id"] == "retry-auto-refresh-job"
+
+
 def test_api_funds_search_keeps_full_universe(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_kwargs: Dict[str, Any] = {}
 

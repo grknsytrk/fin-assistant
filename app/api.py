@@ -844,6 +844,15 @@ def _maybe_schedule_fund_snapshot_refresh(payload: Dict[str, Any]) -> Dict[str, 
     job = _active_fund_refresh_job()
     if job is None:
         cooldown_key = f"{_FUND_REFRESH_AUTO_KEY_PREFIX}:{target_date}"
+        cooldown_value = backend.get(cooldown_key)
+        if isinstance(cooldown_value, dict):
+            cooldown_job_id = str(cooldown_value.get("job_id") or "").strip()
+            if cooldown_job_id:
+                cooldown_job = _get_fund_refresh_job(cooldown_job_id)
+                if cooldown_job is not None and str(cooldown_job.get("status") or "") not in {"queued", "running"}:
+                    # A failed or superseded repair must not suppress the next
+                    # automatic recovery attempt for the whole cooldown TTL.
+                    backend.delete(cooldown_key)
         claimed = backend.set_if_absent(
             cooldown_key,
             {"scheduled_at": _fund_refresh_now_iso()},
@@ -852,6 +861,14 @@ def _maybe_schedule_fund_snapshot_refresh(payload: Dict[str, Any]) -> Dict[str, 
         if claimed:
             try:
                 job = _start_fund_refresh_job(_FUND_REFRESH_MAX_LOOKBACK_DAYS)
+                backend.set(
+                    cooldown_key,
+                    {
+                        "scheduled_at": _fund_refresh_now_iso(),
+                        "job_id": job.get("job_id"),
+                    },
+                    ttl_seconds=max(60, _FUND_REFRESH_AUTO_COOLDOWN_SECONDS),
+                )
                 LOGGER.info(
                     "stale fund catalogue scheduled background refresh: target=%s job_id=%s",
                     target_date,

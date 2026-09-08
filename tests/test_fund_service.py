@@ -223,6 +223,39 @@ def test_tefasfon_snapshot_direct_probes_past_misreported_single_page(monkeypatc
     assert [payload["basSira"] for payload in calls] == [1, 1001]
 
 
+def test_tefasfon_snapshot_direct_rejects_unverified_full_page(monkeypatch) -> None:
+    from tefasfon import getter
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return json.loads(self.text)
+
+    class FakeSession:
+        def post(self, _url, *, json, headers, timeout):
+            del headers, timeout
+            if json["basSira"] == 1:
+                rows = [
+                    {"fonKodu": f"F{index:04d}", "tarih": "2026-06-24", "fiyat": 1.0}
+                    for index in range(1000)
+                ]
+            else:
+                rows = []
+            return FakeResponse({"resultList": rows, "toplamSayfa": 1})
+
+    monkeypatch.setattr(getter, "_new_session", lambda *_args, **_kwargs: FakeSession())
+    monkeypatch.setattr(getter, "_PAGE_SIZE", 1000)
+    monkeypatch.setattr(getter, "_PAGE_DELAY", 0.0)
+
+    with pytest.raises(fund_service.TefasUpstreamError, match="full page"):
+        fund_service.TefasFonClient(fund_types=["SEC"])._fetch_funds_snapshot_direct(
+            date(2026, 6, 24),
+            fund_type="SEC",
+        )
+
+
 def _stub_direct_tefas_empty(monkeypatch) -> None:
     class FakeDirectTefasClient:
         def fetch_fund_history(self, **kwargs):

@@ -3572,7 +3572,9 @@ class TefasFonClient:
             seen_codes: set[str] = set()
             page_index = 0
             total_pages: Optional[int] = None
+            reported_total: Optional[int] = None
             empty_streak = 0
+            full_page_without_terminator = False
 
             def post_with_retries(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 last_err: Optional[Exception] = None
@@ -3605,6 +3607,11 @@ class TefasFonClient:
                     if page_index > 0 and total_pages == 1:
                         # A full first page can be followed by an empty page
                         # when the endpoint's page count is unreliable.
+                        if reported_total is None and full_page_without_terminator:
+                            raise TefasUpstreamError(
+                                f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} ended on a full page "
+                                "without an authoritative total row count"
+                            )
                         break
                     raise TefasUpstreamError(
                         f"tefasfon snapshot page {page_index + 1} returned empty body for {fund_type_code} {as_of.isoformat()}"
@@ -3620,6 +3627,24 @@ class TefasFonClient:
                         total_pages = max(1, int(candidate))
                     except (TypeError, ValueError):
                         total_pages = 1
+                if reported_total is None:
+                    for key in (
+                        "toplamKayit",
+                        "toplamSayi",
+                        "totalCount",
+                        "totalRecords",
+                        "totalRows",
+                        "total_count",
+                        "count",
+                    ):
+                        value = body.get(key)
+                        if value in (None, ""):
+                            continue
+                        try:
+                            reported_total = max(0, int(float(value)))
+                        except (TypeError, ValueError):
+                            continue
+                        break
                 rows: Optional[List[Any]] = None
                 for key in ("resultList", "data", "Data", "result", "Result", "rows", "items"):
                     value = body.get(key)
@@ -3648,6 +3673,17 @@ class TefasFonClient:
                 else:
                     empty_streak = 0
                 page_index += 1
+                if reported_total is not None and len(collected) >= reported_total:
+                    break
+                if len(rows) == page_size:
+                    full_page_without_terminator = True
+                else:
+                    if not rows and reported_total is None and full_page_without_terminator:
+                        raise TefasUpstreamError(
+                            f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} ended on a full page "
+                            "without an authoritative total row count"
+                        )
+                    full_page_without_terminator = False
                 if total_pages is not None and page_index >= total_pages:
                     # TEFAS has returned toplamSayfa=1 for a full page even
                     # when more rows were available. Probe the next page in
@@ -3663,9 +3699,19 @@ class TefasFonClient:
                     )
                 if page_delay > 0:
                     time.sleep(page_delay)
+            if reported_total is not None and len(collected) < reported_total:
+                raise TefasUpstreamError(
+                    f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} was incomplete "
+                    f"({len(collected)} rows vs reported {reported_total})"
+                )
             if total_pages and total_pages > 1 and page_index < total_pages:
                 raise TefasUpstreamError(
                     f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} aborted at page {page_index}/{total_pages}"
+                )
+            if reported_total is None and full_page_without_terminator:
+                raise TefasUpstreamError(
+                    f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} ended on a full page "
+                    "without an authoritative total row count"
                 )
             return collected
 
@@ -4170,6 +4216,26 @@ class TefasClient:
                 continue
         return None
 
+    @staticmethod
+    def _direct_payload_total_count(payload: Dict[str, Any]) -> Optional[int]:
+        for key in (
+            "toplamKayit",
+            "toplamSayi",
+            "totalCount",
+            "totalRecords",
+            "totalRows",
+            "total_count",
+            "count",
+        ):
+            value = payload.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return max(0, int(float(value)))
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def _prime_direct_session(
         self,
         client: httpx.Client,
@@ -4209,12 +4275,15 @@ class TefasClient:
         base_payload: Dict[str, Any],
         referer: str,
         context: str,
+        reject_unverified_full_page: bool = False,
     ) -> List[Dict[str, Any]]:
         page_size = max(1, TEFAS_DIRECT_PAGE_SIZE)
         start_row = 1
         page_number = 0
         total_pages: Optional[int] = None
+        reported_total: Optional[int] = None
         all_rows: List[Dict[str, Any]] = []
+        full_page_without_terminator = False
 
         while page_number < 1000:
             payload = dict(base_payload)
@@ -4233,11 +4302,33 @@ class TefasClient:
             all_rows.extend(rows)
             page_number += 1
             total_pages = total_pages or self._direct_payload_page_count(response)
-            if (total_pages is not None and page_number >= total_pages) or len(rows) < page_size:
+            reported_total = reported_total or self._direct_payload_total_count(response)
+            if reported_total is not None and len(all_rows) >= reported_total:
+                break
+            if len(rows) == page_size:
+                full_page_without_terminator = True
+            if total_pages is not None and page_number >= total_pages and len(rows) < page_size:
+                break
+            # TEFAS sometimes reports toplamSayfa=1 for a full first page.
+            # Probe the next cursor instead of treating that page as complete.
+            if len(rows) < page_size:
+                full_page_without_terminator = False
                 break
             start_row += page_size
             if TEFAS_DIRECT_PAGE_DELAY_SECONDS > 0:
                 time.sleep(TEFAS_DIRECT_PAGE_DELAY_SECONDS)
+        if reported_total is not None and len(all_rows) < reported_total:
+            raise TefasUpstreamError(
+                f"{context} was incomplete ({len(all_rows)} rows vs reported {reported_total})"
+            )
+        if total_pages is not None and page_number < total_pages:
+            raise TefasUpstreamError(
+                f"{context} aborted at page {page_number}/{total_pages}"
+            )
+        if reject_unverified_full_page and reported_total is None and full_page_without_terminator:
+            raise TefasUpstreamError(
+                f"{context} ended on a full page without an authoritative total row count"
+            )
         return all_rows
 
     @staticmethod
@@ -4323,6 +4414,7 @@ class TefasClient:
                         base_payload=base_payload,
                         referer=referer,
                         context=f"direct TEFAS funds {fund_type_code} {chunk_start.isoformat()} {chunk_end.isoformat()}",
+                        reject_unverified_full_page=True,
                     )
                 )
                 if chunk_index < len(chunks) - 1 and TEFAS_DIRECT_CHUNK_DELAY_SECONDS > 0:
@@ -5233,7 +5325,7 @@ def refresh_funds_snapshot(
     # Check the provider result before merging with the cache. Merging is
     # intentionally conservative and would otherwise hide a same-day
     # 1000-row response by filling it with the existing 2041 rows.
-    if existing_count >= 100 and candidate_count and candidate_count + 50 < int(existing_count * 0.9):
+    if existing_count >= 100 and candidate_count and candidate_count + 50 < existing_count:
         truncation_warning = (
             f"tefasfon snapshot looked truncated ({candidate_count} rows vs cached {existing_count}); "
             "preserving existing snapshot and marking it stale"
@@ -5349,7 +5441,7 @@ def refresh_funds_snapshot(
     # Guard: do not overwrite a healthy snapshot with a clearly-truncated refresh
     # (e.g. TEFAS pagination cut short and we end up with the first page only).
     new_count = len(snapshot["rows"])
-    if existing_count >= 100 and new_count + 50 < int(existing_count * 0.9):
+    if existing_count >= 100 and new_count + 50 < existing_count:
         truncation_warning = (
             f"tefasfon snapshot looked truncated ({new_count} rows vs cached {existing_count}); "
             "preserving existing snapshot and marking it stale"
