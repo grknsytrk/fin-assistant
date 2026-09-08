@@ -538,6 +538,16 @@
     font-weight: 900;
 }
 
+.mwr-watchlist-copy small {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .mwr-watchlist-price {
     flex: 0 0 auto;
     color: var(--text-primary);
@@ -823,9 +833,9 @@
 }
 
 .mwr-flow-select {
-    width: auto;
-    min-width: 62px;
-    max-width: 116px;
+    width: 132px;
+    min-width: 132px;
+    max-width: 146px;
     height: 32px;
     min-height: 32px;
     box-sizing: border-box;

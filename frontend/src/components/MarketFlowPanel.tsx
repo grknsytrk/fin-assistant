@@ -18,6 +18,7 @@ const FLOW_FILTERS: Array<{ value: FlowFilter; label: string }> = [
 ];
 
 const FLOW_PAGE_SIZE = 50;
+const FLOW_INITIAL_LOAD_SIZE = FLOW_PAGE_SIZE * 2;
 const FLOW_MAX_ITEMS = 500;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
 
@@ -77,13 +78,44 @@ export default function MarketFlowPanel({
     const filterRef = useRef<FlowFilter>('all');
     const [loadingMore, setLoadingMore] = useState(false);
     const [hasMore, setHasMore] = useState(true);
-    const requestLimitRef = useRef(FLOW_PAGE_SIZE);
+    const [visibleLimit, setVisibleLimit] = useState(FLOW_PAGE_SIZE);
+    const visibleLimitRef = useRef(FLOW_PAGE_SIZE);
+    const requestLimitRef = useRef(FLOW_INITIAL_LOAD_SIZE);
     const loadingMoreRef = useRef(false);
+    const prefetchInFlightRef = useRef(false);
     const [warning, setWarning] = useState<string | null>(null);
+
+    const prefetchMore = useCallback((requestedLimit: number, expectedFilter = filterRef.current) => {
+        if (
+            prefetchInFlightRef.current
+            || expectedFilter === 'watchlist'
+            || requestedLimit <= requestLimitRef.current
+            || requestedLimit > FLOW_MAX_ITEMS
+        ) return;
+
+        prefetchInFlightRef.current = true;
+        apiClient
+            .marketFlow(requestedLimit)
+            .then((payload) => {
+                if (filterRef.current !== expectedFilter) return;
+                const nextItems = payload.items || [];
+                requestLimitRef.current = requestedLimit;
+                setItems(nextItems);
+                setWarning(payload.warning || null);
+                setHasMore(nextItems.length >= requestedLimit && requestedLimit < FLOW_MAX_ITEMS);
+            })
+            .catch(() => {
+                // The visible page remains usable when a speculative request fails.
+            })
+            .finally(() => {
+                prefetchInFlightRef.current = false;
+            });
+    }, []);
 
     const load = useCallback((refresh = false, requestedLimit?: number) => {
         const requestLimit = requestedLimit
-            ?? (filterRef.current === 'watchlist' ? FLOW_FAVORITES_LOAD_SIZE : requestLimitRef.current);
+            ?? (filterRef.current === 'watchlist' ? FLOW_FAVORITES_LOAD_SIZE : requestLimitRef.current || FLOW_INITIAL_LOAD_SIZE);
+        const expectedFilter = filterRef.current;
         requestLimitRef.current = requestLimit;
         setHasMore(requestLimit < FLOW_MAX_ITEMS);
         setLoading(true);
@@ -91,6 +123,7 @@ export default function MarketFlowPanel({
         apiClient
             .marketFlow(requestLimit, undefined, { refresh })
             .then((payload) => {
+                if (filterRef.current !== expectedFilter) return;
                 const nextItems = payload.items || [];
                 setItems(nextItems);
                 setWarning(payload.warning || null);
@@ -102,12 +135,29 @@ export default function MarketFlowPanel({
             .finally(() => setLoading(false));
     }, []);
 
+    const filteredItems = useMemo(
+        () => (items || [])
+            .filter((item) => matchesFlowFilter(item, filter, favoriteSymbols)),
+        [favoriteSymbols, filter, items],
+    );
+
     const loadMore = useCallback(() => {
         if (
             loadingMoreRef.current
             || !hasMore
             || filterRef.current === 'watchlist'
         ) return;
+
+        const currentVisibleLimit = visibleLimitRef.current;
+        if (filteredItems.length > currentVisibleLimit) {
+            const nextVisibleLimit = Math.min(currentVisibleLimit + FLOW_PAGE_SIZE, filteredItems.length);
+            visibleLimitRef.current = nextVisibleLimit;
+            setVisibleLimit(nextVisibleLimit);
+            window.setTimeout(() => {
+                prefetchMore(requestLimitRef.current + FLOW_PAGE_SIZE);
+            }, 0);
+            return;
+        }
 
         const currentLimit = requestLimitRef.current;
         const nextLimit = Math.min(currentLimit + FLOW_PAGE_SIZE, FLOW_MAX_ITEMS);
@@ -126,6 +176,9 @@ export default function MarketFlowPanel({
                 setItems(nextItems);
                 setWarning(payload.warning || null);
                 setHasMore(nextItems.length >= nextLimit && nextLimit < FLOW_MAX_ITEMS);
+                const nextVisibleLimit = Math.min(currentVisibleLimit + FLOW_PAGE_SIZE, nextItems.length);
+                visibleLimitRef.current = nextVisibleLimit;
+                setVisibleLimit(nextVisibleLimit);
             })
             .catch((requestError: unknown) => {
                 setError(requestError instanceof Error ? requestError.message : 'Daha fazla akış verisi alınamadı.');
@@ -134,7 +187,7 @@ export default function MarketFlowPanel({
                 loadingMoreRef.current = false;
                 setLoadingMore(false);
             });
-    }, [hasMore]);
+    }, [filteredItems.length, hasMore, prefetchMore]);
 
     useEffect(() => {
         load();
@@ -147,19 +200,15 @@ export default function MarketFlowPanel({
         return () => window.clearInterval(timer);
     }, [load]);
 
-    const filteredItems = useMemo(
-        () => (items || [])
-            .filter((item) => matchesFlowFilter(item, filter, favoriteSymbols)),
-        [favoriteSymbols, filter, items],
-    );
-
     const handleFilterChange = (nextFilter: FlowFilter) => {
         filterRef.current = nextFilter;
+        visibleLimitRef.current = FLOW_PAGE_SIZE;
+        setVisibleLimit(FLOW_PAGE_SIZE);
         setFilter(nextFilter);
         if (nextFilter === 'watchlist') {
             load(false, FLOW_FAVORITES_LOAD_SIZE);
         } else {
-            load(false, FLOW_PAGE_SIZE);
+            load(false, FLOW_INITIAL_LOAD_SIZE);
         }
     };
 
@@ -176,6 +225,11 @@ export default function MarketFlowPanel({
         }
         if (item.symbol) onSelectTicker?.(item.symbol);
     };
+
+    const visibleItems = useMemo(
+        () => filteredItems.slice(0, filter === 'watchlist' ? FLOW_PAGE_SIZE : visibleLimit),
+        [filter, filteredItems, visibleLimit],
+    );
 
     return (
         <div className="mwr-flow-panel">
@@ -210,7 +264,7 @@ export default function MarketFlowPanel({
             )}
 
             <div className="mwr-flow-list" onScroll={handleFlowScroll}>
-                {filteredItems.map((item) => (
+                {visibleItems.map((item) => (
                     <button
                         key={item.id}
                         type="button"

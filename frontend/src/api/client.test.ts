@@ -2,6 +2,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { apiClient } from './client';
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 describe('request wait budget', () => {
+    it('coalesces and briefly caches identical flow requests', async () => {
+        const payload = { items: [], as_of: '2026-09-08T00:00:00Z' };
+        const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload)));
+        vi.stubGlobal('fetch', fetch);
+
+        const [first, second] = await Promise.all([
+            apiClient.marketFlow(123),
+            apiClient.marketFlow(123),
+        ]);
+        expect(first).toEqual(payload);
+        expect(second).toEqual(payload);
+        expect(await apiClient.marketFlow(123)).toEqual(payload);
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
     it('keeps cold fund responses loading until the background result arrives', async () => {
         vi.useFakeTimers();
         const ready = { status: 'ok', rows: [{ fund_code: 'AAL' }] };

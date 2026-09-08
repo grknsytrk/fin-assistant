@@ -47,6 +47,9 @@ const FUND_HOLDINGS_MEMORY_CACHE_TTL_MS = 15_000;
 const fundHoldingsMemoryCache = new Map<string, { payload: FundHoldingsResponse; fetchedAt: number }>();
 const fundHoldingsInFlight = new Map<string, Promise<FundHoldingsResponse>>();
 const fundHoldingsLiveInFlight = new Map<string, Promise<FundHoldingsLiveResponse>>();
+const MARKET_FLOW_MEMORY_CACHE_TTL_MS = 15_000;
+const marketFlowMemoryCache = new Map<string, { payload: MarketFlowResponse; fetchedAt: number }>();
+const marketFlowInFlight = new Map<string, Promise<MarketFlowResponse>>();
 
 const kapSnapshotMemoryCache = new Map<string, { payload: KapSnapshotResponse; at: number }>();
 export function cachedKapSnapshot(company: string): KapSnapshotResponse | null {
@@ -343,7 +346,25 @@ export const apiClient = {
         const params = new URLSearchParams({ limit: String(limit) });
         if (category) params.append('category', category);
         if (options?.refresh) params.append('refresh', 'true');
-        return fetchApi<MarketFlowResponse>(`/market/flow?${params.toString()}`);
+        const cacheKey = `${limit}:${category || ''}`;
+        const cached = marketFlowMemoryCache.get(cacheKey);
+        if (!options?.refresh && cached && Date.now() - cached.fetchedAt < MARKET_FLOW_MEMORY_CACHE_TTL_MS) {
+            return Promise.resolve(cached.payload);
+        }
+
+        const existingRequest = marketFlowInFlight.get(cacheKey);
+        if (existingRequest) return existingRequest;
+
+        const request = fetchApi<MarketFlowResponse>(`/market/flow?${params.toString()}`)
+            .then((payload) => {
+                marketFlowMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
+                return payload;
+            })
+            .finally(() => {
+                if (marketFlowInFlight.get(cacheKey) === request) marketFlowInFlight.delete(cacheKey);
+            });
+        marketFlowInFlight.set(cacheKey, request);
+        return request;
     },
     marketWatch: (options?: { refresh?: boolean }) => {
         const params = new URLSearchParams();

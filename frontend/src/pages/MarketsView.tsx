@@ -19,7 +19,7 @@ import type {
     MarketStocksResponse,
     MarketUniverseResponse,
     MarketUniverseRow,
-    FundDetail,
+    FundSummary,
 } from '../api/types';
 import { DEFAULT_STOCK_RETURN_MODE } from '../routing/routes';
 import type { StockReturnMode } from '../routing/routes';
@@ -29,6 +29,7 @@ import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavig
 import SymbolLogo from '../components/SymbolLogo';
 import { buildDocumentTitle, formatTitleNumber, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { MAX_WATCHLIST_ITEMS, normalizeWatchlistSymbol, useWatchlist, type WatchlistItem } from '../hooks/useWatchlist';
+import { searchWatchlistFunds } from '../utils/watchlistData';
 import './MarketsView.css';
 
 type MarketSection = MarketsNavigationSection;
@@ -416,32 +417,43 @@ function mobileSparklinePath(points: MarketIndexLinePoint[]): string {
 function MobileMarketOverview({
     index,
     rows,
+    stockQuoteRows,
+    stockCardItems,
     watchlistItems,
     fundRows,
     onSelectTicker,
     onSelectIndex,
     onOpenFund,
     onAddStock,
+    onAddFund,
     onRemoveWatchlistItem,
 }: {
     index: MarketIndexDetailResponse | null;
     rows: MarketUniverseRow[];
+    stockQuoteRows: MarketStockRow[];
+    stockCardItems: MarketStockCardItem[];
     watchlistItems: WatchlistItem[];
-    fundRows: Record<string, FundDetail | null>;
+    fundRows: Record<string, FundSummary | null>;
     onSelectTicker: (ticker: string) => void;
     onSelectIndex: (index: MarketIndexCode) => void;
     onOpenFund?: (fundCode: string) => void;
     onAddStock: (symbol: string) => void;
+    onAddFund: (fund: FundSummary) => void;
     onRemoveWatchlistItem: (item: WatchlistItem) => void;
 }) {
     const [searchOpen, setSearchOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const [companySearchItems, setCompanySearchItems] = useState<MarketUniverseRow[]>([]);
     const [companySearchLoading, setCompanySearchLoading] = useState(false);
+    const [fundSearchItems, setFundSearchItems] = useState<FundSummary[]>([]);
+    const [fundSearchLoading, setFundSearchLoading] = useState(false);
     const [swipedWatchlistKey, setSwipedWatchlistKey] = useState<string | null>(null);
     const swipeStartRef = useRef<{ key: string; x: number; y: number } | null>(null);
     const suppressRowClickRef = useRef(false);
     const rowBySymbol = new Map(rows.map((row) => [normalizeWatchlistSymbol(row.company), row]));
+    const quoteRowBySymbol = new Map(stockQuoteRows.map((row) => [normalizeWatchlistSymbol(row.symbol || row.company), row]));
+    const cardBySymbol = new Map(stockCardItems.map((row) => [normalizeWatchlistSymbol(row.symbol), row]));
+    const indexRowBySymbol = new Map((index?.constituents || []).map((row) => [normalizeWatchlistSymbol(row.symbol), row]));
     const savedStockSymbols = new Set(
         watchlistItems
             .filter((item) => item.kind === 'stock')
@@ -479,6 +491,34 @@ function MobileMarketOverview({
         };
     }, [searchOpen, searchTerm]);
 
+    useEffect(() => {
+        const query = searchTerm.trim();
+        if (!searchOpen || !query) {
+            setFundSearchItems([]);
+            setFundSearchLoading(false);
+            return undefined;
+        }
+
+        let active = true;
+        setFundSearchLoading(true);
+        const timer = window.setTimeout(() => {
+            searchWatchlistFunds(query)
+                .then((payload) => {
+                    if (active) setFundSearchItems(payload);
+                })
+                .catch(() => {
+                    if (active) setFundSearchItems([]);
+                })
+                .finally(() => {
+                    if (active) setFundSearchLoading(false);
+                });
+        }, 180);
+        return () => {
+            active = false;
+            window.clearTimeout(timer);
+        };
+    }, [searchOpen, searchTerm]);
+
     const searchCandidates = new Map<string, { symbol: string; name: string; logoUrl?: string | null }>();
     for (const row of rows) {
         const symbol = normalizeWatchlistSymbol(row.company);
@@ -498,9 +538,17 @@ function MobileMarketOverview({
             ))
             .slice(0, 8)
         : [];
+    const savedFundCodes = new Set(
+        watchlistItems
+            .filter((item) => item.kind === 'fund')
+            .map((item) => normalizeWatchlistSymbol(item.symbol)),
+    );
+    const fundSearchResults = fundSearchItems
+        .filter((fund) => !savedFundCodes.has(normalizeWatchlistSymbol(fund.fund_code)))
+        .slice(0, 8);
     const visibleWatchlist = watchlistItems.slice(0, 5).map((item) => ({
         item,
-        row: item.kind === 'stock' ? rowBySymbol.get(normalizeWatchlistSymbol(item.symbol)) || null : null,
+                             row: item.kind === 'stock' ? rowBySymbol.get(normalizeWatchlistSymbol(item.symbol)) || null : null,
     }));
     const sparkline = mobileSparklinePath(index?.line_points || []);
 
@@ -586,9 +634,12 @@ function MobileMarketOverview({
                             const symbol = normalizeWatchlistSymbol(item.symbol);
                             const itemKey = `${item.kind}:${symbol}`;
                             const fundRow = item.kind === 'fund' ? fundRows[symbol] : null;
-                            const price = row?.price ?? fundRow?.price ?? null;
-                            const changePct = row?.change_pct ?? fundRow?.daily_return ?? null;
-                            const asOf = row?.price_as_of ?? fundRow?.as_of ?? null;
+                            const quoteRow = item.kind === 'stock' ? quoteRowBySymbol.get(symbol) : null;
+                            const cardRow = item.kind === 'stock' ? cardBySymbol.get(symbol) : null;
+                            const indexRow = item.kind === 'stock' ? indexRowBySymbol.get(symbol) : null;
+                            const price = quoteRow?.price ?? cardRow?.price ?? indexRow?.price ?? row?.price ?? fundRow?.price ?? null;
+                            const changePct = quoteRow?.change_pct ?? cardRow?.change_pct ?? indexRow?.change_pct ?? row?.change_pct ?? fundRow?.daily_return ?? null;
+                            const asOf = quoteRow?.price_as_of ?? cardRow?.as_of ?? row?.price_as_of ?? fundRow?.as_of ?? null;
                             return (
                                 <div
                                     key={itemKey}
@@ -604,9 +655,9 @@ function MobileMarketOverview({
                                     >
                                         <SymbolLogo
                                             symbol={symbol}
-                                            name={item.label || row?.company || fundRow?.name || symbol}
+                                            name={item.label || quoteRow?.company || cardRow?.company || indexRow?.symbol || row?.company || fundRow?.name || symbol}
                                             kind={item.kind}
-                                            logoUrl={row?.logo_url}
+                                            logoUrl={quoteRow?.logo_url ?? cardRow?.logo_url ?? indexRow?.logo_url ?? row?.logo_url}
                                             size="sm"
                                         />
                                         <span className="mobile-market-watchlist-symbol">
@@ -652,8 +703,8 @@ function MobileMarketOverview({
                                 autoFocus
                                 value={searchTerm}
                                 onChange={(event) => setSearchTerm(event.target.value)}
-                                placeholder="Hisse kodu ara..."
-                                aria-label="İzleme listesine eklenecek hisseyi ara"
+                                placeholder="Hisse veya fon ara..."
+                                aria-label="İzleme listesine eklenecek hisse veya fonu ara"
                             />
                             <button
                                 type="button"
@@ -669,29 +720,53 @@ function MobileMarketOverview({
                         </div>
                         {searchTerm.trim() && (
                             <div className="mobile-market-watchlist-search-results">
-                                {companySearchLoading && searchResults.length === 0 ? (
-                                    <span className="mobile-market-watchlist-search-empty">Hisseler yükleniyor...</span>
-                                ) : searchResults.length > 0 ? searchResults.map((result) => (
-                                    <button
-                                        key={result.symbol}
-                                        type="button"
-                                        onClick={() => {
-                                            onAddStock(result.symbol);
-                                            setSearchTerm('');
-                                            setSearchOpen(false);
-                                        }}
-                                    >
-                                        <SymbolLogo
-                                            symbol={result.symbol}
-                                            name={result.name}
-                                            kind="stock"
-                                            logoUrl={result.logoUrl}
-                                            size="sm"
-                                        />
-                                        <strong>{result.symbol}</strong>
-                                        <span>Ekle</span>
-                                    </button>
-                                )) : (
+                                {companySearchLoading && fundSearchLoading && searchResults.length === 0 && fundSearchResults.length === 0 ? (
+                                    <span className="mobile-market-watchlist-search-empty">Varlıklar aranıyor...</span>
+                                ) : searchResults.length > 0 || fundSearchResults.length > 0 ? (
+                                    <>
+                                        {searchResults.map((result) => (
+                                            <button
+                                                key={`stock-${result.symbol}`}
+                                                type="button"
+                                                onClick={() => {
+                                                    onAddStock(result.symbol);
+                                                    setSearchTerm('');
+                                                    setSearchOpen(false);
+                                                }}
+                                            >
+                                                <SymbolLogo
+                                                    symbol={result.symbol}
+                                                    name={result.name}
+                                                    kind="stock"
+                                                    logoUrl={result.logoUrl}
+                                                    size="sm"
+                                                />
+                                                <strong>{result.symbol}</strong>
+                                                <span>Hisse · Ekle</span>
+                                            </button>
+                                        ))}
+                                        {fundSearchResults.map((fund) => (
+                                            <button
+                                                key={`fund-${fund.fund_code}`}
+                                                type="button"
+                                                onClick={() => {
+                                                    onAddFund(fund);
+                                                    setSearchTerm('');
+                                                    setSearchOpen(false);
+                                                }}
+                                            >
+                                                <SymbolLogo
+                                                    symbol={fund.fund_code}
+                                                    name={fund.name}
+                                                    kind="fund"
+                                                    size="sm"
+                                                />
+                                                <strong>{fund.fund_code}</strong>
+                                                <span>Fon · Ekle</span>
+                                            </button>
+                                        ))}
+                                    </>
+                                ) : (
                                     <span className="mobile-market-watchlist-search-empty">Sonuç bulunamadı.</span>
                                 )}
                             </div>
@@ -2435,7 +2510,7 @@ export default function MarketsView({
     ));
     const [mobileMarketPanelOpen, setMobileMarketPanelOpen] = useState(false);
     const [mobileIndexDetail, setMobileIndexDetail] = useState<MarketIndexDetailResponse | null>(null);
-    const [mobileWatchlistFundRows, setMobileWatchlistFundRows] = useState<Record<string, FundDetail | null>>({});
+    const [mobileWatchlistFundRows, setMobileWatchlistFundRows] = useState<Record<string, FundSummary | null>>({});
     const [selectedIndex, setSelectedIndex] = useState<MarketIndexCode | null>(routeSelectedIndex);
     const [stockIndex, setStockIndex] = useState<MarketStockIndex>(routeStockIndex);
     const [returnMode, setReturnMode] = useState<StockReturnMode>(routeReturnMode);
@@ -3377,12 +3452,18 @@ export default function MarketsView({
                         <MobileMarketOverview
                             index={mobileIndexDetail}
                             rows={market.rows}
+                            stockQuoteRows={stocks?.rows ?? []}
+                            stockCardItems={stockCards?.items ?? []}
                             watchlistItems={watchlist.items}
                             fundRows={mobileWatchlistFundRows}
                             onSelectTicker={onCompanyClick}
                             onSelectIndex={handleSelectIndex}
                             onOpenFund={onOpenFund}
                             onAddStock={(symbol) => watchlist.addItem({ kind: 'stock', symbol })}
+                            onAddFund={(fund) => {
+                                setMobileWatchlistFundRows((current) => ({ ...current, [fund.fund_code]: fund }));
+                                watchlist.addItem({ kind: 'fund', symbol: fund.fund_code, label: fund.name });
+                            }}
                             onRemoveWatchlistItem={(item) => watchlist.removeItem(item.kind, item.symbol)}
                         />
                         {!isMobileViewport && (
@@ -4121,6 +4202,8 @@ export default function MarketsView({
                 {activeSection === 'markets' && (
                     <MarketWatchRail
                         xu100Rows={market?.rows ?? []}
+                        stockQuoteRows={stocks?.rows ?? []}
+                        stockCardItems={stockCards?.items ?? []}
                         onSelectTicker={onCompanyClick}
                         onSelectFund={(fundCode) => onOpenFund?.(fundCode)}
                         mobilePanelOpen={isMobileViewport ? mobileMarketPanelOpen : undefined}
