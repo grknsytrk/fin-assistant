@@ -5581,7 +5581,7 @@ export default function FundsPage({
         };
     }, [fundCode, activeTab, yieldSummary?.fund_code]);
 
-    useBackgroundRefresh(Boolean(funds?.refresh_pending), async (signal) => {
+    useBackgroundRefresh(Boolean(funds?.refresh_pending || funds?.refresh_job?.status === 'queued' || funds?.refresh_job?.status === 'running'), async (signal) => {
         const payload = await apiClient.funds({ signal });
         if (signal.aborted) return;
         setFunds(payload);
@@ -6078,6 +6078,8 @@ export default function FundsPage({
                                             ? `Fon listesi yenilenemedi: ${refreshError}`
                                             : refreshing
                                               ? 'Fon listesi yeniden yükleniyor.'
+                                              : funds?.refresh_pending
+                                                ? 'Fon kataloğu arka planda otomatik yenileniyor.'
                                               : funds?.degraded
                                             ? 'Fon snapshot cache boş veya kullanılamıyor.'
                                             : funds?.stale && funds?.source_metadata?.snapshot_as_of && funds?.source_metadata?.price_history_as_of
