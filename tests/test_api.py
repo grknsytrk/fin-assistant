@@ -3976,6 +3976,26 @@ def test_market_flow_category_filter_applies_to_public_feed(monkeypatch: pytest.
     assert cats == {"ozel_durum"}
 
 
+def test_market_flow_empty_persisted_category_does_not_return_unfiltered_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_flow_sources(
+        monkeypatch,
+        public=[
+            _flow_item(idx="1", category="finansal_rapor", published_at="2026-04-19T12:00:00"),
+        ],
+    )
+    monkeypatch.setattr(api_module._kap_flow_store, "store_is_configured", lambda: True)
+
+    response = TestClient(app).get("/market/flow", params={"limit": 10, "category": "kar_payi"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"] == []
+    assert payload["has_more"] is False
+    assert payload["next_cursor"] is None
+
+
 def test_market_flow_rejects_two_pagination_directions() -> None:
     response = TestClient(app).get(
         "/market/flow",

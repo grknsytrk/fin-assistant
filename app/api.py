@@ -4862,6 +4862,20 @@ def _market_flow_payload(
             )
             if persisted is not None:
                 return persisted
+            if category:
+                empty_category_payload = dict(seed_payload)
+                empty_category_payload.update(
+                    {
+                        "items": [],
+                        "has_more": False,
+                        "next_cursor": None,
+                        "latest_cursor": None,
+                        "cache_status": "miss",
+                        "stale": False,
+                        "refresh_pending": False,
+                    }
+                )
+                return empty_category_payload
         return seed_payload
     return _legacy_market_flow_payload(limit=limit, category=category, force_refresh=force_refresh)
 
