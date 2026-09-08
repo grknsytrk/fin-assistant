@@ -14,6 +14,7 @@ import type {
     MarketWatchItem,
 } from '../api/types';
 import { normalizeWatchlistSymbol, useWatchlist, watchlistItemKey, type WatchlistItem } from '../hooks/useWatchlist';
+import MarketFlowPanel from './MarketFlowPanel';
 import './MarketWatchRail.css';
 
 type RailTab = 'global' | 'commodities' | 'fx' | 'xutum' | 'xu100' | 'xu030';
@@ -672,7 +673,7 @@ export default function MarketWatchRail({
                 <div className="mwr-head">
                     <div className="mwr-head-row">
                         <h2 className="mwr-panel-title">
-                            {activeTool === 'watchlist' ? 'İzleme listesi' : 'Piyasalar'}
+                            {activeTool === 'watchlist' ? 'İzleme listesi' : activeTool === 'news' ? 'Akış' : 'Piyasalar'}
                         </h2>
                         {activeTool === 'watchlist' && watchlistItems.length > 0 && (
                             <button
@@ -704,7 +705,9 @@ export default function MarketWatchRail({
                     )}
                 </div>
 
-                {activeTool === 'watchlist' ? (
+                {activeTool === 'news' ? (
+                    <MarketFlowPanel onSelectTicker={onSelectTicker} />
+                ) : activeTool === 'watchlist' ? (
                     <div className="mwr-watchlist">
                         <div className="mwr-watchlist-search">
                             <Search size={16} aria-hidden="true" />
@@ -1012,10 +1015,10 @@ export default function MarketWatchRail({
                     className={`mwr-dock-button${activeTool === 'news' ? ' is-active' : ''}`}
                     onClick={() => {
                         setActiveTool('news');
-                        updateCollapsed(true); // Close watchlist if we move to another tool
+                        updateCollapsed(false);
                     }}
-                    aria-label="Haber Akışı"
-                    title="Haber Akışı"
+                    aria-label="Akış"
+                    title="Akış"
                 >
                     <FileText size={18} aria-hidden="true" />
                 </button>

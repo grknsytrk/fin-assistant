@@ -3976,6 +3976,36 @@ def test_market_flow_category_filter_applies_to_public_feed(monkeypatch: pytest.
     assert cats == {"ozel_durum"}
 
 
+def test_parse_kap_public_result_page_maps_related_symbols() -> None:
+    page = """
+    <table><tbody>
+      <tr id="notification1">
+        <td><input id="1660456"/><label>checkbox</label></td>
+        <td>1</td>
+        <td><div>Bugün</div><div>18:51</div></td>
+        <td>TERA, TRA</td>
+        <td>TERA YATIRIM MENKUL DEĞERLER A.Ş.<span>/ NETGL</span></td>
+        <td>DG</td>
+        <td>Fiyat Tespit Raporu</td>
+        <td>Net Global raporu</td>
+        <td>-</td>
+      </tr>
+    </tbody></table>
+    """
+
+    rows = api_module._parse_kap_public_result_page(page, 10)
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == "kap-1660456"
+    assert rows[0]["symbol"] == "NETGL"
+    assert rows[0]["stock_codes"] == ["TERA", "TRA"]
+    assert rows[0]["related_symbols"] == ["NETGL"]
+    assert rows[0]["source"] == "Diğer Bildirim"
+    assert rows[0]["category"] == "diger"
+    assert rows[0]["title"] == "Fiyat Tespit Raporu"
+    assert rows[0]["published_at"].endswith("18:51:00")
+
+
 def test_fetch_market_price_map_parses_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     html = """
     <table><tbody id="tableBody">

@@ -692,6 +692,7 @@ export interface MarketFlowItem {
   source: string;
   symbol: string;
   stock_codes?: string[];
+  related_symbols?: string[];
   title: string;
   subject?: string;
   published_at: string;

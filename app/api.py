@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import html
+from html.parser import HTMLParser
 import json
 import logging
 import math
@@ -3542,6 +3543,7 @@ def _parse_kap_publish_date(raw: Any) -> Optional[datetime]:
 # Map KAP disclosureType codes -> Turkish UI labels for the feed.
 _KAP_TYPE_LABELS: Dict[str, str] = {
     "ODA": "Özel Durum",
+    "ÖDA": "Özel Durum",
     "FR": "Finansal Rapor",
     "FR_Consolidated": "Finansal Rapor",
     "FR_Solo": "Finansal Rapor",
@@ -3553,6 +3555,8 @@ _KAP_TYPE_LABELS: Dict[str, str] = {
     "GR": "Geri Alım",
     "SR": "Sürdürülebilirlik",
     "CG": "Kurumsal Yönetim",
+    "DG": "Diğer Bildirim",
+    "DKB": "Diğer Bildirim",
 }
 
 
@@ -3561,6 +3565,8 @@ def _kap_category(disclosure_type: str, subject: str) -> str:
     subj = (subject or "").lower()
     if dt.startswith("FR"):
         return "finansal_rapor"
+    if dt in {"ODA", "ÖDA"}:
+        return "ozel_durum"
     if "kar pay" in subj or dt == "KBR":
         return "kar_payi"
     if "geri alma" in subj or "geri alım" in subj or dt == "GR":
@@ -3573,6 +3579,8 @@ def _kap_category(disclosure_type: str, subject: str) -> str:
         return "surdurulebilirlik"
     if "faaliyet rapor" in subj or dt == "FDR":
         return "faaliyet_raporu"
+    if dt in {"DG", "DKB", "DK"}:
+        return "diger"
     return "bildirim"
 
 
@@ -3749,115 +3757,262 @@ def _fetch_kap_disclosures_via_url(
         return None, error_text
 
 
-def _fetch_kap_public_disclosures(max_items: int = 80) -> List[Dict[str, Any]]:
-    """Fetch recent disclosures from KAP's public (UI-facing) endpoint.
+class _KapDisclosureTableParser(HTMLParser):
+    """Parse notification rows rendered by KAP's public result page."""
 
-    This endpoint does not require authentication; it backs the KAP.org.tr
-    "Bildirim Sorgu" screen. Returns a list in publishedAt-descending order.
-    In this environment KAP's public disclosure feed may be WAF-protected.
-    We probe the fastest-blocking variant first so repeated refreshes do not
-    spend ~15-20 seconds timing out before falling back.
-    """
-    attempts = [
-        (
-            "https://www.kap.org.tr/tr/api/disclosures?main-category=all&sub-category=all&memberType=IGS",
-            10.0,
-            True,
-        ),
-        ("https://www.kap.org.tr/tr/api/disclosures", 6.0, False),
-        ("https://www.kap.org.tr/tr/api/disclosures", 9.0, True),
-    ]
-    payload: Any = None
-    last_error: Optional[str] = None
-    last_source: Optional[str] = None
-    for idx, (url, timeout, force_bootstrap) in enumerate(attempts):
-        opener = _kap_opener(force=force_bootstrap)
-        payload, last_error = _fetch_kap_disclosures_via_url(url, timeout, opener)
-        last_source = url
-        if isinstance(payload, list):
-            last_error = None
-            break
-        if last_error == "HTTPError 666":
-            # region agent log
-            _debug_log(
-                "H6",
-                "app/api.py:1368",
-                "KAP public feed blocked, skipping slower retries",
-                {
-                    "url": url,
-                    "attempt_index": idx,
-                    "error": last_error,
-                },
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: List[Dict[str, Any]] = []
+        self._row: Optional[Dict[str, Any]] = None
+        self._cell_index: Optional[int] = None
+
+    def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
+        if tag == "tr" and self._row is None:
+            attr_map = dict(attrs)
+            row_id = str(attr_map.get("id") or "")
+            if re.fullmatch(r"notification\d+", row_id):
+                self._row = {"id": row_id, "disclosure_id": None, "cells": []}
+                self._cell_index = None
+            return
+
+        if self._row is None:
+            return
+        if tag == "td":
+            cells = self._row["cells"]
+            cells.append([])
+            self._cell_index = len(cells) - 1
+        elif tag == "input" and self._cell_index == 0:
+            attr_map = dict(attrs)
+            input_id = str(attr_map.get("id") or "").strip()
+            if input_id:
+                self._row["disclosure_id"] = input_id
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._row is None:
+            return
+        if tag == "td":
+            self._cell_index = None
+        elif tag == "tr":
+            self.rows.append(self._row)
+            self._row = None
+            self._cell_index = None
+
+    def handle_data(self, data: str) -> None:
+        if self._row is None or self._cell_index is None:
+            return
+        self._row["cells"][self._cell_index].append(data)
+
+
+_KAP_TABLE_MONTHS = {
+    "ocak": 1,
+    "şubat": 2,
+    "mart": 3,
+    "nisan": 4,
+    "mayıs": 5,
+    "haziran": 6,
+    "temmuz": 7,
+    "ağustos": 8,
+    "eylül": 9,
+    "ekim": 10,
+    "kasım": 11,
+    "aralık": 12,
+}
+
+
+def _parse_kap_table_datetime(raw: str) -> Optional[datetime]:
+    """Parse the Turkish date/time text used in KAP notification cells."""
+    text = " ".join(str(raw or "").split())
+    if not text:
+        return None
+    time_match = re.search(r"\b(\d{1,2}):(\d{2})\b", text)
+    hour = int(time_match.group(1)) if time_match else 0
+    minute = int(time_match.group(2)) if time_match else 0
+
+    relative_day: Optional[int] = None
+    lowered = text.casefold()
+    if "bugün" in lowered:
+        relative_day = 0
+    elif "dün" in lowered:
+        relative_day = -1
+    if relative_day is not None:
+        base = datetime.now() + timedelta(days=relative_day)
+        return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    month_pattern = (
+        r"\b(\d{1,2})\s+(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|"
+        r"ağustos|eylül|ekim|kasım|aralık)\s+(\d{4})\b"
+    )
+    date_match = re.search(month_pattern, lowered)
+    if date_match:
+        try:
+            return datetime(
+                int(date_match.group(3)),
+                _KAP_TABLE_MONTHS[date_match.group(2)],
+                int(date_match.group(1)),
+                hour,
+                minute,
             )
-            # endregion
-            break
-        if idx < len(attempts) - 1:
-            time.sleep(0.35)
+        except ValueError:
+            return None
 
-    _KAP_PUBLIC_LAST_ERROR["message"] = last_error
-    _KAP_PUBLIC_LAST_ERROR["ts"] = time.time()
-    _KAP_PUBLIC_LAST_ERROR["source"] = last_source
+    return _parse_kap_publish_date(text)
 
-    if not isinstance(payload, list):
+
+def _parse_kap_table_codes(raw: str) -> List[str]:
+    """Extract ticker/fund codes while ignoring KAP's '(+N)' marker."""
+    values: List[str] = []
+    for token in re.split(r"[,;\s]+", str(raw or "").strip()):
+        normalized = token.strip().upper()
+        if not normalized or normalized == "-" or re.fullmatch(r"\(\+\d+\)", normalized):
+            continue
+        if normalized not in values:
+            values.append(normalized)
+    return values
+
+
+def _parse_kap_public_result_page(page: str, max_items: int) -> List[Dict[str, Any]]:
+    parser = _KapDisclosureTableParser()
+    try:
+        parser.feed(page)
+        parser.close()
+    except Exception:
         return []
 
     results: List[Dict[str, Any]] = []
-    for node in payload:
-        if not isinstance(node, dict):
-            continue
-        basic = node.get("basic") if isinstance(node.get("basic"), dict) else node
-        if not isinstance(basic, dict):
-            continue
-        disclosure_index = basic.get("disclosureIndex")
-        publish_raw = basic.get("publishDate") or basic.get("submittedDate") or basic.get("disclosureClass")
-        parsed_dt = _parse_kap_publish_date(publish_raw)
-        if parsed_dt is None:
-            continue
-        stock_codes_raw = str(basic.get("stockCodes") or basic.get("stockCode") or "").strip()
-        stock_codes = [s.strip().upper() for s in stock_codes_raw.replace(";", ",").split(",") if s.strip()]
-        symbol = stock_codes[0] if stock_codes else ""
-        if not symbol:
-            # Non-listed disclosures (e.g. regulator notes) — skip in ticker-centric feed
-            continue
-
-        title_candidates = [
-            basic.get("title"),
-            basic.get("summary"),
-            (basic.get("kapTitle") or {}).get("tr") if isinstance(basic.get("kapTitle"), dict) else None,
-            basic.get("subject"),
+    for row in parser.rows:
+        cells = [
+            " ".join(" ".join(str(part) for part in cell).split())
+            for cell in row.get("cells") or []
         ]
-        title = ""
-        for candidate in title_candidates:
-            if candidate and str(candidate).strip():
-                title = str(candidate).strip()
-                break
-        if not title:
-            title = "KAP Bildirimi"
+        if len(cells) < 8:
+            continue
+        published_dt = _parse_kap_table_datetime(cells[2])
+        if published_dt is None:
+            continue
 
-        subject = str(basic.get("subject") or "").strip()
-        disclosure_type = str(basic.get("disclosureType") or basic.get("type") or "").strip()
+        member_codes = _parse_kap_table_codes(cells[3])
+        member_cell = cells[4] if len(cells) > 4 else ""
+        related_tail = member_cell.split("/", 1)[1] if "/" in member_cell else ""
+        related_codes = _parse_kap_table_codes(related_tail)
+        if not related_codes and len(cells) > 8:
+            related_codes = _parse_kap_table_codes(cells[8])
+        display_codes = member_codes or related_codes
+        symbol = related_codes[0] if related_codes else (display_codes[0] if display_codes else "")
+        if not symbol:
+            continue
 
-        results.append(
-            {
-                "id": f"{symbol}-{disclosure_index or parsed_dt.isoformat()}",
-                "source": _kap_source_label(disclosure_type),
-                "symbol": symbol,
-                "stock_codes": stock_codes,
-                "title": title,
-                "subject": subject,
-                "published_at": parsed_dt.isoformat(),
-                "category": _kap_category(disclosure_type, subject),
-                "kap_url": (
-                    f"https://www.kap.org.tr/tr/Bildirim/{disclosure_index}"
-                    if disclosure_index is not None
-                    else None
-                ),
-            }
-        )
-        if len(results) >= max_items:
+        disclosure_id = str(row.get("disclosure_id") or "").strip()
+        disclosure_type = cells[5].strip()
+        subject = cells[6].strip()
+        summary = cells[7].strip()
+        title = subject or summary or "KAP Bildirimi"
+        item: Dict[str, Any] = {
+            "id": f"kap-{disclosure_id or row.get('id') or published_dt.isoformat()}",
+            "source": _kap_source_label(disclosure_type),
+            "symbol": symbol,
+            "stock_codes": display_codes,
+            "related_symbols": related_codes,
+            "title": title,
+            "subject": subject,
+            "published_at": published_dt.isoformat(),
+            "category": _kap_category(disclosure_type, subject),
+            "kap_url": (
+                f"https://www.kap.org.tr/tr/Bildirim/{disclosure_id}"
+                if disclosure_id
+                else None
+            ),
+        }
+        results.append(item)
+        if len(results) >= max(1, int(max_items)):
             break
-
     return results
+
+
+def _fetch_kap_result_page_via_url(
+    url: str,
+    timeout: float,
+    opener: Any,
+) -> tuple[Optional[str], Optional[str]]:
+    """Fetch KAP's browser-rendered disclosure result page."""
+    import urllib.error
+    import urllib.request
+
+    headers = {
+        **_KAP_DEFAULT_HEADERS,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.kap.org.tr/tr/bildirim-sorgu",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    started = time.time()
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with opener.open(req, timeout=timeout) as resp:
+            page = resp.read().decode("utf-8", errors="ignore")
+        _debug_log(
+            "H2",
+            "app/api.py:_fetch_kap_result_page_via_url",
+            "KAP result page fetched",
+            {
+                "url": url,
+                "timeout_s": timeout,
+                "ok": True,
+                "elapsed_ms": int((time.time() - started) * 1000),
+                "bytes": len(page),
+            },
+        )
+        return page, None
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTPError {exc.code}"
+    except (urllib.error.URLError, TimeoutError, Exception) as exc:  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _fetch_kap_public_disclosures(max_items: int = 80) -> List[Dict[str, Any]]:
+    """Fetch recent company and fund disclosures from KAP's public UI page.
+
+    KAP's public JSON list endpoint is WAF-protected for this deployment, but
+    the same data is rendered by the official result page. We read the first
+    page for both traded companies and funds, then merge by publication time.
+    The licensed KAP REST API remains the preferred option when credentials
+    are configured.
+    """
+    requested = max(1, min(int(max_items), _VYK_DEFAULT_DETAIL_BUDGET_MAX))
+    page_urls = [
+        "https://www.kap.org.tr/tr/bildirim-sorgu-sonuc?srcbar=Y&cmp=Y&cat=1&slf=ALL",
+        "https://www.kap.org.tr/tr/bildirim-sorgu-sonuc?srcbar=Y&cmp=N&cat=6&slf=ALL",
+    ]
+    last_error: Optional[str] = None
+    results: List[Dict[str, Any]] = []
+    opener = _kap_opener()
+    successful_pages = 0
+    for url in page_urls:
+        page, error = _fetch_kap_result_page_via_url(url, 12.0, opener)
+        if page:
+            successful_pages += 1
+            results.extend(_parse_kap_public_result_page(page, requested))
+        elif error:
+            last_error = error
+
+    if successful_pages:
+        last_error = None
+
+    results.sort(key=lambda row: row.get("published_at") or "", reverse=True)
+    deduped: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in results:
+        row_id = str(row.get("id") or "")
+        if row_id and row_id in seen:
+            continue
+        if row_id:
+            seen.add(row_id)
+        deduped.append(row)
+        if len(deduped) >= requested:
+            break
+    _KAP_PUBLIC_LAST_ERROR["message"] = last_error
+    _KAP_PUBLIC_LAST_ERROR["ts"] = time.time()
+    _KAP_PUBLIC_LAST_ERROR["source"] = page_urls[0]
+    return deduped
 
 
 def _local_flow_items_from_cache() -> List[Dict[str, Any]]:
