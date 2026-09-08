@@ -3598,6 +3598,8 @@ def _kap_source_label(disclosure_type: str) -> str:
 _KAP_PUBLIC_LAST_ERROR: Dict[str, Any] = {"message": None, "ts": 0.0, "source": None}
 _KAP_SESSION: Dict[str, Any] = {"opener": None, "bootstrapped_at": 0.0}
 _KAP_SESSION_TTL = 15 * 60  # 15 dakika session yeniden kurulur
+_KAP_PUBLIC_SUBJECT_CACHE: Dict[str, Any] = {"items": None, "ts": 0.0}
+_KAP_PUBLIC_SUBJECT_CACHE_TTL = 6 * 60 * 60
 
 
 _KAP_DEFAULT_HEADERS: Dict[str, str] = {
@@ -3975,34 +3977,130 @@ def _fetch_kap_result_page_via_url(
         return None, f"{type(exc).__name__}: {exc}"
 
 
-def _fetch_kap_public_disclosures(max_items: int = 80) -> List[Dict[str, Any]]:
-    """Fetch recent company and fund disclosures from KAP's public UI page.
+def _fetch_kap_disclosures_via_post(
+    url: str,
+    payload: Dict[str, Any],
+    timeout: float,
+    opener: Any,
+) -> tuple[Any, Optional[str]]:
+    """POST one criteria query to KAP's public disclosure API."""
+    import urllib.error
+    import urllib.request
 
-    KAP's public JSON list endpoint is WAF-protected for this deployment, but
-    the same data is rendered by the official result page. We read the first
-    page for both traded companies and funds, then merge by publication time.
-    The licensed KAP REST API remains the preferred option when credentials
-    are configured.
-    """
-    requested = max(1, min(int(max_items), _VYK_DEFAULT_DETAIL_BUDGET_MAX))
-    page_urls = [
-        "https://www.kap.org.tr/tr/bildirim-sorgu-sonuc?srcbar=Y&cmp=Y&cat=1&slf=ALL",
-        "https://www.kap.org.tr/tr/bildirim-sorgu-sonuc?srcbar=Y&cmp=N&cat=6&slf=ALL",
+    headers = {
+        **_KAP_DEFAULT_HEADERS,
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://www.kap.org.tr",
+        "Referer": "https://www.kap.org.tr/tr/bildirim-sorgu",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    try:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with opener.open(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="ignore")
+        return json.loads(raw), None
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTPError {exc.code}"
+    except (urllib.error.URLError, TimeoutError, ValueError, Exception) as exc:  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _fetch_kap_public_subjects(opener: Any) -> List[Dict[str, Any]]:
+    """Fetch and cache KAP's subject catalog used for category backfills."""
+    now = time.time()
+    cached_items = _KAP_PUBLIC_SUBJECT_CACHE.get("items")
+    if (
+        isinstance(cached_items, list)
+        and now - float(_KAP_PUBLIC_SUBJECT_CACHE.get("ts") or 0.0) < _KAP_PUBLIC_SUBJECT_CACHE_TTL
+    ):
+        return list(cached_items)
+
+    payload, _error = _fetch_kap_disclosures_via_url(
+        "https://www.kap.org.tr/tr/api/disclosure/subjects/ALL/Y",
+        12.0,
+        opener,
+    )
+    if not isinstance(payload, list):
+        return []
+    subjects = [
+        {
+            "subject": str(row.get("subject") or "").strip(),
+            "subjectOid": str(row.get("subjectOid") or "").strip(),
+            "disclosureClass": str(row.get("disclosureClass") or "").strip().upper(),
+        }
+        for row in payload
+        if isinstance(row, dict) and row.get("subjectOid")
     ]
-    last_error: Optional[str] = None
-    results: List[Dict[str, Any]] = []
-    opener = _kap_opener()
-    successful_pages = 0
-    for url in page_urls:
-        page, error = _fetch_kap_result_page_via_url(url, 12.0, opener)
-        if page:
-            successful_pages += 1
-            results.extend(_parse_kap_public_result_page(page, requested))
-        elif error:
-            last_error = error
+    _KAP_PUBLIC_SUBJECT_CACHE["items"] = subjects
+    _KAP_PUBLIC_SUBJECT_CACHE["ts"] = now
+    return list(subjects)
 
-    if successful_pages:
-        last_error = None
+
+def _parse_kap_api_codes(raw: Any) -> List[str]:
+    if isinstance(raw, (list, tuple, set)):
+        raw = " ".join(str(value) for value in raw)
+    return _parse_kap_table_codes(str(raw or ""))
+
+
+def _kap_category_source_label(category: str, disclosure_type: str) -> str:
+    if category == "finansal_rapor":
+        return "Finansal Rapor"
+    if category == "kar_payi":
+        return "Kâr Payı"
+    if category == "genel_kurul":
+        return "Genel Kurul"
+    return _kap_source_label(disclosure_type)
+
+
+def _parse_kap_api_disclosures(payload: Any, max_items: int) -> List[Dict[str, Any]]:
+    """Normalize rows returned by KAP's criteria API into flow items."""
+    if not isinstance(payload, list):
+        return []
+
+    results: List[Dict[str, Any]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        published_dt = _parse_kap_publish_date(row.get("publishDate"))
+        disclosure_index = str(row.get("disclosureIndex") or "").strip()
+        if published_dt is None or not disclosure_index:
+            continue
+
+        stock_codes = _parse_kap_api_codes(row.get("stockCodes") or row.get("fundCode"))
+        related_codes = _parse_kap_api_codes(row.get("relatedStocks"))
+        display_codes = stock_codes or related_codes
+        symbol = related_codes[0] if related_codes else (display_codes[0] if display_codes else "")
+        if not symbol:
+            continue
+
+        disclosure_type = str(row.get("disclosureType") or row.get("disclosureClass") or "").strip()
+        subject = str(row.get("subject") or "").strip()
+        summary = str(row.get("summary") or "").strip()
+        category = _kap_category(disclosure_type, subject, summary)
+        results.append(
+            {
+                "id": f"kap-{disclosure_index}",
+                "disclosure_id": disclosure_index,
+                "source": _kap_category_source_label(category, disclosure_type),
+                "symbol": symbol,
+                "stock_codes": display_codes,
+                "related_symbols": related_codes,
+                "title": subject or summary or "KAP Bildirimi",
+                "subject": subject,
+                "summary": summary,
+                "published_at": published_dt.isoformat(),
+                "category": category,
+                "kap_url": f"https://www.kap.org.tr/tr/Bildirim/{disclosure_index}",
+            }
+        )
 
     results.sort(key=lambda row: row.get("published_at") or "", reverse=True)
     deduped: List[Dict[str, Any]] = []
@@ -4014,8 +4112,118 @@ def _fetch_kap_public_disclosures(max_items: int = 80) -> List[Dict[str, Any]]:
         if row_id:
             seen.add(row_id)
         deduped.append(row)
-        if len(deduped) >= requested:
+        if len(deduped) >= max(1, int(max_items)):
             break
+    return deduped
+
+
+def _fetch_kap_category_backfill(opener: Any) -> List[Dict[str, Any]]:
+    """Fetch a small recent history window for sparse flow categories."""
+    topics = _fetch_kap_public_subjects(opener)
+    if not topics:
+        return []
+
+    topic_groups = {
+        "genel_kurul": [
+            row["subjectOid"]
+            for row in topics
+            if "genel kurul" in row["subject"].casefold()
+        ],
+        "kar_payi": [
+            row["subjectOid"]
+            for row in topics
+            if "kar pay" in row["subject"].casefold()
+        ],
+        "finansal_rapor": [
+            row["subjectOid"]
+            for row in topics
+            if row["disclosureClass"] == "FR"
+        ],
+    }
+    start_date = date.today() - timedelta(days=_KAP_FLOW_CATEGORY_BACKFILL_DAYS)
+    end_date = date.today()
+    base_payload: Dict[str, Any] = {
+        "fromDate": start_date.isoformat(),
+        "toDate": end_date.isoformat(),
+        "memberType": "IGS",
+        "mkkMemberOidList": [],
+        "inactiveMkkMemberOidList": [],
+        "disclosureClass": "",
+        "isLate": "",
+        "mainSector": "",
+        "sector": "",
+        "subSector": "",
+        "marketOid": "",
+        "index": "",
+        "bdkReview": "",
+        "bdkMemberOidList": [],
+        "year": "",
+        "term": "",
+        "ruleType": "",
+        "period": "",
+        "fromSrc": False,
+        "srcCategory": "",
+        "disclosureIndexList": [],
+    }
+    endpoint = "https://www.kap.org.tr/tr/api/disclosure/members/byCriteria"
+    results: List[Dict[str, Any]] = []
+    for expected_category, subject_oids in topic_groups.items():
+        if not subject_oids:
+            continue
+        query = dict(base_payload)
+        query["subjectList"] = subject_oids
+        payload, _error = _fetch_kap_disclosures_via_post(endpoint, query, 20.0, opener)
+        parsed = _parse_kap_api_disclosures(payload, _KAP_FLOW_CATEGORY_TARGET * 3)
+        category_rows = [row for row in parsed if row.get("category") == expected_category]
+        results.extend(category_rows[:_KAP_FLOW_CATEGORY_TARGET])
+    return results
+
+
+def _fetch_kap_public_disclosures(max_items: int = 80) -> List[Dict[str, Any]]:
+    """Fetch recent company and fund disclosures from KAP's public UI page.
+
+    KAP's public JSON list endpoint is WAF-protected for this deployment, but
+    the same data is rendered by the official result page. We read the first
+    page for both traded companies and funds, then merge by publication time.
+    The public criteria API also supplies a bounded recent backfill for sparse
+    category filters, so their latest 50 rows are not lost behind the general
+    page window.
+    The licensed KAP REST API remains the preferred option when credentials
+    are configured.
+    """
+    requested = max(1, min(int(max_items), _VYK_DEFAULT_DETAIL_BUDGET_MAX))
+    page_urls = [
+        "https://www.kap.org.tr/tr/bildirim-sorgu-sonuc?srcbar=Y&cmp=Y&cat=1&slf=ALL",
+        "https://www.kap.org.tr/tr/bildirim-sorgu-sonuc?srcbar=Y&cmp=N&cat=6&slf=ALL",
+    ]
+    last_error: Optional[str] = None
+    page_results: List[Dict[str, Any]] = []
+    opener = _kap_opener()
+    successful_pages = 0
+    for url in page_urls:
+        page, error = _fetch_kap_result_page_via_url(url, 12.0, opener)
+        if page:
+            successful_pages += 1
+            page_results.extend(_parse_kap_public_result_page(page, requested))
+        elif error:
+            last_error = error
+
+    if successful_pages:
+        last_error = None
+
+    page_results.sort(key=lambda row: row.get("published_at") or "", reverse=True)
+    category_results = _fetch_kap_category_backfill(opener)
+    results = [*page_results[:requested], *category_results]
+    deduped: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in results:
+        row_id = str(row.get("id") or "")
+        if row_id and row_id in seen:
+            continue
+        if row_id:
+            seen.add(row_id)
+        deduped.append(row)
+    deduped.sort(key=lambda row: row.get("published_at") or "", reverse=True)
     _KAP_PUBLIC_LAST_ERROR["message"] = last_error
     _KAP_PUBLIC_LAST_ERROR["ts"] = time.time()
     _KAP_PUBLIC_LAST_ERROR["source"] = page_urls[0]
@@ -4110,6 +4318,12 @@ _VYK_DEFAULT_DETAIL_BUDGET = 25
 # 500'lük pencereye sıkışmamalı. Resmi KAP public sayfası yaklaşık 2.000 satır
 # döndürüyor; durable store da aynı sınırı zaten koruyor.
 _VYK_DEFAULT_DETAIL_BUDGET_MAX = 2_000
+# The category backfill adds at most 50 rows for each of the three sparse
+# categories to the general public-page window before durable persistence.
+_KAP_FLOW_CATEGORY_TARGET = 50
+_KAP_FLOW_CATEGORY_BACKFILL_DAYS = 90
+_KAP_FLOW_CATEGORY_BACKFILL_EXTRA = _KAP_FLOW_CATEGORY_TARGET * 3
+_KAP_FLOW_STORAGE_LIMIT = _VYK_DEFAULT_DETAIL_BUDGET_MAX + _KAP_FLOW_CATEGORY_BACKFILL_EXTRA
 _VYK_DETAIL_WORKERS = 8
 
 
@@ -4845,7 +5059,7 @@ def _market_flow_payload(
                 "refresh_pending": False,
             }
         seed_payload = _legacy_market_flow_payload(
-            limit=max(50, min(500, int(limit))),
+            limit=_KAP_FLOW_STORAGE_LIMIT,
             category=None,
             force_refresh=force_refresh,
         )
@@ -4991,7 +5205,7 @@ def _build_market_flow_payload(
         )
 
     data = {
-        "items": merged[:_VYK_DEFAULT_DETAIL_BUDGET_MAX],
+        "items": merged[:_KAP_FLOW_STORAGE_LIMIT],
         "source": source,
         "degraded_mode": degraded,
         "multi_category": multi_category_available,

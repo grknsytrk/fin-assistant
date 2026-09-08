@@ -24,7 +24,9 @@ FLOW_HEAD_CACHE_PREFIX = "api:kap:flow:head:v1:"
 FLOW_STATUS_CACHE_KEY = "api:kap:flow:status:v1"
 FLOW_REDIS_STORE_KEY = "api:kap:flow:events:v1"
 FLOW_HEAD_CACHE_TTL_SECONDS = int(os.getenv("RAGFIN_KAP_FLOW_HEAD_CACHE_TTL_SECONDS", "60"))
-FLOW_RETAINED_EVENTS = max(100, int(os.getenv("RAGFIN_KAP_FLOW_RETAINED_EVENTS", "2000")))
+# Keep the Redis fallback slightly wider than the 2,000-row public window so
+# category-specific backfill rows remain available during a Postgres outage.
+FLOW_RETAINED_EVENTS = max(100, int(os.getenv("RAGFIN_KAP_FLOW_RETAINED_EVENTS", "2500")))
 
 
 def _normalize_datetime(raw: Any) -> Optional[str]:

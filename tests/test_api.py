@@ -4085,6 +4085,47 @@ def test_parse_kap_public_result_page_classifies_oda_subjects() -> None:
     assert [row["category"] for row in rows] == ["genel_kurul", "kar_payi"]
 
 
+def test_parse_kap_api_disclosures_maps_criteria_rows() -> None:
+    rows = api_module._parse_kap_api_disclosures(
+        [
+            {
+                "publishDate": "09.09.2026 00:54:31",
+                "disclosureIndex": 1660531,
+                "disclosureType": "CA",
+                "subject": "Genel Kurul İşlemlerine İlişkin Bildirim",
+                "summary": "2025 Yılı Genel Kurul Toplantı Çağrısı",
+                "stockCodes": "UMPAS",
+            },
+            {
+                "publishDate": "08.09.2026 22:10:00",
+                "disclosureIndex": 1660500,
+                "disclosureType": "CA",
+                "subject": "Kar Payı Dağıtımı",
+                "summary": "Kâr payı dağıtım kararı",
+                "stockCodes": "THYAO",
+            },
+            {
+                "publishDate": "08.09.2026 21:10:00",
+                "disclosureIndex": 1660499,
+                "disclosureType": "FR",
+                "subject": "Finansal Rapor",
+                "summary": "2026/6 Aylık Finansal Rapor",
+                "stockCodes": "ASELS",
+            },
+        ],
+        50,
+    )
+
+    assert [row["category"] for row in rows] == [
+        "genel_kurul",
+        "kar_payi",
+        "finansal_rapor",
+    ]
+    assert rows[0]["id"] == "kap-1660531"
+    assert rows[0]["symbol"] == "UMPAS"
+    assert rows[0]["source"] == "Genel Kurul"
+
+
 def test_fetch_market_price_map_parses_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     html = """
     <table><tbody id="tableBody">
