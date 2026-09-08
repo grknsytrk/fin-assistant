@@ -55,7 +55,8 @@ jobs:
             status="$(echo "$response" | jq -r '.refresh_job.status // empty')"
             resolution="$(echo "$response" | jq -r '.refresh_job.resolution_status // empty')"
             as_of="$(echo "$response" | jq -r '.refresh_job.resolved_as_of // .refresh_job.as_of // empty')"
-            echo "refresh status: job_id=$JOB_ID status=$status resolution=${resolution:-unknown} as_of=${as_of:-unknown}"
+            snapshot_action="$(echo "$response" | jq -r '.refresh_job.snapshot_action // empty')"
+            echo "refresh status: job_id=$JOB_ID status=$status resolution=${resolution:-unknown} action=${snapshot_action:-unknown} as_of=${as_of:-unknown}"
             case "$status" in
               succeeded)
                 if [[ ! "$as_of" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
@@ -69,6 +70,14 @@ jobs:
                   echo "refresh completed but snapshot is older than ${FIN_MAX_SNAPSHOT_AGE_DAYS} days: $as_of" >&2
                   exit 1
                 fi
+                case "$snapshot_action" in
+                  updated|retained_current|retained_newer|retained_current_market_closed)
+                    ;;
+                  *)
+                    echo "refresh completed without publishing a valid snapshot: action=${snapshot_action:-unknown}" >&2
+                    exit 1
+                    ;;
+                esac
                 echo "refresh succeeded: $resolution"
                 exit 0
                 ;;

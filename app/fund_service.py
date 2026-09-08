@@ -3411,8 +3411,26 @@ class TefasFonClient:
                 direct_errors.append(str(exc))
         if rows:
             return rows
+        # The package-level getter can silently stop at its first 1000-row
+        # page. Use the paginated direct client before the legacy one-page
+        # fallback so catalogue refreshes can recover the full universe.
+        direct_client = TefasClient()
+        paginated_rows: List[Dict[str, Any]] = []
+        for fund_type in self.fund_types:
+            try:
+                paginated_rows.extend(
+                    direct_client.fetch_funds_direct(
+                        start_date=as_of,
+                        end_date=as_of,
+                        fund_type=fund_type,
+                    )
+                )
+            except TefasUpstreamError as exc:
+                direct_errors.append(str(exc))
+        if paginated_rows:
+            return paginated_rows
         try:
-            fallback_rows = TefasClient().fetch_fund_list_snapshot(target_date=as_of)
+            fallback_rows = direct_client.fetch_fund_list_snapshot(target_date=as_of)
         except TefasUpstreamError as exc:
             if direct_errors:
                 direct_errors.append(str(exc))
@@ -3584,6 +3602,10 @@ class TefasFonClient:
                 }
                 body = post_with_retries(payload)
                 if not body:
+                    if page_index > 0 and total_pages == 1:
+                        # A full first page can be followed by an empty page
+                        # when the endpoint's page count is unreliable.
+                        break
                     raise TefasUpstreamError(
                         f"tefasfon snapshot page {page_index + 1} returned empty body for {fund_type_code} {as_of.isoformat()}"
                     )
@@ -3627,7 +3649,11 @@ class TefasFonClient:
                     empty_streak = 0
                 page_index += 1
                 if total_pages is not None and page_index >= total_pages:
-                    break
+                    # TEFAS has returned toplamSayfa=1 for a full page even
+                    # when more rows were available. Probe the next page in
+                    # that specific case; short pages remain terminal.
+                    if total_pages > 1 or len(rows) < page_size:
+                        break
                 if added < page_size and len(rows) < page_size:
                     # Server reported fewer pages than expected; trust the actual payload size.
                     break
@@ -3784,7 +3810,10 @@ class TefasFonClient:
             target_text = target_date.isoformat()
             attempted_dates.append(target_text)
             try:
-                fund_rows = self.fetch_funds(start_date=target_date, end_date=target_date)
+                # ``tefasfon.get_funds`` can return only its first 1000-row
+                # page without raising an error. The daily snapshot path uses
+                # the paginated request implementation instead.
+                fund_rows = self.fetch_daily_funds_snapshot(target_date)
             except TefasUpstreamError as exc:
                 message = f"tefasfon_funds failed for {target_text}: {exc}"
                 warnings.append(message)
@@ -5197,7 +5226,38 @@ def refresh_funds_snapshot(
         else:
             result.upstream_errors = list(primary.upstream_errors) + list(direct.upstream_errors)
             result.resolution_status = "upstream_unavailable"
-    rows = _merge_refresh_rows_with_existing(existing_snapshot.get("rows") or [], result.rows)
+    existing_rows = list(existing_snapshot.get("rows") or [])
+    existing_count = len(existing_rows)
+    candidate_rows, _, _ = _filter_tefas_open_rows(list(result.rows or []))
+    candidate_count = len(candidate_rows)
+    # Check the provider result before merging with the cache. Merging is
+    # intentionally conservative and would otherwise hide a same-day
+    # 1000-row response by filling it with the existing 2041 rows.
+    if existing_count >= 100 and candidate_count and candidate_count + 50 < int(existing_count * 0.9):
+        truncation_warning = (
+            f"tefasfon snapshot looked truncated ({candidate_count} rows vs cached {existing_count}); "
+            "preserving existing snapshot and marking it stale"
+        )
+        merged = dict(existing_snapshot)
+        merged_warnings = list(merged.get("warnings") or []) + warnings + [truncation_warning]
+        merged_meta = dict(merged.get("source_metadata") or {})
+        merged_meta["warnings"] = merged_warnings
+        merged_meta["stale"] = True
+        merged_meta["truncated_refresh_observed"] = True
+        merged_meta["truncated_refresh_row_count"] = candidate_count
+        merged_meta["truncated_refresh_total_count"] = existing_count
+        merged["warnings"] = merged_warnings
+        merged["stale"] = True
+        merged["source_metadata"] = merged_meta
+        merged = _add_snapshot_resolution_metadata(
+            merged,
+            result=result,
+            action="retained_existing",
+            warnings=merged_warnings,
+        )
+        return merged
+
+    rows = _merge_refresh_rows_with_existing(existing_rows, result.rows)
     rows, skipped_closed, skipped_unknown = _filter_tefas_open_rows(rows)
     if skipped_closed:
         warnings.append(
@@ -5252,11 +5312,27 @@ def refresh_funds_snapshot(
         retained = dict(existing_snapshot)
         retained["stale"] = False if result.resolution_status != "upstream_unavailable" else True
         retained["degraded"] = result.resolution_status == "upstream_unavailable"
+        retained_meta = dict(retained.get("source_metadata") or {})
+        has_truncated_marker = bool(retained_meta.get("truncated_refresh_observed")) or any(
+            "snapshot looked truncated" in str(warning).casefold()
+            for warning in list(retained.get("warnings") or [])
+        )
+        repair_completed = action == "retained_current" and has_truncated_marker and candidate_count >= existing_count
+        retained_warnings = list(warnings) if repair_completed else list(retained.get("warnings") or []) + warnings
+        if repair_completed:
+            for key in (
+                "stale",
+                "truncated_refresh_observed",
+                "truncated_refresh_row_count",
+                "truncated_refresh_total_count",
+            ):
+                retained_meta.pop(key, None)
+            retained["source_metadata"] = retained_meta
         retained = _add_snapshot_resolution_metadata(
             retained,
             result=result,
             action=action,
-            warnings=list(existing_snapshot.get("warnings") or []) + warnings,
+            warnings=retained_warnings,
         )
         retained.setdefault("source_metadata", {})["source_policy"] = FUND_HISTORY_SOURCE_POLICY
         if persist_snapshot and not database_enabled():
@@ -5273,8 +5349,6 @@ def refresh_funds_snapshot(
     # Guard: do not overwrite a healthy snapshot with a clearly-truncated refresh
     # (e.g. TEFAS pagination cut short and we end up with the first page only).
     new_count = len(snapshot["rows"])
-    existing_rows = list(existing_snapshot.get("rows") or [])
-    existing_count = len(existing_rows)
     if existing_count >= 100 and new_count + 50 < int(existing_count * 0.9):
         truncation_warning = (
             f"tefasfon snapshot looked truncated ({new_count} rows vs cached {existing_count}); "

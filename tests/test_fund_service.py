@@ -185,6 +185,44 @@ def test_direct_tefas_adapter_fetches_all_supported_payload_families(monkeypatch
     assert any(url.endswith("dagilimSiraliGetirT") for url in posted_endpoints)
 
 
+def test_tefasfon_snapshot_direct_probes_past_misreported_single_page(monkeypatch) -> None:
+    from tefasfon import getter
+
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return json.loads(self.text)
+
+    class FakeSession:
+        def post(self, _url, *, json, headers, timeout):
+            del headers, timeout
+            calls.append(json)
+            if json["basSira"] == 1:
+                rows = [
+                    {"fonKodu": f"F{index:04d}", "tarih": "2026-06-24", "fiyat": 1.0}
+                    for index in range(1000)
+                ]
+            else:
+                rows = [{"fonKodu": "F1000", "tarih": "2026-06-24", "fiyat": 1.0}]
+            return FakeResponse({"resultList": rows, "toplamSayfa": 1})
+
+    monkeypatch.setattr(getter, "_new_session", lambda *_args, **_kwargs: FakeSession())
+    monkeypatch.setattr(getter, "_PAGE_SIZE", 1000)
+    monkeypatch.setattr(getter, "_PAGE_DELAY", 0.0)
+
+    rows = fund_service.TefasFonClient(fund_types=["SEC"])._fetch_funds_snapshot_direct(
+        date(2026, 6, 24),
+        fund_type="SEC",
+    )
+
+    assert len(rows) == 1001
+    assert [payload["basSira"] for payload in calls] == [1, 1001]
+
+
 def _stub_direct_tefas_empty(monkeypatch) -> None:
     class FakeDirectTefasClient:
         def fetch_fund_history(self, **kwargs):
@@ -1223,13 +1261,13 @@ def test_tefasfon_snapshot_resolution_finds_previous_date_within_fourteen_days(m
     client = fund_service.TefasFonClient()
     calls = []
 
-    def fetch_funds(*, start_date, end_date, fund_codes=None):
-        calls.append(start_date)
-        if start_date == date(2026, 8, 20):
+    def fetch_daily_funds_snapshot(as_of):
+        calls.append(as_of)
+        if as_of == date(2026, 8, 20):
             return [{"fund_code": "TLY", "date": "2026-08-20", "price": 8.819, "tefasDurum": True}]
         return []
 
-    monkeypatch.setattr(client, "fetch_funds", fetch_funds)
+    monkeypatch.setattr(client, "fetch_daily_funds_snapshot", fetch_daily_funds_snapshot)
     result = client.fetch_latest_fund_list_snapshot_result(
         as_of=date(2026, 8, 21), lookback_days=40, enrich=False
     )
@@ -1241,7 +1279,7 @@ def test_tefasfon_snapshot_resolution_finds_previous_date_within_fourteen_days(m
 
 def test_tefasfon_snapshot_resolution_distinguishes_empty_from_upstream_error(monkeypatch) -> None:
     client = fund_service.TefasFonClient()
-    monkeypatch.setattr(client, "fetch_funds", lambda **_kwargs: [])
+    monkeypatch.setattr(client, "fetch_daily_funds_snapshot", lambda _as_of: [])
     empty = client.fetch_latest_fund_list_snapshot_result(
         as_of=date(2026, 8, 21), lookback_days=40, enrich=False
     )
@@ -1251,7 +1289,7 @@ def test_tefasfon_snapshot_resolution_distinguishes_empty_from_upstream_error(mo
     def unavailable(**_kwargs):
         raise fund_service.TefasUpstreamError("429")
 
-    monkeypatch.setattr(client, "fetch_funds", unavailable)
+    monkeypatch.setattr(client, "fetch_daily_funds_snapshot", lambda _as_of: unavailable())
     failed = client.fetch_latest_fund_list_snapshot_result(
         as_of=date(2026, 8, 21), lookback_days=14, enrich=False
     )

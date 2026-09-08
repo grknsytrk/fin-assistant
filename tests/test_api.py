@@ -873,6 +873,41 @@ def test_current_weekend_fund_catalogue_does_not_schedule_refresh(monkeypatch: p
     assert api_module._maybe_schedule_fund_snapshot_refresh(payload) is payload
 
 
+def test_truncated_current_fund_catalogue_schedules_repair_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    jobs: list[int] = []
+    monkeypatch.setattr(
+        api_module,
+        "_start_fund_refresh_job",
+        lambda lookback_days: jobs.append(lookback_days) or {
+            "job_id": "truncated-repair-job",
+            "status": "queued",
+            "requested_at": "2026-09-08T12:00:00+00:00",
+        },
+    )
+    backend = cache_module.get_cache()
+    backend.delete(f"{api_module._FUND_REFRESH_AUTO_KEY_PREFIX}:2026-09-08")
+    payload = {
+        "status": "ok",
+        "rows": [{"fund_code": "TLY"}],
+        "total_count": 2041,
+        "as_of": "2026-09-08",
+        "stale": False,
+        "warnings": ["tefasfon snapshot looked truncated (1000 rows vs cached 2041)"],
+        "source_metadata": {
+            "snapshot_as_of": "2026-09-08",
+            "snapshot_target_date": "2026-09-08",
+            "snapshot_as_of_lag_days": 0,
+            "truncated_refresh_observed": True,
+        },
+    }
+
+    refreshed = api_module._maybe_schedule_fund_snapshot_refresh(payload)
+
+    assert jobs == [api_module._FUND_REFRESH_MAX_LOOKBACK_DAYS]
+    assert refreshed["refresh_pending"] is True
+    assert refreshed["refresh_job"]["job_id"] == "truncated-repair-job"
+
+
 def test_api_funds_search_keeps_full_universe(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_kwargs: Dict[str, Any] = {}
 
@@ -1036,6 +1071,49 @@ def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.Mon
     assert backend.get("api:funds-categories:v2") is None
     assert backend.get("api:fund-yield-summary:TLY") is None
     assert backend.get("api:fund-holdings:TLY") is None
+
+
+def test_truncated_fund_refresh_is_failed_without_committing(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = cache_module.get_cache()
+    job = {
+        "job_id": "truncated-refresh-job",
+        "status": "queued",
+        "requested_at": "2026-09-08T10:00:00+00:00",
+        "started_at": None,
+        "finished_at": None,
+        "as_of": None,
+        "row_count": None,
+        "error": None,
+    }
+    api_module._set_fund_refresh_job(job)
+    backend.set(api_module._FUND_REFRESH_ACTIVE_KEY, job["job_id"], ttl_seconds=600)
+    monkeypatch.setattr(
+        fund_service_module,
+        "refresh_funds_snapshot",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "rows": [{"fund_code": "TLY"}],
+            "resolution_status": "available",
+            "warnings": ["tefasfon snapshot looked truncated (1000 rows vs cached 2041)"],
+            "source_metadata": {
+                "snapshot_action": "retained_existing",
+                "truncated_refresh_observed": True,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "commit_funds_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("truncated snapshot must not be committed"),
+    )
+
+    api_module._run_fund_refresh_job(job["job_id"], 14)
+
+    final_job = api_module._get_fund_refresh_job(job["job_id"])
+    assert final_job is not None
+    assert final_job["status"] == "failed"
+    assert final_job["snapshot_action"] == "retained_existing"
+    assert "truncated" in final_job["error"]
 
 
 def test_admin_funds_refresh_reuses_active_job_and_exposes_status(monkeypatch: pytest.MonkeyPatch) -> None:

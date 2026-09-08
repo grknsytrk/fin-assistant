@@ -650,11 +650,25 @@ def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
                 error=warnings[0] if warnings else "TEFAS güvenilir cevap döndürmedi; mevcut snapshot korundu.",
             )
             return
+        result_meta = dict(result.get("source_metadata") or {})
+        snapshot_action = str(
+            result_meta.get("snapshot_action") or result.get("snapshot_action") or ""
+        ).strip()
+        if snapshot_action == "retained_existing" and result_meta.get("truncated_refresh_observed"):
+            warnings = list(result.get("warnings") or [])
+            _update_fund_refresh_job(
+                job_id,
+                status="failed",
+                finished_at=_fund_refresh_now_iso(),
+                resolution_status=resolution_status,
+                snapshot_action=snapshot_action,
+                error=warnings[-1] if warnings else "TEFAS eksik snapshot döndürdü; mevcut snapshot korundu.",
+            )
+            return
         from app.fund_service import commit_funds_snapshot
 
         result = dict(result)
         result["snapshot_generation"] = generation
-        result_meta = dict(result.get("source_metadata") or {})
         result_meta["snapshot_generation"] = generation
         result["source_metadata"] = result_meta
         committed = commit_funds_snapshot(
@@ -776,6 +790,16 @@ def _fund_snapshot_needs_background_refresh(payload: Dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         has_catalogue = bool(payload.get("rows"))
     if not has_catalogue:
+        return True
+
+    # A previous deployment may have preserved a full snapshot after TEFAS
+    # returned only its first page. Its as_of date can still match today's
+    # target, so the date/lag checks below alone would never retry the repair.
+    # Let the new paginated collector heal that specific legacy state once.
+    if metadata.get("truncated_refresh_observed"):
+        return True
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    if any("snapshot looked truncated" in str(warning).casefold() for warning in warnings):
         return True
 
     lag = metadata.get("snapshot_as_of_lag_days")
