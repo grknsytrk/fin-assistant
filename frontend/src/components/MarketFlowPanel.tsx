@@ -55,7 +55,7 @@ function matchesFlowFilter(item: MarketFlowItem, filter: FlowFilter, favoriteSym
         if (favoriteSymbols.size === 0) return false;
         return getMatchingFavoriteSymbols(item, favoriteSymbols).length > 0;
     }
-    if (filter === 'ozel_durum') return item.category === 'ozel_durum' || item.source === 'Özel Durum';
+    if (filter === 'ozel_durum') return item.category === 'ozel_durum' || (!item.category && item.source === 'Özel Durum');
     if (filter === 'finansal_rapor') return item.category === 'finansal_rapor';
     if (filter === 'kar_payi') return item.category === 'kar_payi';
     if (filter === 'genel_kurul') return item.category === 'genel_kurul';

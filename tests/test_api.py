@@ -4054,6 +4054,37 @@ def test_parse_kap_public_result_page_maps_related_symbols() -> None:
     assert rows[0]["published_at"].endswith("18:51:00")
 
 
+def test_parse_kap_public_result_page_classifies_oda_subjects() -> None:
+    page = """
+    <table><tbody>
+      <tr id="notification1">
+        <td><input id="1660457"/></td>
+        <td>1</td>
+        <td><div>Bugün</div><div>18:51</div></td>
+        <td>GUBRF</td>
+        <td>GÜBRE FABRİKALARI A.Ş.</td>
+        <td>ÖDA</td>
+        <td>Genel Kurul İşlemlerine İlişkin Bildirim</td>
+        <td>2026 Olağan Genel Kurul Toplantısı</td>
+      </tr>
+      <tr id="notification2">
+        <td><input id="1660458"/></td>
+        <td>2</td>
+        <td><div>Bugün</div><div>18:50</div></td>
+        <td>EPLAS</td>
+        <td>EGEPLAS A.Ş.</td>
+        <td>ÖDA</td>
+        <td>Kar Payı Dağıtım İşlemlerine İlişkin Bildirim</td>
+        <td>Kar Payı Dağıtımına İlişkin Yönetim Kurulu Teklifi</td>
+      </tr>
+    </tbody></table>
+    """
+
+    rows = api_module._parse_kap_public_result_page(page, 10)
+
+    assert [row["category"] for row in rows] == ["genel_kurul", "kar_payi"]
+
+
 def test_fetch_market_price_map_parses_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     html = """
     <table><tbody id="tableBody">

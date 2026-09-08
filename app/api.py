@@ -3566,13 +3566,11 @@ _KAP_TYPE_LABELS: Dict[str, str] = {
 }
 
 
-def _kap_category(disclosure_type: str, subject: str) -> str:
+def _kap_category(disclosure_type: str, subject: str, summary: str = "") -> str:
     dt = (disclosure_type or "").strip().upper()
-    subj = (subject or "").lower()
+    subj = f"{subject or ''} {summary or ''}".lower()
     if dt.startswith("FR"):
         return "finansal_rapor"
-    if dt in {"ODA", "ÖDA"}:
-        return "ozel_durum"
     if "kar pay" in subj or dt == "KBR":
         return "kar_payi"
     if "geri alma" in subj or "geri alım" in subj or dt == "GR":
@@ -3585,6 +3583,8 @@ def _kap_category(disclosure_type: str, subject: str) -> str:
         return "surdurulebilirlik"
     if "faaliyet rapor" in subj or dt == "FDR":
         return "faaliyet_raporu"
+    if dt in {"ODA", "ÖDA"}:
+        return "ozel_durum"
     if dt in {"DG", "DKB", "DK"}:
         return "diger"
     return "bildirim"
@@ -3922,7 +3922,7 @@ def _parse_kap_public_result_page(page: str, max_items: int) -> List[Dict[str, A
             "title": title,
             "subject": subject,
             "published_at": published_dt.isoformat(),
-            "category": _kap_category(disclosure_type, subject),
+            "category": _kap_category(disclosure_type, subject, summary),
             "kap_url": (
                 f"https://www.kap.org.tr/tr/Bildirim/{disclosure_id}"
                 if disclosure_id
