@@ -491,6 +491,32 @@
     cursor: pointer;
 }
 
+.stock-card-loading-notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 30%, var(--surface-border));
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--accent-color) 7%, var(--surface-color));
+}
+
+.stock-card-loading-notice button {
+    flex: 0 0 auto;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 42%, var(--surface-border));
+    background: transparent;
+    color: var(--text-primary);
+    padding: 0.32rem 0.55rem;
+    cursor: pointer;
+}
+
+.stock-card-loading-notice button:hover {
+    border-color: var(--accent-color);
+    background: color-mix(in srgb, var(--accent-color) 10%, transparent);
+}
+
 .stock-card-empty-state {
     display: flex;
     flex-direction: column;
