@@ -21,6 +21,7 @@ const FLOW_PAGE_SIZE = 50;
 const FLOW_INITIAL_LOAD_SIZE = FLOW_PAGE_SIZE * 2;
 const FLOW_MAX_ITEMS = 500;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
+const FLOW_NEW_ITEM_HIGHLIGHT_MS = 10_000;
 
 function getFlowSymbols(item: MarketFlowItem): string[] {
     return [item.symbol, ...(item.stock_codes || []), ...(item.related_symbols || [])]
@@ -31,6 +32,11 @@ function getFlowSymbols(item: MarketFlowItem): string[] {
 export function getMatchingFavoriteSymbols(item: MarketFlowItem, favoriteSymbols: Set<string>): string[] {
     const itemSymbols = new Set(getFlowSymbols(item));
     return Array.from(favoriteSymbols).filter((symbol) => itemSymbols.has(symbol));
+}
+
+export function getNewFlowItemIds(previousIds: Set<string> | null, items: MarketFlowItem[]): string[] {
+    if (!previousIds) return [];
+    return items.filter((item) => !previousIds.has(item.id)).map((item) => item.id);
 }
 
 function matchesFlowFilter(item: MarketFlowItem, filter: FlowFilter, favoriteSymbols: Set<string>): boolean {
@@ -93,7 +99,40 @@ export default function MarketFlowPanel({
     const requestLimitRef = useRef(FLOW_INITIAL_LOAD_SIZE);
     const loadingMoreRef = useRef(false);
     const prefetchInFlightRef = useRef(false);
+    const observedFlowIdsRef = useRef<Set<string> | null>(null);
+    const highlightTimersRef = useRef(new Map<string, number>());
+    const [highlightedItemIds, setHighlightedItemIds] = useState<Set<string>>(new Set());
     const [warning, setWarning] = useState<string | null>(null);
+
+    const markNewItems = useCallback((itemIds: string[]) => {
+        if (itemIds.length === 0) return;
+
+        setHighlightedItemIds((current) => {
+            const next = new Set(current);
+            itemIds.forEach((id) => next.add(id));
+            return next;
+        });
+
+        itemIds.forEach((id) => {
+            const previousTimer = highlightTimersRef.current.get(id);
+            if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+            const timer = window.setTimeout(() => {
+                setHighlightedItemIds((current) => {
+                    if (!current.has(id)) return current;
+                    const next = new Set(current);
+                    next.delete(id);
+                    return next;
+                });
+                highlightTimersRef.current.delete(id);
+            }, FLOW_NEW_ITEM_HIGHLIGHT_MS);
+            highlightTimersRef.current.set(id, timer);
+        });
+    }, []);
+
+    useEffect(() => () => {
+        highlightTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+        highlightTimersRef.current.clear();
+    }, []);
 
     const prefetchMore = useCallback((requestedLimit: number, expectedFilter = filterRef.current) => {
         if (
@@ -110,6 +149,7 @@ export default function MarketFlowPanel({
                 if (filterRef.current !== expectedFilter) return;
                 const nextItems = payload.items || [];
                 requestLimitRef.current = requestedLimit;
+                observedFlowIdsRef.current = new Set(nextItems.map((item) => item.id));
                 setItems(nextItems);
                 setWarning(payload.warning || null);
                 setHasMore(nextItems.length >= requestedLimit && requestedLimit < FLOW_MAX_ITEMS);
@@ -135,6 +175,10 @@ export default function MarketFlowPanel({
             .then((payload) => {
                 if (filterRef.current !== expectedFilter) return;
                 const nextItems = payload.items || [];
+                if (refresh) {
+                    markNewItems(getNewFlowItemIds(observedFlowIdsRef.current, nextItems));
+                }
+                observedFlowIdsRef.current = new Set(nextItems.map((item) => item.id));
                 setItems(nextItems);
                 setWarning(payload.warning || null);
                 setHasMore(nextItems.length >= requestLimit && requestLimit < FLOW_MAX_ITEMS);
@@ -183,6 +227,7 @@ export default function MarketFlowPanel({
             .then((payload) => {
                 const nextItems = payload.items || [];
                 requestLimitRef.current = nextLimit;
+                observedFlowIdsRef.current = new Set(nextItems.map((item) => item.id));
                 setItems(nextItems);
                 setWarning(payload.warning || null);
                 setHasMore(nextItems.length >= nextLimit && nextLimit < FLOW_MAX_ITEMS);
@@ -278,7 +323,7 @@ export default function MarketFlowPanel({
                     <button
                         key={item.id}
                         type="button"
-                        className="mwr-flow-item"
+                        className={`mwr-flow-item${highlightedItemIds.has(item.id) ? ' is-new' : ''}`}
                         onClick={() => handleItemClick(item)}
                         title={`${item.title} · ${formatFlowDate(item.published_at)}`}
                     >

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MarketFlowItem } from '../api/types';
-import { getMatchingFavoriteSymbols } from './MarketFlowPanel';
+import { getMatchingFavoriteSymbols, getNewFlowItemIds } from './MarketFlowPanel';
 
 const flowItem: MarketFlowItem = {
     id: 'kap-example',
@@ -20,5 +20,13 @@ describe('MarketFlowPanel favorites matching', () => {
 
     it('does not match an unrelated flow item', () => {
         expect(getMatchingFavoriteSymbols(flowItem, new Set(['BIMAS']))).toEqual([]);
+    });
+
+    it('only marks records that arrived after the previous refresh', () => {
+        expect(getNewFlowItemIds(new Set(['old-1']), [
+            { ...flowItem, id: 'new-1' },
+            { ...flowItem, id: 'old-1' },
+        ])).toEqual(['new-1']);
+        expect(getNewFlowItemIds(null, [flowItem])).toEqual([]);
     });
 });

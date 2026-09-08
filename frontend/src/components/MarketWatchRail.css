@@ -922,6 +922,32 @@
     transition: background-color 0.14s ease;
 }
 
+.mwr-flow-item.is-new {
+    animation: mwr-flow-new-item 1.15s ease-in-out infinite;
+    border-left: 2px solid var(--accent-color);
+    padding-left: calc(1rem - 2px);
+}
+
+@keyframes mwr-flow-new-item {
+    0%,
+    100% {
+        background: color-mix(in srgb, var(--accent-color) 7%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-color) 16%, transparent);
+    }
+
+    50% {
+        background: color-mix(in srgb, var(--accent-color) 22%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-color) 58%, transparent);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mwr-flow-item.is-new {
+        animation: none;
+        background: color-mix(in srgb, var(--accent-color) 18%, transparent);
+    }
+}
+
 .mwr-flow-item:hover {
     background: color-mix(in srgb, var(--accent-color) 9%, var(--surface-border) 18%);
 }
