@@ -4106,9 +4106,10 @@ _VYK_DEFAULT_LIST_BUDGET = 2
 # Her refresh'te en fazla bu kadar `disclosureDetail` cagrisi yapilir;
 # gerisi sessizce atlanir. Gateway'in "cok fazla istek" sikayetini onler.
 _VYK_DEFAULT_DETAIL_BUDGET = 25
-# Kullanici akisi genisletmek isteyebilir; bu sinir gateway'i bunaltmadan
-# saglik sinirinda tutar.
-_VYK_DEFAULT_DETAIL_BUDGET_MAX = 500
+# Akış filtrelerinin kendi son kayıtlarını bulabilmesi için collector tek bir
+# 500'lük pencereye sıkışmamalı. Resmi KAP public sayfası yaklaşık 2.000 satır
+# döndürüyor; durable store da aynı sınırı zaten koruyor.
+_VYK_DEFAULT_DETAIL_BUDGET_MAX = 2_000
 _VYK_DETAIL_WORKERS = 8
 
 

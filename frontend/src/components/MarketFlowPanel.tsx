@@ -20,6 +20,7 @@ const FLOW_FILTERS: Array<{ value: FlowFilter; label: string }> = [
 const FLOW_PAGE_SIZE = 50;
 const FLOW_INITIAL_LOAD_SIZE = FLOW_PAGE_SIZE;
 const FLOW_CATEGORY_LOAD_SIZE = 100;
+const FLOW_BACKFILL_PAGE_SIZE = 500;
 const FLOW_MAX_ITEMS = 2_000;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
 const FLOW_NEW_ITEM_HIGHLIGHT_MS = 5_000;
@@ -185,7 +186,7 @@ export default function MarketFlowPanel({
         [favoriteSymbols, filter, items],
     );
 
-    const loadMore = useCallback(() => {
+    const loadMore = useCallback((requestedPageSize = FLOW_PAGE_SIZE) => {
         if (loadingMoreRef.current) return;
 
         const currentVisibleLimit = visibleLimitRef.current;
@@ -199,7 +200,8 @@ export default function MarketFlowPanel({
 
         const nextCursor = nextCursorRef.current;
         const currentLimit = requestLimitRef.current;
-        const nextLimit = Math.min(currentLimit + FLOW_PAGE_SIZE, FLOW_MAX_ITEMS);
+        const pageSize = Math.min(Math.max(requestedPageSize, FLOW_PAGE_SIZE), FLOW_BACKFILL_PAGE_SIZE);
+        const nextLimit = Math.min(currentLimit + pageSize, FLOW_MAX_ITEMS);
         if (!nextCursor && nextLimit <= currentLimit) {
             setHasMore(false);
             return;
@@ -209,7 +211,7 @@ export default function MarketFlowPanel({
         setLoadingMore(true);
         apiClient
             .marketFlow(
-                nextCursor ? FLOW_PAGE_SIZE : nextLimit,
+                nextCursor ? pageSize : nextLimit,
                 requestCategoryRef.current,
                 nextCursor ? { before: nextCursor } : undefined,
             )
@@ -226,7 +228,7 @@ export default function MarketFlowPanel({
                 setWarning(payload.warning || null);
                 setHasMore(typeof payload.has_more === 'boolean'
                     ? payload.has_more
-                    : olderItems.length >= (nextCursor ? FLOW_PAGE_SIZE : nextLimit)
+                    : olderItems.length >= (nextCursor ? pageSize : nextLimit)
                         && requestLimitRef.current < FLOW_MAX_ITEMS);
                 const nextVisibleLimit = currentVisibleLimit + FLOW_PAGE_SIZE;
                 visibleLimitRef.current = nextVisibleLimit;
@@ -240,6 +242,17 @@ export default function MarketFlowPanel({
                 setLoadingMore(false);
             });
     }, [filteredItems.length, hasMore]);
+
+    useEffect(() => {
+        const needsBackfill = filter === 'watchlist' || filter === 'diger';
+        if (!needsBackfill || loading || loadingMore || !items || !hasMore) return;
+        if (filteredItems.length >= FLOW_PAGE_SIZE) return;
+
+        // A filtered view should not depend on the user reaching an empty
+        // scrollbar to discover older matches. Fetch one bounded 500-row page
+        // at a time until we have 50 matches or the durable feed ends.
+        loadMore(FLOW_BACKFILL_PAGE_SIZE);
+    }, [filter, filteredItems.length, hasMore, items, loading, loadingMore, loadMore]);
 
     useEffect(() => {
         load();
