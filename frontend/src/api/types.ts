@@ -122,6 +122,8 @@ export interface MarketStocksResponse {
   quote_status?: 'fresh' | 'stale' | 'unavailable';
   stale?: boolean;
   quote_error?: string | null;
+  partial?: boolean;
+  partial_message?: string | null;
 }
 
 export interface MarketStockSearchResponse {

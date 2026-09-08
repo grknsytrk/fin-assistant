@@ -50,6 +50,12 @@ const fundHoldingsLiveInFlight = new Map<string, Promise<FundHoldingsLiveRespons
 const MARKET_FLOW_MEMORY_CACHE_TTL_MS = 15_000;
 const marketFlowMemoryCache = new Map<string, { payload: MarketFlowResponse; fetchedAt: number }>();
 const marketFlowInFlight = new Map<string, Promise<MarketFlowResponse>>();
+const MARKET_UNIVERSE_MEMORY_CACHE_TTL_MS = 60_000;
+const marketUniverseMemoryCache = new Map<string, { payload: MarketUniverseResponse; fetchedAt: number }>();
+const marketUniverseInFlight = new Map<string, Promise<MarketUniverseResponse>>();
+const MARKET_STOCKS_MEMORY_CACHE_TTL_MS = 30_000;
+const marketStocksMemoryCache = new Map<string, { payload: MarketStocksResponse; fetchedAt: number }>();
+const marketStocksInFlight = new Map<string, Promise<MarketStocksResponse>>();
 
 const kapSnapshotMemoryCache = new Map<string, { payload: KapSnapshotResponse; at: number }>();
 export function cachedKapSnapshot(company: string): KapSnapshotResponse | null {
@@ -262,19 +268,56 @@ export const apiClient = {
     health: () => fetchApi<{ status: string }>('/health'),
 
     marketUniverse: (options?: { index?: MarketStockIndex; refresh?: boolean }) => {
+        const cacheKey = options?.index || 'XUTUM';
+        const cached = marketUniverseMemoryCache.get(cacheKey);
+        if (!options?.refresh && cached && Date.now() - cached.fetchedAt < MARKET_UNIVERSE_MEMORY_CACHE_TTL_MS) {
+            return Promise.resolve(cached.payload);
+        }
+
+        const existingRequest = marketUniverseInFlight.get(cacheKey);
+        if (existingRequest) return existingRequest;
+
         const params = new URLSearchParams();
         if (options?.index) params.append('index', options.index);
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
-        return fetchApi<MarketUniverseResponse>(query ? `/market/universe?${query}` : '/market/universe');
+        const request = fetchApi<MarketUniverseResponse>(query ? `/market/universe?${query}` : '/market/universe')
+            .then((payload) => {
+                marketUniverseMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
+                return payload;
+            })
+            .finally(() => {
+                if (marketUniverseInFlight.get(cacheKey) === request) marketUniverseInFlight.delete(cacheKey);
+            });
+        marketUniverseInFlight.set(cacheKey, request);
+        return request;
     },
     marketStocks: (options?: { index?: MarketStockIndex; refresh?: boolean }) => {
+        const cacheKey = options?.index || 'XUTUM';
+        const cached = marketStocksMemoryCache.get(cacheKey);
+        if (!options?.refresh && cached && Date.now() - cached.fetchedAt < MARKET_STOCKS_MEMORY_CACHE_TTL_MS) {
+            return Promise.resolve(cached.payload);
+        }
+
+        const existingRequest = marketStocksInFlight.get(cacheKey);
+        if (existingRequest) return existingRequest;
+
         const params = new URLSearchParams();
         if (options?.index) params.append('index', options.index);
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
-        return fetchApi<MarketStocksResponse>(query ? `/market/stocks?${query}` : '/market/stocks');
+        const request = fetchApi<MarketStocksResponse>(query ? `/market/stocks?${query}` : '/market/stocks')
+            .then((payload) => {
+                marketStocksMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
+                return payload;
+            })
+            .finally(() => {
+                if (marketStocksInFlight.get(cacheKey) === request) marketStocksInFlight.delete(cacheKey);
+            });
+        marketStocksInFlight.set(cacheKey, request);
+        return request;
     },
+    getCachedMarketStocks: (index: MarketStockIndex) => marketStocksMemoryCache.get(index)?.payload || null,
     marketStockSearch: (options: {
         q: string;
         index?: MarketStockIndex;

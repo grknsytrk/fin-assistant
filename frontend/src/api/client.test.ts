@@ -17,6 +17,27 @@ describe('request wait budget', () => {
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 
+    it('coalesces and briefly caches identical market stock requests', async () => {
+        const payload = {
+            index: 'XU100',
+            rows: [],
+            benchmarks: {},
+            source: 'test',
+            as_of: '2026-09-08T00:00:00Z',
+        };
+        const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload)));
+        vi.stubGlobal('fetch', fetch);
+
+        const [first, second] = await Promise.all([
+            apiClient.marketStocks({ index: 'XU100' }),
+            apiClient.marketStocks({ index: 'XU100' }),
+        ]);
+        expect(first).toEqual(payload);
+        expect(second).toEqual(payload);
+        expect(await apiClient.marketStocks({ index: 'XU100' })).toEqual(payload);
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
     it('keeps cold fund responses loading until the background result arrives', async () => {
         vi.useFakeTimers();
         const ready = { status: 'ok', rows: [{ fund_code: 'AAL' }] };

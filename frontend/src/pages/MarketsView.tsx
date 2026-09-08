@@ -801,6 +801,53 @@ function stockCardsMemoryKey(symbols: string[]): string {
     return symbols.join(',');
 }
 
+function emptyMarketReturnBenchmark(): MarketReturnBenchmark {
+    return {
+        return_1w_pct: null,
+        return_1m_pct: null,
+        return_3m_pct: null,
+        return_6m_pct: null,
+        return_ytd_pct: null,
+        return_1y_pct: null,
+        as_of: null,
+    };
+}
+
+function quickStocksFromUniverse(
+    index: MarketStockIndex,
+    universe: MarketUniverseResponse,
+): MarketStocksResponse {
+    const rows: MarketStockRow[] = (universe.rows || []).map((row) => ({
+        ...row,
+        symbol: row.symbol || row.company,
+        volume: null,
+        return_1w_pct: null,
+        return_1m_pct: null,
+        return_3m_pct: null,
+        return_6m_pct: null,
+        return_ytd_pct: null,
+        return_1y_pct: null,
+    }));
+    const benchmark = emptyMarketReturnBenchmark();
+    return {
+        index,
+        rows,
+        benchmarks: {
+            XUTUM: benchmark,
+            XU100: benchmark,
+            XU030: benchmark,
+        },
+        source: 'market_universe_quick',
+        universe: universe.universe,
+        as_of: universe.universe?.fetched_at || new Date().toISOString(),
+        cache_status: 'hit',
+        quote_status: 'fresh',
+        stale: false,
+        partial: true,
+        partial_message: 'Detaylı hacim ve getiri verileri arka planda yükleniyor…',
+    };
+}
+
 function mergeStockCardPayloads(
     current: MarketStockCardsResponse | null,
     next: MarketStockCardsResponse,
@@ -2898,6 +2945,24 @@ export default function MarketsView({
     async function loadStocks(silent = false, refresh = false, requestedIndex: MarketStockIndex = stockIndex) {
         if (stocksInFlightRef.current) return;
         stocksInFlightRef.current = true;
+        const cachedStocks = apiClient.getCachedMarketStocks(requestedIndex);
+        if (cachedStocks) {
+            setStocks(cachedStocks);
+        } else if (!silent) {
+            void apiClient
+                .marketUniverse({ index: requestedIndex })
+                .then((universePayload) => {
+                    if (latestStockIndexRef.current !== requestedIndex) return;
+                    setStocks((current) => (
+                        current?.index === requestedIndex && !current.partial
+                            ? current
+                            : quickStocksFromUniverse(requestedIndex, universePayload)
+                    ));
+                })
+                .catch(() => {
+                    // The detailed stock request remains the source of truth.
+                });
+        }
         if (!silent) setStocksLoading(true);
         if (!silent) setStocksError(null);
         try {
@@ -3729,6 +3794,11 @@ export default function MarketsView({
                                     {stocks.stale && (
                                         <span className="stocks-soft-error">
                                             {stocks.quote_error || 'Son veri alınamadı; son sağlıklı fiyat gösteriliyor.'}
+                                        </span>
+                                    )}
+                                    {stocks.partial && (
+                                        <span className="stocks-soft-error">
+                                            {stocks.partial_message || 'Detaylı veriler hazırlanıyor.'}
                                         </span>
                                     )}
                                 </div>
