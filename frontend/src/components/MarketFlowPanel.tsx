@@ -21,7 +21,7 @@ const FLOW_PAGE_SIZE = 50;
 const FLOW_INITIAL_LOAD_SIZE = FLOW_PAGE_SIZE * 2;
 const FLOW_MAX_ITEMS = 500;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
-const FLOW_NEW_ITEM_HIGHLIGHT_MS = 10_000;
+const FLOW_NEW_ITEM_HIGHLIGHT_MS = 5_000;
 
 function getFlowSymbols(item: MarketFlowItem): string[] {
     return [item.symbol, ...(item.stock_codes || []), ...(item.related_symbols || [])]
