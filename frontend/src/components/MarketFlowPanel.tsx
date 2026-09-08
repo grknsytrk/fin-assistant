@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronRight, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import type { UIEvent } from 'react';
+import { ChevronRight } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { MarketFlowItem } from '../api/types';
 import { normalizeWatchlistSymbol, useWatchlist } from '../hooks/useWatchlist';
@@ -16,20 +17,9 @@ const FLOW_FILTERS: Array<{ value: FlowFilter; label: string }> = [
     { value: 'diger', label: 'Diğer' },
 ];
 
-const FLOW_SIZE_OPTIONS = [25, 50, 100];
-const FLOW_SIZE_STORAGE_KEY = 'ragfin.flow.size';
-const FLOW_SIZE_DEFAULT = 50;
+const FLOW_PAGE_SIZE = 50;
+const FLOW_MAX_ITEMS = 500;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
-
-function readInitialFlowSize(): number {
-    if (typeof window === 'undefined') return FLOW_SIZE_DEFAULT;
-    try {
-        const saved = Number.parseInt(window.localStorage.getItem(FLOW_SIZE_STORAGE_KEY) || '', 10);
-        return FLOW_SIZE_OPTIONS.includes(saved) ? saved : FLOW_SIZE_DEFAULT;
-    } catch {
-        return FLOW_SIZE_DEFAULT;
-    }
-}
 
 function matchesFlowFilter(item: MarketFlowItem, filter: FlowFilter, favoriteSymbols: Set<string>): boolean {
     if (filter === 'all') return true;
@@ -85,27 +75,66 @@ export default function MarketFlowPanel({
     const [error, setError] = useState<string | null>(null);
     const [filter, setFilter] = useState<FlowFilter>('all');
     const filterRef = useRef<FlowFilter>('all');
-    const [size, setSize] = useState(readInitialFlowSize);
-    const sizeRef = useRef(size);
-    const [showOptions, setShowOptions] = useState(false);
+    const [loadingMore, setLoadingMore] = useState(false);
+    const [hasMore, setHasMore] = useState(true);
+    const requestLimitRef = useRef(FLOW_PAGE_SIZE);
+    const loadingMoreRef = useRef(false);
     const [warning, setWarning] = useState<string | null>(null);
 
-    const load = useCallback((refresh = false, requestedSize?: number) => {
-        const requestSize = requestedSize
-            ?? (filterRef.current === 'watchlist' ? FLOW_FAVORITES_LOAD_SIZE : sizeRef.current);
+    const load = useCallback((refresh = false, requestedLimit?: number) => {
+        const requestLimit = requestedLimit
+            ?? (filterRef.current === 'watchlist' ? FLOW_FAVORITES_LOAD_SIZE : requestLimitRef.current);
+        requestLimitRef.current = requestLimit;
+        setHasMore(requestLimit < FLOW_MAX_ITEMS);
         setLoading(true);
         setError(null);
         apiClient
-            .marketFlow(requestSize, undefined, { refresh })
+            .marketFlow(requestLimit, undefined, { refresh })
             .then((payload) => {
-                setItems(payload.items || []);
+                const nextItems = payload.items || [];
+                setItems(nextItems);
                 setWarning(payload.warning || null);
+                setHasMore(nextItems.length >= requestLimit && requestLimit < FLOW_MAX_ITEMS);
             })
             .catch((requestError: unknown) => {
                 setError(requestError instanceof Error ? requestError.message : 'Akış verisi alınamadı.');
             })
             .finally(() => setLoading(false));
     }, []);
+
+    const loadMore = useCallback(() => {
+        if (
+            loadingMoreRef.current
+            || !hasMore
+            || filterRef.current === 'watchlist'
+        ) return;
+
+        const currentLimit = requestLimitRef.current;
+        const nextLimit = Math.min(currentLimit + FLOW_PAGE_SIZE, FLOW_MAX_ITEMS);
+        if (nextLimit <= currentLimit) {
+            setHasMore(false);
+            return;
+        }
+
+        loadingMoreRef.current = true;
+        setLoadingMore(true);
+        apiClient
+            .marketFlow(nextLimit)
+            .then((payload) => {
+                const nextItems = payload.items || [];
+                requestLimitRef.current = nextLimit;
+                setItems(nextItems);
+                setWarning(payload.warning || null);
+                setHasMore(nextItems.length >= nextLimit && nextLimit < FLOW_MAX_ITEMS);
+            })
+            .catch((requestError: unknown) => {
+                setError(requestError instanceof Error ? requestError.message : 'Daha fazla akış verisi alınamadı.');
+            })
+            .finally(() => {
+                loadingMoreRef.current = false;
+                setLoadingMore(false);
+            });
+    }, [hasMore]);
 
     useEffect(() => {
         load();
@@ -120,9 +149,8 @@ export default function MarketFlowPanel({
 
     const filteredItems = useMemo(
         () => (items || [])
-            .filter((item) => matchesFlowFilter(item, filter, favoriteSymbols))
-            .slice(0, size),
-        [favoriteSymbols, filter, items, size],
+            .filter((item) => matchesFlowFilter(item, filter, favoriteSymbols)),
+        [favoriteSymbols, filter, items],
     );
 
     const handleFilterChange = (nextFilter: FlowFilter) => {
@@ -130,20 +158,15 @@ export default function MarketFlowPanel({
         setFilter(nextFilter);
         if (nextFilter === 'watchlist') {
             load(false, FLOW_FAVORITES_LOAD_SIZE);
-        } else if (filter === 'watchlist') {
-            load(false, sizeRef.current);
+        } else {
+            load(false, FLOW_PAGE_SIZE);
         }
     };
 
-    const handleSizeChange = (next: number) => {
-        sizeRef.current = next;
-        setSize(next);
-        try {
-            window.localStorage.setItem(FLOW_SIZE_STORAGE_KEY, String(next));
-        } catch {
-            // localStorage unavailable; the current selection still works.
-        }
-        load(false, filterRef.current === 'watchlist' ? FLOW_FAVORITES_LOAD_SIZE : next);
+    const handleFlowScroll = (event: UIEvent<HTMLDivElement>) => {
+        const target = event.currentTarget;
+        const remaining = target.scrollHeight - target.scrollTop - target.clientHeight;
+        if (remaining < 220) loadMore();
     };
 
     const handleItemClick = (item: MarketFlowItem) => {
@@ -162,7 +185,6 @@ export default function MarketFlowPanel({
                     <ChevronRight size={16} aria-hidden="true" />
                 </div>
                 <label className="mwr-flow-select-wrap">
-                    <span className="sr-only">Akış filtresi</span>
                     <select
                         className="mwr-flow-select"
                         value={filter}
@@ -174,48 +196,7 @@ export default function MarketFlowPanel({
                         ))}
                     </select>
                 </label>
-                <button
-                    type="button"
-                    className={`mwr-flow-options-button${showOptions ? ' is-active' : ''}`}
-                    onClick={() => setShowOptions((current) => !current)}
-                    aria-expanded={showOptions}
-                    aria-label="Akış seçenekleri"
-                    title="Akış seçenekleri"
-                >
-                    <SlidersHorizontal size={16} aria-hidden="true" />
-                </button>
             </div>
-
-            {showOptions && (
-                <div className="mwr-flow-options" role="group" aria-label="Akış kayıt sayısı">
-                    <span className="mwr-flow-options-label">Gösterilecek kayıt</span>
-                    <div className="mwr-flow-options-actions">
-                        <div className="mwr-flow-size-options">
-                            {FLOW_SIZE_OPTIONS.map((option) => (
-                                <button
-                                    key={option}
-                                    type="button"
-                                    className={size === option ? 'is-active' : ''}
-                                    onClick={() => handleSizeChange(option)}
-                                    disabled={loading && size === option}
-                                >
-                                    {option}
-                                </button>
-                            ))}
-                        </div>
-                        <button
-                            type="button"
-                            className="mwr-flow-options-refresh"
-                            onClick={() => load(true)}
-                            disabled={loading}
-                            aria-label="Akışı yenile"
-                            title="Akışı yenile"
-                        >
-                            <RefreshCw size={14} className={loading ? 'is-spinning' : ''} aria-hidden="true" />
-                        </button>
-                    </div>
-                </div>
-            )}
 
             {warning && <div className="mwr-flow-warning" role="status">{warning}</div>}
             {loading && !items && <div className="mwr-flow-state">Akış yükleniyor…</div>}
@@ -228,7 +209,7 @@ export default function MarketFlowPanel({
                 </div>
             )}
 
-            <div className="mwr-flow-list">
+            <div className="mwr-flow-list" onScroll={handleFlowScroll}>
                 {filteredItems.map((item) => (
                     <button
                         key={item.id}
@@ -250,6 +231,10 @@ export default function MarketFlowPanel({
                         <div className="mwr-flow-item-title">{item.title}</div>
                     </button>
                 ))}
+                {loadingMore && <div className="mwr-flow-load-state">Daha fazla bildirim yükleniyor…</div>}
+                {!loadingMore && !hasMore && filteredItems.length > 0 && (
+                    <div className="mwr-flow-load-state">Akışın sonu</div>
+                )}
             </div>
         </div>
     );

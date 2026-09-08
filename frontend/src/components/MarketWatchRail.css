@@ -788,7 +788,7 @@
 
 .mwr-flow-toolbar {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto 36px;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.45rem;
     min-height: 58px;
@@ -819,6 +819,7 @@
     min-width: 0;
     height: 32px;
     display: flex;
+    justify-self: end;
 }
 
 .mwr-flow-select {
@@ -843,102 +844,6 @@
     border-color: color-mix(in srgb, var(--accent-color) 64%, var(--surface-border));
     background: color-mix(in srgb, var(--accent-color) 12%, #1b1c1b);
     outline: none;
-}
-
-.mwr-flow-options-button,
-.mwr-flow-options-refresh {
-    width: 34px;
-    height: 34px;
-    min-height: 34px;
-    box-sizing: border-box;
-    justify-self: center;
-    display: grid;
-    place-items: center;
-    padding: 0;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-secondary);
-    cursor: pointer;
-}
-
-.mwr-flow-options-button:hover,
-.mwr-flow-options-button.is-active,
-.mwr-flow-options-refresh:hover:not(:disabled),
-.mwr-flow-options-button:focus-visible,
-.mwr-flow-options-refresh:focus-visible {
-    border-color: color-mix(in srgb, var(--accent-color) 52%, var(--surface-border));
-    background: color-mix(in srgb, var(--accent-color) 12%, transparent);
-    color: var(--accent-color);
-}
-
-.mwr-flow-options-refresh:disabled {
-    cursor: wait;
-    opacity: 0.56;
-}
-
-.mwr-flow-options {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    padding: 0.55rem 1rem;
-    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 62%, transparent);
-    color: var(--text-secondary);
-    font-size: 0.72rem;
-}
-
-.mwr-flow-options-actions {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-}
-
-.mwr-flow-size-options {
-    display: inline-flex;
-    gap: 0.2rem;
-}
-
-.mwr-flow-size-options button {
-    min-width: 30px;
-    min-height: 25px;
-    padding: 0 0.35rem;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 74%, transparent);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-secondary);
-    font: inherit;
-    cursor: pointer;
-}
-
-.mwr-flow-size-options button:hover,
-.mwr-flow-size-options button.is-active {
-    border-color: var(--accent-color);
-    background: color-mix(in srgb, var(--accent-color) 16%, transparent);
-    color: var(--text-primary);
-}
-
-.mwr-flow-size-options button:disabled {
-    cursor: wait;
-    opacity: 0.55;
-}
-
-.mwr-flow-status-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    padding: 0.58rem 1rem 0.45rem;
-    color: var(--text-secondary);
-    font-family: var(--font-mono);
-    font-size: 0.64rem;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-}
-
-.mwr-flow-status-row span:last-child {
-    color: var(--accent-color);
-    white-space: nowrap;
 }
 
 .mwr-flow-warning {
@@ -968,6 +873,16 @@
     overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: color-mix(in srgb, var(--surface-border) 74%, var(--text-secondary)) transparent;
+}
+
+.mwr-flow-load-state {
+    padding: 0.8rem 1rem 1rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.04em;
+    text-align: center;
+    text-transform: uppercase;
 }
 
 .mwr-flow-list::-webkit-scrollbar {
@@ -1063,14 +978,6 @@
 
 .mwr-flow-item-type svg {
     color: var(--accent-color);
-}
-
-@keyframes mwr-flow-spin {
-    to { transform: rotate(360deg); }
-}
-
-.mwr-flow-options-refresh .is-spinning {
-    animation: mwr-flow-spin 0.9s linear infinite;
 }
 
 @media (max-width: 1180px) {
