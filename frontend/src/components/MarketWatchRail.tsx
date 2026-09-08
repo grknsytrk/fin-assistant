@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Clock, BarChart3, FileText, Wallet, Star, FolderPlus, Search, X, Pencil, Trash2, GripVertical } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Clock, BarChart3, Wallet, Star, FolderPlus, Search, X, Pencil, Trash2, GripVertical } from 'lucide-react';
 import { apiClient } from '../api/client';
 import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
 import type {
@@ -1017,10 +1017,10 @@ export default function MarketWatchRail({
                         setActiveTool('news');
                         updateCollapsed(false);
                     }}
-                    aria-label="Akış"
-                    title="Akış"
+                    aria-label="KAP Akışı"
+                    title="KAP Akışı"
                 >
-                    <FileText size={18} aria-hidden="true" />
+                    <Activity size={18} aria-hidden="true" />
                 </button>
                 <button
                     type="button"
