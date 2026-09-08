@@ -4737,7 +4737,7 @@ def _market_flow_payload(
         _VYK_DEFAULT_DETAIL_BUDGET,
         min(_VYK_DEFAULT_DETAIL_BUDGET_MAX, int(limit)),
     )
-    shared_key = f"api:kap:market-flow:category={category or ''}:budget={effective_budget}:v2"
+    shared_key = f"api:kap:market-flow:category={category or ''}:budget={effective_budget}:v3"
     payload, cache_status, stale, refresh_pending = _shared_swr_payload(
         cache_key=shared_key,
         factory=lambda: _build_market_flow_payload(
