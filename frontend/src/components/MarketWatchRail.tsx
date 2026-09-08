@@ -670,40 +670,42 @@ export default function MarketWatchRail({
                 aria-label="İzleme listesi"
                 aria-hidden={panelCollapsed}
             >
-                <div className="mwr-head">
-                    <div className="mwr-head-row">
-                        <h2 className="mwr-panel-title">
-                            {activeTool === 'watchlist' ? 'İzleme listesi' : activeTool === 'news' ? 'Akış' : 'Piyasalar'}
-                        </h2>
-                        {activeTool === 'watchlist' && watchlistItems.length > 0 && (
-                            <button
-                                type="button"
-                                className={`mwr-watchlist-edit-btn${watchlistEditMode ? ' is-active' : ''}`}
-                                onClick={() => setWatchlistEditMode((p) => !p)}
-                                aria-label={watchlistEditMode ? 'Düzenlemeyi bitir' : 'İzleme listesini düzenle'}
-                                title={watchlistEditMode ? 'Bitti' : 'Düzenle'}
-                            >
-                                <Pencil size={16} aria-hidden="true" />
-                            </button>
+                {activeTool !== 'news' && (
+                    <div className="mwr-head">
+                        <div className="mwr-head-row">
+                            <h2 className="mwr-panel-title">
+                                {activeTool === 'watchlist' ? 'İzleme listesi' : 'Piyasalar'}
+                            </h2>
+                            {activeTool === 'watchlist' && watchlistItems.length > 0 && (
+                                <button
+                                    type="button"
+                                    className={`mwr-watchlist-edit-btn${watchlistEditMode ? ' is-active' : ''}`}
+                                    onClick={() => setWatchlistEditMode((p) => !p)}
+                                    aria-label={watchlistEditMode ? 'Düzenlemeyi bitir' : 'İzleme listesini düzenle'}
+                                    title={watchlistEditMode ? 'Bitti' : 'Düzenle'}
+                                >
+                                    <Pencil size={16} aria-hidden="true" />
+                                </button>
+                            )}
+                        </div>
+                        {activeTool === 'markets' && (
+                            <div className="mwr-tabs" role="tablist" aria-label="İzleme sekmeleri">
+                                {RAIL_TABS.map((tab) => (
+                                    <button
+                                        key={tab.id}
+                                        type="button"
+                                        role="tab"
+                                        aria-selected={activeTab === tab.id}
+                                        className={`mwr-tab${activeTab === tab.id ? ' is-active' : ''}`}
+                                        onClick={() => setActiveTab(tab.id)}
+                                    >
+                                        {tab.label}
+                                    </button>
+                                ))}
+                            </div>
                         )}
                     </div>
-                    {activeTool === 'markets' && (
-                        <div className="mwr-tabs" role="tablist" aria-label="İzleme sekmeleri">
-                            {RAIL_TABS.map((tab) => (
-                                <button
-                                    key={tab.id}
-                                    type="button"
-                                    role="tab"
-                                    aria-selected={activeTab === tab.id}
-                                    className={`mwr-tab${activeTab === tab.id ? ' is-active' : ''}`}
-                                    onClick={() => setActiveTab(tab.id)}
-                                >
-                                    {tab.label}
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                </div>
+                )}
 
                 {activeTool === 'news' ? (
                     <MarketFlowPanel onSelectTicker={onSelectTicker} />

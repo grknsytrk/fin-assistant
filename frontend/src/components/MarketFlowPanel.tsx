@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ExternalLink, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import { ChevronRight, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { MarketFlowItem } from '../api/types';
 import { normalizeWatchlistSymbol, useWatchlist } from '../hooks/useWatchlist';
@@ -65,13 +65,9 @@ function formatFlowDate(iso: string): string {
 
 function formatFlowCodes(item: MarketFlowItem): string {
     const codes = item.stock_codes?.filter(Boolean) || [];
-    if (codes.length === 0) return item.symbol || 'KAP';
+    if (codes.length === 0) return item.symbol || '';
     if (codes.length <= 2) return codes.join(' ');
     return `${codes.slice(0, 2).join(' ')} +${codes.length - 2} şirket`;
-}
-
-function flowFilterLabel(filter: FlowFilter): string {
-    return FLOW_FILTERS.find((option) => option.value === filter)?.label || 'Tümü';
 }
 
 export default function MarketFlowPanel({
@@ -161,6 +157,10 @@ export default function MarketFlowPanel({
     return (
         <div className="mwr-flow-panel">
             <div className="mwr-flow-toolbar">
+                <div className="mwr-flow-heading">
+                    <h2 className="mwr-flow-title">Akış</h2>
+                    <ChevronRight size={16} aria-hidden="true" />
+                </div>
                 <label className="mwr-flow-select-wrap">
                     <span className="sr-only">Akış filtresi</span>
                     <select
@@ -184,41 +184,38 @@ export default function MarketFlowPanel({
                 >
                     <SlidersHorizontal size={16} aria-hidden="true" />
                 </button>
-                <button
-                    type="button"
-                    className="mwr-flow-refresh-button"
-                    onClick={() => load(true)}
-                    disabled={loading}
-                    aria-label="Akışı yenile"
-                    title="Akışı yenile"
-                >
-                    <RefreshCw size={15} className={loading ? 'is-spinning' : ''} aria-hidden="true" />
-                </button>
             </div>
 
             {showOptions && (
                 <div className="mwr-flow-options" role="group" aria-label="Akış kayıt sayısı">
-                    <span>Gösterilecek kayıt</span>
-                    <div className="mwr-flow-size-options">
-                        {FLOW_SIZE_OPTIONS.map((option) => (
-                            <button
-                                key={option}
-                                type="button"
-                                className={size === option ? 'is-active' : ''}
-                                onClick={() => handleSizeChange(option)}
-                                disabled={loading && size === option}
-                            >
-                                {option}
-                            </button>
-                        ))}
+                    <span className="mwr-flow-options-label">Gösterilecek kayıt</span>
+                    <div className="mwr-flow-options-actions">
+                        <div className="mwr-flow-size-options">
+                            {FLOW_SIZE_OPTIONS.map((option) => (
+                                <button
+                                    key={option}
+                                    type="button"
+                                    className={size === option ? 'is-active' : ''}
+                                    onClick={() => handleSizeChange(option)}
+                                    disabled={loading && size === option}
+                                >
+                                    {option}
+                                </button>
+                            ))}
+                        </div>
+                        <button
+                            type="button"
+                            className="mwr-flow-options-refresh"
+                            onClick={() => load(true)}
+                            disabled={loading}
+                            aria-label="Akışı yenile"
+                            title="Akışı yenile"
+                        >
+                            <RefreshCw size={14} className={loading ? 'is-spinning' : ''} aria-hidden="true" />
+                        </button>
                     </div>
                 </div>
             )}
-
-            <div className="mwr-flow-status-row">
-                <span>Resmi KAP akışı</span>
-                <span>{flowFilterLabel(filter)}</span>
-            </div>
 
             {warning && <div className="mwr-flow-warning" role="status">{warning}</div>}
             {loading && !items && <div className="mwr-flow-state">Akış yükleniyor…</div>}
@@ -242,17 +239,15 @@ export default function MarketFlowPanel({
                     >
                         <div className="mwr-flow-item-meta">
                             <span className="mwr-flow-source">KAP</span>
-                            <span className="mwr-flow-dot" aria-hidden="true">·</span>
-                            <span className="mwr-flow-codes">{formatFlowCodes(item)}</span>
+                            {formatFlowCodes(item) && (
+                                <>
+                                    <span className="mwr-flow-dot" aria-hidden="true">·</span>
+                                    <span className="mwr-flow-codes">{formatFlowCodes(item)}</span>
+                                </>
+                            )}
                             <time dateTime={item.published_at}>{formatFlowTime(item.published_at)}</time>
                         </div>
                         <div className="mwr-flow-item-title">{item.title}</div>
-                        {item.source && item.source !== 'KAP' && (
-                            <div className="mwr-flow-item-type">
-                                <span>{item.source}</span>
-                                <ExternalLink size={12} aria-hidden="true" />
-                            </div>
-                        )}
                     </button>
                 ))}
             </div>
