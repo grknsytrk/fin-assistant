@@ -9,6 +9,7 @@ import type {
     MarketIndicesResponse,
     MarketIndexDetailResponse,
     MarketFlowResponse,
+    MarketFlowHeadResponse,
     MarketStockCardsResponse,
     MarketStockCardChartRange,
     MarketStockCardChartResponse,
@@ -385,11 +386,17 @@ export const apiClient = {
             query ? `/market/indices/${index}?${query}` : `/market/indices/${index}`,
         );
     },
-    marketFlow: (limit = 40, category?: string, options?: { refresh?: boolean }) => {
+    marketFlow: (
+        limit = 40,
+        category?: string,
+        options?: { refresh?: boolean; before?: string; after?: string },
+    ) => {
         const params = new URLSearchParams({ limit: String(limit) });
         if (category) params.append('category', category);
         if (options?.refresh) params.append('refresh', 'true');
-        const cacheKey = `${limit}:${category || ''}`;
+        if (options?.before) params.append('before', options.before);
+        if (options?.after) params.append('after', options.after);
+        const cacheKey = `${limit}:${category || ''}:${options?.before || ''}:${options?.after || ''}`;
         const cached = marketFlowMemoryCache.get(cacheKey);
         if (!options?.refresh && cached && Date.now() - cached.fetchedAt < MARKET_FLOW_MEMORY_CACHE_TTL_MS) {
             return Promise.resolve(cached.payload);
@@ -408,6 +415,12 @@ export const apiClient = {
             });
         marketFlowInFlight.set(cacheKey, request);
         return request;
+    },
+    marketFlowHead: (category?: string) => {
+        const params = new URLSearchParams();
+        if (category) params.append('category', category);
+        const query = params.toString();
+        return fetchApi<MarketFlowHeadResponse>(query ? `/market/flow/head?${query}` : '/market/flow/head');
     },
     marketWatch: (options?: { refresh?: boolean }) => {
         const params = new URLSearchParams();

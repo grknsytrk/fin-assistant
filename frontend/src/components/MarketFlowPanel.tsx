@@ -18,10 +18,11 @@ const FLOW_FILTERS: Array<{ value: FlowFilter; label: string }> = [
 ];
 
 const FLOW_PAGE_SIZE = 50;
-const FLOW_INITIAL_LOAD_SIZE = FLOW_PAGE_SIZE * 2;
-const FLOW_MAX_ITEMS = 500;
+const FLOW_INITIAL_LOAD_SIZE = FLOW_PAGE_SIZE;
+const FLOW_MAX_ITEMS = 2_000;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
 const FLOW_NEW_ITEM_HIGHLIGHT_MS = 5_000;
+const FLOW_HEAD_POLL_MS = 15_000;
 
 function getFlowSymbols(item: MarketFlowItem): string[] {
     return [item.symbol, ...(item.stock_codes || []), ...(item.related_symbols || [])]
@@ -97,8 +98,9 @@ export default function MarketFlowPanel({
     const [visibleLimit, setVisibleLimit] = useState(FLOW_PAGE_SIZE);
     const visibleLimitRef = useRef(FLOW_PAGE_SIZE);
     const requestLimitRef = useRef(FLOW_INITIAL_LOAD_SIZE);
+    const nextCursorRef = useRef<string | null>(null);
+    const latestCursorRef = useRef<string | null>(null);
     const loadingMoreRef = useRef(false);
-    const prefetchInFlightRef = useRef(false);
     const observedFlowIdsRef = useRef<Set<string> | null>(null);
     const highlightTimersRef = useRef(new Map<string, number>());
     const [highlightedItemIds, setHighlightedItemIds] = useState<Set<string>>(new Set());
@@ -134,54 +136,29 @@ export default function MarketFlowPanel({
         highlightTimersRef.current.clear();
     }, []);
 
-    const prefetchMore = useCallback((requestedLimit: number, expectedFilter = filterRef.current) => {
-        if (
-            prefetchInFlightRef.current
-            || expectedFilter === 'watchlist'
-            || requestedLimit <= requestLimitRef.current
-            || requestedLimit > FLOW_MAX_ITEMS
-        ) return;
-
-        prefetchInFlightRef.current = true;
-        apiClient
-            .marketFlow(requestedLimit)
-            .then((payload) => {
-                if (filterRef.current !== expectedFilter) return;
-                const nextItems = payload.items || [];
-                requestLimitRef.current = requestedLimit;
-                observedFlowIdsRef.current = new Set(nextItems.map((item) => item.id));
-                setItems(nextItems);
-                setWarning(payload.warning || null);
-                setHasMore(nextItems.length >= requestedLimit && requestedLimit < FLOW_MAX_ITEMS);
-            })
-            .catch(() => {
-                // The visible page remains usable when a speculative request fails.
-            })
-            .finally(() => {
-                prefetchInFlightRef.current = false;
-            });
-    }, []);
-
-    const load = useCallback((refresh = false, requestedLimit?: number) => {
+    const load = useCallback((requestedLimit?: number) => {
         const requestLimit = requestedLimit
             ?? (filterRef.current === 'watchlist' ? FLOW_FAVORITES_LOAD_SIZE : requestLimitRef.current || FLOW_INITIAL_LOAD_SIZE);
         const expectedFilter = filterRef.current;
         requestLimitRef.current = requestLimit;
-        setHasMore(requestLimit < FLOW_MAX_ITEMS);
+        nextCursorRef.current = null;
+        latestCursorRef.current = null;
+        setHasMore(true);
         setLoading(true);
         setError(null);
         apiClient
-            .marketFlow(requestLimit, undefined, { refresh })
+            .marketFlow(requestLimit)
             .then((payload) => {
                 if (filterRef.current !== expectedFilter) return;
                 const nextItems = payload.items || [];
-                if (refresh) {
-                    markNewItems(getNewFlowItemIds(observedFlowIdsRef.current, nextItems));
-                }
                 observedFlowIdsRef.current = new Set(nextItems.map((item) => item.id));
+                nextCursorRef.current = payload.next_cursor || null;
+                latestCursorRef.current = payload.latest_cursor || null;
                 setItems(nextItems);
                 setWarning(payload.warning || null);
-                setHasMore(nextItems.length >= requestLimit && requestLimit < FLOW_MAX_ITEMS);
+                setHasMore(typeof payload.has_more === 'boolean'
+                    ? payload.has_more
+                    : nextItems.length >= requestLimit && requestLimit < FLOW_MAX_ITEMS);
             })
             .catch((requestError: unknown) => {
                 setError(requestError instanceof Error ? requestError.message : 'Akış verisi alınamadı.');
@@ -196,26 +173,21 @@ export default function MarketFlowPanel({
     );
 
     const loadMore = useCallback(() => {
-        if (
-            loadingMoreRef.current
-            || !hasMore
-            || filterRef.current === 'watchlist'
-        ) return;
+        if (loadingMoreRef.current) return;
 
         const currentVisibleLimit = visibleLimitRef.current;
         if (filteredItems.length > currentVisibleLimit) {
             const nextVisibleLimit = Math.min(currentVisibleLimit + FLOW_PAGE_SIZE, filteredItems.length);
             visibleLimitRef.current = nextVisibleLimit;
             setVisibleLimit(nextVisibleLimit);
-            window.setTimeout(() => {
-                prefetchMore(requestLimitRef.current + FLOW_PAGE_SIZE);
-            }, 0);
             return;
         }
+        if (!hasMore) return;
 
+        const nextCursor = nextCursorRef.current;
         const currentLimit = requestLimitRef.current;
         const nextLimit = Math.min(currentLimit + FLOW_PAGE_SIZE, FLOW_MAX_ITEMS);
-        if (nextLimit <= currentLimit) {
+        if (!nextCursor && nextLimit <= currentLimit) {
             setHasMore(false);
             return;
         }
@@ -223,15 +195,27 @@ export default function MarketFlowPanel({
         loadingMoreRef.current = true;
         setLoadingMore(true);
         apiClient
-            .marketFlow(nextLimit)
+            .marketFlow(
+                nextCursor ? FLOW_PAGE_SIZE : nextLimit,
+                undefined,
+                nextCursor ? { before: nextCursor } : undefined,
+            )
             .then((payload) => {
-                const nextItems = payload.items || [];
-                requestLimitRef.current = nextLimit;
-                observedFlowIdsRef.current = new Set(nextItems.map((item) => item.id));
-                setItems(nextItems);
+                const olderItems = payload.items || [];
+                requestLimitRef.current = nextCursor ? currentLimit + olderItems.length : nextLimit;
+                nextCursorRef.current = payload.next_cursor || null;
+                latestCursorRef.current = latestCursorRef.current || payload.latest_cursor || null;
+                setItems((currentItems) => {
+                    const current = currentItems || [];
+                    const seen = new Set(current.map((item) => item.id));
+                    return [...current, ...olderItems.filter((item) => !seen.has(item.id))];
+                });
                 setWarning(payload.warning || null);
-                setHasMore(nextItems.length >= nextLimit && nextLimit < FLOW_MAX_ITEMS);
-                const nextVisibleLimit = Math.min(currentVisibleLimit + FLOW_PAGE_SIZE, nextItems.length);
+                setHasMore(typeof payload.has_more === 'boolean'
+                    ? payload.has_more
+                    : olderItems.length >= (nextCursor ? FLOW_PAGE_SIZE : nextLimit)
+                        && requestLimitRef.current < FLOW_MAX_ITEMS);
+                const nextVisibleLimit = currentVisibleLimit + FLOW_PAGE_SIZE;
                 visibleLimitRef.current = nextVisibleLimit;
                 setVisibleLimit(nextVisibleLimit);
             })
@@ -242,7 +226,7 @@ export default function MarketFlowPanel({
                 loadingMoreRef.current = false;
                 setLoadingMore(false);
             });
-    }, [filteredItems.length, hasMore, prefetchMore]);
+    }, [filteredItems.length, hasMore]);
 
     useEffect(() => {
         load();
@@ -250,10 +234,47 @@ export default function MarketFlowPanel({
 
     useEffect(() => {
         const timer = window.setInterval(() => {
-            if (document.visibilityState === 'visible') load(true);
-        }, 30000);
+            if (document.visibilityState !== 'visible') return;
+            apiClient
+                .marketFlowHead()
+                .then((head) => {
+                    const previousCursor = latestCursorRef.current;
+                    if (!head.latest_cursor) return;
+                    if (!previousCursor) {
+                        latestCursorRef.current = head.latest_cursor;
+                        return;
+                    }
+                    if (head.latest_cursor === previousCursor) return;
+
+                    return apiClient
+                        .marketFlow(FLOW_PAGE_SIZE, undefined, { after: previousCursor })
+                        .then((payload) => {
+                            const incoming = payload.items || [];
+                            const newIds = getNewFlowItemIds(observedFlowIdsRef.current, incoming);
+                            if (incoming.length > 0) {
+                                setItems((currentItems) => {
+                                    const current = currentItems || [];
+                                    const incomingIds = new Set(incoming.map((item) => item.id));
+                                    return [
+                                        ...incoming,
+                                        ...current.filter((item) => !incomingIds.has(item.id)),
+                                    ];
+                                });
+                                const observed = observedFlowIdsRef.current || new Set<string>();
+                                incoming.forEach((item) => observed.add(item.id));
+                                observedFlowIdsRef.current = observed;
+                                markNewItems(newIds);
+                                setWarning(payload.warning || null);
+                            }
+                            latestCursorRef.current = head.latest_cursor;
+                        });
+                })
+                .catch(() => {
+                    // The last successful flow remains visible while the head check retries later.
+                });
+        }, FLOW_HEAD_POLL_MS);
         return () => window.clearInterval(timer);
-    }, [load]);
+    }, [markNewItems]);
 
     const handleFilterChange = (nextFilter: FlowFilter) => {
         filterRef.current = nextFilter;
@@ -261,9 +282,9 @@ export default function MarketFlowPanel({
         setVisibleLimit(FLOW_PAGE_SIZE);
         setFilter(nextFilter);
         if (nextFilter === 'watchlist') {
-            load(false, FLOW_FAVORITES_LOAD_SIZE);
+            load(FLOW_FAVORITES_LOAD_SIZE);
         } else {
-            load(false, FLOW_INITIAL_LOAD_SIZE);
+            load(FLOW_INITIAL_LOAD_SIZE);
         }
     };
 
@@ -282,8 +303,8 @@ export default function MarketFlowPanel({
     };
 
     const visibleItems = useMemo(
-        () => filteredItems.slice(0, filter === 'watchlist' ? FLOW_PAGE_SIZE : visibleLimit),
-        [filter, filteredItems, visibleLimit],
+        () => filteredItems.slice(0, visibleLimit),
+        [filteredItems, visibleLimit],
     );
 
     return (

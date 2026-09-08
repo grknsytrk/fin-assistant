@@ -92,6 +92,8 @@ Redis bağlantı URL'si, Supabase database şifresi ve API token'ları GitHub'a,
 
 Fon, KAP ve piyasa endpoint'lerinde önce mevcut cache okunur; pahalı dış kaynak yenilemeleri cache miss durumunda yapılır. Upstash Redis kullanıldığında birden fazla backend instance'ı aynı cache'i paylaşır ve aynı verinin eşzamanlı olarak tekrar çekilmesi önlenir. Endeks, döviz, emtia, hisse grafikleri, KAP snapshot ve karşılaştırma serileri fresh/stale zarfı kullanır: stale veri dönerken yalnızca bir worker arka planda yenileme yapar. Frontend tarafında da sayfa geçişlerinde tekrar istekleri azaltan cache-first/stale-while-revalidate akışı kullanılır.
 
+KAP akışı için yenileme ve okuma yolları ayrıdır: GitHub Actions `POST /admin/kap/refresh` ile dış kaynaktan güncel akışı alır; backend olayları `ragfin_kap_flow_events` tablosunda kalıcılaştırır ve Redis'e yalnızca hızlı head/bounded fallback kopyasını yazar. Kullanıcı isteği normalde KAP'a gitmez: ilk 50 kayıt keyset cursor ile döner, eski kayıtlar `before` cursor'ıyla sayfalanır, yeni kayıt kontrolü ise `GET /market/flow/head` ile hafifçe yapılır. Böylece siteye kimse girmese de akış yenilenir; Redis veya Postgres geçici olarak kullanılamazsa mevcut legacy kaynak yolu devreye girer.
+
 Production'da `/health` yanıtındaki `cache_backend` değeri `redis` ve `cache_redis_fallback` değeri `false` olmalıdır. Aksi durumda uygulama yalnızca process-memory cache kullanır; çoklu worker sağlayıcı çağrılarını paylaşamaz.
 
 ## API yüzeyi
@@ -110,6 +112,10 @@ Temel endpoint'ler:
 - `GET /market/universe`
 - `GET /market/stocks/search?q={query}`
 - `GET /market/stocks`
+- `GET /market/flow?limit=50`
+- `GET /market/flow?limit=50&before={cursor}`
+- `GET /market/flow/head`
+- `POST /admin/kap/refresh` (Bearer admin token)
 - aktif market ve endeks endpoint'leri
 
 Eski `/stocks/:ticker/ask` adresleri bozulmaz; frontend bu yolu şirketin Genel Bakış sekmesine yönlendirir. RAG'e ait `/ask`, `/ingest`, `/index`, `/stats`, `/commentary` ve `/feedback` endpoint'leri artık sunulmaz.
@@ -126,6 +132,7 @@ Eski `/stocks/:ticker/ask` adresleri bozulmaz; frontend bu yolu şirketin Genel 
 - `RAGFIN_TEFAS_FUND_TYPES`, `RAGFIN_TEFAS_OPEN_ONLY`
 - `RAGFIN_FUNDS_LIST_MIN_AUM` (boşsa varsayılan filtre yoktur)
 - `RAGFIN_CACHE_BACKEND`, `RAGFIN_REDIS_URL`
+- `RAGFIN_KAP_FLOW_HEAD_CACHE_TTL_SECONDS`, `RAGFIN_KAP_FLOW_RETAINED_EVENTS`
 
 KAP yorumunu etkinleştirmek için `NVIDIA_API_KEY` ve ilgili `NVIDIA_AI_*` değişkenlerini doldurabilirsiniz. Yorum özelliği isteğe bağlıdır; yapılandırılmış KAP tablolarının çalışması için gerekli değildir.
 

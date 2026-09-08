@@ -704,12 +704,28 @@ export interface MarketFlowItem {
 
 export interface MarketFlowResponse {
   items: MarketFlowItem[];
-  as_of: string;
+  as_of: string | null;
   source?: string;
+  has_more?: boolean;
+  next_cursor?: string | null;
+  latest_cursor?: string | null;
+  last_successful_refresh?: string | null;
+  refresh_status?: string;
+  cache_status?: string;
+  stale?: boolean;
+  refresh_pending?: boolean;
   degraded_mode?: boolean;
   multi_category?: boolean;
   warning?: string | null;
   public_error?: string | null;
+}
+
+export interface MarketFlowHeadResponse {
+  latest_cursor: string | null;
+  as_of: string | null;
+  last_successful_refresh: string | null;
+  refresh_status: string;
+  source?: string;
 }
 
 export interface MarketWatchItem {

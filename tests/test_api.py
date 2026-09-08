@@ -3976,6 +3976,34 @@ def test_market_flow_category_filter_applies_to_public_feed(monkeypatch: pytest.
     assert cats == {"ozel_durum"}
 
 
+def test_market_flow_rejects_two_pagination_directions() -> None:
+    response = TestClient(app).get(
+        "/market/flow",
+        params={"before": "cursor-a", "after": "cursor-b"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_admin_kap_refresh_requires_token_and_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_refresh_kap_flow_store",
+        lambda: {"status": "ok", "stored_count": 2},
+    )
+    client = TestClient(app)
+
+    unauthorized = client.post("/admin/kap/refresh")
+    authorized = client.post(
+        "/admin/kap/refresh",
+        headers={"Authorization": "Bearer test-admin-token"},
+    )
+
+    assert unauthorized.status_code == 401
+    assert authorized.status_code == 200
+    assert authorized.json()["stored_count"] == 2
+
+
 def test_parse_kap_public_result_page_maps_related_symbols() -> None:
     page = """
     <table><tbody>

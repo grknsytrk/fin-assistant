@@ -1,0 +1,38 @@
+name: refresh KAP flow
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub may delay scheduled jobs slightly.  The endpoint is idempotent
+    # and the cache lock prevents overlapping refreshes.
+    - cron: "*/10 6-19 * * 1-5"
+
+permissions: {}
+
+concurrency:
+  group: kap-flow-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      FIN_API_BASE_URL: https://grknsytrk-fin-api.hf.space
+      FIN_API_ADMIN_TOKEN: ${{ secrets.FIN_API_ADMIN_TOKEN }}
+    steps:
+      - name: refresh KAP flow store
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors \
+            --connect-timeout 5 --max-time 60 \
+            -X POST \
+            -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
+            "$FIN_API_BASE_URL/admin/kap/refresh")"
+          status="$(echo "$response" | jq -r '.status // empty')"
+          echo "KAP flow refresh status: ${status:-unknown}"
+          if [[ "$status" != "ok" && "$status" != "already_running" ]]; then
+            echo "$response" >&2
+            exit 1
+          fi

@@ -43,10 +43,12 @@ from app.cache import get_or_set_single_flight as _get_or_set_single_flight
 from app.cache import get_json_dict as _cache_get_dict
 from app.cache import set_json as _cache_set_json
 from app.rate_limit import RequestRateLimitMiddleware
+from app import kap_flow_store as _kap_flow_store
 from app.database import (
     acquire_refresh_lease,
     close_postgres_pool,
     database_enabled,
+    ensure_kap_flow_schema,
     ensure_json_cache_schema,
     ensure_refresh_lease_schema,
     get_refresh_lease,
@@ -944,6 +946,7 @@ def bootstrap_application_storage() -> None:
 
     ensure_json_cache_schema()
     ensure_refresh_lease_schema()
+    ensure_kap_flow_schema()
     ensure_reference_data_schema(CONFIG.paths.processed_dir)
     from app.fund_service import ensure_fund_prices_schema
 
@@ -3513,6 +3516,9 @@ _FLOW_CACHE_TTL = 180
 # When the VYK feed fetch budget is spent we still want the last successful
 # payload served for a while even if the cache itself is stale.
 _FLOW_STALE_SERVE_WINDOW = 15 * 60
+_KAP_FLOW_REFRESH_LOCK_TIMEOUT_SECONDS = float(
+    os.getenv("RAGFIN_KAP_FLOW_REFRESH_LOCK_TIMEOUT_SECONDS", "0.1")
+)
 
 
 def _parse_kap_publish_date(raw: Any) -> Optional[datetime]:
@@ -3908,6 +3914,7 @@ def _parse_kap_public_result_page(page: str, max_items: int) -> List[Dict[str, A
         title = subject or summary or "KAP Bildirimi"
         item: Dict[str, Any] = {
             "id": f"kap-{disclosure_id or row.get('id') or published_dt.isoformat()}",
+            "disclosure_id": disclosure_id or None,
             "source": _kap_source_label(disclosure_type),
             "symbol": symbol,
             "stock_codes": display_codes,
@@ -4055,6 +4062,7 @@ def _local_flow_items_from_cache() -> List[Dict[str, Any]]:
             items.append(
                 {
                     "id": f"{symbol}-{disclosure_id or quarter_label or parsed_dt.isoformat()}",
+                    "disclosure_id": str(disclosure_id).strip() if disclosure_id else None,
                     "source": "Finansal Rapor",
                     "symbol": symbol,
                     "stock_codes": [symbol],
@@ -4304,6 +4312,7 @@ def _fetch_kap_vyk_feed(
 
         built = {
             "id": f"vyk-{idx_str}",
+            "disclosure_id": idx_str,
             "source": _vyk_source_label(disclosure_class, disclosure_type, subject_tr),
             "symbol": symbol,
             "stock_codes": stock_codes,
@@ -4683,6 +4692,7 @@ def _fetch_kap_member_feed(
         items.append(
             {
                 "id": f"{symbol}-{idx}",
+                "disclosure_id": str(idx),
                 "source": "Finansal Rapor",
                 "symbol": symbol,
                 "stock_codes": [symbol],
@@ -4725,7 +4735,7 @@ def _fetch_kap_member_feed(
     return list(items)
 
 
-def _market_flow_payload(
+def _legacy_market_flow_payload(
     limit: int = 40,
     category: Optional[str] = None,
     *,
@@ -4761,6 +4771,141 @@ def _market_flow_payload(
     )
     response["items"] = list(response.get("items") or [])[:limit]
     return response
+
+
+def _persisted_market_flow_payload(
+    *,
+    limit: int,
+    category: Optional[str],
+    before: Optional[str],
+    after: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    try:
+        page = _kap_flow_store.read_flow_page(
+            limit=limit,
+            before=before,
+            after=after,
+            category=category,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if page is None:
+        return None
+    response = dict(page)
+    response.setdefault("source", "kap_flow_store")
+    response.setdefault("as_of", None)
+    response.setdefault("degraded_mode", False)
+    response.setdefault("multi_category", True)
+    response.setdefault("warning", None)
+    response.setdefault("public_error", None)
+    response["cache_status"] = "shared_hit"
+    response["stale"] = False
+    response["refresh_pending"] = False
+    return response
+
+
+def _market_flow_payload(
+    limit: int = 40,
+    category: Optional[str] = None,
+    *,
+    force_refresh: bool = False,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
+) -> Dict[str, Any]:
+    # Once the durable feed has rows, reads never call KAP.  The first cold
+    # read seeds the store through the legacy source path so local development
+    # and an unprimed deployment remain usable before the first cron run.
+    store_requested = bool(before or after) or database_enabled() or _kap_flow_store.store_is_configured()
+    if store_requested:
+        persisted = _persisted_market_flow_payload(
+            limit=limit,
+            category=category,
+            before=before,
+            after=after,
+        )
+        if persisted is not None:
+            return persisted
+        if before or after:
+            return {
+                "items": [],
+                "source": "kap_flow_store",
+                "as_of": None,
+                "has_more": False,
+                "next_cursor": None,
+                "latest_cursor": None,
+                "last_successful_refresh": None,
+                "refresh_status": "empty",
+                "degraded_mode": False,
+                "multi_category": True,
+                "warning": None,
+                "public_error": None,
+                "cache_status": "miss",
+                "stale": False,
+                "refresh_pending": False,
+            }
+        seed_payload = _legacy_market_flow_payload(
+            limit=max(50, min(500, int(limit))),
+            category=None,
+            force_refresh=force_refresh,
+        )
+        if seed_payload.get("items"):
+            _kap_flow_store.persist_flow_items(
+                list(seed_payload.get("items") or []),
+                source=str(seed_payload.get("source") or "kap"),
+                as_of=seed_payload.get("as_of"),
+            )
+            persisted = _persisted_market_flow_payload(
+                limit=limit,
+                category=category,
+                before=before,
+                after=after,
+            )
+            if persisted is not None:
+                return persisted
+        return seed_payload
+    return _legacy_market_flow_payload(limit=limit, category=category, force_refresh=force_refresh)
+
+
+def _refresh_kap_flow_store() -> Dict[str, Any]:
+    """Fetch the current KAP feed once and publish it to durable storage."""
+
+    backend = _get_cache()
+    with backend.lock("kap-flow-refresh", timeout=max(0.001, _KAP_FLOW_REFRESH_LOCK_TIMEOUT_SECONDS)) as acquired:
+        if not acquired:
+            return {
+                "status": "already_running",
+                "refresh_status": "running",
+                "source": "kap_flow_store",
+            }
+
+        payload = _build_market_flow_payload(
+            limit=_VYK_DEFAULT_DETAIL_BUDGET_MAX,
+            category=None,
+            force_refresh=True,
+        )
+        items = list(payload.get("items") or [])
+        if not items:
+            return {
+                "status": "empty",
+                "refresh_status": "empty",
+                "source": payload.get("source") or "kap_flow_store",
+                "as_of": payload.get("as_of"),
+                "stored_count": 0,
+                "warning": payload.get("warning"),
+            }
+
+        result = _kap_flow_store.persist_flow_items(
+            items,
+            source=str(payload.get("source") or "kap"),
+            as_of=payload.get("as_of"),
+        )
+        return {
+            "status": "ok",
+            **result,
+            "received_count": len(items),
+            "degraded_mode": bool(payload.get("degraded_mode")),
+            "warning": payload.get("warning"),
+        }
 
 
 def _build_market_flow_payload(
@@ -4867,8 +5012,33 @@ def market_flow(
     limit: int = Query(40, ge=1, le=500),
     category: Optional[str] = Query(None),
     refresh: bool = Query(False),
+    before: Optional[str] = Query(None, max_length=512),
+    after: Optional[str] = Query(None, max_length=512),
 ) -> Dict[str, Any]:
-    return _market_flow_payload(limit=limit, category=category, force_refresh=refresh)
+    if before and after:
+        raise HTTPException(status_code=400, detail="Aynı istekte before ve after cursor birlikte kullanılamaz.")
+    return _market_flow_payload(
+        limit=limit,
+        category=category,
+        force_refresh=refresh,
+        before=before,
+        after=after,
+    )
+
+
+@app.get("/market/flow/head")
+def market_flow_head(category: Optional[str] = Query(None)) -> Dict[str, Any]:
+    """Return the light-weight cursor used to detect newly ingested KAP rows."""
+
+    return _kap_flow_store.read_flow_head(category=category)
+
+
+@app.post("/admin/kap/refresh")
+def admin_refresh_kap_flow(request: Request) -> Dict[str, Any]:
+    """Refresh KAP flow storage for the scheduled GitHub Actions job."""
+
+    _require_admin_refresh_access(request)
+    return _refresh_kap_flow_store()
 
 
 @app.get("/kap/companies")

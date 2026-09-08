@@ -22,6 +22,7 @@ LOGGER = logging.getLogger(__name__)
 _SCHEMA_LOCK = threading.Lock()
 _JSON_SCHEMA_READY = False
 _REFRESH_LEASE_SCHEMA_READY = False
+_KAP_FLOW_SCHEMA_READY = False
 _POOL_LOCK = threading.Lock()
 _POSTGRES_POOL: Any = None
 _POSTGRES_POOL_URL = ""
@@ -256,6 +257,164 @@ def ensure_refresh_lease_schema() -> None:
             )
             conn.commit()
         _REFRESH_LEASE_SCHEMA_READY = True
+
+
+def ensure_kap_flow_schema() -> None:
+    """Create the durable KAP flow event store used by cursor pagination."""
+
+    global _KAP_FLOW_SCHEMA_READY
+    if not database_enabled() or _KAP_FLOW_SCHEMA_READY:
+        return
+    with _SCHEMA_LOCK:
+        if _KAP_FLOW_SCHEMA_READY:
+            return
+        with connect_postgres() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ragfin_kap_flow_events (
+                    event_key TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    disclosure_id TEXT,
+                    published_at TIMESTAMPTZ NOT NULL,
+                    symbol TEXT NOT NULL DEFAULT '',
+                    stock_codes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    related_symbols JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    title TEXT NOT NULL,
+                    subject TEXT,
+                    category TEXT NOT NULL DEFAULT 'bildirim',
+                    kap_url TEXT,
+                    payload JSONB NOT NULL,
+                    ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ragfin_kap_flow_events_published
+                ON ragfin_kap_flow_events (published_at DESC, event_key DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ragfin_kap_flow_events_category_published
+                ON ragfin_kap_flow_events (category, published_at DESC, event_key DESC)
+                """
+            )
+            conn.execute("ALTER TABLE ragfin_kap_flow_events ENABLE ROW LEVEL SECURITY")
+            conn.commit()
+        _KAP_FLOW_SCHEMA_READY = True
+
+
+def upsert_kap_flow_events(events: list[dict[str, Any]]) -> int:
+    """Atomically upsert normalized KAP flow events into Postgres."""
+
+    if not database_enabled() or not events:
+        return 0
+    ensure_kap_flow_schema()
+    rows = [
+        (
+            str(event["event_key"]),
+            str(event.get("source") or "KAP"),
+            str(event.get("disclosure_id") or "") or None,
+            str(event["published_at"]),
+            str(event.get("symbol") or ""),
+            json.dumps(event.get("stock_codes") or [], ensure_ascii=False),
+            json.dumps(event.get("related_symbols") or [], ensure_ascii=False),
+            str(event.get("title") or "KAP Bildirimi"),
+            str(event.get("subject") or "") or None,
+            str(event.get("category") or "bildirim"),
+            str(event.get("kap_url") or "") or None,
+            json.dumps(event.get("payload") or {}, ensure_ascii=False, default=str),
+        )
+        for event in events
+        if event.get("event_key") and event.get("published_at")
+    ]
+    if not rows:
+        return 0
+    with connect_postgres() as conn:
+        conn.executemany(
+            """
+            INSERT INTO ragfin_kap_flow_events (
+                event_key, source, disclosure_id, published_at, symbol,
+                stock_codes, related_symbols, title, subject, category,
+                kap_url, payload, ingested_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?::jsonb, NOW(), NOW())
+            ON CONFLICT (event_key) DO UPDATE SET
+                source = EXCLUDED.source,
+                disclosure_id = EXCLUDED.disclosure_id,
+                published_at = EXCLUDED.published_at,
+                symbol = EXCLUDED.symbol,
+                stock_codes = EXCLUDED.stock_codes,
+                related_symbols = EXCLUDED.related_symbols,
+                title = EXCLUDED.title,
+                subject = EXCLUDED.subject,
+                category = EXCLUDED.category,
+                kap_url = EXCLUDED.kap_url,
+                payload = EXCLUDED.payload,
+                updated_at = NOW()
+            """,
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
+def read_kap_flow_events(
+    *,
+    limit: int,
+    before: Optional[tuple[str, str]] = None,
+    after: Optional[tuple[str, str]] = None,
+    category: Optional[str] = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read a keyset-paginated KAP flow page from the durable store."""
+
+    if not database_enabled():
+        return [], False
+    ensure_kap_flow_schema()
+    page_size = max(1, min(int(limit), 500))
+    conditions: list[str] = []
+    params: list[Any] = []
+    if category:
+        conditions.append("category = ?")
+        params.append(category)
+    if before:
+        conditions.append("(published_at, event_key) < (?, ?)")
+        params.extend(before)
+    if after:
+        conditions.append("(published_at, event_key) > (?, ?)")
+        params.extend(after)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    with connect_postgres() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT event_key, published_at, payload
+            FROM ragfin_kap_flow_events
+            {where}
+            ORDER BY published_at DESC, event_key DESC
+            LIMIT ?
+            """,
+            (*params, page_size + 1),
+        ).fetchall()
+    has_more = len(rows) > page_size
+    output: list[dict[str, Any]] = []
+    for row in rows[:page_size]:
+        if not isinstance(row, dict) or not isinstance(row.get("payload"), dict):
+            continue
+        output.append(
+            {
+                "event_key": str(row.get("event_key") or ""),
+                "published_at": row.get("published_at"),
+                "payload": dict(row["payload"]),
+            }
+        )
+    return output, has_more
+
+
+def reset_kap_flow_schema_for_tests() -> None:
+    global _KAP_FLOW_SCHEMA_READY
+    _KAP_FLOW_SCHEMA_READY = False
 
 
 def acquire_refresh_lease(
@@ -510,7 +669,8 @@ def hydrate_json_cache(processed_dir: Path) -> int:
 
 
 def reset_database_state_for_tests() -> None:
-    global _JSON_SCHEMA_READY, _REFRESH_LEASE_SCHEMA_READY
+    global _JSON_SCHEMA_READY, _REFRESH_LEASE_SCHEMA_READY, _KAP_FLOW_SCHEMA_READY
     close_postgres_pool()
     _JSON_SCHEMA_READY = False
     _REFRESH_LEASE_SCHEMA_READY = False
+    _KAP_FLOW_SCHEMA_READY = False
