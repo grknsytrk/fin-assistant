@@ -734,7 +734,13 @@ function mergeStockCardPayloads(
 ): MarketStockCardsResponse {
     const itemsBySymbol = new Map<string, MarketStockCardItem>();
     for (const item of current?.items || []) itemsBySymbol.set(item.symbol, item);
-    for (const item of next.items || []) itemsBySymbol.set(item.symbol, item);
+    for (const item of next.items || []) {
+        const currentItem = itemsBySymbol.get(item.symbol);
+        // A quick refresh must never replace a previously completed card with
+        // a partial quote-only item.
+        if (item.card_stage === 'quick' && currentItem && currentItem.card_stage !== 'quick') continue;
+        itemsBySymbol.set(item.symbol, item);
+    }
     return {
         ...next,
         items: orderedSymbols
@@ -1717,6 +1723,8 @@ function MarketStockCard({
     isLoading?: boolean;
     isDragging?: boolean;
 }) {
+    const isDetailLoading = !isLoading && item.card_stage === 'quick';
+    const isCardDataLoading = isLoading || isDetailLoading;
     const [selectedRange, setSelectedRange] = useState<MarketStockCardChartRange>('1d');
     const [pendingRange, setPendingRange] = useState<MarketStockCardChartRange | null>(null);
     const [chartDataByRange, setChartDataByRange] = useState<Partial<Record<MarketStockCardChartRange, MarketIndexLinePoint[]>>>(
@@ -1752,7 +1760,7 @@ function MarketStockCard({
     const tooltipOpenFrameRef = useRef<number | null>(null);
 
     useLayoutEffect(() => {
-        if (!isLoading && hoveredData && performanceRef.current) {
+        if (!isCardDataLoading && hoveredData && performanceRef.current) {
             const performanceRect = performanceRef.current.getBoundingClientRect();
             const cardElement = performanceRef.current.closest('.stock-card');
             const cardRect = cardElement?.getBoundingClientRect() ?? performanceRect;
@@ -1768,7 +1776,7 @@ function MarketStockCard({
                 maxWidth: `${cardRect.width}px`,
             });
         }
-    }, [hoveredData, isLoading]);
+    }, [hoveredData, isCardDataLoading]);
 
     useEffect(() => {
         return () => {
@@ -1782,7 +1790,7 @@ function MarketStockCard({
     }, []);
 
     useEffect(() => {
-        if (isLoading) {
+        if (isCardDataLoading) {
             if (tooltipCloseTimerRef.current != null) {
                 window.clearTimeout(tooltipCloseTimerRef.current);
                 tooltipCloseTimerRef.current = null;
@@ -1794,7 +1802,7 @@ function MarketStockCard({
             setTooltipActive(false);
             setHoveredData(null);
         }
-    }, [isLoading]);
+    }, [isCardDataLoading]);
 
     const openPerformanceTooltip = (
         data: {
@@ -1838,7 +1846,7 @@ function MarketStockCard({
     };
 
     const handleRangeSelect = (nextRange: MarketStockCardChartRange) => {
-        if (isLoading) {
+        if (isCardDataLoading) {
             return;
         }
         if (nextRange === selectedRange || rangeLoading[nextRange]) {
@@ -1996,7 +2004,7 @@ function MarketStockCard({
                         <span>{item.company}</span>
                     </div>
                 </div>
-                {!isLoading && (
+                {!isCardDataLoading && (
                     <span 
                         className={`stock-card-session-dot ${sessionStatusClass}`}
                         title={sessionLabel}
@@ -2024,7 +2032,7 @@ function MarketStockCard({
                 <div>
                     <span>Yüksek</span>
                     <strong>
-                        {isLoading ? (
+                        {isCardDataLoading ? (
                             <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
                         ) : (
                             formatCardCurrency(item.high, item.currency)
@@ -2034,7 +2042,7 @@ function MarketStockCard({
                 <div>
                     <span>Düşük</span>
                     <strong>
-                        {isLoading ? (
+                        {isCardDataLoading ? (
                             <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
                         ) : (
                             formatCardCurrency(item.low, item.currency)
@@ -2044,7 +2052,7 @@ function MarketStockCard({
                 <div>
                     <span>Önc.Kap.</span>
                     <strong>
-                        {isLoading ? (
+                        {isCardDataLoading ? (
                             <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
                         ) : (
                             formatCardCurrency(item.previous_close, item.currency)
@@ -2070,7 +2078,7 @@ function MarketStockCard({
                 rangeLoading={rangeLoading}
                 rangeError={rangeError}
                 onRangeSelect={handleRangeSelect}
-                isLoading={isLoading}
+                isLoading={isCardDataLoading}
                 isLive={isCardLive}
             />
 
@@ -2078,7 +2086,7 @@ function MarketStockCard({
                 <div>
                     <span>F/K</span>
                     <strong>
-                        {isLoading ? (
+                        {isCardDataLoading ? (
                             <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
                         ) : (
                             formatCardPositiveRatio(item.fk)
@@ -2088,7 +2096,7 @@ function MarketStockCard({
                 <div>
                     <span>FD/FAVÖK</span>
                     <strong>
-                        {isLoading ? (
+                        {isCardDataLoading ? (
                             <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
                         ) : (
                             formatCardPositiveRatio(item.fd_favok)
@@ -2098,7 +2106,7 @@ function MarketStockCard({
                 <div>
                     <span>PD/DD</span>
                     <strong>
-                        {isLoading ? (
+                        {isCardDataLoading ? (
                             <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
                         ) : (
                             formatCardPositiveRatio(item.pd_dd)
@@ -2108,7 +2116,7 @@ function MarketStockCard({
                 <div>
                     <span>Net Borç/FAVÖK</span>
                     <strong>
-                        {isLoading ? (
+                        {isCardDataLoading ? (
                             <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
                         ) : (
                             formatCardRatio(item.net_borc_favok)
@@ -2118,7 +2126,7 @@ function MarketStockCard({
                 <div>
                     <span>Hacim Lot</span>
                     <strong>
-                        {isLoading ? (
+                        {isCardDataLoading ? (
                             <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
                         ) : (
                             formatCardFullNumber(item.volume_lot)
@@ -2128,7 +2136,7 @@ function MarketStockCard({
                 <div>
                     <span>Hacim TL</span>
                     <strong>
-                        {isLoading ? (
+                        {isCardDataLoading ? (
                             <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric" aria-hidden="true" />
                         ) : (
                             formatCardFullCurrency(item.volume_tl, item.currency)
@@ -2138,7 +2146,7 @@ function MarketStockCard({
                 <div className="stock-card-detail-wide">
                     <span>Piyasa Değeri</span>
                     <strong>
-                        {isLoading ? (
+                        {isCardDataLoading ? (
                             <span className="stock-card-inline-skeleton-value stock-card-inline-skeleton-pulse stock-card-inline-skeleton-metric-wide" aria-hidden="true" />
                         ) : (
                             formatCardFullCurrency(item.market_cap, item.currency)
@@ -2149,7 +2157,7 @@ function MarketStockCard({
 
 
             <div className="stock-card-performance" ref={performanceRef}>
-                {!isLoading && hoveredData && createPortal(
+                {!isCardDataLoading && hoveredData && createPortal(
                     <div
                         className={`stock-card-performance-tooltip${tooltipActive ? ' active' : ''}`}
                         style={tooltipStyles}
@@ -2171,7 +2179,7 @@ function MarketStockCard({
                     </div>,
                     document.body
                 )}
-                {isLoading
+                {isCardDataLoading
                     ? STOCK_CARD_PERFORMANCE_KEYS.map(({ key }) => (
                           <span key={key} className="stock-card-performance-chip stock-card-performance-chip-skeleton" aria-hidden="true">
                               <span className="stock-card-inline-skeleton-chip-line stock-card-inline-skeleton-pulse" />
@@ -2207,7 +2215,7 @@ function MarketStockCard({
             </div>
 
             <div className="stock-card-foot">
-                {isLoading ? (
+                {isCardDataLoading ? (
                     <span className="stock-card-inline-skeleton-time stock-card-inline-skeleton-pulse" aria-hidden="true" />
                 ) : (
                     <span>{footerLabel} {sessionTime}</span>
@@ -2708,7 +2716,9 @@ export default function MarketsView({
             stockCardsRef.current = cached.data;
             setStockCards(cached.data);
             setStockCardPendingSymbols((previous) => previous.filter(
-                (symbol) => !(cached.data.items || []).some((item) => item.symbol === symbol),
+                (symbol) => !(cached.data.items || []).some(
+                    (item) => item.symbol === symbol && item.card_stage !== 'quick',
+                ),
             ));
         } else {
             stockCardsRef.current = null;
@@ -2734,7 +2744,8 @@ export default function MarketsView({
                         });
                         if (controller.signal.aborted) return;
                     }
-                    await loadStockCards(index > 0 || Boolean(cached), false, batch, controller.signal);
+                    await loadStockCards(index > 0 || Boolean(cached), false, batch, controller.signal, 'quick');
+                    await loadStockCards(true, false, batch, controller.signal, 'full');
                 }
             } finally {
                 batchesLoading = false;
@@ -2835,6 +2846,7 @@ export default function MarketsView({
         refresh = false,
         requestedSymbols: string[] = stockCardSymbols,
         signal?: AbortSignal,
+        tier: 'quick' | 'full' = 'full',
     ) {
         if (stockCardsInFlightRef.current) return;
         if (requestedSymbols.length === 0) return;
@@ -2842,7 +2854,7 @@ export default function MarketsView({
         if (!silent) setStockCardsLoading(true);
         if (!silent) setStockCardsError(null);
         try {
-            const payload = await apiClient.marketStockCards({ symbols: requestedSymbols, refresh, signal });
+            const payload = await apiClient.marketStockCards({ symbols: requestedSymbols, refresh, tier, signal });
             if (signal?.aborted) return;
             const latestSymbols = latestStockCardSymbolsRef.current.split(',').filter(Boolean);
             const latestSymbolSet = new Set(latestSymbols);
@@ -2854,7 +2866,7 @@ export default function MarketsView({
             setStockCardsError(null);
             const readySymbols = new Set(
                 (mergedPayload.items ?? [])
-                    .filter((item) => hasStockCardLoadedData(item))
+                    .filter((item) => item.card_stage !== 'quick' && hasStockCardLoadedData(item))
                     .map((item) => item.symbol),
             );
             if (readySymbols.size > 0) {
@@ -3454,7 +3466,7 @@ export default function MarketsView({
 
                             {stockCardSymbols.length > 0 && stockCardPendingSymbols.length > 0 && !stockCardsError && (
                                 <div className="stock-card-loading-notice" role="status" aria-live="polite">
-                                    <span>Öncelikli kartlar gösteriliyor; diğer kartlar arka planda hazırlanıyor.</span>
+                                    <span>Öncelikli veriler gösteriliyor; kartların kalan detayları arka planda hazırlanıyor.</span>
                                 </div>
                             )}
 

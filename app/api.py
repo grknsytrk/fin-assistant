@@ -1423,8 +1423,12 @@ def market_stocks(index: str = Query("XUTUM"), refresh: bool = Query(False)) -> 
 
 
 @app.get("/market/stocks/cards")
-def market_stock_cards(symbols: str = Query(""), refresh: bool = Query(False)) -> Dict[str, Any]:
-    return _market_stock_cards_payload(symbols=symbols, force_refresh=refresh)
+def market_stock_cards(
+    symbols: str = Query(""),
+    refresh: bool = Query(False),
+    tier: str = Query("full"),
+) -> Dict[str, Any]:
+    return _market_stock_cards_payload(symbols=symbols, force_refresh=refresh, tier=tier)
 
 
 @app.get("/market/stocks/cards/chart")
@@ -5050,6 +5054,9 @@ _STOCKS_CACHE_TTL = 3
 _MARKET_STOCK_CARD_CHART_CACHE: Dict[str, Any] = {}
 _MARKET_STOCK_CARD_CHART_CACHE_TTL = 45
 _MARKET_STOCK_CARD_LIMIT = 12
+_MARKET_STOCK_CARDS_QUICK_RESPONSE_CACHE_TTL = int(
+    os.getenv("RAGFIN_MARKET_STOCK_CARDS_QUICK_RESPONSE_CACHE_TTL_SECONDS", "3")
+)
 _MARKET_STOCK_CARDS_RESPONSE_CACHE_TTL = int(
     os.getenv("RAGFIN_MARKET_STOCK_CARDS_RESPONSE_CACHE_TTL_SECONDS", "5")
 )
@@ -6043,6 +6050,13 @@ def _normalize_market_stock_card_symbols(symbols: str) -> List[str]:
     return normalized
 
 
+def _normalize_market_stock_card_tier(tier: str) -> str:
+    normalized = str(tier or "full").strip().lower()
+    if normalized not in {"quick", "full"}:
+        raise HTTPException(status_code=400, detail="Gecersiz hisse karti veri seviyesi: quick veya full")
+    return normalized
+
+
 def _normalize_stock_card_chart_range(chart_range: str) -> str:
     normalized = str(chart_range or "1d").strip().lower()
     if normalized not in _MARKET_STOCK_CARD_CHART_RANGES:
@@ -6394,9 +6408,9 @@ def _fetch_stock_card_intraday(symbol: str, *, force_refresh: bool = False) -> D
     return dict(fallback)
 
 
-def _stock_cards_response_cache_key(symbols: List[str]) -> str:
+def _stock_cards_response_cache_key(symbols: List[str], tier: str = "full") -> str:
     normalized = ",".join(sorted(symbols))
-    return f"api:market:stock-cards:symbols={normalized}:v2"
+    return f"api:market:stock-cards:symbols={normalized}:tier={tier}:v3"
 
 
 def _first_not_none(*values: Any) -> Any:
@@ -6669,16 +6683,97 @@ def _resolve_market_card_valuation(symbol: str, *, market_cap: Any) -> Dict[str,
     return _resolve_market_card_valuation_from_cached_data(cached_payload, market_cap=market_cap)
 
 
-def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) -> Dict[str, Any]:
+def _market_stock_cards_quick_payload(
+    normalized_symbols: List[str],
+    *,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Return the quote-first portion of stock cards without slow enrichments."""
+    response_cache_key = _stock_cards_response_cache_key(normalized_symbols, tier="quick")
+    if not force_refresh:
+        shared_cached = _shared_cache_get_dict(response_cache_key)
+        if shared_cached is not None:
+            return dict(shared_cached)
+
+    price_map = _fetch_market_price_map(normalized_symbols)
+    instrument_map = get_instruments(CONFIG.paths.processed_dir, "stock", normalized_symbols)
+    items: List[Dict[str, Any]] = []
+    for symbol in normalized_symbols:
+        quote = price_map.get(symbol, {})
+        price = quote.get("price")
+        volume = quote.get("volume")
+        items.append({
+            "symbol": symbol,
+            "company": str((instrument_map.get(symbol) or {}).get("name") or symbol).strip() or symbol,
+            "yahoo_symbol": f"{symbol}.IS",
+            "price": price,
+            "currency": quote.get("currency") or "TRY",
+            "change": quote.get("change"),
+            "change_pct": quote.get("change_pct"),
+            "volume": volume,
+            "volume_lot": None,
+            "volume_tl": volume,
+            "market_cap": quote.get("market_cap"),
+            "high": None,
+            "low": None,
+            "previous_close": None,
+            "fk": None,
+            "pd_dd": None,
+            "fd_favok": None,
+            "net_borc_favok": None,
+            "market_state": quote.get("market_state") or "",
+            "as_of": quote.get("as_of"),
+            "session_status": "unknown",
+            "session_label": "Detaylar hazırlanıyor",
+            "is_live": False,
+            "is_stale": False,
+            "last_trade_at": None,
+            "last_trade_date": None,
+            "line_points": [],
+            "error": None if price is not None else "quote_unavailable",
+            "logo_url": (instrument_map.get(symbol) or {}).get("logo_url"),
+            "logo_source": (instrument_map.get(symbol) or {}).get("logo_source"),
+            "card_stage": "quick",
+            "return_1w_pct": None,
+            "return_1m_pct": None,
+            "return_3m_pct": None,
+            "return_6m_pct": None,
+            "return_ytd_pct": None,
+            "return_1y_pct": None,
+        })
+
+    data = {
+        "items": items,
+        "source": "infoyatirim_live_quote",
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+    _shared_cache_set(
+        response_cache_key,
+        data,
+        ttl_seconds=_MARKET_STOCK_CARDS_QUICK_RESPONSE_CACHE_TTL,
+    )
+    return data
+
+
+def _market_stock_cards_payload(
+    *,
+    symbols: str,
+    force_refresh: bool = False,
+    tier: str = "full",
+) -> Dict[str, Any]:
+    normalized_tier = _normalize_market_stock_card_tier(tier)
     normalized_symbols = _normalize_market_stock_card_symbols(symbols)
     if not normalized_symbols:
         return {
             "items": [],
-            "source": "infoyatirim_yahoo_chart",
+            "source": "infoyatirim_live_quote" if normalized_tier == "quick" else "infoyatirim_yahoo_chart",
             "as_of": datetime.now(timezone.utc).isoformat(),
         }
 
-    response_cache_key = _stock_cards_response_cache_key(normalized_symbols)
+    if normalized_tier == "quick":
+        return _market_stock_cards_quick_payload(normalized_symbols, force_refresh=force_refresh)
+
+    response_cache_key = _stock_cards_response_cache_key(normalized_symbols, tier="full")
     if not force_refresh:
         shared_cached = _shared_cache_get_dict(response_cache_key)
         if shared_cached is not None:
@@ -6711,6 +6806,7 @@ def _market_stock_cards_payload(*, symbols: str, force_refresh: bool = False) ->
         as_of = intraday.get("as_of") if session_status != "open" else (quote.get("as_of") or intraday.get("as_of"))
         item = {
             "symbol": symbol,
+            "card_stage": "full",
             "company": company_name,
             "yahoo_symbol": intraday.get("yahoo_symbol"),
             "price": price,

@@ -4655,6 +4655,63 @@ def test_market_stock_cards_returns_quotes_and_line_points(monkeypatch: pytest.M
     assert payload["items"][0]["line_points"][1]["close"] == 760.0
 
 
+def test_market_stock_cards_quick_returns_quote_before_detail_enrichment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_market_price_map",
+        lambda symbols: {
+            "BIMAS": {
+                "price": 760.0,
+                "currency": "TRY",
+                "change": -3.0,
+                "change_pct": -0.39,
+                "volume": 2_813_888_143.0,
+                "market_state": "REGULAR",
+                "as_of": "2026-04-25T11:00:00+00:00",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "get_instruments",
+        lambda *_args, **_kwargs: {"BIMAS": {"name": "BIM BIRLESIK MAGAZALAR"}},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_isyatirim_basic_summary_map",
+        lambda: pytest.fail("quick stock cards should not fetch basic summaries"),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_stock_return_bases_bulk",
+        lambda _symbols: pytest.fail("quick stock cards should not fetch return history"),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_stock_card_intraday",
+        lambda *_args, **_kwargs: pytest.fail("quick stock cards should not fetch intraday data"),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_resolve_market_card_valuation",
+        lambda *_args, **_kwargs: pytest.fail("quick stock cards should not fetch valuation data"),
+    )
+
+    client = TestClient(app)
+    response = client.get("/market/stocks/cards?symbols=BIMAS&tier=quick&refresh=true")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["card_stage"] == "quick"
+    assert item["price"] == 760.0
+    assert item["change_pct"] == -0.39
+    assert item["volume_tl"] == 2_813_888_143.0
+    assert item["line_points"] == []
+    assert item["fk"] is None
+
+
 def test_stock_return_bases_keep_history_before_one_year_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

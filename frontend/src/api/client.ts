@@ -285,10 +285,16 @@ export const apiClient = {
             signal: options.signal,
         });
     },
-    marketStockCards: (options: { symbols: string[]; refresh?: boolean; signal?: AbortSignal }) => {
+    marketStockCards: (options: {
+        symbols: string[];
+        refresh?: boolean;
+        tier?: 'quick' | 'full';
+        signal?: AbortSignal;
+    }) => {
         const params = new URLSearchParams();
         params.append('symbols', options.symbols.join(','));
         if (options.refresh) params.append('refresh', 'true');
+        if (options.tier) params.append('tier', options.tier);
         return fetchApi<MarketStockCardsResponse>(`/market/stocks/cards?${params.toString()}`, {
             signal: options.signal,
         });

@@ -575,6 +575,7 @@ export interface MarketIndexLinePoint {
 }
 
 export type MarketStockCardChartRange = '1d' | '1w' | '1m' | '1y';
+export type MarketStockCardStage = 'quick' | 'full';
 
 export interface MarketStockCardItem {
   symbol: string;
@@ -631,6 +632,7 @@ export interface MarketStockCardItem {
   error: string | null;
   logo_url?: string | null;
   logo_source?: 'kap' | null;
+  card_stage?: MarketStockCardStage;
 }
 
 export interface MarketStockCardsResponse {
