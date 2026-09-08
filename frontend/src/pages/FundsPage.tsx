@@ -36,6 +36,7 @@ import {
     X,
 } from 'lucide-react';
 import { apiClient } from '../api/client';
+import { useBackgroundRefresh } from '../hooks/useBackgroundRefresh';
 import type {
     FundAllocation,
     FundAllocationHistoryDay,
@@ -5557,11 +5558,12 @@ export default function FundsPage({
         }
         if (activeTab !== 'overview' || yieldSummary?.fund_code === fundCode.trim().toUpperCase()) return;
         let alive = true;
+        const controller = new AbortController();
         const normalizedCode = fundCode.trim().toUpperCase();
         setYieldLoading(true);
         setYieldError(null);
         apiClient
-            .fundYieldSummary(normalizedCode)
+            .fundYieldSummary(normalizedCode, { signal: controller.signal })
             .then((payload) => {
                 if (alive) setYieldSummary(payload);
             })
@@ -5575,8 +5577,28 @@ export default function FundsPage({
             });
         return () => {
             alive = false;
+            controller.abort();
         };
     }, [fundCode, activeTab, yieldSummary?.fund_code]);
+
+    useBackgroundRefresh(Boolean(funds?.refresh_pending), async (signal) => {
+        const payload = await apiClient.funds({ signal });
+        if (signal.aborted) return;
+        setFunds(payload);
+        if (fundsCatalogMemoryCache) {
+            fundsCatalogMemoryCache = { ...fundsCatalogMemoryCache, funds: payload, fetchedAt: Date.now() };
+        }
+    });
+    useBackgroundRefresh(Boolean(fundCode && activeTab === 'overview' && yieldSummary?.refresh_pending), async (signal) => {
+        const code = fundCode!.trim().toUpperCase();
+        const payload = await apiClient.fundYieldSummary(code, { signal });
+        if (!signal.aborted && activeFundCodeRef.current === code) setYieldSummary(payload);
+    });
+    useBackgroundRefresh(Boolean(fundCode && holdings?.refresh_pending), async (signal) => {
+        const code = fundCode!.trim().toUpperCase();
+        const payload = await apiClient.fundHoldings(code, { force: true });
+        if (!signal.aborted && activeFundCodeRef.current === code) setHoldings(payload);
+    });
 
     useEffect(() => {
         if (!fundCode) {

@@ -17,6 +17,7 @@ up, it can never break the existing flow.
 from __future__ import annotations
 
 import json
+import copy
 import logging
 import math
 import os
@@ -28,6 +29,10 @@ from functools import wraps
 from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+_RESPONSE_REFRESH_SLOTS = threading.BoundedSemaphore(4)
+_RESPONSE_REFRESH_MUTEX = threading.Lock()
+_RESPONSE_REFRESH_ACTIVE: set[str] = set()
 
 
 _CACHE_BACKEND_ENV = "RAGFIN_CACHE_BACKEND"
@@ -633,6 +638,81 @@ def l1_l2_cached(
     if value is not None or cache_none:
         local_cache[key] = {"_ts": now, "data": value}
     return value, shared_hit
+
+
+def cached_in_background(
+    *,
+    key_fn: Callable[..., str],
+    ttl_seconds: int,
+    stale_seconds: int,
+    pending_fn: Callable[..., Dict[str, Any]],
+) -> Callable[[Callable[..., Dict[str, Any]]], Callable[..., Dict[str, Any]]]:
+    """Serve the last response while a bounded, leased worker refreshes it.
+
+    Cold reads return a pending payload. Companion keys keep the original
+    prefix so existing prefix invalidation also removes stale/retry entries.
+    Dates inside the source payload are never advanced by a cache read.
+    """
+    def decorator(func: Callable[..., Dict[str, Any]]) -> Callable[..., Dict[str, Any]]:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+            key = key_fn(*args, **kwargs)
+            backend = get_cache()
+            fresh = backend.get(key)
+            if fresh is not None:
+                return copy.deepcopy(fresh)
+            stale_key = f"{key}:stale"
+            retry_key = f"{key}:retry"
+            stale = backend.get(stale_key)
+
+            def produce() -> Dict[str, Any]:
+                started = time.perf_counter()
+                result = func(*args, **kwargs)
+                if stale is not None and (
+                    result.get("status") == "unavailable"
+                    or (stale.get("positions") and not result.get("positions") and result.get("status") != "ok")
+                ):
+                    raise RuntimeError("refresh returned unavailable; retaining last response")
+                logging.getLogger("uvicorn.error").info(
+                    "response_refresh key=%s duration_ms=%.1f", key,
+                    (time.perf_counter() - started) * 1000,
+                )
+                return result
+
+            def refresh() -> None:
+                try:
+                    result, state = get_or_set_single_flight(
+                        key, ttl_seconds=ttl_seconds, factory=produce,
+                        lock_ttl_seconds=120, wait_timeout_seconds=0,
+                    )
+                    if state == "miss" and result is not None and result.get("status") != "unavailable":
+                        backend.set(stale_key, result, ttl_seconds=ttl_seconds + stale_seconds)
+                except Exception:
+                    logger.warning("response refresh failed for %s", key, exc_info=True)
+                    # Do not hammer a failing upstream on every polling request.
+                    backend.set(retry_key, True, ttl_seconds=30)
+                finally:
+                    with _RESPONSE_REFRESH_MUTEX:
+                        _RESPONSE_REFRESH_ACTIVE.discard(key)
+                    _RESPONSE_REFRESH_SLOTS.release()
+
+            if not backend.get(retry_key):
+                with _RESPONSE_REFRESH_MUTEX:
+                    if key not in _RESPONSE_REFRESH_ACTIVE and _RESPONSE_REFRESH_SLOTS.acquire(blocking=False):
+                        _RESPONSE_REFRESH_ACTIVE.add(key)
+                        try:
+                            threading.Thread(target=refresh, name="fund-response-refresh", daemon=True).start()
+                        except Exception:
+                            _RESPONSE_REFRESH_ACTIVE.discard(key)
+                            _RESPONSE_REFRESH_SLOTS.release()
+                            raise
+            payload = copy.deepcopy(stale) if stale is not None else pending_fn(*args, **kwargs)
+            payload["refresh_pending"] = True
+            payload["response_cache_status"] = "stale" if stale is not None else "pending"
+            return payload
+
+        return wrapper
+    return decorator
 
 
 def cached(

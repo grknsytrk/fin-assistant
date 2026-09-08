@@ -236,6 +236,25 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
     throw new Error(STARTUP_HINT);
 }
 
+async function fetchFundResponse<T extends { status: string }>(endpoint: string, options: FetchApiOptions = {}): Promise<T> {
+    const deadline = Date.now() + 120_000;
+    let delay = 1000;
+    while (true) {
+        if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const payload = await fetchApi<T>(endpoint, options);
+        if (payload.status !== 'pending') return payload;
+        if (Date.now() >= deadline) throw new Error('Veri hazırlama işlemi beklenenden uzun sürüyor.');
+        await new Promise<void>((resolve, reject) => {
+            const signal = options.signal;
+            const abort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+            const timer = window.setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, delay);
+            if (signal?.aborted) abort();
+            else signal?.addEventListener('abort', abort, { once: true });
+        });
+        delay = Math.min(5000, delay * 1.5);
+    }
+}
+
 export const apiClient = {
     health: () => fetchApi<{ status: string }>('/health'),
 
@@ -344,6 +363,7 @@ export const apiClient = {
         risk?: string;
         sort?: string;
         order?: 'asc' | 'desc';
+        signal?: AbortSignal;
     }) => {
         const params = new URLSearchParams();
         if (options?.q) params.append('q', options.q);
@@ -354,7 +374,7 @@ export const apiClient = {
         if (options?.sort) params.append('sort', options.sort);
         if (options?.order) params.append('order', options.order);
         const query = params.toString();
-        return fetchApi<FundsResponse>(query ? `/funds?${query}` : '/funds');
+        return fetchFundResponse<FundsResponse>(query ? `/funds?${query}` : '/funds', { signal: options?.signal });
     },
     fundSearch: (q: string, limit = 50, options?: { signal?: AbortSignal }) => {
         const params = new URLSearchParams({ q, limit: String(limit) });
@@ -364,8 +384,9 @@ export const apiClient = {
     },
     fundCategories: () => fetchApi<FundCategoriesResponse>('/funds/categories'),
     fundDetail: (fundCode: string) => fetchApi<FundDetail>(`/funds/${encodeURIComponent(fundCode)}`),
-    fundYieldSummary: (fundCode: string) =>
-        fetchApi<FundYieldSummaryResponse>(`/funds/${encodeURIComponent(fundCode)}/yield-summary`, {
+    fundYieldSummary: (fundCode: string, options?: { signal?: AbortSignal }) =>
+        fetchFundResponse<FundYieldSummaryResponse>(`/funds/${encodeURIComponent(fundCode)}/yield-summary`, {
+            signal: options?.signal,
             timeoutMs: 30000,
             exposeErrorDetail: true,
         }),
@@ -408,7 +429,7 @@ export const apiClient = {
         }
         const existingRequest = fundHoldingsInFlight.get(normalizedCode);
         if (existingRequest) return existingRequest;
-        const request = fetchApi<FundHoldingsResponse>(`/funds/${encodeURIComponent(normalizedCode)}/holdings`)
+        const request = fetchFundResponse<FundHoldingsResponse>(`/funds/${encodeURIComponent(normalizedCode)}/holdings`)
             .then((payload) => {
                 fundHoldingsMemoryCache.set(normalizedCode, { payload, fetchedAt: Date.now() });
                 return payload;

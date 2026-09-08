@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 import random
@@ -5604,7 +5605,9 @@ def get_funds_payload(
     min_aum: Optional[float] = FUNDS_LIST_MIN_AUM,
     auto_refresh: bool = False,
 ) -> Dict[str, Any]:
+    started = time.perf_counter()
     snapshot = load_funds_snapshot(processed_dir)
+    snapshot_loaded = time.perf_counter()
     # A previously failed weekend refresh may already be stored. Present the
     # Friday/last-business-day snapshot as current instead of alarming users.
     if _snapshot_is_current_on_market_closure(snapshot):
@@ -5619,8 +5622,16 @@ def get_funds_payload(
         and _meets_min_aum(row, min_aum)
         and _row_matches(row, q=q, fund_type=fund_type, founder=founder, manager=manager, risk=risk)
     ]
+    filtered = time.perf_counter()
     rows = _apply_daily_return_overrides(processed_dir, rows)
+    reconciled = time.perf_counter()
     rows = _sort_rows(rows, sort, order)
+    finished = time.perf_counter()
+    logging.getLogger("uvicorn.error").info(
+        "fund_catalog rows=%d snapshot_ms=%.1f filter_ms=%.1f returns_ms=%.1f sort_ms=%.1f total_ms=%.1f",
+        len(rows), (snapshot_loaded - started) * 1000, (filtered - snapshot_loaded) * 1000,
+        (reconciled - filtered) * 1000, (finished - reconciled) * 1000, (finished - started) * 1000,
+    )
     meta = dict(snapshot.get("source_metadata") or {})
     meta["list_min_aum"] = min_aum
     return {

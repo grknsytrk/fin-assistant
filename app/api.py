@@ -36,6 +36,7 @@ from src.config import load_config
 from src.nvidia_commentary import MAX_REQUEST_BYTES, PayloadValidationError, generate_overview_commentary
 from app.cache import cache_status as _cache_status
 from app.cache import cached as _cached_response
+from app.cache import cached_in_background as _background_cached_response
 from app.cache import get_cache as _get_cache
 from app.cache import get_or_set_single_flight as _get_or_set_single_flight
 from app.cache import get_json_dict as _cache_get_dict
@@ -1348,9 +1349,11 @@ def funds(
     )
 
 
-@_cached_response(
+@_background_cached_response(
     key_fn=_fund_listing_cache_key,
     ttl_seconds=45,
+    stale_seconds=15 * 60,
+    pending_fn=lambda **kwargs: {"status": "pending", "rows": [], "count": 0, "total_count": 0},
 )
 def _funds_listing_payload(
     *,
@@ -1918,12 +1921,11 @@ def fund_yield_summary(fund_code: str) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@_cached_response(
+@_background_cached_response(
     key_fn=lambda *, normalized: f"api:fund-yield-summary:{normalized}",
     ttl_seconds=_FUND_YIELD_SUMMARY_CACHE_TTL,
-    skip_when=lambda *, normalized: not normalized,
-    single_flight=True,
-    lock_timeout=20,
+    stale_seconds=24 * 60 * 60,
+    pending_fn=lambda *, normalized: {"fund_code": normalized, "status": "pending", "periods": {}},
 )
 def _fund_yield_summary_payload(*, normalized: str) -> Dict[str, Any]:
     from app.fund_service import get_fund_yield_summary_payload
@@ -1936,6 +1938,16 @@ def fund_holdings(fund_code: str) -> Dict[str, Any]:
     from app.fund_service import normalize_fund_code
 
     normalized = normalize_fund_code(fund_code)
+    return _fund_holdings_response_payload(normalized=normalized)
+
+
+@_background_cached_response(
+    key_fn=lambda *, normalized: f"api:fund-holdings:{normalized}:response:v{_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION}",
+    ttl_seconds=15,
+    stale_seconds=24 * 60 * 60,
+    pending_fn=lambda *, normalized: {"fund_code": normalized, "status": "pending", "positions": []},
+)
+def _fund_holdings_response_payload(*, normalized: str) -> Dict[str, Any]:
     payload = _fund_holdings_static_payload(normalized=normalized)
     return _enrich_fund_holdings_with_daily_market_data(payload, normalized)
 
@@ -3210,6 +3222,8 @@ def _invalidate_single_fund_response_cache(normalized: str) -> None:
                 backend.delete_prefix(key_or_prefix)
             else:
                 backend.delete(key_or_prefix)
+                backend.delete(f"{key_or_prefix}:stale")
+                backend.delete(f"{key_or_prefix}:retry")
         except Exception:
             continue
 

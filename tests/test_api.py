@@ -750,6 +750,18 @@ def test_kap_snapshot_normalization_exposes_identity_company_kind() -> None:
     assert payload["company_kind"] == "generic"
 
 
+def _get_ready_fund(client, path):
+    deadline = time.monotonic() + 3
+    while True:
+        response = client.get(path)
+        if response.status_code != 200 or (
+            response.json().get("status") != "pending" and not response.json().get("refresh_pending")
+        ):
+            return response
+        assert time.monotonic() < deadline, "fund response did not finish"
+        time.sleep(0.005)
+
+
 def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_kwargs: Dict[str, Any] = {}
 
@@ -785,7 +797,7 @@ def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fund_service_module, "get_funds_payload", fake_get_funds_payload)
     client = TestClient(app)
 
-    response = client.get("/funds")
+    response = _get_ready_fund(client, "/funds")
 
     assert response.status_code == 200
     payload = response.json()
@@ -842,8 +854,8 @@ def test_api_fund_yield_summary_uses_response_cache(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(fund_service_module, "get_fund_yield_summary_payload", fake_payload)
     client = TestClient(app)
 
-    first = client.get("/funds/TLY/yield-summary")
-    second = client.get("/funds/TLY/yield-summary")
+    first = _get_ready_fund(client, "/funds/TLY/yield-summary")
+    second = _get_ready_fund(client, "/funds/TLY/yield-summary")
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -872,8 +884,8 @@ def test_api_fund_holdings_reuses_static_response_cache(monkeypatch: pytest.Monk
     )
     client = TestClient(app)
 
-    first = client.get("/funds/TLY/holdings")
-    second = client.get("/funds/TLY/holdings")
+    first = _get_ready_fund(client, "/funds/TLY/holdings")
+    second = _get_ready_fund(client, "/funds/TLY/holdings")
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -1036,7 +1048,7 @@ def test_api_fund_holdings_unavailable_when_kap_fund_not_found(
     monkeypatch.setattr(fund_service_module, "_kap_search_fund_metadata", lambda _fund_code: None)
     client = TestClient(app)
 
-    response = client.get("/funds/YAC/holdings")
+    response = _get_ready_fund(client, "/funds/YAC/holdings")
 
     assert response.status_code == 200
     payload = response.json()
@@ -1099,7 +1111,7 @@ AKBNK Akbank T.A.S. 300,00 2,00 600,00 3,00TRYTRAAKBNKXXX
     )
     client = TestClient(app)
 
-    response = client.get("/funds/TST/holdings")
+    response = _get_ready_fund(client, "/funds/TST/holdings")
 
     assert response.status_code == 200
     payload = response.json()
@@ -1175,7 +1187,7 @@ def test_api_fund_holdings_adds_optional_sector_fields(
     )
     client = TestClient(app)
 
-    response = client.get("/funds/TLY/holdings")
+    response = _get_ready_fund(client, "/funds/TLY/holdings")
 
     assert response.status_code == 200
     positions = {item["asset_code"]: item for item in response.json()["positions"]}
@@ -1242,7 +1254,7 @@ def test_api_fund_holdings_reuses_monthly_report_cache(
     )
     client = TestClient(app)
 
-    response = client.get("/funds/TLY/holdings")
+    response = _get_ready_fund(client, "/funds/TLY/holdings")
 
     assert response.status_code == 200
     payload = response.json()
@@ -1522,7 +1534,7 @@ def test_api_fund_holdings_enriches_daily_market_effect(
     )
     client = TestClient(app)
 
-    response = client.get("/funds/TLY/holdings")
+    response = _get_ready_fund(client, "/funds/TLY/holdings")
 
     assert response.status_code == 200
     payload = response.json()
@@ -1717,7 +1729,7 @@ def test_api_fund_holdings_marks_inner_funds_as_tefas_tradable(
     )
     client = TestClient(app)
 
-    response = client.get("/funds/IIE/holdings")
+    response = _get_ready_fund(client, "/funds/IIE/holdings")
 
     assert response.status_code == 200
     payload = response.json()
@@ -2096,7 +2108,7 @@ def test_api_fund_holdings_enriches_tpkgy_from_gefas(
     )
     client = TestClient(app)
 
-    response = client.get("/funds/TLY/holdings")
+    response = _get_ready_fund(client, "/funds/TLY/holdings")
 
     assert response.status_code == 200
     payload = response.json()
@@ -2115,7 +2127,7 @@ def test_api_fund_holdings_enriches_tpkgy_from_gefas(
     assert payload["source_metadata"]["daily_market_enrichment"]["gefas_gyf_quote_count"] == 1
 
 
-def test_api_fund_holdings_does_not_cache_final_live_quote_response(
+def test_api_fund_holdings_refreshes_quotes_after_short_response_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
@@ -2169,8 +2181,14 @@ def test_api_fund_holdings_does_not_cache_final_live_quote_response(
     monkeypatch.setattr(api_module, "_fetch_market_price_map", fake_price_map)
     client = TestClient(app)
 
-    first = client.get("/funds/TLY/holdings").json()
-    second = client.get("/funds/TLY/holdings").json()
+    first = _get_ready_fund(client, "/funds/TLY/holdings").json()
+    cached = _get_ready_fund(client, "/funds/TLY/holdings").json()
+    assert cached["positions"][0]["price"] == first["positions"][0]["price"]
+    assert calls["count"] == 1
+    cache_module.get_cache().delete(
+        f"api:fund-holdings:TLY:response:v{api_module._FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION}"
+    )
+    second = _get_ready_fund(client, "/funds/TLY/holdings").json()
 
     assert first["positions"][0]["price"] == 41.0
     assert second["positions"][0]["price"] == 42.0
@@ -2987,7 +3005,7 @@ def test_api_fund_holdings_partial_when_pdf_not_parsed(
     monkeypatch.setattr(fund_service_module, "_extract_kap_pdf_text", lambda _data: "parse edilemeyen metin")
     client = TestClient(app)
 
-    response = client.get("/funds/BAD/holdings")
+    response = _get_ready_fund(client, "/funds/BAD/holdings")
 
     assert response.status_code == 200
     payload = response.json()

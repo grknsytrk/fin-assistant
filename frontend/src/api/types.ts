@@ -230,6 +230,7 @@ export interface FundYieldPeriodSummary {
 }
 
 export interface FundYieldSummaryResponse {
+  refresh_pending?: boolean;
   fund_code: string;
   status: string;
   source: string;
@@ -413,6 +414,7 @@ export interface FundRefreshJob {
 }
 
 export interface FundsResponse {
+  refresh_pending?: boolean;
   status: string;
   rows: FundSummary[];
   count: number;
@@ -508,6 +510,7 @@ export interface FundAllocationsHistoryResponse {
 }
 
 export interface FundHoldingsResponse {
+  refresh_pending?: boolean;
   fund_code: string;
   status: 'unavailable' | 'not_parsed' | 'ok' | string;
   positions: FundPortfolioPosition[];

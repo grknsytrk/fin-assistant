@@ -2,6 +2,38 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { apiClient } from './client';
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 describe('request wait budget', () => {
+    it('keeps cold fund responses loading until the background result arrives', async () => {
+        vi.useFakeTimers();
+        const ready = { status: 'ok', rows: [{ fund_code: 'AAL' }] };
+        const fetch = vi.fn()
+            .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'pending', rows: [] })))
+            .mockResolvedValueOnce(new Response(JSON.stringify(ready)));
+        vi.stubGlobal('fetch', fetch);
+        const result = apiClient.funds();
+        await vi.runAllTimersAsync();
+        expect(await result).toEqual(ready);
+        expect(fetch).toHaveBeenCalledTimes(2);
+    });
+    it('returns stale fund data immediately without waiting for its refresh', async () => {
+        const stale = { status: 'ok', refresh_pending: true, rows: [{ fund_code: 'AAL' }] };
+        const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(stale)));
+        vi.stubGlobal('fetch', fetch);
+        expect(await apiClient.funds()).toEqual(stale);
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+    it('cancels cold fund polling when its consumer leaves', async () => {
+        vi.useFakeTimers();
+        const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: 'pending' })));
+        vi.stubGlobal('fetch', fetch);
+        const controller = new AbortController();
+        const result = expect(apiClient.fundYieldSummary('AAL', { signal: controller.signal }))
+            .rejects.toMatchObject({ name: 'AbortError' });
+        await vi.advanceTimersByTimeAsync(1);
+        controller.abort();
+        await result;
+        await vi.runAllTimersAsync();
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
     it('stops retrying HTTP failures after two attempts', async () => {
         vi.useFakeTimers();
         const fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 503 }));
