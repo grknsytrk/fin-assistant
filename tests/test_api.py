@@ -4051,7 +4051,30 @@ def test_parse_kap_public_result_page_maps_related_symbols() -> None:
     assert rows[0]["source"] == "Diğer Bildirim"
     assert rows[0]["category"] == "diger"
     assert rows[0]["title"] == "Fiyat Tespit Raporu"
-    assert rows[0]["published_at"].endswith("18:51:00")
+    assert rows[0]["published_at"].endswith("18:51:00+03:00")
+
+
+def test_parse_kap_public_result_page_prefers_embedded_absolute_publish_date() -> None:
+    page = r'''
+    <script>\"publishDate\":\"08.09.2026 23:57:04\",\"disclosureIndex\":1660529</script>
+    <table><tbody>
+      <tr id="notification1">
+        <td><input id="1660529"/></td>
+        <td>1</td>
+        <td><div>Bugün</div><div>23:57</div></td>
+        <td>ALKLC</td>
+        <td>ALTINKILIÇ GIDA VE SÜT SANAYİ TİCARET A.Ş.</td>
+        <td>ÖDA</td>
+        <td>Sermaye Artırımı - Azaltımı İşlemlerine İlişkin Bildirim</td>
+        <td>Bedelsiz Sermaye Artırımı Hakkında</td>
+      </tr>
+    </tbody></table>
+    '''
+
+    rows = api_module._parse_kap_public_result_page(page, 10)
+
+    assert len(rows) == 1
+    assert rows[0]["published_at"] == "2026-09-08T23:57:04+03:00"
 
 
 def test_parse_kap_public_result_page_classifies_oda_subjects() -> None:

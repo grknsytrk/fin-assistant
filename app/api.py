@@ -3546,6 +3546,19 @@ def _parse_kap_publish_date(raw: Any) -> Optional[datetime]:
         return None
 
 
+_KAP_SOURCE_TIMEZONE = timezone(timedelta(hours=3))
+
+
+def _parse_kap_source_datetime(raw: Any) -> Optional[datetime]:
+    """Parse an absolute KAP timestamp as Europe/Istanbul time."""
+    parsed = _parse_kap_publish_date(raw)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=_KAP_SOURCE_TIMEZONE)
+    return parsed
+
+
 # Map KAP disclosureType codes -> Turkish UI labels for the feed.
 _KAP_TYPE_LABELS: Dict[str, str] = {
     "ODA": "Özel Durum",
@@ -3843,7 +3856,7 @@ def _parse_kap_table_datetime(raw: str) -> Optional[datetime]:
     elif "dün" in lowered:
         relative_day = -1
     if relative_day is not None:
-        base = datetime.now() + timedelta(days=relative_day)
+        base = datetime.now(_KAP_SOURCE_TIMEZONE) + timedelta(days=relative_day)
         return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     month_pattern = (
@@ -3859,11 +3872,28 @@ def _parse_kap_table_datetime(raw: str) -> Optional[datetime]:
                 int(date_match.group(1)),
                 hour,
                 minute,
+                tzinfo=_KAP_SOURCE_TIMEZONE,
             )
         except ValueError:
             return None
 
-    return _parse_kap_publish_date(text)
+    return _parse_kap_source_datetime(text)
+
+
+def _parse_kap_embedded_publish_dates(page: str) -> Dict[str, datetime]:
+    """Extract absolute publish dates embedded in KAP's result page state."""
+    pattern = re.compile(
+        r'publishDate[\\]?"\s*:[\\]?"([^"\\]+)[\\]?"\s*,\s*'
+        r'[\\]?"disclosureIndex[\\]?"\s*:\s*(\d+)',
+        re.IGNORECASE,
+    )
+    dates: Dict[str, datetime] = {}
+    for match in pattern.finditer(page):
+        disclosure_id = match.group(2)
+        published_dt = _parse_kap_source_datetime(match.group(1))
+        if disclosure_id and published_dt is not None:
+            dates[disclosure_id] = published_dt
+    return dates
 
 
 def _parse_kap_table_codes(raw: str) -> List[str]:
@@ -3886,6 +3916,7 @@ def _parse_kap_public_result_page(page: str, max_items: int) -> List[Dict[str, A
     except Exception:
         return []
 
+    absolute_publish_dates = _parse_kap_embedded_publish_dates(page)
     results: List[Dict[str, Any]] = []
     for row in parser.rows:
         cells = [
@@ -3894,7 +3925,11 @@ def _parse_kap_public_result_page(page: str, max_items: int) -> List[Dict[str, A
         ]
         if len(cells) < 8:
             continue
-        published_dt = _parse_kap_table_datetime(cells[2])
+
+        disclosure_id = str(row.get("disclosure_id") or "").strip()
+        published_dt = absolute_publish_dates.get(disclosure_id)
+        if published_dt is None:
+            published_dt = _parse_kap_table_datetime(cells[2])
         if published_dt is None:
             continue
 
@@ -3909,7 +3944,6 @@ def _parse_kap_public_result_page(page: str, max_items: int) -> List[Dict[str, A
         if not symbol:
             continue
 
-        disclosure_id = str(row.get("disclosure_id") or "").strip()
         disclosure_type = cells[5].strip()
         subject = cells[6].strip()
         summary = cells[7].strip()
@@ -4069,7 +4103,7 @@ def _parse_kap_api_disclosures(payload: Any, max_items: int) -> List[Dict[str, A
     for row in payload:
         if not isinstance(row, dict):
             continue
-        published_dt = _parse_kap_publish_date(row.get("publishDate"))
+        published_dt = _parse_kap_source_datetime(row.get("publishDate"))
         disclosure_index = str(row.get("disclosureIndex") or "").strip()
         if published_dt is None or not disclosure_index:
             continue
