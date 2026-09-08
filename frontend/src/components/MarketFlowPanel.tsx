@@ -22,14 +22,22 @@ const FLOW_INITIAL_LOAD_SIZE = FLOW_PAGE_SIZE * 2;
 const FLOW_MAX_ITEMS = 500;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
 
+function getFlowSymbols(item: MarketFlowItem): string[] {
+    return [item.symbol, ...(item.stock_codes || []), ...(item.related_symbols || [])]
+        .filter(Boolean)
+        .map(normalizeWatchlistSymbol);
+}
+
+export function getMatchingFavoriteSymbols(item: MarketFlowItem, favoriteSymbols: Set<string>): string[] {
+    const itemSymbols = new Set(getFlowSymbols(item));
+    return Array.from(favoriteSymbols).filter((symbol) => itemSymbols.has(symbol));
+}
+
 function matchesFlowFilter(item: MarketFlowItem, filter: FlowFilter, favoriteSymbols: Set<string>): boolean {
     if (filter === 'all') return true;
     if (filter === 'watchlist') {
         if (favoriteSymbols.size === 0) return false;
-        const itemSymbols = [item.symbol, ...(item.stock_codes || []), ...(item.related_symbols || [])]
-            .filter(Boolean)
-            .map(normalizeWatchlistSymbol);
-        return itemSymbols.some((symbol) => favoriteSymbols.has(symbol));
+        return getMatchingFavoriteSymbols(item, favoriteSymbols).length > 0;
     }
     if (filter === 'ozel_durum') return item.category === 'ozel_durum' || item.source === 'Özel Durum';
     if (filter === 'finansal_rapor') return item.category === 'finansal_rapor';
@@ -54,8 +62,10 @@ function formatFlowDate(iso: string): string {
     });
 }
 
-function formatFlowCodes(item: MarketFlowItem): string {
-    const codes = item.stock_codes?.filter(Boolean) || [];
+function formatFlowCodes(item: MarketFlowItem, preferredSymbols?: string[]): string {
+    const codes = preferredSymbols?.length
+        ? preferredSymbols
+        : item.stock_codes?.filter(Boolean) || [];
     if (codes.length === 0) return item.symbol || '';
     if (codes.length <= 2) return codes.join(' ');
     return `${codes.slice(0, 2).join(' ')} +${codes.length - 2} şirket`;
@@ -274,10 +284,16 @@ export default function MarketFlowPanel({
                     >
                         <div className="mwr-flow-item-meta">
                             <span className="mwr-flow-source">KAP</span>
-                            {formatFlowCodes(item) && (
+                            {formatFlowCodes(item, filter === 'watchlist'
+                                ? getMatchingFavoriteSymbols(item, favoriteSymbols)
+                                : undefined) && (
                                 <>
                                     <span className="mwr-flow-dot" aria-hidden="true">·</span>
-                                    <span className="mwr-flow-codes">{formatFlowCodes(item)}</span>
+                                    <span className="mwr-flow-codes">
+                                        {formatFlowCodes(item, filter === 'watchlist'
+                                            ? getMatchingFavoriteSymbols(item, favoriteSymbols)
+                                            : undefined)}
+                                    </span>
                                 </>
                             )}
                             <time dateTime={item.published_at}>{formatFlowTime(item.published_at)}</time>
