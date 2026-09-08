@@ -24,7 +24,6 @@ import type {
 import { DEFAULT_STOCK_RETURN_MODE } from '../routing/routes';
 import type { StockReturnMode } from '../routing/routes';
 import MarketWatchRail from '../components/MarketWatchRail';
-import MarketSidebar from '../components/MarketSidebar';
 import MarketWatchStrip from '../components/MarketWatchStrip';
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo from '../components/SymbolLogo';
@@ -3333,9 +3332,6 @@ export default function MarketsView({
             />
             <div className={`markets-workspace${activeSection === 'markets' ? ' markets-workspace-with-rail' : ''}`}>
                 <div className="market-page" ref={marketPageRef}>
-                {market && activeSection !== 'markets' && (
-                    <MarketSidebar rows={market.rows} onSelectTicker={onCompanyClick} />
-                )}
             {activeSection !== 'markets' && (
                 <header className="market-header">
                     <div className="market-title">
