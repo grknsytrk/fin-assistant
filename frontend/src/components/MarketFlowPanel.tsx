@@ -393,7 +393,9 @@ export default function MarketFlowPanel({
                                     </span>
                                 </>
                             )}
-                            <time dateTime={item.published_at}>{formatFlowTime(item.published_at)}</time>
+                            <time dateTime={item.published_at}>
+                                {formatFlowDate(item.published_at)} · {formatFlowTime(item.published_at)}
+                            </time>
                         </div>
                         <div className="mwr-flow-item-title">{item.title}</div>
                     </button>
