@@ -787,7 +787,8 @@
 }
 
 .mwr-flow-toolbar {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 36px 36px;
     align-items: center;
     gap: 0.45rem;
     padding: 0.8rem 1rem 0.65rem;
@@ -796,12 +797,15 @@
 
 .mwr-flow-select-wrap {
     min-width: 0;
-    flex: 1 1 auto;
+    height: 36px;
+    display: flex;
 }
 
 .mwr-flow-select {
     width: 100%;
-    min-height: 34px;
+    height: 36px;
+    min-height: 36px;
+    box-sizing: border-box;
     padding: 0 2rem 0 0.7rem;
     border: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
     border-radius: 8px;
@@ -815,8 +819,10 @@
 .mwr-flow-options-button,
 .mwr-flow-refresh-button {
     width: 34px;
-    height: 34px;
-    flex: 0 0 34px;
+    height: 36px;
+    min-height: 36px;
+    box-sizing: border-box;
+    justify-self: center;
     display: grid;
     place-items: center;
     padding: 0;

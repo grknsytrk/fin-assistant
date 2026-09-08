@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { MarketFlowItem } from '../api/types';
+import { normalizeWatchlistSymbol, useWatchlist } from '../hooks/useWatchlist';
 
-type FlowFilter = 'all' | 'ozel_durum' | 'finansal_rapor' | 'kar_payi' | 'genel_kurul' | 'diger';
+type FlowFilter = 'all' | 'watchlist' | 'ozel_durum' | 'finansal_rapor' | 'kar_payi' | 'genel_kurul' | 'diger';
 
 const FLOW_FILTERS: Array<{ value: FlowFilter; label: string }> = [
     { value: 'all', label: 'Tümü' },
+    { value: 'watchlist', label: 'Favorilerim' },
     { value: 'ozel_durum', label: 'Özel Durum' },
     { value: 'finansal_rapor', label: 'Finansal Rapor' },
     { value: 'kar_payi', label: 'Kâr Payı' },
@@ -17,6 +19,7 @@ const FLOW_FILTERS: Array<{ value: FlowFilter; label: string }> = [
 const FLOW_SIZE_OPTIONS = [25, 50, 100];
 const FLOW_SIZE_STORAGE_KEY = 'ragfin.flow.size';
 const FLOW_SIZE_DEFAULT = 50;
+const FLOW_FAVORITES_LOAD_SIZE = 500;
 
 function readInitialFlowSize(): number {
     if (typeof window === 'undefined') return FLOW_SIZE_DEFAULT;
@@ -28,8 +31,15 @@ function readInitialFlowSize(): number {
     }
 }
 
-function matchesFlowFilter(item: MarketFlowItem, filter: FlowFilter): boolean {
+function matchesFlowFilter(item: MarketFlowItem, filter: FlowFilter, favoriteSymbols: Set<string>): boolean {
     if (filter === 'all') return true;
+    if (filter === 'watchlist') {
+        if (favoriteSymbols.size === 0) return false;
+        const itemSymbols = [item.symbol, ...(item.stock_codes || []), ...(item.related_symbols || [])]
+            .filter(Boolean)
+            .map(normalizeWatchlistSymbol);
+        return itemSymbols.some((symbol) => favoriteSymbols.has(symbol));
+    }
     if (filter === 'ozel_durum') return item.category === 'ozel_durum' || item.source === 'Özel Durum';
     if (filter === 'finansal_rapor') return item.category === 'finansal_rapor';
     if (filter === 'kar_payi') return item.category === 'kar_payi';
@@ -69,17 +79,24 @@ export default function MarketFlowPanel({
 }: {
     onSelectTicker?: (ticker: string) => void;
 }) {
+    const watchlist = useWatchlist();
+    const favoriteSymbols = useMemo(
+        () => new Set(watchlist.items.map((item) => normalizeWatchlistSymbol(item.symbol))),
+        [watchlist.items],
+    );
     const [items, setItems] = useState<MarketFlowItem[] | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [filter, setFilter] = useState<FlowFilter>('all');
+    const filterRef = useRef<FlowFilter>('all');
     const [size, setSize] = useState(readInitialFlowSize);
     const sizeRef = useRef(size);
     const [showOptions, setShowOptions] = useState(false);
     const [warning, setWarning] = useState<string | null>(null);
 
     const load = useCallback((refresh = false, requestedSize?: number) => {
-        const requestSize = requestedSize ?? sizeRef.current;
+        const requestSize = requestedSize
+            ?? (filterRef.current === 'watchlist' ? FLOW_FAVORITES_LOAD_SIZE : sizeRef.current);
         setLoading(true);
         setError(null);
         apiClient
@@ -106,9 +123,21 @@ export default function MarketFlowPanel({
     }, [load]);
 
     const filteredItems = useMemo(
-        () => (items || []).filter((item) => matchesFlowFilter(item, filter)),
-        [filter, items],
+        () => (items || [])
+            .filter((item) => matchesFlowFilter(item, filter, favoriteSymbols))
+            .slice(0, size),
+        [favoriteSymbols, filter, items, size],
     );
+
+    const handleFilterChange = (nextFilter: FlowFilter) => {
+        filterRef.current = nextFilter;
+        setFilter(nextFilter);
+        if (nextFilter === 'watchlist') {
+            load(false, FLOW_FAVORITES_LOAD_SIZE);
+        } else if (filter === 'watchlist') {
+            load(false, sizeRef.current);
+        }
+    };
 
     const handleSizeChange = (next: number) => {
         sizeRef.current = next;
@@ -118,7 +147,7 @@ export default function MarketFlowPanel({
         } catch {
             // localStorage unavailable; the current selection still works.
         }
-        load(false, next);
+        load(false, filterRef.current === 'watchlist' ? FLOW_FAVORITES_LOAD_SIZE : next);
     };
 
     const handleItemClick = (item: MarketFlowItem) => {
@@ -137,7 +166,7 @@ export default function MarketFlowPanel({
                     <select
                         className="mwr-flow-select"
                         value={filter}
-                        onChange={(event) => setFilter(event.target.value as FlowFilter)}
+                        onChange={(event) => handleFilterChange(event.target.value as FlowFilter)}
                         aria-label="Akış filtresi"
                     >
                         {FLOW_FILTERS.map((option) => (
@@ -195,7 +224,11 @@ export default function MarketFlowPanel({
             {loading && !items && <div className="mwr-flow-state">Akış yükleniyor…</div>}
             {error && <div className="mwr-flow-state mwr-flow-error">{error}</div>}
             {!loading && !error && items && filteredItems.length === 0 && (
-                <div className="mwr-flow-state">Bu filtreye uygun bildirim yok.</div>
+                <div className="mwr-flow-state">
+                    {filter === 'watchlist' && favoriteSymbols.size === 0
+                        ? 'Önce yıldız simgesinden favori ekle.'
+                        : 'Bu filtreye uygun bildirim yok.'}
+                </div>
             )}
 
             <div className="mwr-flow-list">
