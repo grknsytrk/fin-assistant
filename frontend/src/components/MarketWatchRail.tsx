@@ -1014,8 +1014,12 @@ export default function MarketWatchRail({
                     type="button"
                     className={`mwr-dock-button${activeTool === 'news' ? ' is-active' : ''}`}
                     onClick={() => {
-                        setActiveTool('news');
-                        updateCollapsed(false);
+                        if (activeTool === 'news') {
+                            updateCollapsed(!panelCollapsed);
+                        } else {
+                            setActiveTool('news');
+                            updateCollapsed(false);
+                        }
                     }}
                     aria-label="KAP Akışı"
                     title="KAP Akışı"
