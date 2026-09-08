@@ -19,10 +19,18 @@ const FLOW_FILTERS: Array<{ value: FlowFilter; label: string }> = [
 
 const FLOW_PAGE_SIZE = 50;
 const FLOW_INITIAL_LOAD_SIZE = FLOW_PAGE_SIZE;
+const FLOW_CATEGORY_LOAD_SIZE = 100;
 const FLOW_MAX_ITEMS = 2_000;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
 const FLOW_NEW_ITEM_HIGHLIGHT_MS = 5_000;
 const FLOW_HEAD_POLL_MS = 15_000;
+
+function getServerFlowCategory(filter: FlowFilter): string | undefined {
+    if (filter === 'ozel_durum' || filter === 'finansal_rapor' || filter === 'kar_payi' || filter === 'genel_kurul') {
+        return filter;
+    }
+    return undefined;
+}
 
 function getFlowSymbols(item: MarketFlowItem): string[] {
     return [item.symbol, ...(item.stock_codes || []), ...(item.related_symbols || [])]
@@ -98,6 +106,7 @@ export default function MarketFlowPanel({
     const [visibleLimit, setVisibleLimit] = useState(FLOW_PAGE_SIZE);
     const visibleLimitRef = useRef(FLOW_PAGE_SIZE);
     const requestLimitRef = useRef(FLOW_INITIAL_LOAD_SIZE);
+    const requestCategoryRef = useRef<string | undefined>(undefined);
     const nextCursorRef = useRef<string | null>(null);
     const latestCursorRef = useRef<string | null>(null);
     const loadingMoreRef = useRef(false);
@@ -136,18 +145,22 @@ export default function MarketFlowPanel({
         highlightTimersRef.current.clear();
     }, []);
 
-    const load = useCallback((requestedLimit?: number) => {
-        const requestLimit = requestedLimit
-            ?? (filterRef.current === 'watchlist' ? FLOW_FAVORITES_LOAD_SIZE : requestLimitRef.current || FLOW_INITIAL_LOAD_SIZE);
+    const load = useCallback((requestedLimit?: number, requestedCategory?: string) => {
         const expectedFilter = filterRef.current;
+        const serverCategory = requestedCategory ?? getServerFlowCategory(expectedFilter);
+        const requestLimit = requestedLimit
+            ?? (expectedFilter === 'watchlist'
+                ? FLOW_FAVORITES_LOAD_SIZE
+                : serverCategory ? FLOW_CATEGORY_LOAD_SIZE : requestLimitRef.current || FLOW_INITIAL_LOAD_SIZE);
         requestLimitRef.current = requestLimit;
+        requestCategoryRef.current = serverCategory;
         nextCursorRef.current = null;
         latestCursorRef.current = null;
         setHasMore(true);
         setLoading(true);
         setError(null);
         apiClient
-            .marketFlow(requestLimit)
+            .marketFlow(requestLimit, serverCategory)
             .then((payload) => {
                 if (filterRef.current !== expectedFilter) return;
                 const nextItems = payload.items || [];
@@ -197,7 +210,7 @@ export default function MarketFlowPanel({
         apiClient
             .marketFlow(
                 nextCursor ? FLOW_PAGE_SIZE : nextLimit,
-                undefined,
+                requestCategoryRef.current,
                 nextCursor ? { before: nextCursor } : undefined,
             )
             .then((payload) => {
@@ -235,8 +248,9 @@ export default function MarketFlowPanel({
     useEffect(() => {
         const timer = window.setInterval(() => {
             if (document.visibilityState !== 'visible') return;
+            const serverCategory = requestCategoryRef.current;
             apiClient
-                .marketFlowHead()
+                .marketFlowHead(serverCategory)
                 .then((head) => {
                     const previousCursor = latestCursorRef.current;
                     if (!head.latest_cursor) return;
@@ -247,7 +261,7 @@ export default function MarketFlowPanel({
                     if (head.latest_cursor === previousCursor) return;
 
                     return apiClient
-                        .marketFlow(FLOW_PAGE_SIZE, undefined, { after: previousCursor })
+                        .marketFlow(FLOW_PAGE_SIZE, serverCategory, { after: previousCursor })
                         .then((payload) => {
                             const incoming = payload.items || [];
                             const newIds = getNewFlowItemIds(observedFlowIdsRef.current, incoming);
@@ -283,6 +297,8 @@ export default function MarketFlowPanel({
         setFilter(nextFilter);
         if (nextFilter === 'watchlist') {
             load(FLOW_FAVORITES_LOAD_SIZE);
+        } else if (getServerFlowCategory(nextFilter)) {
+            load(FLOW_CATEGORY_LOAD_SIZE, getServerFlowCategory(nextFilter));
         } else {
             load(FLOW_INITIAL_LOAD_SIZE);
         }

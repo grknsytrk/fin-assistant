@@ -3,9 +3,10 @@ name: refresh KAP flow
 on:
   workflow_dispatch:
   schedule:
-    # GitHub may delay scheduled jobs slightly.  The endpoint is idempotent
-    # and the cache lock prevents overlapping refreshes.
-    - cron: "*/10 6-19 * * 1-5"
+    # GitHub may delay scheduled jobs slightly. The endpoint is idempotent,
+    # and the cache lock prevents overlapping refreshes. KAP announcements
+    # can arrive outside market hours, so keep the collector active all day.
+    - cron: "*/10 * * * *"
 
 permissions: {}
 
