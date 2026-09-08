@@ -31,7 +31,9 @@ jobs:
             -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
             "$FIN_API_BASE_URL/admin/kap/refresh")"
           status="$(echo "$response" | jq -r '.status // empty')"
-          echo "KAP flow refresh status: ${status:-unknown}"
+          database_written="$(echo "$response" | jq -r '.database_written // false')"
+          stored_count="$(echo "$response" | jq -r '.stored_count // 0')"
+          echo "KAP flow refresh status: ${status:-unknown} stored_count=$stored_count database_written=$database_written"
           if [[ "$status" != "ok" && "$status" != "already_running" ]]; then
             echo "$response" >&2
             exit 1
