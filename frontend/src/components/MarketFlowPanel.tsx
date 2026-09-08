@@ -186,11 +186,11 @@ export default function MarketFlowPanel({
         [favoriteSymbols, filter, items],
     );
 
-    const loadMore = useCallback((requestedPageSize = FLOW_PAGE_SIZE) => {
+    const loadMore = useCallback((requestedPageSize = FLOW_PAGE_SIZE, revealMore = true) => {
         if (loadingMoreRef.current) return;
 
         const currentVisibleLimit = visibleLimitRef.current;
-        if (filteredItems.length > currentVisibleLimit) {
+        if (revealMore && filteredItems.length > currentVisibleLimit) {
             const nextVisibleLimit = Math.min(currentVisibleLimit + FLOW_PAGE_SIZE, filteredItems.length);
             visibleLimitRef.current = nextVisibleLimit;
             setVisibleLimit(nextVisibleLimit);
@@ -230,7 +230,9 @@ export default function MarketFlowPanel({
                     ? payload.has_more
                     : olderItems.length >= (nextCursor ? pageSize : nextLimit)
                         && requestLimitRef.current < FLOW_MAX_ITEMS);
-                const nextVisibleLimit = currentVisibleLimit + FLOW_PAGE_SIZE;
+                const nextVisibleLimit = revealMore
+                    ? currentVisibleLimit + FLOW_PAGE_SIZE
+                    : currentVisibleLimit;
                 visibleLimitRef.current = nextVisibleLimit;
                 setVisibleLimit(nextVisibleLimit);
             })
@@ -251,7 +253,7 @@ export default function MarketFlowPanel({
         // A filtered view should not depend on the user reaching an empty
         // scrollbar to discover older matches. Fetch one bounded 500-row page
         // at a time until we have 50 matches or the durable feed ends.
-        loadMore(FLOW_BACKFILL_PAGE_SIZE);
+        loadMore(FLOW_BACKFILL_PAGE_SIZE, false);
     }, [filter, filteredItems.length, hasMore, items, loading, loadingMore, loadMore]);
 
     useEffect(() => {
