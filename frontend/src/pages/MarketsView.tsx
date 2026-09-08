@@ -4122,9 +4122,9 @@ export default function MarketsView({
                 </div>
             )}
                 </div>
-                {activeSection === 'markets' && market && (
+                {activeSection === 'markets' && (
                     <MarketWatchRail
-                        xu100Rows={market.rows}
+                        xu100Rows={market?.rows ?? []}
                         onSelectTicker={onCompanyClick}
                         onSelectFund={(fundCode) => onOpenFund?.(fundCode)}
                         mobilePanelOpen={isMobileViewport ? mobileMarketPanelOpen : undefined}
