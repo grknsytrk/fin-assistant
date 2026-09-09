@@ -2716,6 +2716,7 @@ ISIN KODU
 HİSSE SENETLERİ
 Hisse Türk
 ORANI
+VADEYE
 AKBNK AKBANK
 T.A.Ş.
 18.653.248,00 69,718033 30/04/26 73,200000 1.365.417.753,60 4,66 3,67TL 80100511 3,67TRAAKBNK91N6
@@ -2759,6 +2760,7 @@ TRT131027T36 HAZİNE 0 10.000,00 1,00 10.000,00 0,68TL 0,68TRT131027T36
     assert by_code["PNU"]["asset_type"] == "fund"
     assert "CİNSİ" not in by_code
     assert "ORANI" not in by_code
+    assert "VADEYE" not in by_code
     assert "AC2" not in by_code
     assert "TRT131027T36" not in by_code
 

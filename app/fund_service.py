@@ -7923,7 +7923,7 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
 
 
 KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
-KAP_HOLDINGS_PARSE_VERSION = 16
+KAP_HOLDINGS_PARSE_VERSION = 17
 _KAP_NUMBER_PATTERN = re.compile(
     r"-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?(?!\d)|\d+[.,]\d+|\d+)(?:\s*%)?"
 )
@@ -8022,6 +8022,7 @@ _KAP_POSITION_STOPWORDS = {
     "TUTAR",
     "TUTARI",
     "VADE",
+    "VADEYE",
 }
 _KAP_INCLUDED_HOLDING_TYPES = {"local_equity", "fund", "foreign_equity", "foreign_fund"}
 _KAP_FOREIGN_ISIN_PROVIDER_SYMBOLS = {
