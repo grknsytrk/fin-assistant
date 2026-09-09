@@ -2720,6 +2720,78 @@ def test_refresh_fund_allocations_history_groups_last_days(monkeypatch, tmp_path
     assert [row["date"] for row in payload["history"]] == ["2026-04-01", "2026-04-30"]
     assert payload["history"][0]["allocations"][0]["allocation_type"] == "hs"
     assert payload["history"][1]["allocations"][0]["weight"] == 58.0
+    current = fund_service.get_fund_allocations_payload(tmp_path, "TLY")
+    assert current["source_metadata"]["as_of"] == "2026-04-30"
+    assert current["allocations"][0]["weight"] == 58.0
+
+
+def test_get_fund_allocations_payload_promotes_newer_fresh_history(monkeypatch, tmp_path) -> None:
+    allocations_dir = tmp_path / "funds_cache" / "allocations"
+    allocations_dir.mkdir(parents=True)
+    (allocations_dir / "TLY.json").write_text(
+        json.dumps(
+            {
+                "fund_code": "TLY",
+                "status": "ok",
+                "allocations": [
+                    {
+                        "fund_code": "TLY",
+                        "allocation_type": "hs",
+                        "label": "Hisse Senedi",
+                        "weight": 80.3,
+                        "report_date": "2026-09-02",
+                        "source": "tefasfon_portfolio",
+                    }
+                ],
+                "source": "tefasfon_portfolio",
+                "stale": True,
+                "source_metadata": {
+                    "as_of": "2026-09-02",
+                    "fetched_at": "2026-09-02T18:00:00+00:00",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (allocations_dir / "TLY_history_30d.json").write_text(
+        json.dumps(
+            {
+                "fund_code": "TLY",
+                "status": "ok",
+                "lookback_days": 30,
+                "history": [
+                    {
+                        "date": "2026-09-08",
+                        "allocations": [
+                            {
+                                "fund_code": "TLY",
+                                "allocation_type": "hs",
+                                "label": "Hisse Senedi",
+                                "weight": 84.57,
+                                "report_date": "2026-09-08",
+                                "source": "tefas_direct_portfolio",
+                            }
+                        ],
+                    }
+                ],
+                "source": "tefasfon_portfolio",
+                "stale": False,
+                "source_metadata": {
+                    "as_of": "2026-09-08",
+                    "fetched_at": fund_service._utc_now_iso(),
+                    "warnings": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = fund_service.get_fund_allocations_payload(tmp_path, "TLY")
+
+    assert payload["stale"] is False
+    assert payload["source_metadata"]["as_of"] == "2026-09-08"
+    assert payload["source_metadata"]["promoted_from"] == "allocation_history"
+    assert payload["allocations"][0]["weight"] == 84.57
 
 
 def test_refresh_fund_allocations_history_falls_back_to_daily_snapshots(monkeypatch, tmp_path) -> None:

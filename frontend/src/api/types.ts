@@ -492,6 +492,7 @@ export interface FundAllocationsResponse {
   allocations: FundAllocation[];
   source: string;
   stale?: boolean;
+  refresh_pending?: boolean;
   source_metadata: FundSourceMetadata;
 }
 

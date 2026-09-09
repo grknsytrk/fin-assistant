@@ -5603,6 +5603,18 @@ export default function FundsPage({
         const payload = await apiClient.fundHoldings(code, { force: true });
         if (!signal.aborted && activeFundCodeRef.current === code) setHoldings(payload);
     });
+    useBackgroundRefresh(
+        Boolean(
+            fundCode
+            && (activeTab === 'overview' || activeTab === 'allocation')
+            && allocations?.refresh_pending,
+        ),
+        async (signal) => {
+            const code = fundCode!.trim().toUpperCase();
+            const payload = await apiClient.fundAllocations(code);
+            if (!signal.aborted && activeFundCodeRef.current === code) setAllocations(payload);
+        },
+    );
 
     useEffect(() => {
         if (!fundCode) {

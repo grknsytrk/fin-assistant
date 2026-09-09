@@ -2240,6 +2240,97 @@ def _normalize_allocation_row(row: Dict[str, Any], fallback_code: str | None = N
     return allocations
 
 
+def _allocation_payload_report_date(payload: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Return the newest report date represented by an allocation payload."""
+
+    if not isinstance(payload, dict):
+        return None
+    dates = [
+        report_date
+        for item in list(payload.get("allocations") or [])
+        for report_date in [_fund_date(item.get("report_date"))]
+        if report_date
+    ]
+    meta = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+    dates.extend(
+        report_date
+        for report_date in [_fund_date(meta.get("as_of")), _fund_date(payload.get("as_of"))]
+        if report_date
+    )
+    return max(dates) if dates else None
+
+
+def _promote_latest_allocation_history(
+    processed_dir: Path,
+    fund_code: str,
+    history_payload: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Make the newest fresh history day the canonical allocation snapshot.
+
+    The overview card and the allocation-history screen used to have separate
+    caches. A history refresh could therefore contain newer TEFAS data while
+    the overview still displayed an older single-day snapshot. Promoting the
+    newest history day keeps both views on the same report date without making
+    another upstream request.
+    """
+
+    if not isinstance(history_payload, dict) or history_payload.get("stale"):
+        return None
+    normalized = normalize_fund_code(fund_code)
+    history_days = [
+        day
+        for day in list(history_payload.get("history") or [])
+        if isinstance(day, dict) and _fund_date(day.get("date")) and list(day.get("allocations") or [])
+    ]
+    if not history_days:
+        return None
+    latest_day = max(history_days, key=lambda day: _fund_date(day.get("date")) or "")
+    latest_date = _fund_date(latest_day.get("date"))
+    if not latest_date:
+        return None
+    latest_allocations = [
+        dict(item)
+        for item in list(latest_day.get("allocations") or [])
+        if isinstance(item, dict)
+    ]
+    if not latest_allocations:
+        return None
+
+    current = _read_json(_allocations_path(processed_dir, normalized))
+    current_date = _allocation_payload_report_date(current)
+    if current_date and current_date >= latest_date:
+        return None
+
+    history_meta = history_payload.get("source_metadata") if isinstance(history_payload.get("source_metadata"), dict) else {}
+    fetched_at = history_meta.get("fetched_at") or _utc_now_iso()
+    metadata = dict(history_meta)
+    metadata.update(
+        {
+            "source": TEFASFON_PORTFOLIO_SOURCE,
+            "source_url": TEFASFON_SOURCE_URL,
+            "fetched_at": fetched_at,
+            "as_of": latest_date,
+            "cache_hit": True,
+            "stale": False,
+            "parse_status": "ok_tefasfon_portfolio_history_latest",
+            "source_policy": "tefasfon_primary",
+            "promoted_from": "allocation_history",
+            "history_lookback_days": history_payload.get("lookback_days"),
+            "warnings": list(history_meta.get("warnings") or []),
+        }
+    )
+    promoted = {
+        "fund_code": normalized,
+        "status": "ok",
+        "allocations": latest_allocations,
+        "source": TEFASFON_PORTFOLIO_SOURCE,
+        "stale": False,
+        "source_metadata": metadata,
+    }
+    _write_json(_allocations_path(processed_dir, normalized), promoted)
+    return promoted
+
+
 def _return_between(latest_price: Optional[float], base_price: Optional[float]) -> Optional[float]:
     if latest_price is None or base_price is None or base_price <= 0:
         return None
@@ -7705,6 +7796,8 @@ def refresh_fund_allocations_history(
         "off",
     }:
         _write_json(_allocations_history_path(processed_dir, normalized, bounded_lookback), payload)
+    if history:
+        _promote_latest_allocation_history(processed_dir, normalized, payload)
     return payload
 
 
@@ -7785,12 +7878,27 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
     normalized = normalize_fund_code(fund_code)
     path = _allocations_path(processed_dir, normalized)
     payload = _read_json(path)
+
+    # The history endpoint may already have a newer, valid TEFAS report even
+    # when the legacy single-snapshot file is stale. Reuse that same latest
+    # day so the overview and history screens cannot disagree.
+    history_payload = get_fund_allocations_history_payload(
+        processed_dir,
+        normalized,
+        lookback_days=30,
+        auto_refresh=False,
+    )
+    promoted = _promote_latest_allocation_history(processed_dir, normalized, history_payload)
+    if promoted is not None:
+        payload = promoted
+
     if not payload or _public_price_source(str(payload.get("source") or "")) == "legacy_cache":
         return {
             "fund_code": normalized,
             "status": "unavailable",
             "allocations": [],
             "source": TEFASFON_PORTFOLIO_SOURCE,
+            "stale": True,
             "source_metadata": {
                 "source": TEFASFON_PORTFOLIO_SOURCE,
                 "source_url": TEFASFON_SOURCE_URL,

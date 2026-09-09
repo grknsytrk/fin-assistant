@@ -97,6 +97,8 @@ KAP akışı için yenileme ve okuma yolları ayrıdır: Cloudflare Worker Cron 
 
 Fonların KAP portföy dağılımında PDF cache'i uzun süre korunur; ancak KAP'ın hafif bildirim listesi 60 saniyede bir yeniden doğrulanır. Yeni `disclosureIndex` görüldüğünde yalnızca yeni PDF indirilip parse edilir. Fonun Genel Bakış veya Portföy Dağılımı ekranı açıkken frontend de holdings yanıtını 60 saniyede bir yeniler; bu nedenle KAP'ın yayınlama/ağ gecikmesi dışında yeni rapor normalde en geç birkaç dakika içinde görünür.
 
+Fon varlık dağılımı özet kartı ile `Fon Dağılımı` geçmişi aynı en yeni TEFAS rapor gününü kullanır. Geçmiş cache'i daha yeni bir gün içeriyorsa bu gün otomatik olarak özet snapshot'ına yükseltilir; özet snapshot'ı eskiyse API aynı 30 günlük geçmiş yenileme işini arka planda başlatır ve frontend sonucu beklemeden mevcut veriyi gösterip tamamlanınca günceller.
+
 Cloudflare Worker Cron kurulumu için önce `FIN_API_ADMIN_TOKEN` secret'ını tanımlayın (`npx wrangler secret put FIN_API_ADMIN_TOKEN`); değer Hugging Face `RAGFIN_ADMIN_REFRESH_TOKEN` ile aynı olmalıdır. Ardından `npx wrangler deploy` çalıştırın. `wrangler.toml` içindeki `* * * * *` dakikalık hızlı, `*/5 * * * *` ise derin yenileme tetikleyicisidir; ikisi de UTC'dir. Deploy sonrası Worker > Settings > Triggers ve Workers Logs ekranlarında tetiklemeleri doğrulayın.
 
 Production'da `/health` yanıtındaki `cache_backend` değeri `redis` ve `cache_redis_fallback` değeri `false` olmalıdır. Aksi durumda uygulama yalnızca process-memory cache kullanır; çoklu worker sağlayıcı çağrılarını paylaşamaz.

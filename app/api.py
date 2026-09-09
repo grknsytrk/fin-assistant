@@ -3231,9 +3231,26 @@ def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_c
 
 @app.get("/funds/{fund_code}/allocations")
 def fund_allocations(fund_code: str) -> Dict[str, Any]:
-    from app.fund_service import get_fund_allocations_payload
+    from app.fund_service import get_fund_allocations_payload, normalize_fund_code
 
-    return get_fund_allocations_payload(CONFIG.paths.processed_dir, fund_code)
+    normalized = normalize_fund_code(fund_code)
+    payload = get_fund_allocations_payload(CONFIG.paths.processed_dir, normalized)
+    if not payload.get("stale"):
+        response = dict(payload)
+        response["refresh_pending"] = False
+        return response
+
+    # Keep serving the last usable snapshot, but use the same background
+    # history refresh as the history screen. When it completes, the worker
+    # promotes the newest history day into the canonical allocation snapshot.
+    normalized = _require_known_fund_code(normalized)
+    job = _start_allocation_history_refresh_job(normalized, 30)
+    response = dict(payload)
+    response["refresh_pending"] = str(job.get("status")) in {"queued", "running", "pending"}
+    metadata = dict(response.get("source_metadata") or {})
+    metadata["allocation_history_job"] = _allocation_history_job_public(job)
+    response["source_metadata"] = metadata
+    return response
 
 
 def _allocation_history_job_key(fund_code: str, lookback_days: int) -> str:

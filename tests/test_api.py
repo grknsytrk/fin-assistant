@@ -556,6 +556,43 @@ def test_api_allocation_history_returns_pending_without_synchronous_upstream_wor
     assert response.json()["source_metadata"]["allocation_history_job"]["job_id"] == "job-1"
 
 
+def test_api_allocations_queues_refresh_for_stale_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api_module, "_require_known_fund_code", lambda _fund_code: "TLY")
+    monkeypatch.setattr(
+        fund_service_module,
+        "get_fund_allocations_payload",
+        lambda *_args, **_kwargs: {
+            "fund_code": "TLY",
+            "status": "ok",
+            "allocations": [{"allocation_type": "hs", "weight": 80.3}],
+            "source": "tefasfon_portfolio",
+            "stale": True,
+            "source_metadata": {"as_of": "2026-09-02"},
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_start_allocation_history_refresh_job",
+        lambda *_args, **_kwargs: {
+            "job_id": "job-2",
+            "fund_code": "TLY",
+            "lookback_days": 30,
+            "status": "queued",
+            "requested_at": "2026-09-09T12:00:00+00:00",
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+        },
+    )
+
+    response = TestClient(app).get("/funds/TLY/allocations")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["refresh_pending"] is True
+    assert payload["source_metadata"]["allocation_history_job"]["job_id"] == "job-2"
+
+
 def test_allocation_history_refresh_job_is_coalesced_per_fund_and_range(monkeypatch: pytest.MonkeyPatch) -> None:
     submitted: list[tuple[Any, ...]] = []
 
