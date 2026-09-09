@@ -1,4 +1,5 @@
-const REFRESH_PATH = "/admin/kap/refresh";
+const FAST_REFRESH_PATH = "/admin/kap/refresh?fast=1";
+const DEEP_REFRESH_PATH = "/admin/kap/refresh";
 const REFRESH_TIMEOUT_MS = 90_000;
 const REFRESH_ATTEMPTS = 2;
 
@@ -10,11 +11,11 @@ async function wait(milliseconds: number): Promise<void> {
     await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function requestKapRefresh(baseUrl: string, token: string): Promise<Response> {
+async function requestKapRefresh(baseUrl: string, token: string, path: string): Promise<Response> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
     try {
-        return await fetch(new URL(REFRESH_PATH, baseUrl), {
+        return await fetch(new URL(path, baseUrl), {
             method: "POST",
             headers: {
                 Authorization: `Bearer ${token}`,
@@ -28,6 +29,7 @@ async function requestKapRefresh(baseUrl: string, token: string): Promise<Respon
 }
 
 async function refreshKapFlow(controller: ScheduledController, env: Env): Promise<void> {
+    const refreshPath = controller.cron === "* * * * *" ? FAST_REFRESH_PATH : DEEP_REFRESH_PATH;
     let response: Response | null = null;
     let lastError: string | null = null;
     let attemptsMade = 0;
@@ -35,7 +37,7 @@ async function refreshKapFlow(controller: ScheduledController, env: Env): Promis
     for (let attempt = 1; attempt <= REFRESH_ATTEMPTS; attempt += 1) {
         attemptsMade = attempt;
         try {
-            response = await requestKapRefresh(env.FIN_API_BASE_URL, env.FIN_API_ADMIN_TOKEN);
+            response = await requestKapRefresh(env.FIN_API_BASE_URL, env.FIN_API_ADMIN_TOKEN, refreshPath);
             if (response.ok || (response.status !== 429 && response.status < 500)) break;
             lastError = `backend returned HTTP ${response.status}`;
         } catch (error) {
@@ -55,6 +57,7 @@ async function refreshKapFlow(controller: ScheduledController, env: Env): Promis
             message: "KAP refresh backend rejected the request",
             status: response.status,
             attemptCount: attemptsMade,
+            refreshPath,
         };
         if (response.status === 401 || response.status === 403) {
             controller.noRetry();
@@ -76,6 +79,7 @@ async function refreshKapFlow(controller: ScheduledController, env: Env): Promis
         console.log(JSON.stringify({
             message: "KAP flow refresh completed",
             cron: controller.cron,
+            refreshPath,
             scheduledTime: controller.scheduledTime,
             status,
             storedCount: payload.stored_count ?? 0,
@@ -89,6 +93,7 @@ async function refreshKapFlow(controller: ScheduledController, env: Env): Promis
         console.warn(JSON.stringify({
             message: "KAP flow refresh returned no rows; existing data remains authoritative",
             cron: controller.cron,
+            refreshPath,
             scheduledTime: controller.scheduledTime,
         }));
         return;
@@ -113,6 +118,7 @@ export default {
             console.error(JSON.stringify({
                 message: "KAP flow refresh failed",
                 cron: controller.cron,
+                refreshPath: controller.cron === "* * * * *" ? FAST_REFRESH_PATH : DEEP_REFRESH_PATH,
                 scheduledTime: controller.scheduledTime,
                 error: asErrorMessage(error),
             }));

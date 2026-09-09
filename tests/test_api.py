@@ -4006,22 +4006,24 @@ def test_market_flow_rejects_two_pagination_directions() -> None:
 
 
 def test_admin_kap_refresh_requires_token_and_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    refresh_calls: List[Dict[str, Any]] = []
     monkeypatch.setattr(
         api_module,
         "_refresh_kap_flow_store",
-        lambda: {"status": "ok", "stored_count": 2},
+        lambda **kwargs: refresh_calls.append(kwargs) or {"status": "ok", "stored_count": 2},
     )
     client = TestClient(app)
 
     unauthorized = client.post("/admin/kap/refresh")
     authorized = client.post(
-        "/admin/kap/refresh",
+        "/admin/kap/refresh?fast=1",
         headers={"Authorization": "Bearer test-admin-token"},
     )
 
     assert unauthorized.status_code == 401
     assert authorized.status_code == 200
     assert authorized.json()["stored_count"] == 2
+    assert refresh_calls == [{"fast": True}]
 
 
 def test_kap_flow_head_schedules_only_one_stale_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4059,6 +4061,69 @@ def test_kap_flow_head_schedules_only_one_stale_refresh(monkeypatch: pytest.Monk
     assert first.json()["latest_cursor"] == "cursor-1"
     assert first.json()["refresh_pending"] is True
     assert "güncelleniyor" in first.json()["warning"]
+
+
+def test_kap_flow_head_schedules_live_refresh_before_stale_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    submitted: List[Any] = []
+    refresh_calls: List[Dict[str, Any]] = []
+
+    class FakeExecutor:
+        def submit(self, function: Any) -> None:
+            submitted.append(function)
+
+    monkeypatch.setattr(api_module._kap_flow_store, "store_is_configured", lambda: True)
+    monkeypatch.setattr(api_module, "_KAP_FLOW_REFRESH_EXECUTOR", FakeExecutor())
+    monkeypatch.setattr(
+        api_module,
+        "_refresh_kap_flow_store",
+        lambda **kwargs: refresh_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        api_module._kap_flow_store,
+        "read_flow_head",
+        lambda **_kwargs: {
+            "latest_cursor": "cursor-live",
+            "as_of": "2026-09-09T10:00:00+00:00",
+            "last_successful_refresh": None,
+            "refresh_status": "unknown",
+        },
+    )
+    api_module._kap_flow_store.update_flow_status(
+        refresh_status="running",
+        refresh_pending=True,
+        last_successful_refresh=(datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat(),
+    )
+
+    response = TestClient(app).get("/market/flow/head")
+
+    assert response.status_code == 200
+    assert len(submitted) == 1
+    assert response.json()["latest_cursor"] == "cursor-live"
+    assert response.json()["refresh_pending"] is True
+    submitted[0]()
+    assert refresh_calls == [{"fast": True}]
+
+
+def test_kap_flow_head_does_not_refresh_within_live_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    submitted: List[Any] = []
+
+    class FakeExecutor:
+        def submit(self, function: Any) -> None:
+            submitted.append(function)
+
+    monkeypatch.setattr(api_module._kap_flow_store, "store_is_configured", lambda: True)
+    monkeypatch.setattr(api_module, "_KAP_FLOW_REFRESH_EXECUTOR", FakeExecutor())
+    api_module._kap_flow_store.update_flow_status(
+        refresh_status="ok",
+        refresh_pending=False,
+        last_successful_refresh=(datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat(),
+    )
+
+    response = TestClient(app).get("/market/flow/head")
+
+    assert response.status_code == 200
+    assert submitted == []
+    assert response.json()["refresh_pending"] is False
 
 
 def test_kap_flow_refresh_failure_keeps_last_successful_data(monkeypatch: pytest.MonkeyPatch) -> None:

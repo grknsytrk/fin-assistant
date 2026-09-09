@@ -15,7 +15,7 @@ FIN_API_BASE_URL = "https://grknsytrk-fin-api.hf.space"
 required = ["FIN_API_ADMIN_TOKEN"]
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["* * * * *", "*/5 * * * *"]
 
 [observability]
 enabled = true

@@ -24,7 +24,7 @@ const FLOW_BACKFILL_PAGE_SIZE = 500;
 const FLOW_MAX_ITEMS = 2_500;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
 const FLOW_NEW_ITEM_HIGHLIGHT_MS = 5_000;
-const FLOW_HEAD_POLL_MS = 15_000;
+const FLOW_HEAD_POLL_MS = 5_000;
 
 function getServerFlowCategory(filter: FlowFilter): string | undefined {
     if (filter === 'ozel_durum' || filter === 'finansal_rapor' || filter === 'kar_payi' || filter === 'genel_kurul') {

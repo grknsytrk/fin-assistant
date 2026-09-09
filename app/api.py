@@ -173,6 +173,15 @@ _KAP_FLOW_REFRESH_COOLDOWN_SECONDS = max(
     int(os.getenv("RAGFIN_KAP_FLOW_REFRESH_COOLDOWN_SECONDS", str(5 * 60))),
 )
 _KAP_FLOW_REFRESH_WATCHDOG_KEY = "api:kap:flow:refresh-watchdog:v1"
+_KAP_FLOW_REFRESH_LIVE_AFTER_SECONDS = max(
+    10,
+    int(os.getenv("RAGFIN_KAP_FLOW_REFRESH_LIVE_AFTER_SECONDS", "30")),
+)
+_KAP_FLOW_REFRESH_LIVE_COOLDOWN_SECONDS = max(
+    30,
+    int(os.getenv("RAGFIN_KAP_FLOW_REFRESH_LIVE_COOLDOWN_SECONDS", "30")),
+)
+_KAP_FLOW_REFRESH_LIVE_WATCHDOG_KEY = "api:kap:flow:refresh-live-watchdog:v1"
 _KAP_FLOW_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="kap-flow-refresh-watchdog",
@@ -234,17 +243,38 @@ def _kap_flow_refresh_warning(metadata: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _maybe_schedule_kap_flow_refresh() -> bool:
+def _maybe_schedule_kap_flow_refresh(
+    *,
+    refresh_after_seconds: Optional[int] = None,
+    cooldown_seconds: Optional[int] = None,
+    watchdog_key: Optional[str] = None,
+    fast: bool = False,
+) -> bool:
     """Queue one non-blocking refresh when the durable flow is too old."""
 
     if not _kap_flow_store.store_is_configured():
         return False
+    refresh_after = max(
+        1,
+        int(
+            _KAP_FLOW_REFRESH_STALE_AFTER_SECONDS
+            if refresh_after_seconds is None
+            else refresh_after_seconds
+        ),
+    )
+    cooldown = max(
+        1,
+        int(
+            _KAP_FLOW_REFRESH_COOLDOWN_SECONDS
+            if cooldown_seconds is None
+            else cooldown_seconds
+        ),
+    )
+    lease_key = watchdog_key or _KAP_FLOW_REFRESH_WATCHDOG_KEY
     metadata = _kap_flow_refresh_metadata()
     age_seconds = metadata.get("refresh_age_seconds")
-    if age_seconds is not None and int(age_seconds) <= _KAP_FLOW_REFRESH_STALE_AFTER_SECONDS:
+    if age_seconds is not None and int(age_seconds) <= refresh_after:
         return False
-    if metadata.get("refresh_pending"):
-        return True
 
     backend = _get_cache()
     owner = uuid.uuid4().hex
@@ -252,9 +282,9 @@ def _maybe_schedule_kap_flow_refresh() -> bool:
     lease_value = {"owner": owner, "requested_at": requested_at}
     try:
         claimed = backend.set_if_absent(
-            _KAP_FLOW_REFRESH_WATCHDOG_KEY,
+            lease_key,
             lease_value,
-            ttl_seconds=_KAP_FLOW_REFRESH_COOLDOWN_SECONDS,
+            ttl_seconds=cooldown,
         )
     except Exception:
         LOGGER.warning("KAP flow watchdog lease could not be acquired", exc_info=True)
@@ -270,7 +300,7 @@ def _maybe_schedule_kap_flow_refresh() -> bool:
 
     def refresh() -> None:
         try:
-            _refresh_kap_flow_store()
+            _refresh_kap_flow_store(fast=fast)
         except Exception:
             # The last successful data remains authoritative. The cooldown
             # prevents a visible head poll from retrying on every request.
@@ -280,7 +310,7 @@ def _maybe_schedule_kap_flow_refresh() -> bool:
         _KAP_FLOW_REFRESH_EXECUTOR.submit(refresh)
     except Exception:
         try:
-            backend.release_if_owner(_KAP_FLOW_REFRESH_WATCHDOG_KEY, lease_value)
+            backend.release_if_owner(lease_key, lease_value)
         except Exception:
             LOGGER.debug("KAP flow watchdog lease release failed", exc_info=True)
         _kap_flow_store.update_flow_status(
@@ -291,6 +321,17 @@ def _maybe_schedule_kap_flow_refresh() -> bool:
         LOGGER.warning("KAP flow watchdog refresh could not be queued", exc_info=True)
         return False
     return True
+
+
+def _maybe_schedule_kap_flow_live_refresh() -> bool:
+    """Refresh active flow viewers without waiting for the stale threshold."""
+
+    return _maybe_schedule_kap_flow_refresh(
+        refresh_after_seconds=_KAP_FLOW_REFRESH_LIVE_AFTER_SECONDS,
+        cooldown_seconds=_KAP_FLOW_REFRESH_LIVE_COOLDOWN_SECONDS,
+        watchdog_key=_KAP_FLOW_REFRESH_LIVE_WATCHDOG_KEY,
+        fast=True,
+    )
 
 
 def _require_admin_refresh_access(request: Request) -> None:
@@ -4335,7 +4376,11 @@ def _fetch_kap_category_backfill(opener: Any) -> List[Dict[str, Any]]:
     return results
 
 
-def _fetch_kap_public_disclosures(max_items: int = 80) -> List[Dict[str, Any]]:
+def _fetch_kap_public_disclosures(
+    max_items: int = 80,
+    *,
+    include_category_backfill: bool = True,
+) -> List[Dict[str, Any]]:
     """Fetch recent company and fund disclosures from KAP's public UI page.
 
     KAP's public JSON list endpoint is WAF-protected for this deployment, but
@@ -4368,7 +4413,7 @@ def _fetch_kap_public_disclosures(max_items: int = 80) -> List[Dict[str, Any]]:
         last_error = None
 
     page_results.sort(key=lambda row: row.get("published_at") or "", reverse=True)
-    category_results = _fetch_kap_category_backfill(opener)
+    category_results = _fetch_kap_category_backfill(opener) if include_category_backfill else []
     results = [*page_results[:requested], *category_results]
     deduped: List[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -5162,7 +5207,7 @@ def _persisted_market_flow_payload(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if page is None:
         return None
-    _maybe_schedule_kap_flow_refresh()
+    _maybe_schedule_kap_flow_live_refresh()
     response = dict(page)
     response.setdefault("source", "kap_flow_store")
     response.setdefault("as_of", None)
@@ -5257,7 +5302,7 @@ def _market_flow_payload(
     return _legacy_market_flow_payload(limit=limit, category=category, force_refresh=force_refresh)
 
 
-def _refresh_kap_flow_store() -> Dict[str, Any]:
+def _refresh_kap_flow_store(*, fast: bool = False) -> Dict[str, Any]:
     """Fetch the current KAP feed once and publish it to durable storage."""
 
     backend = _get_cache()
@@ -5281,6 +5326,7 @@ def _refresh_kap_flow_store() -> Dict[str, Any]:
                 limit=_VYK_DEFAULT_DETAIL_BUDGET_MAX,
                 category=None,
                 force_refresh=True,
+                include_category_backfill=not fast,
             )
             items = list(payload.get("items") or [])
             if not items:
@@ -5326,6 +5372,7 @@ def _build_market_flow_payload(
     category: Optional[str] = None,
     *,
     force_refresh: bool = False,
+    include_category_backfill: bool = True,
 ) -> Dict[str, Any]:
     started = time.time()
     # Kullanici 'kac kayit' ayarini UI'dan degistirince backend'in VYK detay
@@ -5349,7 +5396,10 @@ def _build_market_flow_payload(
     public_items: List[Dict[str, Any]] = []
     local_items: List[Dict[str, Any]] = []
     if not vyk_items:
-        public_items = _fetch_kap_public_disclosures(max_items=limit)
+        public_items = _fetch_kap_public_disclosures(
+            max_items=limit,
+            include_category_backfill=include_category_backfill,
+        )
         if not public_items:
             local_items = _local_flow_items_from_cache()
 
@@ -5445,7 +5495,7 @@ def market_flow_head(category: Optional[str] = Query(None)) -> Dict[str, Any]:
 
     store_configured = _kap_flow_store.store_is_configured()
     if store_configured:
-        _maybe_schedule_kap_flow_refresh()
+        _maybe_schedule_kap_flow_live_refresh()
     response = _kap_flow_store.read_flow_head(category=category)
     if store_configured:
         refresh_metadata = _kap_flow_refresh_metadata()
@@ -5455,11 +5505,14 @@ def market_flow_head(category: Optional[str] = Query(None)) -> Dict[str, Any]:
 
 
 @app.post("/admin/kap/refresh")
-def admin_refresh_kap_flow(request: Request) -> Dict[str, Any]:
+def admin_refresh_kap_flow(
+    request: Request,
+    fast: bool = Query(False),
+) -> Dict[str, Any]:
     """Refresh KAP flow storage for the Cloudflare Cron or manual fallback."""
 
     _require_admin_refresh_access(request)
-    return _refresh_kap_flow_store()
+    return _refresh_kap_flow_store(fast=fast)
 
 
 @app.get("/kap/companies")
