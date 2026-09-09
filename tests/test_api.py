@@ -2682,7 +2682,14 @@ def test_kap_holdings_normalizer_keeps_unlisted_local_equity(tmp_path: Any) -> N
             "asset_name": "KARDEMİR ÇELİK SANAYİ A.Ş.",
             "asset_type": "local_equity",
             "weight": 7.09,
-        }
+        },
+        {
+            "fund_code": "THF",
+            "asset_code": "KALAN",
+            "asset_name": "GÜN VADE TARİHİ İHRAÇCI KURUMMENKUL KIYMET NET DÖNÜŞ TUTARI DÖVİZ CİNSİ ISIN KODU KARCL",
+            "asset_type": "local_equity",
+            "weight": 1.6,
+        },
     ]
 
     normalized = fund_service_module._normalize_holding_positions_for_response(
@@ -2694,6 +2701,7 @@ def test_kap_holdings_normalizer_keeps_unlisted_local_equity(tmp_path: Any) -> N
     assert normalized[0]["asset_code"] == "KARCL"
     assert normalized[0]["asset_type"] == "local_equity"
     assert normalized[0]["asset_name"] == "KARDEMİR ÇELİK SANAYİ A.Ş."
+    assert all(row["asset_code"] != "KALAN" for row in normalized)
 
 
 def test_kap_holdings_parser_ignores_table_headers_and_splits_funds() -> None:
@@ -2717,6 +2725,7 @@ HİSSE SENETLERİ
 Hisse Türk
 ORANI
 VADEYE
+SAYISI
 AKBNK AKBANK
 T.A.Ş.
 18.653.248,00 69,718033 30/04/26 73,200000 1.365.417.753,60 4,66 3,67TL 80100511 3,67TRAAKBNK91N6
@@ -2761,6 +2770,7 @@ TRT131027T36 HAZİNE 0 10.000,00 1,00 10.000,00 0,68TL 0,68TRT131027T36
     assert "CİNSİ" not in by_code
     assert "ORANI" not in by_code
     assert "VADEYE" not in by_code
+    assert "SAYISI" not in by_code
     assert "AC2" not in by_code
     assert "TRT131027T36" not in by_code
 

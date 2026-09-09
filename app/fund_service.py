@@ -7923,7 +7923,7 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
 
 
 KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
-KAP_HOLDINGS_PARSE_VERSION = 17
+KAP_HOLDINGS_PARSE_VERSION = 19
 _KAP_NUMBER_PATTERN = re.compile(
     r"-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?(?!\d)|\d+[.,]\d+|\d+)(?:\s*%)?"
 )
@@ -8007,6 +8007,7 @@ _KAP_POSITION_STOPWORDS = {
     "ORANI",
     "PORTFÖY",
     "SATIN",
+    "SAYISI",
     "SIRKETIN",
     "ŞIRKETIN",
     "ŞİRKETİN",
@@ -8023,6 +8024,7 @@ _KAP_POSITION_STOPWORDS = {
     "TUTARI",
     "VADE",
     "VADEYE",
+    "KALAN",
 }
 _KAP_INCLUDED_HOLDING_TYPES = {"local_equity", "fund", "foreign_equity", "foreign_fund"}
 _KAP_FOREIGN_ISIN_PROVIDER_SYMBOLS = {
@@ -8749,6 +8751,30 @@ def _kap_looks_like_local_equity_symbol(code: Any) -> bool:
     )
 
 
+def _kap_holding_name_is_header_noise(name: Any) -> bool:
+    """Reject a row whose parsed name is mostly the repeated PDF header."""
+    norm = _normalize_match_text(name)
+    if not norm:
+        return False
+    header_terms = (
+        "ISIN KODU",
+        "VADE",
+        "IHRACCI",
+        "NOMINAL",
+        "FAIZ ORANI",
+        "DOVIZ CINSI",
+        "BORSA",
+        "SOZLESM",
+        "TUTARI",
+        "ODEME SAYISI",
+        "NET DONUS",
+        "SATIN ALIS",
+        "BIRIM ALIS",
+    )
+    matches = sum(1 for term in header_terms if term in norm)
+    return matches >= 3
+
+
 def _kap_looks_like_fund_symbol(code: str) -> bool:
     symbol = normalize_fund_code(code).replace(".", "")
     if not symbol or symbol in _KAP_POSITION_STOPWORDS:
@@ -9412,6 +9438,8 @@ def _normalize_holding_positions_for_response(
         if code == current_fund_code:
             continue
         row_type = str(position.get("asset_type") or "").strip().lower()
+        if row_type == "local_equity" and _kap_holding_name_is_header_noise(position.get("asset_name")):
+            continue
         if row_type == "fund":
             code = _kap_resolve_fund_code_ocr_variant(code, fund_names)
             if code == current_fund_code:
