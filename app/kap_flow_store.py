@@ -252,11 +252,15 @@ def persist_flow_items(items: list[dict[str, Any]], *, source: str, as_of: Optio
         LOGGER.debug("KAP flow head cache invalidation failed", exc_info=True)
 
     latest = merged[0] if merged else None
+    previous_status = get_flow_status()
     status = {
         "source": source,
         "as_of": as_of or (latest or {}).get("published_at"),
         "last_successful_refresh": datetime.now(timezone.utc).isoformat(),
+        "last_refresh_attempt": previous_status.get("last_refresh_attempt"),
+        "last_refresh_error": None,
         "refresh_status": "ok" if normalized else "empty",
+        "refresh_pending": False,
         "stored_count": len(normalized),
         "database_written": database_written,
     }
@@ -324,6 +328,16 @@ def read_flow_page(
 def get_flow_status() -> dict[str, Any]:
     cached = get_cache().get(FLOW_STATUS_CACHE_KEY)
     return dict(cached) if isinstance(cached, dict) else {}
+
+
+def update_flow_status(**updates: Any) -> dict[str, Any]:
+    """Merge refresh lifecycle metadata without replacing the stored feed."""
+
+    backend = get_cache()
+    current = get_flow_status()
+    current.update(updates)
+    backend.set(FLOW_STATUS_CACHE_KEY, current)
+    return current
 
 
 def store_is_configured() -> bool:

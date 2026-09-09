@@ -4024,6 +4024,68 @@ def test_admin_kap_refresh_requires_token_and_delegates(monkeypatch: pytest.Monk
     assert authorized.json()["stored_count"] == 2
 
 
+def test_kap_flow_head_schedules_only_one_stale_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    submitted: List[Any] = []
+
+    class FakeExecutor:
+        def submit(self, function: Any) -> None:
+            submitted.append(function)
+
+    monkeypatch.setattr(api_module._kap_flow_store, "store_is_configured", lambda: True)
+    monkeypatch.setattr(api_module, "_KAP_FLOW_REFRESH_EXECUTOR", FakeExecutor())
+    monkeypatch.setattr(
+        api_module._kap_flow_store,
+        "read_flow_head",
+        lambda **_kwargs: {
+            "latest_cursor": "cursor-1",
+            "as_of": "2026-09-09T10:00:00+00:00",
+            "last_successful_refresh": None,
+            "refresh_status": "unknown",
+        },
+    )
+    api_module._kap_flow_store.update_flow_status(
+        refresh_status="ok",
+        refresh_pending=False,
+        last_successful_refresh=(datetime.now(timezone.utc) - timedelta(minutes=16)).isoformat(),
+    )
+
+    client = TestClient(app)
+    first = client.get("/market/flow/head")
+    second = client.get("/market/flow/head")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(submitted) == 1
+    assert first.json()["latest_cursor"] == "cursor-1"
+    assert first.json()["refresh_pending"] is True
+    assert "güncelleniyor" in first.json()["warning"]
+
+
+def test_kap_flow_refresh_failure_keeps_last_successful_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api_module._kap_flow_store, "database_enabled", lambda: False)
+    api_module._kap_flow_store.persist_flow_items(
+        [_flow_item(idx="stable", category="ozel_durum", published_at="2026-09-09T10:00:00+00:00")],
+        source="kap_public_website",
+    )
+    previous = api_module._kap_flow_store.get_flow_status()
+
+    def fail_refresh(**_kwargs: Any) -> Dict[str, Any]:
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(api_module, "_build_market_flow_payload", fail_refresh)
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        api_module._refresh_kap_flow_store()
+
+    status = api_module._kap_flow_store.get_flow_status()
+    page = api_module._kap_flow_store.read_flow_page(limit=1)
+    assert status["refresh_status"] == "failed"
+    assert status["refresh_pending"] is False
+    assert status["last_successful_refresh"] == previous["last_successful_refresh"]
+    assert page is not None
+    assert page["items"][0]["id"] == "vyk-stable"
+
+
 def test_parse_kap_public_result_page_maps_related_symbols() -> None:
     page = """
     <table><tbody>

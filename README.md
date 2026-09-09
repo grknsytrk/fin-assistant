@@ -84,7 +84,8 @@ Canlı servislerde gizli değişkenler platformların secret/variable alanların
 - Hugging Face: `RAGFIN_CACHE_BACKEND=redis` variable olarak.
 - Hugging Face: `RAGFIN_ADMIN_REFRESH_TOKEN` secret olarak.
 - Cloudflare: `VITE_API_BASE_URL` build variable olarak.
-- GitHub Actions: `FIN_API_ADMIN_TOKEN` secret'ı, HF secret'ındaki değerle aynı olmalıdır. Bu token yalnızca `Authorization: Bearer ...` ile fon snapshot workflow'unda kullanılır; frontend'e aktarılmaz.
+- Cloudflare Worker: `FIN_API_ADMIN_TOKEN` secret'ı, HF secret'ındaki değerle aynı olmalıdır. KAP Cron Trigger bu token ile yalnızca `POST /admin/kap/refresh` çağrısını yapar; frontend'e aktarılmaz.
+- GitHub Actions: aynı token secret'ı manuel KAP refresh fallback'i ve mevcut fon snapshot workflow'u için kullanılabilir.
 
 Redis bağlantı URL'si, Supabase database şifresi ve API token'ları GitHub'a, frontend bundle'ına veya README'ye yazılmamalıdır.
 
@@ -92,7 +93,9 @@ Redis bağlantı URL'si, Supabase database şifresi ve API token'ları GitHub'a,
 
 Fon, KAP ve piyasa endpoint'lerinde önce mevcut cache okunur; pahalı dış kaynak yenilemeleri cache miss durumunda yapılır. Upstash Redis kullanıldığında birden fazla backend instance'ı aynı cache'i paylaşır ve aynı verinin eşzamanlı olarak tekrar çekilmesi önlenir. Endeks, döviz, emtia, hisse grafikleri, KAP snapshot ve karşılaştırma serileri fresh/stale zarfı kullanır: stale veri dönerken yalnızca bir worker arka planda yenileme yapar. Frontend tarafında da sayfa geçişlerinde tekrar istekleri azaltan cache-first/stale-while-revalidate akışı kullanılır.
 
-KAP akışı için yenileme ve okuma yolları ayrıdır: GitHub Actions `POST /admin/kap/refresh` ile dış kaynaktan güncel akışı alır; backend olayları `ragfin_kap_flow_events` tablosunda kalıcılaştırır ve Redis'e yalnızca hızlı head/bounded fallback kopyasını yazar. Kullanıcı isteği normalde KAP'a gitmez: ilk 50 kayıt keyset cursor ile döner, eski kayıtlar `before` cursor'ıyla sayfalanır, yeni kayıt kontrolü ise `GET /market/flow/head` ile hafifçe yapılır. Böylece siteye kimse girmese de akış yenilenir; Redis veya Postgres geçici olarak kullanılamazsa mevcut legacy kaynak yolu devreye girer.
+KAP akışı için yenileme ve okuma yolları ayrıdır: Cloudflare Worker Cron Trigger her 5 dakikada `POST /admin/kap/refresh` ile dış kaynaktan güncel akışı alır; backend olayları `ragfin_kap_flow_events` tablosunda kalıcılaştırır ve Redis'e yalnızca hızlı head/bounded fallback kopyasını yazar. Kullanıcı isteği normalde KAP'a gitmez: ilk 50 kayıt keyset cursor ile döner, eski kayıtlar `before` cursor'ıyla sayfalanır, yeni kayıt kontrolü ise `GET /market/flow/head` ile hafifçe yapılır. Son başarılı yenileme 15 dakikadan eskiyse backend mevcut veriyi hemen sunup tek bir arka plan self-heal yenilemesi kuyruğa alır. GitHub Actions workflow'u otomatik scheduler değil, manuel fallback olarak tutulur.
+
+Cloudflare Worker Cron kurulumu için önce `FIN_API_ADMIN_TOKEN` secret'ını tanımlayın (`npx wrangler secret put FIN_API_ADMIN_TOKEN`); değer Hugging Face `RAGFIN_ADMIN_REFRESH_TOKEN` ile aynı olmalıdır. Ardından `npx wrangler deploy` çalıştırın. `wrangler.toml` içindeki `*/5 * * * *` ifadesi UTC'dir. Deploy sonrası Worker > Settings > Triggers ve Workers Logs ekranlarında tetiklemeleri doğrulayın.
 
 Production'da `/health` yanıtındaki `cache_backend` değeri `redis` ve `cache_redis_fallback` değeri `false` olmalıdır. Aksi durumda uygulama yalnızca process-memory cache kullanır; çoklu worker sağlayıcı çağrılarını paylaşamaz.
 

@@ -164,11 +164,133 @@ _MARKET_SWR_REVALIDATION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=max(1, int(os.getenv("RAGFIN_MARKET_SWR_REVALIDATION_WORKERS", "2"))),
     thread_name_prefix="market-cache-revalidate",
 )
+_KAP_FLOW_REFRESH_STALE_AFTER_SECONDS = max(
+    60,
+    int(os.getenv("RAGFIN_KAP_FLOW_REFRESH_STALE_AFTER_SECONDS", str(15 * 60))),
+)
+_KAP_FLOW_REFRESH_COOLDOWN_SECONDS = max(
+    60,
+    int(os.getenv("RAGFIN_KAP_FLOW_REFRESH_COOLDOWN_SECONDS", str(5 * 60))),
+)
+_KAP_FLOW_REFRESH_WATCHDOG_KEY = "api:kap:flow:refresh-watchdog:v1"
+_KAP_FLOW_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="kap-flow-refresh-watchdog",
+)
 
 
 def _truthy_env(name: str, default: str = "1") -> bool:
     value = os.getenv(name, default).strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _kap_flow_refresh_age_seconds(
+    status: Optional[Dict[str, Any]] = None,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[int]:
+    """Return the age of the last successful flow refresh in seconds."""
+
+    current = status if status is not None else _kap_flow_store.get_flow_status()
+    raw = current.get("last_successful_refresh")
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    age = (current_time.astimezone(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    return max(0, int(age))
+
+
+def _kap_flow_refresh_metadata() -> Dict[str, Any]:
+    status = _kap_flow_store.get_flow_status()
+    age_seconds = _kap_flow_refresh_age_seconds(status)
+    refresh_status = str(status.get("refresh_status") or "unknown")
+    stale = age_seconds is None or age_seconds > _KAP_FLOW_REFRESH_STALE_AFTER_SECONDS
+    if stale and refresh_status in {"", "unknown", "ok"}:
+        refresh_status = "stale"
+    refresh_pending = bool(status.get("refresh_pending")) or refresh_status in {"queued", "running"}
+    return {
+        "refresh_status": refresh_status,
+        "refresh_pending": refresh_pending,
+        "refresh_age_seconds": age_seconds,
+        "last_successful_refresh": status.get("last_successful_refresh"),
+        "last_refresh_attempt": status.get("last_refresh_attempt"),
+    }
+
+
+def _kap_flow_refresh_warning(metadata: Dict[str, Any]) -> Optional[str]:
+    age_seconds = metadata.get("refresh_age_seconds")
+    if metadata.get("refresh_pending"):
+        return "KAP akışı güncelleniyor; son başarılı veri gösteriliyor."
+    if age_seconds is None or int(age_seconds) > _KAP_FLOW_REFRESH_STALE_AFTER_SECONDS:
+        return "KAP akışı beklenenden eski; otomatik yenileme yeniden denenecek."
+    return None
+
+
+def _maybe_schedule_kap_flow_refresh() -> bool:
+    """Queue one non-blocking refresh when the durable flow is too old."""
+
+    if not _kap_flow_store.store_is_configured():
+        return False
+    metadata = _kap_flow_refresh_metadata()
+    age_seconds = metadata.get("refresh_age_seconds")
+    if age_seconds is not None and int(age_seconds) <= _KAP_FLOW_REFRESH_STALE_AFTER_SECONDS:
+        return False
+    if metadata.get("refresh_pending"):
+        return True
+
+    backend = _get_cache()
+    owner = uuid.uuid4().hex
+    requested_at = datetime.now(timezone.utc).isoformat()
+    lease_value = {"owner": owner, "requested_at": requested_at}
+    try:
+        claimed = backend.set_if_absent(
+            _KAP_FLOW_REFRESH_WATCHDOG_KEY,
+            lease_value,
+            ttl_seconds=_KAP_FLOW_REFRESH_COOLDOWN_SECONDS,
+        )
+    except Exception:
+        LOGGER.warning("KAP flow watchdog lease could not be acquired", exc_info=True)
+        return False
+    if not claimed:
+        return False
+
+    _kap_flow_store.update_flow_status(
+        refresh_status="queued",
+        refresh_pending=True,
+        last_refresh_attempt=requested_at,
+    )
+
+    def refresh() -> None:
+        try:
+            _refresh_kap_flow_store()
+        except Exception:
+            # The last successful data remains authoritative. The cooldown
+            # prevents a visible head poll from retrying on every request.
+            LOGGER.warning("KAP flow watchdog refresh failed", exc_info=True)
+
+    try:
+        _KAP_FLOW_REFRESH_EXECUTOR.submit(refresh)
+    except Exception:
+        try:
+            backend.release_if_owner(_KAP_FLOW_REFRESH_WATCHDOG_KEY, lease_value)
+        except Exception:
+            LOGGER.debug("KAP flow watchdog lease release failed", exc_info=True)
+        _kap_flow_store.update_flow_status(
+            refresh_status="failed",
+            refresh_pending=False,
+            last_refresh_attempt=requested_at,
+        )
+        LOGGER.warning("KAP flow watchdog refresh could not be queued", exc_info=True)
+        return False
+    return True
 
 
 def _require_admin_refresh_access(request: Request) -> None:
@@ -5040,6 +5162,7 @@ def _persisted_market_flow_payload(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if page is None:
         return None
+    _maybe_schedule_kap_flow_refresh()
     response = dict(page)
     response.setdefault("source", "kap_flow_store")
     response.setdefault("as_of", None)
@@ -5048,8 +5171,13 @@ def _persisted_market_flow_payload(
     response.setdefault("warning", None)
     response.setdefault("public_error", None)
     response["cache_status"] = "shared_hit"
-    response["stale"] = False
-    response["refresh_pending"] = False
+    refresh_metadata = _kap_flow_refresh_metadata()
+    response.update(refresh_metadata)
+    response["stale"] = (
+        refresh_metadata.get("refresh_age_seconds") is None
+        or int(refresh_metadata["refresh_age_seconds"]) > _KAP_FLOW_REFRESH_STALE_AFTER_SECONDS
+    )
+    response["warning"] = response.get("warning") or _kap_flow_refresh_warning(refresh_metadata)
     return response
 
 
@@ -5141,34 +5269,56 @@ def _refresh_kap_flow_store() -> Dict[str, Any]:
                 "source": "kap_flow_store",
             }
 
-        payload = _build_market_flow_payload(
-            limit=_VYK_DEFAULT_DETAIL_BUDGET_MAX,
-            category=None,
-            force_refresh=True,
+        refresh_started_at = datetime.now(timezone.utc).isoformat()
+        _kap_flow_store.update_flow_status(
+            refresh_status="running",
+            refresh_pending=True,
+            last_refresh_attempt=refresh_started_at,
+            last_refresh_error=None,
         )
-        items = list(payload.get("items") or [])
-        if not items:
+        try:
+            payload = _build_market_flow_payload(
+                limit=_VYK_DEFAULT_DETAIL_BUDGET_MAX,
+                category=None,
+                force_refresh=True,
+            )
+            items = list(payload.get("items") or [])
+            if not items:
+                _kap_flow_store.update_flow_status(
+                    refresh_status="empty",
+                    refresh_pending=False,
+                    last_refresh_attempt=refresh_started_at,
+                    last_refresh_error=payload.get("warning"),
+                )
+                return {
+                    "status": "empty",
+                    "refresh_status": "empty",
+                    "source": payload.get("source") or "kap_flow_store",
+                    "as_of": payload.get("as_of"),
+                    "stored_count": 0,
+                    "warning": payload.get("warning"),
+                }
+
+            result = _kap_flow_store.persist_flow_items(
+                items,
+                source=str(payload.get("source") or "kap"),
+                as_of=payload.get("as_of"),
+            )
             return {
-                "status": "empty",
-                "refresh_status": "empty",
-                "source": payload.get("source") or "kap_flow_store",
-                "as_of": payload.get("as_of"),
-                "stored_count": 0,
+                "status": "ok",
+                **result,
+                "received_count": len(items),
+                "degraded_mode": bool(payload.get("degraded_mode")),
                 "warning": payload.get("warning"),
             }
-
-        result = _kap_flow_store.persist_flow_items(
-            items,
-            source=str(payload.get("source") or "kap"),
-            as_of=payload.get("as_of"),
-        )
-        return {
-            "status": "ok",
-            **result,
-            "received_count": len(items),
-            "degraded_mode": bool(payload.get("degraded_mode")),
-            "warning": payload.get("warning"),
-        }
+        except Exception as exc:
+            _kap_flow_store.update_flow_status(
+                refresh_status="failed",
+                refresh_pending=False,
+                last_refresh_attempt=refresh_started_at,
+                last_refresh_error=str(exc),
+            )
+            raise
 
 
 def _build_market_flow_payload(
@@ -5293,12 +5443,20 @@ def market_flow(
 def market_flow_head(category: Optional[str] = Query(None)) -> Dict[str, Any]:
     """Return the light-weight cursor used to detect newly ingested KAP rows."""
 
-    return _kap_flow_store.read_flow_head(category=category)
+    store_configured = _kap_flow_store.store_is_configured()
+    if store_configured:
+        _maybe_schedule_kap_flow_refresh()
+    response = _kap_flow_store.read_flow_head(category=category)
+    if store_configured:
+        refresh_metadata = _kap_flow_refresh_metadata()
+        response.update(refresh_metadata)
+        response["warning"] = _kap_flow_refresh_warning(refresh_metadata)
+    return response
 
 
 @app.post("/admin/kap/refresh")
 def admin_refresh_kap_flow(request: Request) -> Dict[str, Any]:
-    """Refresh KAP flow storage for the scheduled GitHub Actions job."""
+    """Refresh KAP flow storage for the Cloudflare Cron or manual fallback."""
 
     _require_admin_refresh_access(request)
     return _refresh_kap_flow_store()

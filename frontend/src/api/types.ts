@@ -714,6 +714,8 @@ export interface MarketFlowResponse {
   cache_status?: string;
   stale?: boolean;
   refresh_pending?: boolean;
+  refresh_age_seconds?: number | null;
+  last_refresh_attempt?: string | null;
   degraded_mode?: boolean;
   multi_category?: boolean;
   warning?: string | null;
@@ -725,6 +727,10 @@ export interface MarketFlowHeadResponse {
   as_of: string | null;
   last_successful_refresh: string | null;
   refresh_status: string;
+  refresh_pending?: boolean;
+  refresh_age_seconds?: number | null;
+  last_refresh_attempt?: string | null;
+  warning?: string | null;
   source?: string;
 }
 

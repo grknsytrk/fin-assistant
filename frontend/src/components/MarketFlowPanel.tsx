@@ -267,6 +267,7 @@ export default function MarketFlowPanel({
             apiClient
                 .marketFlowHead(serverCategory)
                 .then((head) => {
+                    setWarning(head.warning || null);
                     const previousCursor = latestCursorRef.current;
                     if (!head.latest_cursor) return;
                     if (!previousCursor) {
