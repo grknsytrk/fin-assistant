@@ -29,6 +29,10 @@ import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavig
 import SymbolLogo from '../components/SymbolLogo';
 import { buildDocumentTitle, formatTitleNumber, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { MAX_WATCHLIST_ITEMS, normalizeWatchlistSymbol, useWatchlist, type WatchlistItem } from '../hooks/useWatchlist';
+import {
+    getMarketStockCardSymbolsNeedingLoad,
+    retainMarketStockCardsForSymbols,
+} from '../utils/stockCardData';
 import { searchWatchlistFunds } from '../utils/watchlistData';
 import './MarketsView.css';
 
@@ -2589,7 +2593,7 @@ export default function MarketsView({
     const stocksInFlightRef = useRef(false);
     const indicesInFlightRef = useRef(false);
     const indexDetailInFlightRef = useRef(false);
-    const stockCardsInFlightRef = useRef(false);
+    const stockCardsInFlightRef = useRef<Promise<void> | null>(null);
     const stockCardsRef = useRef<MarketStockCardsResponse | null>(stockCards);
     const marketPageRef = useRef<HTMLDivElement | null>(null);
     const pendingMarketScrollResetRef = useRef(true);
@@ -2841,20 +2845,31 @@ export default function MarketsView({
                     (item) => item.symbol === symbol && item.card_stage !== 'quick',
                 ),
             ));
+        } else if (stockCardsRef.current) {
+            // Adding or reordering a card must not blank cards that are
+            // already visible. Keep the current payload and request only the
+            // symbols that are not present in it.
+            const retained = retainMarketStockCardsForSymbols(stockCardsRef.current, stockCardSymbols);
+            stockCardsRef.current = retained;
+            setStockCards(retained);
         } else {
-            stockCardsRef.current = null;
             setStockCards(null);
         }
 
         const controller = new AbortController();
         let delayTimer: number | null = null;
         let batchesLoading = false;
-        const initialBatch = stockCardSymbols.slice(0, STOCK_CARD_INITIAL_BATCH_SIZE);
-        const batches = initialBatch.length > 0
-            ? [initialBatch, ...splitStockCardBatches(stockCardSymbols.slice(STOCK_CARD_INITIAL_BATCH_SIZE), STOCK_CARD_BACKGROUND_BATCH_SIZE)]
-            : [];
-        const loadBatches = async () => {
+        const initialSymbols = getMarketStockCardSymbolsNeedingLoad(stockCardSymbols, stockCardsRef.current);
+        const buildBatches = (symbols: string[]) => {
+            const initialBatch = symbols.slice(0, STOCK_CARD_INITIAL_BATCH_SIZE);
+            return initialBatch.length > 0
+                ? [initialBatch, ...splitStockCardBatches(symbols.slice(STOCK_CARD_INITIAL_BATCH_SIZE), STOCK_CARD_BACKGROUND_BATCH_SIZE)]
+                : [];
+        };
+        const loadBatches = async (symbols: string[]) => {
             if (batchesLoading) return;
+            const batches = buildBatches(symbols);
+            if (batches.length === 0) return;
             batchesLoading = true;
             try {
                 for (const [index, batch] of batches.entries()) {
@@ -2873,13 +2888,15 @@ export default function MarketsView({
             }
         };
 
-        void loadBatches();
+        // When the selection changes, load only new or incomplete cards. The
+        // periodic refresh below still revalidates the complete selection.
+        void loadBatches(initialSymbols);
         const intervalId = window.setInterval(() => {
             if (document.visibilityState !== 'visible') return;
-            void loadBatches();
+            void loadBatches(stockCardSymbols);
         }, marketDetailRefreshMs);
         const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible') void loadBatches();
+            if (document.visibilityState === 'visible') void loadBatches(stockCardSymbols);
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
@@ -2987,38 +3004,50 @@ export default function MarketsView({
         signal?: AbortSignal,
         tier: 'quick' | 'full' = 'full',
     ) {
-        if (stockCardsInFlightRef.current) return;
         if (requestedSymbols.length === 0) return;
-        stockCardsInFlightRef.current = true;
-        if (!silent) setStockCardsLoading(true);
-        if (!silent) setStockCardsError(null);
-        try {
-            const payload = await apiClient.marketStockCards({ symbols: requestedSymbols, refresh, tier, signal });
+        const previousRequest = stockCardsInFlightRef.current;
+        const request = (async () => {
+            if (previousRequest) await previousRequest;
             if (signal?.aborted) return;
-            const latestSymbols = latestStockCardSymbolsRef.current.split(',').filter(Boolean);
-            const latestSymbolSet = new Set(latestSymbols);
-            if (!requestedSymbols.every((symbol) => latestSymbolSet.has(symbol))) return;
-            const mergedPayload = mergeStockCardPayloads(stockCardsRef.current, payload, latestSymbols);
-            stockCardsRef.current = mergedPayload;
-            marketStockCardsMemoryCache.set(latestSymbols.join(','), { data: mergedPayload, fetchedAt: Date.now() });
-            setStockCards(mergedPayload);
-            setStockCardsError(null);
-            const readySymbols = new Set(
-                (mergedPayload.items ?? [])
-                    .filter((item) => item.card_stage !== 'quick' && hasStockCardLoadedData(item))
-                    .map((item) => item.symbol),
-            );
-            if (readySymbols.size > 0) {
-                setStockCardPendingSymbols((previous) => previous.filter((symbol) => !readySymbols.has(symbol)));
+
+            if (!silent) setStockCardsLoading(true);
+            if (!silent) setStockCardsError(null);
+            try {
+                const payload = await apiClient.marketStockCards({ symbols: requestedSymbols, refresh, tier, signal });
+                if (signal?.aborted) return;
+                const latestSymbols = latestStockCardSymbolsRef.current.split(',').filter(Boolean);
+                const latestSymbolSet = new Set(latestSymbols);
+                if (!requestedSymbols.every((symbol) => latestSymbolSet.has(symbol))) return;
+                const mergedPayload = mergeStockCardPayloads(stockCardsRef.current, payload, latestSymbols);
+                stockCardsRef.current = mergedPayload;
+                marketStockCardsMemoryCache.set(latestSymbols.join(','), { data: mergedPayload, fetchedAt: Date.now() });
+                setStockCards(mergedPayload);
+                setStockCardsError(null);
+                const readySymbols = new Set(
+                    (mergedPayload.items ?? [])
+                        .filter((item) => item.card_stage !== 'quick' && hasStockCardLoadedData(item))
+                        .map((item) => item.symbol),
+                );
+                if (readySymbols.size > 0) {
+                    setStockCardPendingSymbols((previous) => previous.filter((symbol) => !readySymbols.has(symbol)));
+                }
+            } catch (err: any) {
+                if (err?.name === 'AbortError' || signal?.aborted) return;
+                if (!silent || !stockCardsRef.current) {
+                    setStockCardsError(err.message || 'Hisse kartları şu an hazırlanıyor.');
+                }
+            } finally {
+                if (!silent) setStockCardsLoading(false);
             }
-        } catch (err: any) {
-            if (err?.name === 'AbortError' || signal?.aborted) return;
-            if (!silent || !stockCardsRef.current) {
-                setStockCardsError(err.message || 'Hisse kartları şu an hazırlanıyor.');
-            }
+        })();
+
+        stockCardsInFlightRef.current = request;
+        try {
+            await request;
         } finally {
-            stockCardsInFlightRef.current = false;
-            if (!silent) setStockCardsLoading(false);
+            if (stockCardsInFlightRef.current === request) {
+                stockCardsInFlightRef.current = null;
+            }
         }
     }
 
