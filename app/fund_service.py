@@ -7923,7 +7923,7 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
 
 
 KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
-KAP_HOLDINGS_PARSE_VERSION = 19
+KAP_HOLDINGS_PARSE_VERSION = 20
 _KAP_NUMBER_PATTERN = re.compile(
     r"-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?(?!\d)|\d+[.,]\d+|\d+)(?:\s*%)?"
 )
@@ -9080,6 +9080,14 @@ def _kap_buffer_starts_with_local_equity_symbol(buffer: List[str], context: str)
     return _kap_looks_like_local_equity_symbol(first)
 
 
+def _kap_line_starts_known_local_equity_symbol(line: str) -> bool:
+    """Identify a known ticker that starts a fresh local-equity row."""
+    text = str(line or "").strip()
+    first = text.split()[0].strip(" :-,;()") if text.split() else ""
+    candidate = normalize_fund_code(first).replace(".", "")
+    return bool(candidate and _kap_is_stock_symbol(candidate))
+
+
 def _parse_kap_holding_block(
     block: str,
     *,
@@ -9379,7 +9387,10 @@ def _parse_kap_holdings_pdf_text(
                 _kap_buffer_is_header_noise(buffer)
                 and not _kap_buffer_starts_with_fund_symbol(buffer, buffer_category)
                 and not _kap_buffer_starts_with_foreign_symbol(buffer, buffer_category)
-                and not _kap_buffer_starts_with_local_equity_symbol(buffer, buffer_category)
+                and (
+                    not _kap_buffer_starts_with_local_equity_symbol(buffer, buffer_category)
+                    or _kap_line_starts_known_local_equity_symbol(line)
+                )
             ):
                 buffer = []
                 buffer_category = ""

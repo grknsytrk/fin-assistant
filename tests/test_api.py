@@ -2775,6 +2775,36 @@ TRT131027T36 HAZİNE 0 10.000,00 1,00 10.000,00 0,68TL 0,68TRT131027T36
     assert "TRT131027T36" not in by_code
 
 
+def test_kap_holdings_parser_discards_page_break_name_fragments() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+Hisse Türk
+DEPOSU
+TİCARET
+VE SANAYİ
+A.Ş.
+SELEC SELÇUK
+ECZA
+DEPOSU
+TİCARET
+VE SANAYİ
+A.Ş.
+646.963,00 263,176177 31/08/26 333,500000 215.762.160,50 0,29 0,26TL 80100511 0,29
+TRESLEC00014
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="THF",
+        report_date="2026-08-31",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert "DEPOSU" not in by_code
+    assert by_code["SELEC"]["weight"] == pytest.approx(0.29)
+
+
 def test_kap_holdings_parser_stops_before_trade_flow_and_keeps_fund_rows() -> None:
     text = """
 III-FON PORTFÖY DEĞERİ TABLOSU
