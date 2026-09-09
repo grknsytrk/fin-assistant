@@ -7923,7 +7923,7 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
 
 
 KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
-KAP_HOLDINGS_PARSE_VERSION = 15
+KAP_HOLDINGS_PARSE_VERSION = 16
 _KAP_NUMBER_PATTERN = re.compile(
     r"-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?(?!\d)|\d+[.,]\d+|\d+)(?:\s*%)?"
 )
@@ -8004,6 +8004,7 @@ _KAP_POSITION_STOPWORDS = {
     "NOMINAL",
     "NOMİNAL",
     "ORAN",
+    "ORANI",
     "PORTFÖY",
     "SATIN",
     "SIRKETIN",
