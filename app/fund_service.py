@@ -7923,7 +7923,7 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
 
 
 KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
-KAP_HOLDINGS_PARSE_VERSION = 14
+KAP_HOLDINGS_PARSE_VERSION = 15
 _KAP_NUMBER_PATTERN = re.compile(
     r"-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?(?!\d)|\d+[.,]\d+|\d+)(?:\s*%)?"
 )
@@ -7932,7 +7932,7 @@ _KAP_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{2,4}\b")
 # itself glued to the currency token (e.g. ``14,41TL 80100511TRABTCIM91F5``),
 # so we tolerate an optional numeric prefix between the currency and the ISIN.
 _KAP_ISIN_TAIL_PATTERN = re.compile(
-    r"(?P<weight>-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?))\s*%?\s*(?:TL|TRY|USD|EUR|JPY|GBP)?\s*\d*[A-Z]{2}[A-Z0-9]{6,}\s*$",
+    r"(?P<weight>-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?))\s*%?\s*(?:TL|TRY|USD|EUR|JPY|GBP)?\s*\d*[A-Z]{2}[A-Z0-9]{9}[0-9]\s*$",
     flags=re.IGNORECASE,
 )
 # Some KAP PDF text extractions omit the final FTD percentage and glue the
@@ -8019,6 +8019,7 @@ _KAP_POSITION_STOPWORDS = {
     "TEMİNAT",
     "TOPLAM",
     "TUTAR",
+    "TUTARI",
     "VADE",
 }
 _KAP_INCLUDED_HOLDING_TYPES = {"local_equity", "fund", "foreign_equity", "foreign_fund"}
@@ -8734,6 +8735,18 @@ def _kap_looks_like_equity_symbol(code: str) -> bool:
     return bool(re.fullmatch(r"[A-Z0-9]{3,6}", symbol))
 
 
+def _kap_looks_like_local_equity_symbol(code: Any) -> bool:
+    """Recognize a BIST-style ticker before the reference universe catches up."""
+    raw = str(code or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{3,6}", raw):
+        return False
+    return (
+        _kap_looks_like_equity_symbol(raw)
+        and raw not in _KAP_POSITION_STOPWORDS
+        and raw not in _KAP_NON_HOLDING_CONTEXT_TOKENS
+    )
+
+
 def _kap_looks_like_fund_symbol(code: str) -> bool:
     symbol = normalize_fund_code(code).replace(".", "")
     if not symbol or symbol in _KAP_POSITION_STOPWORDS:
@@ -9025,6 +9038,20 @@ def _kap_buffer_starts_with_foreign_symbol(buffer: List[str], context: str) -> b
     return bool(compact and len(compact.split()) <= 4)
 
 
+def _kap_buffer_starts_with_local_equity_symbol(buffer: List[str], context: str) -> bool:
+    """Keep unknown local tickers while their multi-line company name unfolds."""
+    context_norm = _normalize_match_text(context)
+    if _kap_context_is_foreign(context_norm) or not any(
+        token in context_norm for token in ("HISSE SENEDI", "HISSE SENETLERI", "HISSE")
+    ):
+        return False
+    first_line = str(buffer[0] if buffer else "").strip()
+    first = first_line.split()[0].strip(":-,;()") if first_line.split() else ""
+    if not first or first != first.upper():
+        return False
+    return _kap_looks_like_local_equity_symbol(first)
+
+
 def _parse_kap_holding_block(
     block: str,
     *,
@@ -9302,6 +9329,7 @@ def _parse_kap_holdings_pdf_text(
                 _kap_buffer_is_header_noise(buffer)
                 and not _kap_buffer_starts_with_fund_symbol(buffer, buffer_category)
                 and not _kap_buffer_starts_with_foreign_symbol(buffer, buffer_category)
+                and not _kap_buffer_starts_with_local_equity_symbol(buffer, buffer_category)
             ):
                 buffer = []
                 buffer_category = ""
@@ -9323,6 +9351,7 @@ def _parse_kap_holdings_pdf_text(
                 _kap_buffer_is_header_noise(buffer)
                 and not _kap_buffer_starts_with_fund_symbol(buffer, buffer_category)
                 and not _kap_buffer_starts_with_foreign_symbol(buffer, buffer_category)
+                and not _kap_buffer_starts_with_local_equity_symbol(buffer, buffer_category)
             ):
                 buffer = []
                 buffer_category = ""
@@ -9388,7 +9417,7 @@ def _normalize_holding_positions_for_response(
         if row_type in {"foreign_equity", "foreign_fund"}:
             candidates.append((position, code, row_type))
             continue
-        if _kap_is_stock_symbol(code):
+        if _kap_is_stock_symbol(code) or (row_type == "local_equity" and _kap_looks_like_local_equity_symbol(code)):
             candidates.append((position, code, "local_equity"))
             stock_codes.append(code)
             continue

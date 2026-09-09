@@ -2642,6 +2642,60 @@ V-AY İÇİNDE YAPILAN GİDERLER
     assert "TÜRKİYE" not in by_code
 
 
+def test_kap_holdings_parser_keeps_new_ipo_symbols_and_numeric_company_names() -> None:
+    text = """
+III-FON PORTFÖY DEĞERİ TABLOSU
+Hisse Türk
+KARCL KARDEMİR
+ÇELİK
+SANAYİ A.Ş.
+35.000.000,00 111,756316 31/08/26 151,500000 5.302.500.000,00 7,26 6,35TL 80100511 7,09TREKDMR00027
+CITAS ÇİTLEKÇİ
+MAĞAZACILIK GIDA A.Ş.
+8.319.732,00 106,155658 26/08/26 128,000000 1.064.925.696,00 1,45 1,27TL 80100511 1,42TRECTLK00027
+BINHO 1000
+YATIRIMLAR HOLDİNG A.Ş.
+12.154.577,00 10,153135 26/08/26 9,740000 118.385.579,98 0,16 0,14TL 80100511 0,16TREBINH00024
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="THF",
+        report_date="2026-08-31",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert by_code["KARCL"]["asset_type"] == "local_equity"
+    assert by_code["KARCL"]["weight"] == pytest.approx(7.09)
+    assert by_code["CITAS"]["asset_type"] == "local_equity"
+    assert by_code["CITAS"]["weight"] == pytest.approx(1.42)
+    assert by_code["BINHO"]["asset_type"] == "local_equity"
+    assert by_code["BINHO"]["weight"] == pytest.approx(0.16)
+
+
+def test_kap_holdings_normalizer_keeps_unlisted_local_equity(tmp_path: Any) -> None:
+    positions = [
+        {
+            "fund_code": "THF",
+            "asset_code": "KARCL",
+            "asset_name": "KARDEMİR ÇELİK SANAYİ A.Ş.",
+            "asset_type": "local_equity",
+            "weight": 7.09,
+        }
+    ]
+
+    normalized = fund_service_module._normalize_holding_positions_for_response(
+        tmp_path,
+        positions,
+        fund_code="THF",
+    )
+
+    assert normalized[0]["asset_code"] == "KARCL"
+    assert normalized[0]["asset_type"] == "local_equity"
+    assert normalized[0]["asset_name"] == "KARDEMİR ÇELİK SANAYİ A.Ş."
+
+
 def test_kap_holdings_parser_ignores_table_headers_and_splits_funds() -> None:
     text = """
 III-FON PORTFÖY DEĞERİ TABLOSU
