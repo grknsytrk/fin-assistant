@@ -1358,11 +1358,17 @@ def test_api_fund_holdings_adds_optional_sector_fields(
         "source": "kap_portfolio_allocation_report",
         "source_metadata": {
             "source": "kap_portfolio_allocation_report",
-            "fetched_at": "2026-05-01T00:00:00+00:00",
+            "fetched_at": "2026-05-20T11:59:30+00:00",
+            "as_of": "2026-04-30",
             "parse_status": "ok",
+            "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
+            "latest_report": {"disclosure_index": 1601574, "report_date": "2026-04-30"},
+            "previous_report": {"disclosure_index": 1583104, "report_date": "2026-03-31"},
+            "disclosure_check": {"checked_at": "2026-05-20T11:59:30+00:00", "ttl_seconds": 60},
         },
     }
     (tmp_path / "TLY.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+    monkeypatch.setattr(fund_service_module, "_utc_now", lambda: datetime(2026, 5, 20, 12, tzinfo=timezone.utc))
     monkeypatch.setattr(
         api_module,
         "_fund_holding_sector_map",
@@ -1518,6 +1524,112 @@ def test_fund_holdings_disclosure_check_skips_pdf_when_report_unchanged(
     assert payload["source_metadata"]["cache_hit"] is True
     assert payload["source_metadata"]["static_cache_hit"] is True
     assert payload["source_metadata"]["disclosure_check"]["latest_disclosure_index"] == 1601574
+
+
+def test_fund_holdings_picks_up_new_disclosure_index_after_short_check_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    _patch_holdings_cache_path(monkeypatch, tmp_path)
+    cached_positions = [
+        {
+            "fund_code": "TLY",
+            "asset_code": "DSTKF",
+            "asset_name": "DESTEK FİNANS FAKTORİNG A.Ş.",
+            "asset_type": "local_equity",
+            "weight": 20.0,
+            "report_date": "2026-08-31",
+            "source_report_url": "https://www.kap.org.tr/tr/Bildirim/1657116",
+            "source_type": "kap_pdf",
+            "parse_confidence": 0.9,
+        }
+    ]
+    cached_payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": cached_positions,
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-09-02T16:56:15+03:00",
+            "as_of": "2026-08-31",
+            "parse_status": "ok",
+            "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
+            "latest_report": {
+                "disclosure_index": 1657116,
+                "report_date": "2026-08-31",
+                "source_url": "https://www.kap.org.tr/tr/Bildirim/1657116",
+            },
+            "previous_report": {
+                "disclosure_index": 1642306,
+                "report_date": "2026-07-31",
+                "source_url": "https://www.kap.org.tr/tr/Bildirim/1642306",
+            },
+            "disclosure_check": {
+                "checked_at": "2026-09-09T15:44:56+03:00",
+                "ttl_seconds": 60,
+            },
+            "positions_hash": fund_service_module._holdings_positions_hash(cached_positions),
+            "warnings": [],
+        },
+    }
+    (tmp_path / "TLY.json").write_text(json.dumps(cached_payload), encoding="utf-8")
+    monkeypatch.setattr(
+        fund_service_module,
+        "_utc_now",
+        lambda: datetime(2026, 9, 9, 15, 16, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_search_fund_metadata",
+        lambda _fund_code: {"fund_code": "TLY", "fund_oid": "fund-oid", "fund_name": "TLY"},
+    )
+    monkeypatch.setattr(fund_service_module, "_kap_portfolio_subject_oid", lambda _fund_oid: "subject-oid")
+    monkeypatch.setattr(
+        fund_service_module,
+        "_kap_list_portfolio_disclosures",
+        lambda _fund_oid, _subject_oid: [
+            {"disclosureBasic": {"disclosureIndex": 1661170, "publishDate": "09.09.2026 18:00:07"}},
+            {"disclosureBasic": {"disclosureIndex": 1657116, "publishDate": "02.09.2026 11:02:16"}},
+        ],
+    )
+    detail_calls: List[int] = []
+
+    def fake_detail(disclosure_index: int) -> Dict[str, Any]:
+        detail_calls.append(disclosure_index)
+        return {"disclosureIndex": disclosure_index}
+
+    def fake_positions(_processed_dir: Any, detail: Dict[str, Any], *, fund_code: str) -> Any:
+        disclosure_index = int(detail["disclosureIndex"])
+        return [
+            {
+                "fund_code": fund_code,
+                "asset_code": "DSTKF",
+                "asset_name": "DESTEK FİNANS FAKTORİNG A.Ş.",
+                "asset_type": "local_equity",
+                "weight": 25.0 if disclosure_index == 1661170 else 20.0,
+                "report_date": "2026-08-31",
+                "source_report_url": f"https://www.kap.org.tr/tr/Bildirim/{disclosure_index}",
+                "source_type": "kap_pdf",
+                "parse_confidence": 0.9,
+            }
+        ], {
+            "disclosure_index": disclosure_index,
+            "file_name": "TLY_2026.08.pdf",
+            "report_date": "2026-08-31",
+            "source_url": f"https://www.kap.org.tr/tr/Bildirim/{disclosure_index}",
+        }
+
+    monkeypatch.setattr(fund_service_module, "_kap_fetch_report_detail", fake_detail)
+    monkeypatch.setattr(fund_service_module, "_kap_report_positions", fake_positions)
+
+    payload = fund_service_module.get_fund_holdings_payload(tmp_path, "TLY")
+
+    assert detail_calls == [1661170, 1657116]
+    assert payload["positions"][0]["weight"] == 25.0
+    assert payload["source_metadata"]["latest_report"]["disclosure_index"] == 1661170
+    assert payload["source_metadata"]["disclosure_check"]["latest_disclosure_index"] == 1661170
+    assert payload["source_metadata"]["cache_hit"] is False
 
 
 def test_fund_holdings_parser_version_reuses_cached_attachment_text(
@@ -1693,7 +1805,7 @@ def test_api_fund_holdings_enriches_daily_market_effect(
             "stale": False,
             "parse_status": "ok",
             "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
-            "disclosure_check": {"checked_at": "2026-05-20T11:00:00+00:00", "ttl_seconds": 21600},
+            "disclosure_check": {"checked_at": "2026-05-20T11:59:30+00:00", "ttl_seconds": 60},
             "warnings": [],
         },
     }
@@ -1889,7 +2001,7 @@ def test_api_fund_holdings_marks_inner_funds_as_tefas_tradable(
             "stale": False,
             "parse_status": "ok",
             "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
-            "disclosure_check": {"checked_at": "2026-05-20T11:00:00+00:00", "ttl_seconds": 21600},
+            "disclosure_check": {"checked_at": "2026-05-20T11:59:30+00:00", "ttl_seconds": 60},
             "warnings": [],
         },
     }
@@ -2268,7 +2380,7 @@ def test_api_fund_holdings_enriches_tpkgy_from_gefas(
             "stale": False,
             "parse_status": "ok",
             "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
-            "disclosure_check": {"checked_at": "2026-05-20T11:00:00+00:00", "ttl_seconds": 21600},
+            "disclosure_check": {"checked_at": "2026-05-20T11:59:30+00:00", "ttl_seconds": 60},
             "warnings": [],
         },
     }
@@ -2346,7 +2458,7 @@ def test_api_fund_holdings_refreshes_quotes_after_short_response_cache(
             "as_of": "2026-04-30",
             "parse_status": "ok",
             "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
-            "disclosure_check": {"checked_at": "2026-05-20T11:00:00+00:00", "ttl_seconds": 21600},
+            "disclosure_check": {"checked_at": "2026-05-20T11:59:30+00:00", "ttl_seconds": 60},
             "warnings": [],
         },
     }
@@ -2415,7 +2527,7 @@ def test_api_fund_holdings_live_returns_small_market_payload(
             "cache_hit": True,
             "parse_status": "ok",
             "parser_version": fund_service_module.KAP_HOLDINGS_PARSE_VERSION,
-            "disclosure_check": {"checked_at": "2026-05-20T11:00:00+00:00", "ttl_seconds": 21600},
+            "disclosure_check": {"checked_at": "2026-05-20T11:59:30+00:00", "ttl_seconds": 60},
             "warnings": [],
         },
     }

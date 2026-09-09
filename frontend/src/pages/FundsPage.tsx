@@ -117,6 +117,10 @@ type FundHistorySubtab = 'prices' | 'allocation';
 
 const FUND_HOLDINGS_LIVE_REFRESH_MS = 15_000;
 const FUND_HOLDINGS_LIVE_MAX_BACKOFF_MS = 60_000;
+// KAP portfolio reports do not have a push/webhook channel. Revalidate the
+// selected fund's disclosure list while its holdings panel is visible so a
+// newly published report is picked up without a full page reload.
+const FUND_HOLDINGS_REPORT_REFRESH_MS = 60_000;
 const FUND_HOLDINGS_LIVE_FLASH_MS = 900;
 // The first chart view is six months. The backend may still warm the shared
 // history job up to one year, but that wider fetch must not change the UI range.
@@ -5650,6 +5654,30 @@ export default function FundsPage({
         }
         void loadHoldings(normalizedCode);
     }, [fundCode, activeTab, holdings?.fund_code, loadHoldings]);
+
+    useEffect(() => {
+        if (!fundCode || (activeTab !== 'overview' && activeTab !== 'allocation')) return;
+        const normalizedCode = fundCode.trim().toUpperCase();
+        let alive = true;
+        let timer: number | null = null;
+
+        const revalidate = () => {
+            if (!alive || document.visibilityState !== 'visible') return;
+            void loadHoldings(normalizedCode, { silent: true, force: true });
+        };
+        const onFocus = () => revalidate();
+        const onVisibilityChange = () => revalidate();
+
+        timer = window.setInterval(revalidate, FUND_HOLDINGS_REPORT_REFRESH_MS);
+        window.addEventListener('focus', onFocus);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            alive = false;
+            if (timer !== null) window.clearInterval(timer);
+            window.removeEventListener('focus', onFocus);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+    }, [fundCode, activeTab, loadHoldings]);
 
     useEffect(() => {
         if (!fundCode) return;
