@@ -68,6 +68,7 @@ import {
     formatFundQuotePrice,
     formatFundReportDate,
     hasFundRangeStartCoverage,
+    mergeFundPerformancePayloads,
 } from '../utils/fundPresentation';
 import type { FundTab } from '../routing/routes';
 import './FundsPage.css';
@@ -5510,25 +5511,34 @@ export default function FundsPage({
                     startDate: requestedStart,
                     endDate: requestedEnd,
                 });
-                const job = status.history_job;
+                const statusJob = status.history_job;
                 if (!alive) return;
-                if (!job) {
+                if (!statusJob) {
                     continuePolling = false;
                     return;
                 }
-                if (!['queued', 'running'].includes(job.status)) {
+                if (!['queued', 'running'].includes(statusJob.status)) {
                     continuePolling = false;
-                    if (job?.status === 'succeeded') {
+                    if (statusJob.status === 'succeeded') {
+                        // The worker may widen the range beyond the original
+                        // six-month request. Read that effective range and
+                        // merge it so a narrower late response cannot erase
+                        // an already complete series in the UI.
+                        const refreshStart = statusJob.effective_start
+                            || historyJob.effective_start
+                            || requestedStart;
+                        const refreshEnd = statusJob.effective_end
+                            || historyJob.effective_end
+                            || requestedEnd;
                         const refreshed = await apiClient.fundPerformance(normalizedCode, {
-                            startDate: requestedStart,
-                            endDate: requestedEnd,
+                            startDate: refreshStart,
+                            endDate: refreshEnd,
                             refresh: true,
                         });
                         if (!alive) return;
-                        setPerformance(refreshed);
-                        setHeatmapPerformance(refreshed);
+                        setPerformance((current) => mergeFundPerformancePayloads(current, refreshed));
                         setHistoryBackfillError(null);
-                    } else if (job?.status === 'failed') {
+                    } else if (statusJob.status === 'failed') {
                         setHistoryBackfillError('Günlük geçmiş alınamadı; mevcut veriler gösteriliyor.');
                     }
                     return;

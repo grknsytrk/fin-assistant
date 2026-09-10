@@ -2161,6 +2161,7 @@ def fund_performance(
         f":fb={1 if fallback else 0}"
     ),
     ttl_seconds=60,
+    skip_when=lambda **kwargs: bool(kwargs.get("refresh")),
 )
 def _fund_performance_payload(
     *,

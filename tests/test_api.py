@@ -352,6 +352,40 @@ def test_fund_performance_returns_local_points_and_queues_background_history_job
     assert len(submitted) == 1
 
 
+def test_fund_performance_refresh_bypasses_response_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[Dict[str, Any]] = []
+
+    def fake_performance(processed_dir: Any, fund_code: str, **kwargs: Any) -> Dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "fund_code": fund_code,
+            "status": "ok",
+            "points": [{"date": "2026-08-18", "price": 10.0}],
+            "period_stats": {},
+            "source_metadata": {
+                "resolution": "daily",
+                "coverage_state": "complete",
+                "available_start_date": "2026-01-22",
+                "available_end_date": "2026-08-18",
+                "internal_gap_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_fund_performance_payload", fake_performance)
+
+    client = TestClient(app)
+    params = {"start_date": "2026-01-22", "end_date": "2026-08-18"}
+    first = client.get("/funds/REFRESHTHF/performance", params=params)
+    refreshed = client.get(
+        "/funds/REFRESHTHF/performance",
+        params={**params, "refresh": "true"},
+    )
+
+    assert first.status_code == 200
+    assert refreshed.status_code == 200
+    assert len(calls) == 2
+
+
 def test_single_fund_history_invalidation_clears_versioned_performance_cache() -> None:
     backend = cache_module.get_cache()
     backend.set("api:fund-performance:v3:THF:2026-01-22:2026-08-18:fb=0:refresh=0", {"stale": True})
