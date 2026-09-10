@@ -1076,9 +1076,8 @@ def test_latest_tefasfon_snapshot_daily_return_skips_turkey_market_holidays() ->
             super().__init__(fund_types=["SEC"])
             self.range_calls = []
 
-        def fetch_funds(self, *, start_date, end_date, fund_codes=None):
-            assert start_date == date(2026, 5, 20)
-            assert end_date == date(2026, 5, 20)
+        def fetch_daily_funds_snapshot(self, as_of):
+            assert as_of == date(2026, 5, 20)
             return [
                 {
                     "fonKodu": "TLY",
@@ -1087,6 +1086,9 @@ def test_latest_tefasfon_snapshot_daily_return_skips_turkey_market_holidays() ->
                     "fiyat": 5516.308655,
                 }
             ]
+
+        def fetch_management_fees(self, *, fund_codes=None, lookback_days=21, as_of=None):
+            return []
 
         def fetch_returns(self, *, start_date=None, end_date=None, fund_codes=None):
             if start_date is None or end_date is None:
@@ -1469,12 +1471,12 @@ def test_refresh_funds_snapshot_noops_when_tefas_returns_empty(monkeypatch, tmp_
 
 def test_tefasfon_fast_snapshot_skips_returns_and_fee_enrichment(monkeypatch) -> None:
     client = fund_service.TefasFonClient()
-    calls = {"funds": 0, "returns": 0, "fees": 0}
+    calls = {"snapshots": 0, "returns": 0, "fees": 0}
 
     monkeypatch.setattr(
         client,
-        "fetch_funds",
-        lambda **_kwargs: calls.__setitem__("funds", calls["funds"] + 1) or [
+        "fetch_daily_funds_snapshot",
+        lambda _as_of: calls.__setitem__("snapshots", calls["snapshots"] + 1) or [
             {
                 "fund_code": "TLY",
                 "name": "FAST FUND",
@@ -1503,7 +1505,7 @@ def test_tefasfon_fast_snapshot_skips_returns_and_fee_enrichment(monkeypatch) ->
 
     assert len(rows) == 1
     assert warnings == []
-    assert calls == {"funds": 1, "returns": 0, "fees": 0}
+    assert calls == {"snapshots": 1, "returns": 0, "fees": 0}
 
 
 def test_tefasfon_snapshot_resolution_finds_previous_date_within_fourteen_days(monkeypatch) -> None:
