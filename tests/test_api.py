@@ -308,6 +308,33 @@ def test_legacy_long_history_job_is_retried_for_fintables_probe(monkeypatch: pyt
     assert len(submitted) == 1
 
 
+def test_complete_tefas_history_schedules_one_fintables_probe() -> None:
+    payload = {
+        "points": [{"date": "2026-03-10", "price": 10.0}, {"date": "2026-09-10", "price": 11.0}],
+        "source_metadata": {
+            "history_source_used": "tefasfon_funds",
+            "resolution": "daily",
+            "coverage_state": "complete",
+            "available_start_date": "2026-03-10",
+            "available_end_date": "2026-09-10",
+            "internal_gap_count": 0,
+        },
+    }
+    target = api_module._history_request_range(date(2026, 3, 10), date(2026, 9, 10))
+
+    assert api_module._history_job_should_schedule(payload, last_job=None, target=target) is True
+    completed_probe = {
+        "job_id": "fintables-probe-1",
+        "status": "succeeded",
+        "effective_start": "2026-03-10",
+        "effective_end": "2026-09-10",
+        "requested_start": "2026-03-10",
+        "requested_end": "2026-09-10",
+        "fintables_point_count": 0,
+    }
+    assert api_module._history_job_should_schedule(payload, last_job=completed_probe, target=target) is False
+
+
 def test_fund_performance_returns_local_points_and_queues_background_history_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

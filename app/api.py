@@ -1847,6 +1847,17 @@ def _history_job_should_schedule(
     # unavailable upstream does not create a request loop.
     if _history_job_needs_fintables_probe(last_job, target):
         return True
+    target_span_days = (target["requested_end"] - target["requested_start"]).days
+    history_source = str(metadata.get("history_source_used") or "").strip().lower()
+    if target_span_days > 120 and history_source and history_source != "fintables_udf_history":
+        # A complete TEFAS cache can otherwise suppress the first Fintables
+        # probe forever. Once a job records ``fintables_point_count`` (even
+        # zero), the probe has been made and should not loop on every request.
+        job_status = str(last_job.get("status") or "").strip().lower() if last_job else ""
+        if job_status in {"queued", "running"}:
+            return False
+        if not last_job or "fintables_point_count" not in last_job:
+            return True
     last_point = _history_job_date(metadata.get("available_end_date") or metadata.get("date_max"))
     if last_point and last_point < target["requested_end"]:
         from app.fund_service import _business_days_between
