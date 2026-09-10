@@ -354,7 +354,7 @@ def test_fund_performance_returns_local_points_and_queues_background_history_job
 
 def test_single_fund_history_invalidation_clears_versioned_performance_cache() -> None:
     backend = cache_module.get_cache()
-    backend.set("api:fund-performance:v2:THF:2026-01-22:2026-08-18:fb=0:refresh=0", {"stale": True})
+    backend.set("api:fund-performance:v3:THF:2026-01-22:2026-08-18:fb=0:refresh=0", {"stale": True})
 
     api_module._invalidate_single_fund_response_cache("THF")
 
