@@ -1468,7 +1468,7 @@ function FundPerformanceChart({
 
     const returnStrip = (
         <FundChartReturnStrip
-            periodReturns={loading ? undefined : periodReturns}
+            periodReturns={historyPending ? undefined : periodReturns}
             visibleRangeReturn={visibleRangeReturn}
             yieldPeriods={yieldPeriods}
             currency={currency}
@@ -5903,7 +5903,7 @@ export default function FundsPage({
             }
             const fromSummary = periodReturnsFromYieldSummary(yieldSummary, detailLatestPrice);
             const fromPerformance = periodReturnsFromPerformancePoints(visiblePerformancePoints);
-            return mergePeriodReturnSources(fromSummary, selectedFund?.period_returns, fromPerformance);
+            return mergePeriodReturnSources(fromPerformance, fromSummary, selectedFund?.period_returns);
         },
         [detailLatestPrice, fintablesHistoryPending, selectedFund, visiblePerformancePoints, yieldSummary],
     );
