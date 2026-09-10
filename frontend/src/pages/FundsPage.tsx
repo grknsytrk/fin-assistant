@@ -909,16 +909,21 @@ function pointOnOrBefore(points: FundPricePoint[], targetDate: string): FundPric
     return match;
 }
 
-function periodReturnsFromPerformancePoints(points: FundPricePoint[]): FundSummary['period_returns'] {
+function periodReturnsFromPerformancePoints(
+    points: FundPricePoint[],
+    allowPartialPeriodFallback = false,
+): FundSummary['period_returns'] {
     const ordered = sortFundPoints(points);
     const latest = ordered[ordered.length - 1];
+    const first = ordered[0];
     const latestPrice = Number(latest?.price);
-    if (!latest || !Number.isFinite(latestPrice) || latestPrice <= 0) {
+    if (!latest || !first || !Number.isFinite(latestPrice) || latestPrice <= 0) {
         return {};
     }
     return DETAIL_RETURN_PERIODS.reduce<FundSummary['period_returns']>((returns, period) => {
         const startDate = rangeStartDate(period.key, latest.date, '');
-        const basePoint = pointOnOrBefore(ordered, startDate);
+        const basePoint = pointOnOrBefore(ordered, startDate)
+            || (allowPartialPeriodFallback && first.date < latest.date ? first : null);
         returns[period.key] = returnBetween(latestPrice, Number(basePoint?.price));
         return returns;
     }, {});
@@ -5891,9 +5896,12 @@ export default function FundsPage({
                     return returns;
                 }, {});
             }
-            return periodReturnsFromPerformancePoints(visiblePerformancePoints);
+            return periodReturnsFromPerformancePoints(
+                visiblePerformancePoints,
+                performance?.source_metadata?.coverage_state === 'range_incomplete',
+            );
         },
-        [fintablesHistoryPending, visiblePerformancePoints],
+        [fintablesHistoryPending, performance?.source_metadata?.coverage_state, visiblePerformancePoints],
     );
     const fundsDocumentTitle = useMemo(() => {
         if (fundCode || selectedFund) {
