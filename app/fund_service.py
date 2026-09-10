@@ -2824,6 +2824,49 @@ def _history_resolution(points: List[Dict[str, Any]]) -> str:
     return "daily"
 
 
+def _history_coverage_boundary(
+    points: List[Dict[str, Any]],
+    *,
+    start_date: Optional[date],
+    end_date: Optional[date],
+    coverage_state: str,
+    resolution: str,
+    internal_gap_count: int,
+) -> Optional[str]:
+    """Classify a clean, current series whose only missing edge is its head.
+
+    A young fund (or a source with a fixed earliest record) can legitimately
+    start after the requested range. Re-running the same long-range backfill
+    cannot create records before that boundary, so expose the distinction to
+    the API scheduler. Tail gaps and internal gaps deliberately do not get
+    this classification because a future refresh may repair them.
+    """
+
+    if (
+        not points
+        or not start_date
+        or not end_date
+        or coverage_state != "range_incomplete"
+        or resolution != "daily"
+        or internal_gap_count > 0
+    ):
+        return None
+    sources = {
+        _normalize_price_source(str(point.get("source") or ""))
+        for point in points
+        if isinstance(point, dict)
+    }
+    if sources != {FINTABLES_UDF_HISTORY_SOURCE}:
+        return None
+    first_date = _fund_date(points[0].get("date"))
+    last_date = _fund_date(points[-1].get("date"))
+    if not first_date or not last_date:
+        return None
+    if date.fromisoformat(first_date) <= start_date or date.fromisoformat(last_date) < end_date:
+        return None
+    return "head"
+
+
 def _history_is_usable_daily_range(
     points: List[Dict[str, Any]],
     *,
@@ -6513,6 +6556,14 @@ def _fund_performance_payload_from_points(
             coverage_state = "range_incomplete"
     else:
         coverage_state = "unavailable"
+    coverage_boundary = _history_coverage_boundary(
+        ordered,
+        start_date=start_date,
+        end_date=end_date,
+        coverage_state=coverage_state,
+        resolution=resolution,
+        internal_gap_count=len(internal_gap_warnings),
+    )
     daily_upgrade_state = "idle"
     if history_job:
         job_status = str(history_job.get("status") or "").strip().lower()
@@ -6556,6 +6607,7 @@ def _fund_performance_payload_from_points(
         "backfill_used": backfill_used,
         "full_history_requested": bool(full_history_requested),
         "coverage_state": coverage_state,
+        "coverage_boundary": coverage_boundary,
         "resolution": resolution,
         "requested_resolution": requested_resolution,
         "available_start_date": date_min,

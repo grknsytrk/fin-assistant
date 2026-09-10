@@ -1840,6 +1840,14 @@ def _history_job_should_schedule(
     points = payload.get("points") if isinstance(payload.get("points"), list) else []
     if not points:
         return True
+    # A daily Fintables series with a current tail, no internal gaps, and only
+    # a missing head has reached the source's earliest available record. A
+    # second request for the same range cannot manufacture pre-inception data;
+    # do not enqueue the same expensive long-range job on every cache expiry.
+    # Failed jobs remain retryable so a transient upstream error is not hidden.
+    if str(metadata.get("coverage_boundary") or "").strip().lower() == "head":
+        if not last_job or not _history_job_failed(last_job):
+            return False
     # Long chart ranges are bootstrapped from Fintables' daily UDF series.
     # Jobs created before that source was made explicit can look successful
     # while containing only the shorter TEFAS detail history. Give each such

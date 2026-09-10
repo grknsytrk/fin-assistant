@@ -1200,6 +1200,39 @@ def test_fund_performance_metadata_marks_material_tail_gap_incomplete(tmp_path) 
     assert metadata["coverage_state"] == "range_incomplete"
     assert metadata["coverage_gap_business_days"] > 3
     assert metadata["available_end_date"] == "2026-05-26"
+    assert metadata["coverage_boundary"] is None
+
+
+def test_fund_performance_metadata_marks_clean_fintables_head_boundary(tmp_path) -> None:
+    points = []
+    current = date(2026, 4, 1)
+    price = 1.0
+    while current <= date(2026, 9, 10):
+        if current.weekday() < 5:
+            points.append(
+                {
+                    "fund_code": "BYZ",
+                    "date": current.isoformat(),
+                    "price": price,
+                    "source": "fintables_udf_history",
+                }
+            )
+            price += 0.01
+        current += timedelta(days=1)
+
+    payload = fund_service._fund_performance_payload_from_points(
+        tmp_path,
+        "BYZ",
+        points,
+        start_date=date(2026, 3, 10),
+        end_date=date(2026, 9, 10),
+    )
+
+    metadata = payload["source_metadata"]
+    assert metadata["coverage_state"] == "range_incomplete"
+    assert metadata["coverage_boundary"] == "head"
+    assert metadata["coverage_gap_business_days"] == 0
+    assert metadata["internal_gap_count"] == 0
 
 
 def test_refresh_funds_snapshot_backfills_daily_return_from_local_prices(monkeypatch, tmp_path) -> None:

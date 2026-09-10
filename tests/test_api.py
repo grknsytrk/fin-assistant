@@ -335,6 +335,27 @@ def test_complete_tefas_history_schedules_one_fintables_probe() -> None:
     assert api_module._history_job_should_schedule(payload, last_job=completed_probe, target=target) is False
 
 
+def test_head_limited_fintables_history_does_not_schedule_repeated_backfill() -> None:
+    payload = {
+        "points": [
+            {"date": "2026-04-01", "price": 1.0},
+            {"date": "2026-09-10", "price": 2.0},
+        ],
+        "source_metadata": {
+            "history_source_used": "fintables_udf_history",
+            "resolution": "daily",
+            "coverage_state": "range_incomplete",
+            "coverage_boundary": "head",
+            "available_start_date": "2026-04-01",
+            "available_end_date": "2026-09-10",
+            "internal_gap_count": 0,
+        },
+    }
+    target = api_module._history_request_range(date(2026, 3, 10), date(2026, 9, 10))
+
+    assert api_module._history_job_should_schedule(payload, last_job=None, target=target) is False
+
+
 def test_fund_performance_returns_local_points_and_queues_background_history_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -191,4 +191,37 @@ describe('fund presentation helpers', () => {
         expect(lines.join('\n')).toContain('6A, YBB, 1Y');
         expect(lines.join('\n')).toContain('history-puk');
     });
+
+    it('explains a clean source head boundary without claiming a missing job', () => {
+        const performance = performancePayload(
+            [
+                performancePoint('2026-04-01', 1.0, 'fintables_udf_history'),
+                performancePoint('2026-09-10', 1.1, 'fintables_udf_history'),
+            ],
+            {
+                source: 'sqlite',
+                history_source_used: 'fintables_udf_history',
+                primary_source: 'fintables',
+                coverage_state: 'range_incomplete',
+                coverage_boundary: 'head',
+                requested_start_date: '2026-03-10',
+                requested_end_date: '2026-09-10',
+                available_start_date: '2026-04-01',
+                available_end_date: '2026-09-10',
+                coverage_gap_business_days: 0,
+                internal_gap_count: 0,
+            },
+        );
+
+        const lines = buildFundHistoryDiagnosticLines({
+            fundCode: 'BYZ',
+            performance,
+            points: performance.points,
+            periodReturns: { '1w': 1, '1m': 2, '3m': 3, '6m': 4, ytd: 5, '1y': 6 },
+        });
+
+        expect(lines.join('\n')).toContain('yeniden backfill planlanmadı');
+        expect(lines.join('\n')).toContain('yeniden job başlatılmadı');
+        expect(lines.join('\n')).not.toContain('bu yanıtta job kaydı yok');
+    });
 });

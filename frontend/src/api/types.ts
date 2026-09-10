@@ -167,6 +167,7 @@ export interface FundSourceMetadata {
   cached_fallback_points_present?: boolean;
   cached_fallback_point_count?: number | null;
   coverage_state?: 'complete' | 'range_incomplete' | 'upgrading' | 'unavailable' | string | null;
+  coverage_boundary?: 'head' | string | null;
   resolution?: 'daily' | 'monthly_anchor' | 'mixed' | 'unknown' | string | null;
   requested_resolution?: 'daily' | string | null;
   available_start_date?: string | null;

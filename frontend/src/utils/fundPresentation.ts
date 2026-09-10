@@ -386,6 +386,8 @@ export function buildFundHistoryDiagnosticLines(input: FundHistoryDiagnosticInpu
         lines.push('Kapsama durumu: Fintables günlük geçmişi hazırlanıyor; geçici TEFAS serisi grafiklerde gizleniyor.');
     } else if (coverage === 'complete') {
         lines.push('Kapsama durumu: İstenen aralığın başlangıç ve bitiş uçları mevcut.');
+    } else if (coverage === 'range_incomplete' && metadata?.coverage_boundary === 'head') {
+        lines.push('Kapsama durumu: Kaynakta istenen başlangıçtan önce kayıt yok; seri mevcut ilk kayıttan başlıyor ve aynı aralık için yeniden backfill planlanmadı.');
     } else if (coverage === 'range_incomplete') {
         lines.push('Kapsama durumu: Aralığın en az bir ucu eksik; grafikte mevcut kayıtlar gösteriliyor.');
     } else if (coverage === 'upgrading') {
@@ -415,6 +417,8 @@ export function buildFundHistoryDiagnosticLines(input: FundHistoryDiagnosticInpu
         const pointCountDetail = job.fintables_point_count != null ? ` · Fintables nokta: ${job.fintables_point_count}` : '';
         lines.push(`Arka plan işi: ${job.status} · iş kimliği: ${job.job_id}${phase}${jobRange}${effectiveRange}${pointCountDetail}${finished}.`);
         if (job.error) lines.push(`Arka plan işi hatası: ${job.error}`);
+    } else if (metadata?.coverage_boundary === 'head') {
+        lines.push('Arka plan işi: Kaynak başlangıç sınırı biliniyor; aynı aralık için yeniden job başlatılmadı.');
     } else if (input.performanceLoading) {
         lines.push('Arka plan işi: performans geçmişi yükleniyor; henüz job bilgisi dönmedi.');
     } else {
