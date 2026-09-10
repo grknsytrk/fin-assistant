@@ -54,7 +54,7 @@ const marketFlowInFlight = new Map<string, Promise<MarketFlowResponse>>();
 const MARKET_UNIVERSE_MEMORY_CACHE_TTL_MS = 60_000;
 const marketUniverseMemoryCache = new Map<string, { payload: MarketUniverseResponse; fetchedAt: number }>();
 const marketUniverseInFlight = new Map<string, Promise<MarketUniverseResponse>>();
-const MARKET_STOCKS_MEMORY_CACHE_TTL_MS = 30_000;
+const MARKET_STOCKS_MEMORY_CACHE_TTL_MS = 3_000;
 const marketStocksMemoryCache = new Map<string, { payload: MarketStocksResponse; fetchedAt: number }>();
 const marketStocksInFlight = new Map<string, Promise<MarketStocksResponse>>();
 

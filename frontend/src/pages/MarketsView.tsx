@@ -95,8 +95,9 @@ const MAX_STOCK_CARDS = 12;
 const STOCK_CARD_INITIAL_BATCH_SIZE = 3;
 const STOCK_CARD_BACKGROUND_BATCH_SIZE = 3;
 const STOCK_CARD_BACKGROUND_DELAY_MS = 120;
-const MARKET_LIST_REFRESH_DESKTOP_MS = 30000;
-const MARKET_LIST_REFRESH_MOBILE_MS = 60000;
+const MARKET_QUOTE_REFRESH_MS = 3000;
+const MARKET_LIST_REFRESH_DESKTOP_MS = MARKET_QUOTE_REFRESH_MS;
+const MARKET_LIST_REFRESH_MOBILE_MS = MARKET_QUOTE_REFRESH_MS;
 const MARKET_DETAIL_REFRESH_DESKTOP_MS = 15000;
 const MARKET_DETAIL_REFRESH_MOBILE_MS = 30000;
 const STOCK_CARD_CHART_RANGES: Array<{ id: MarketStockCardChartRange; label: string; title: string }> = [
@@ -314,6 +315,7 @@ function formatStockCardTradeTime(iso: string | null | undefined): string {
         ...(isToday ? {} : { day: '2-digit', month: 'short' }),
         hour: '2-digit',
         minute: '2-digit',
+        second: '2-digit',
     }).format(dt);
 }
 
@@ -857,14 +859,54 @@ function mergeStockCardPayloads(
     next: MarketStockCardsResponse,
     orderedSymbols: string[],
 ): MarketStockCardsResponse {
+    const quoteTimestamp = (item: MarketStockCardItem | undefined): number => {
+        const timestamp = item?.as_of ? Date.parse(item.as_of) : Number.NaN;
+        return Number.isFinite(timestamp) ? timestamp : 0;
+    };
+    const shouldUseNextQuote = (currentItem: MarketStockCardItem, nextItem: MarketStockCardItem): boolean => {
+        const currentTimestamp = quoteTimestamp(currentItem);
+        const nextTimestamp = quoteTimestamp(nextItem);
+        if (currentTimestamp === 0) return true;
+        if (nextTimestamp === 0) return false;
+        return nextTimestamp >= currentTimestamp;
+    };
+    const mergeQuoteIntoCard = (
+        card: MarketStockCardItem,
+        quote: MarketStockCardItem,
+    ): MarketStockCardItem => ({
+        ...card,
+        price: quote.price ?? card.price,
+        currency: quote.currency || card.currency,
+        change: quote.change ?? card.change,
+        change_pct: quote.change_pct ?? card.change_pct,
+        volume: quote.volume ?? card.volume,
+        volume_tl: quote.volume_tl ?? card.volume_tl,
+        market_cap: card.market_cap ?? quote.market_cap,
+        market_state: quote.market_state || card.market_state,
+        as_of: quote.as_of || card.as_of,
+        error: quote.price != null ? null : card.error || quote.error,
+    });
     const itemsBySymbol = new Map<string, MarketStockCardItem>();
     for (const item of current?.items || []) itemsBySymbol.set(item.symbol, item);
     for (const item of next.items || []) {
         const currentItem = itemsBySymbol.get(item.symbol);
-        // A quick refresh must never replace a previously completed card with
-        // a partial quote-only item.
-        if (item.card_stage === 'quick' && currentItem && currentItem.card_stage !== 'quick') continue;
-        itemsBySymbol.set(item.symbol, item);
+        if (!currentItem) {
+            itemsBySymbol.set(item.symbol, item);
+            continue;
+        }
+
+        const latestQuote = shouldUseNextQuote(currentItem, item) ? item : currentItem;
+        // Quick polling updates the quote fields in place while preserving the
+        // chart, valuation and return data already loaded for a full card.
+        if (item.card_stage === 'quick' && currentItem.card_stage !== 'quick') {
+            itemsBySymbol.set(item.symbol, mergeQuoteIntoCard(currentItem, latestQuote));
+        } else if (item.card_stage === 'full') {
+            // A slower full response must not overwrite a newer 3-second quote
+            // response that finished while its enrichment was running.
+            itemsBySymbol.set(item.symbol, mergeQuoteIntoCard(item, latestQuote));
+        } else if (shouldUseNextQuote(currentItem, item)) {
+            itemsBySymbol.set(item.symbol, item);
+        }
     }
     return {
         ...next,
@@ -2048,7 +2090,11 @@ function MarketStockCard({
         : hasPreviousSessionData
             ? 'is-previous'
             : 'is-closed';
-    const sessionTime = formatStockCardTradeTime(item.last_trade_at || latestPointTime || item.as_of);
+    const sessionTime = formatStockCardTradeTime(
+        isCardLive
+            ? item.as_of || item.last_trade_at || latestPointTime
+            : item.last_trade_at || latestPointTime || item.as_of,
+    );
     const footerLabel = isCardLive ? 'Canlı güncelleme' : hasPreviousSessionData ? 'Son işlem' : sessionLabel;
 
     return (
@@ -2593,7 +2639,8 @@ export default function MarketsView({
     const stocksInFlightRef = useRef(false);
     const indicesInFlightRef = useRef(false);
     const indexDetailInFlightRef = useRef(false);
-    const stockCardsInFlightRef = useRef<Promise<void> | null>(null);
+    const stockCardQuickInFlightRef = useRef<Promise<void> | null>(null);
+    const stockCardFullInFlightRef = useRef<Promise<void> | null>(null);
     const stockCardsRef = useRef<MarketStockCardsResponse | null>(stockCards);
     const marketPageRef = useRef<HTMLDivElement | null>(null);
     const pendingMarketScrollResetRef = useRef(true);
@@ -2858,7 +2905,8 @@ export default function MarketsView({
 
         const controller = new AbortController();
         let delayTimer: number | null = null;
-        let batchesLoading = false;
+        let detailBatchesLoading = false;
+        let quoteBatchesLoading = false;
         const initialSymbols = getMarketStockCardSymbolsNeedingLoad(stockCardSymbols, stockCardsRef.current);
         const buildBatches = (symbols: string[]) => {
             const initialBatch = symbols.slice(0, STOCK_CARD_INITIAL_BATCH_SIZE);
@@ -2866,25 +2914,31 @@ export default function MarketsView({
                 ? [initialBatch, ...splitStockCardBatches(symbols.slice(STOCK_CARD_INITIAL_BATCH_SIZE), STOCK_CARD_BACKGROUND_BATCH_SIZE)]
                 : [];
         };
-        const loadBatches = async (symbols: string[]) => {
-            if (batchesLoading) return;
-            const batches = buildBatches(symbols);
+        const loadBatches = async (symbols: string[], includeFull = true) => {
+            if (includeFull ? detailBatchesLoading : quoteBatchesLoading) return;
+            const batches = includeFull
+                ? buildBatches(symbols)
+                : symbols.length > 0 ? [symbols] : [];
             if (batches.length === 0) return;
-            batchesLoading = true;
+            if (includeFull) detailBatchesLoading = true;
+            else quoteBatchesLoading = true;
             try {
                 for (const [index, batch] of batches.entries()) {
                     if (controller.signal.aborted) return;
-                    if (index > 0) {
+                    if (includeFull && index > 0) {
                         await new Promise<void>((resolve) => {
                             delayTimer = window.setTimeout(resolve, STOCK_CARD_BACKGROUND_DELAY_MS);
                         });
                         if (controller.signal.aborted) return;
                     }
-                    await loadStockCards(index > 0 || Boolean(cached), false, batch, controller.signal, 'quick');
-                    await loadStockCards(true, false, batch, controller.signal, 'full');
+                    await loadStockCards(includeFull && (index > 0 || Boolean(cached)), false, batch, controller.signal, 'quick');
+                    if (includeFull) {
+                        await loadStockCards(true, false, batch, controller.signal, 'full');
+                    }
                 }
             } finally {
-                batchesLoading = false;
+                if (includeFull) detailBatchesLoading = false;
+                else quoteBatchesLoading = false;
             }
         };
 
@@ -2893,16 +2947,21 @@ export default function MarketsView({
         void loadBatches(initialSymbols);
         const intervalId = window.setInterval(() => {
             if (document.visibilityState !== 'visible') return;
-            void loadBatches(stockCardSymbols);
+            void loadBatches(stockCardSymbols, true);
         }, marketDetailRefreshMs);
+        const quoteIntervalId = window.setInterval(() => {
+            if (document.visibilityState !== 'visible') return;
+            void loadBatches(stockCardSymbols, false);
+        }, MARKET_QUOTE_REFRESH_MS);
         const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible') void loadBatches(stockCardSymbols);
+            if (document.visibilityState === 'visible') void loadBatches(stockCardSymbols, true);
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
             controller.abort();
             if (delayTimer !== null) window.clearTimeout(delayTimer);
             window.clearInterval(intervalId);
+            window.clearInterval(quoteIntervalId);
             document.removeEventListener('visibilitychange', onVisibilityChange);
         };
     }, [activeSection, isMobileViewport, marketDetailRefreshMs, stockCardSymbols, stockCardSymbolsKey]);
@@ -3005,7 +3064,8 @@ export default function MarketsView({
         tier: 'quick' | 'full' = 'full',
     ) {
         if (requestedSymbols.length === 0) return;
-        const previousRequest = stockCardsInFlightRef.current;
+        const inFlightRef = tier === 'quick' ? stockCardQuickInFlightRef : stockCardFullInFlightRef;
+        const previousRequest = inFlightRef.current;
         const request = (async () => {
             if (previousRequest) await previousRequest;
             if (signal?.aborted) return;
@@ -3041,12 +3101,12 @@ export default function MarketsView({
             }
         })();
 
-        stockCardsInFlightRef.current = request;
+        inFlightRef.current = request;
         try {
             await request;
         } finally {
-            if (stockCardsInFlightRef.current === request) {
-                stockCardsInFlightRef.current = null;
+            if (inFlightRef.current === request) {
+                inFlightRef.current = null;
             }
         }
     }

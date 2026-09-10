@@ -4557,6 +4557,57 @@ def test_fetch_market_price_map_parses_volume(monkeypatch: pytest.MonkeyPatch) -
     assert payload["A1CAP"]["volume"] == 108750000.50
 
 
+def test_fetch_market_price_map_reuses_one_snapshot_across_market_views(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    html = """
+    <table><tbody id="tableBody">
+      <tr data-symbol="A1CAP">
+        <td>A1 CAPITAL</td>
+        <td class="price" data-val="14.18">14.18</td>
+        <td class="change" data-val="-0.21">-0.21</td>
+        <td class="percent" data-val="-1.46">-1.46 %</td>
+        <td>108.750.000</td>
+        <td class="previousClose" data-val="14.39">14.39</td>
+      </tr>
+      <tr data-symbol="BIMAS">
+        <td>BIM BIRLESIK MAGAZALAR</td>
+        <td class="price" data-val="760.00">760.00</td>
+        <td class="change" data-val="-3.00">-3.00</td>
+        <td class="percent" data-val="-0.39">-0.39 %</td>
+        <td>2.813.888.143</td>
+        <td class="previousClose" data-val="763.00">763.00</td>
+      </tr>
+    </tbody></table>
+    """
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return html.encode("utf-8")
+
+    requested_urls: List[str] = []
+
+    def fake_urlopen(request: Any, **_kwargs: Any) -> FakeResponse:
+        requested_urls.append(str(getattr(request, "full_url", request)))
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    first = api_module._fetch_market_price_map(["A1CAP"], index_name="XU100")
+    second = api_module._fetch_market_price_map(["BIMAS"], index_name="XU030")
+
+    assert requested_urls == ["https://infoyatirim.com/canli-borsa"]
+    assert first["A1CAP"]["as_of"] == second["BIMAS"]["as_of"]
+    assert first["A1CAP"]["price"] == 14.18
+    assert second["BIMAS"]["price"] == 760.0
+
+
 def test_extract_infoyatirim_stock_page_quote_parses_single_stock_page() -> None:
     html = """
     <section>

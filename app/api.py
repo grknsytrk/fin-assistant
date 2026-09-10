@@ -147,7 +147,7 @@ _ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS = int(
 _MARKET_UNIVERSE_CACHE_TTL = int(
     os.getenv("RAGFIN_MARKET_UNIVERSE_CACHE_TTL_SECONDS", str(6 * 60 * 60))
 )
-_MARKET_QUOTES_FRESH_TTL = int(os.getenv("RAGFIN_MARKET_QUOTES_FRESH_TTL_SECONDS", "5"))
+_MARKET_QUOTES_FRESH_TTL = int(os.getenv("RAGFIN_MARKET_QUOTES_FRESH_TTL_SECONDS", "3"))
 _MARKET_QUOTES_STALE_TTL = int(os.getenv("RAGFIN_MARKET_QUOTES_STALE_TTL_SECONDS", "120"))
 _MARKET_QUOTES_LOCK_TTL_SECONDS = float(
     os.getenv("RAGFIN_MARKET_QUOTES_LOCK_TTL_SECONDS", "60")
@@ -5866,6 +5866,7 @@ _PRICE_CACHE: Dict[str, Any] = {}
 _PRICE_CACHE_TTL = 300  # 5 minutes
 _MARKET_PRICE_CACHE: Dict[str, Any] = {}
 _MARKET_PRICE_CACHE_TTL = 3  # seconds; used by the live stocks table
+_MARKET_QUOTE_SOURCE_INDEX = "XUTUM"
 _INFOYATIRIM_STOCK_PAGE_CACHE: Dict[str, Any] = {}
 _INFOYATIRIM_STOCK_PAGE_CACHE_TTL = 60
 _INFOYATIRIM_STOCK_PAGE_FALLBACK_LIMIT = 12
@@ -5878,7 +5879,7 @@ _MARKET_STOCK_CARDS_QUICK_RESPONSE_CACHE_TTL = int(
     os.getenv("RAGFIN_MARKET_STOCK_CARDS_QUICK_RESPONSE_CACHE_TTL_SECONDS", "3")
 )
 _MARKET_STOCK_CARDS_RESPONSE_CACHE_TTL = int(
-    os.getenv("RAGFIN_MARKET_STOCK_CARDS_RESPONSE_CACHE_TTL_SECONDS", "5")
+    os.getenv("RAGFIN_MARKET_STOCK_CARDS_RESPONSE_CACHE_TTL_SECONDS", "3")
 )
 _MARKET_STOCK_CARD_PREVIOUS_SESSION_LOOKBACK_DAYS = 10
 _STOCK_CARD_VALUATION_CACHE: Dict[str, Any] = {}
@@ -6233,7 +6234,18 @@ def _market_price_source_url(index_name: str) -> str:
     return "https://infoyatirim.com/canli-borsa/xu100-bist-100-hisseleri"
 
 
-def _fetch_market_price_map(symbols: List[str], *, index_name: str = "XU100") -> Dict[str, Dict[str, Any]]:
+def _fetch_market_price_map(
+    symbols: List[str],
+    *,
+    index_name: str = _MARKET_QUOTE_SOURCE_INDEX,
+) -> Dict[str, Dict[str, Any]]:
+    """Fetch one canonical InfoYatirim quote snapshot and project its symbols.
+
+    Market lists and stock cards must not receive different prices because they
+    requested different symbol subsets or index views.  The XUTUM live page
+    contains the complete BIST equity universe, so it is used as the single
+    quote source and cache snapshot for every consumer.
+    """
     import urllib.error
     import urllib.request
 
@@ -6241,14 +6253,25 @@ def _fetch_market_price_map(symbols: List[str], *, index_name: str = "XU100") ->
     if not normalized_symbols:
         return {}
 
-    normalized_index = str(index_name or "XU100").strip().upper()
-    cache_key = f"{normalized_index}:{','.join(normalized_symbols)}"
+    # Keep the public argument for callers that select XU100/XU030 rows, but
+    # deliberately use the same upstream page and cache entry for all of them.
+    del index_name
+    source_index = _MARKET_QUOTE_SOURCE_INDEX
+    cache_key = f"snapshot:{source_index}"
+
+    def project_items(items: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        return {
+            symbol: dict(items[symbol])
+            for symbol in normalized_symbols
+            if symbol in items
+        }
+
     now = time.time()
     cached = _MARKET_PRICE_CACHE.get(cache_key)
     if cached and now - cached.get("_ts", 0) < _MARKET_PRICE_CACHE_TTL:
-        return cached.get("items", {})
+        return project_items(cached.get("items", {}))
 
-    url = _market_price_source_url(normalized_index)
+    url = _market_price_source_url(source_index)
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -6299,7 +6322,7 @@ def _fetch_market_price_map(symbols: List[str], *, index_name: str = "XU100") ->
         for symbol in normalized_symbols
         if _market_price_row_needs_fallback(items.get(symbol))
     ]
-    if items and missing_symbols and normalized_index != "XUTUM":
+    if items and missing_symbols:
         fallback_symbols = missing_symbols[:_INFOYATIRIM_STOCK_PAGE_FALLBACK_LIMIT]
         try:
             from concurrent.futures import ThreadPoolExecutor
@@ -6313,7 +6336,7 @@ def _fetch_market_price_map(symbols: List[str], *, index_name: str = "XU100") ->
                 items[symbol] = _merge_market_price_fallback(items.get(symbol, {}), fallback)
 
     _MARKET_PRICE_CACHE[cache_key] = {"_ts": now, "items": items}
-    return items
+    return project_items(items)
 
 
 def _pick_series_value_at_or_before(
@@ -6596,6 +6619,14 @@ def _build_market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bo
         }
     cache_dir = CONFIG.paths.processed_dir / "kap_cache"
     price_map = _fetch_market_price_map(symbols, index_name=normalized_index)
+    quote_as_of = next(
+        (
+            quote.get("as_of")
+            for quote in price_map.values()
+            if isinstance(quote, dict) and quote.get("as_of")
+        ),
+        None,
+    )
     return_base_map = (
         _cached_stock_return_bases_bulk(symbols)
         if normalized_index == "XUTUM"
@@ -6627,7 +6658,9 @@ def _build_market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bo
             "cache_hit": bool(universe.get("cache_hit")),
             "fallback_used": bool(universe.get("fallback_used")),
         },
-        "as_of": datetime.now(timezone.utc).isoformat(),
+        # The quote timestamp is the shared live snapshot timestamp used by
+        # both the market list and the stock cards.
+        "as_of": quote_as_of or datetime.now(timezone.utc).isoformat(),
     }
     return data
 
@@ -7516,6 +7549,14 @@ def _market_stock_cards_quick_payload(
             return dict(shared_cached)
 
     price_map = _fetch_market_price_map(normalized_symbols)
+    quote_as_of = next(
+        (
+            quote.get("as_of")
+            for quote in price_map.values()
+            if isinstance(quote, dict) and quote.get("as_of")
+        ),
+        None,
+    )
     instrument_map = get_instruments(CONFIG.paths.processed_dir, "stock", normalized_symbols)
     items: List[Dict[str, Any]] = []
     for symbol in normalized_symbols:
@@ -7565,7 +7606,9 @@ def _market_stock_cards_quick_payload(
     data = {
         "items": items,
         "source": "infoyatirim_live_quote",
-        "as_of": datetime.now(timezone.utc).isoformat(),
+        # The quote timestamp is the shared live snapshot timestamp used by
+        # both the market list and the stock cards.
+        "as_of": quote_as_of or datetime.now(timezone.utc).isoformat(),
     }
     _shared_cache_set(
         response_cache_key,
@@ -7601,6 +7644,14 @@ def _market_stock_cards_payload(
 
     cache_dir = CONFIG.paths.processed_dir / "kap_cache"
     price_map = _fetch_market_price_map(normalized_symbols)
+    quote_as_of = next(
+        (
+            quote.get("as_of")
+            for quote in price_map.values()
+            if isinstance(quote, dict) and quote.get("as_of")
+        ),
+        None,
+    )
     basic_summary_map = _fetch_isyatirim_basic_summary_map()
     return_base_map = _fetch_stock_return_bases_bulk(normalized_symbols)
     instrument_map = get_instruments(CONFIG.paths.processed_dir, "stock", normalized_symbols)
@@ -7623,7 +7674,9 @@ def _market_stock_cards_payload(
         volume_lot = _first_not_none(intraday.get("volume_lot"), intraday.get("volume"))
         current_for_returns = price if price is not None else return_bases.get("latest_close")
         session_status = intraday.get("session_status") or "unknown"
-        as_of = intraday.get("as_of") if session_status != "open" else (quote.get("as_of") or intraday.get("as_of"))
+        # Price, change and volume all come from the canonical live quote;
+        # keep its timestamp even when Yahoo supplies the chart/session data.
+        as_of = quote.get("as_of") or intraday.get("as_of")
         item = {
             "symbol": symbol,
             "card_stage": "full",
@@ -7668,7 +7721,7 @@ def _market_stock_cards_payload(
     data = {
         "items": items,
         "source": "infoyatirim_yahoo_chart",
-        "as_of": datetime.now(timezone.utc).isoformat(),
+        "as_of": quote_as_of or datetime.now(timezone.utc).isoformat(),
     }
     _shared_cache_set(
         response_cache_key,

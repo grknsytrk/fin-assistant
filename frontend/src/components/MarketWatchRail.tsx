@@ -24,8 +24,9 @@ type StockRailTab = Extract<RailTab, 'xutum' | 'xu100' | 'xu030'>;
 type RailSortKey = 'symbol' | 'price' | 'changePct';
 type RailSortDirection = 'asc' | 'desc';
 
-const LIVE_RAIL_REFRESH_DESKTOP_MS = 30000;
-const LIVE_RAIL_REFRESH_MOBILE_MS = 60000;
+const LIVE_MARKET_QUOTE_REFRESH_MS = 3000;
+const LIVE_RAIL_REFRESH_DESKTOP_MS = LIVE_MARKET_QUOTE_REFRESH_MS;
+const LIVE_RAIL_REFRESH_MOBILE_MS = LIVE_MARKET_QUOTE_REFRESH_MS;
 const STOCK_TAB_TO_INDEX: Record<StockRailTab, MarketStockIndex> = {
     xutum: 'XUTUM',
     xu100: 'XU100',
