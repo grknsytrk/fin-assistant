@@ -538,6 +538,56 @@ def test_fintables_client_uses_curl_cffi_after_shell_curl_fails(monkeypatch) -> 
     assert cffi_calls[0][4] == "Fintables yield summary"
 
 
+def test_fintables_client_uses_authenticated_proxy_after_local_fallbacks_fail(monkeypatch) -> None:
+    class FakeResponse:
+        def __init__(self, status_code, content, headers):
+            self.status_code = status_code
+            self.content = content
+            self.headers = headers
+
+    calls = []
+
+    class FakeHttpxClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def get(self, url, *args, **kwargs):
+            calls.append((url, kwargs))
+            if len(calls) == 1:
+                return FakeResponse(
+                    403,
+                    b"<html><title>Just a moment...</title>cloudflare</html>",
+                    {"content-type": "text/html"},
+                )
+            return FakeResponse(
+                200,
+                b'{"1w":{"prev_close_date":"2026-04-23T21:00:00Z","prev_close":10,"high":12,"low":9}}',
+                {"content-type": "application/json"},
+            )
+
+    def fail_fallback(*_args, **_kwargs):
+        raise fund_service.FintablesUpstreamError("fallback unavailable")
+
+    monkeypatch.setattr(fund_service.httpx, "Client", FakeHttpxClient)
+    monkeypatch.setattr(fund_service, "_fintables_curl_payload", fail_fallback)
+    monkeypatch.setattr(fund_service, "_fintables_curl_cffi_payload", fail_fallback)
+    monkeypatch.setattr(fund_service, "FINTABLES_PROXY_BASE_URL", "https://fin-assistant.example.workers.dev")
+    monkeypatch.setattr(fund_service, "FINTABLES_PROXY_TOKEN", "proxy-token")
+
+    payload = fund_service.FintablesClient().fetch_yield_summary("TLY")
+
+    assert payload["periods"]["1w"]["prev_close"] == 10
+    assert calls[1][0] == "https://fin-assistant.example.workers.dev/internal/fintables/yield-summary"
+    assert calls[1][1]["headers"]["Authorization"] == "Bearer proxy-token"
+    assert calls[1][1]["params"] == {"code": "TLY"}
+
+
 def test_normalize_tefas_fund_list_payload_maps_list_snapshot_rows() -> None:
     rows = fund_service._normalize_tefas_fund_list_payload(
         {

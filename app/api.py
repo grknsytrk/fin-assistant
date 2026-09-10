@@ -141,7 +141,7 @@ _FUND_HISTORY_HEARTBEAT_INTERVAL_SECONDS = float(
 _FUND_HISTORY_MAX_PHASES = int(os.getenv("RAGFIN_FUND_HISTORY_MAX_PHASES", "2"))
 # Bump when the history assembly strategy changes so legacy partial series and
 # completed jobs cannot suppress a fresh daily backfill.
-_FUND_HISTORY_KEY_VERSION = 4
+_FUND_HISTORY_KEY_VERSION = 5
 _ADMIN_REFRESH_TOKEN_ENV = "RAGFIN_ADMIN_REFRESH_TOKEN"
 _ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS = int(
     os.getenv("RAGFIN_ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS", "370")

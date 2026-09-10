@@ -64,6 +64,11 @@ FINTABLES_YIELD_SUMMARY_ENDPOINT = os.getenv(
     "RAGFIN_FINTABLES_YIELD_SUMMARY_ENDPOINT",
     f"{FINTABLES_GATE_BASE_URL}/barbar/server/yield",
 )
+FINTABLES_PROXY_BASE_URL = os.getenv("RAGFIN_FINTABLES_PROXY_BASE_URL", "").rstrip("/")
+FINTABLES_PROXY_TOKEN = (
+    os.getenv("RAGFIN_FINTABLES_PROXY_TOKEN", "").strip()
+    or os.getenv("RAGFIN_ADMIN_REFRESH_TOKEN", "").strip()
+)
 FINTABLES_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_FINTABLES_TIMEOUT_SECONDS", "12"))
 FINTABLES_FUND_BASE_URL = os.getenv(
     "RAGFIN_FINTABLES_FUND_BASE_URL",
@@ -1058,6 +1063,44 @@ def _fintables_curl_cffi_payload(
         )
     except Exception as exc:
         raise FintablesUpstreamError(f"{context}: curl_cffi fallback failed: {exc}") from exc
+    return _decode_fintables_json_response(
+        response.status_code,
+        dict(response.headers),
+        response.content,
+        context=context,
+    )
+
+
+def _fintables_proxy_payload(
+    endpoint: str,
+    *,
+    params: Dict[str, Any],
+    timeout_seconds: float,
+    context: str,
+) -> Dict[str, Any]:
+    """Fetch through the authenticated edge proxy when the HF egress is blocked."""
+
+    if not FINTABLES_PROXY_BASE_URL or not FINTABLES_PROXY_TOKEN:
+        raise FintablesUpstreamError(f"{context}: Fintables proxy is not configured")
+    if endpoint.rstrip("/").endswith("/barbar/udf/history"):
+        proxy_path = "/internal/fintables/udf/history"
+    elif endpoint.rstrip("/").endswith("/barbar/server/yield"):
+        proxy_path = "/internal/fintables/yield-summary"
+    else:
+        raise FintablesUpstreamError(f"{context}: unsupported Fintables proxy endpoint")
+    proxy_url = f"{FINTABLES_PROXY_BASE_URL}{proxy_path}"
+    try:
+        with httpx.Client(timeout=timeout_seconds, follow_redirects=True) as client:
+            response = client.get(
+                proxy_url,
+                params=params,
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {FINTABLES_PROXY_TOKEN}",
+                },
+            )
+    except httpx.HTTPError as exc:
+        raise FintablesUpstreamError(f"{context}: Fintables proxy request failed: {exc}") from exc
     return _decode_fintables_json_response(
         response.status_code,
         dict(response.headers),
@@ -3087,6 +3130,18 @@ class FintablesClient:
                         context=context,
                     )
                 except FintablesUpstreamError as cffi_exc:
+                    if FINTABLES_PROXY_BASE_URL and FINTABLES_PROXY_TOKEN:
+                        try:
+                            return _fintables_proxy_payload(
+                                endpoint,
+                                params=params,
+                                timeout_seconds=self.timeout_seconds,
+                                context=context,
+                            )
+                        except FintablesUpstreamError as proxy_exc:
+                            raise FintablesUpstreamError(
+                                f"{curl_exc}; {cffi_exc}; {proxy_exc}"
+                            ) from proxy_exc
                     raise FintablesUpstreamError(f"{curl_exc}; {cffi_exc}") from cffi_exc
 
     def fetch_udf_history(self, fund_code: str, start_date: date, end_date: date) -> List[Dict[str, Any]]:

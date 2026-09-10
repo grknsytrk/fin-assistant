@@ -81,6 +81,7 @@ Backend Space güncellenirken yalnızca uygulama dosyaları ve bağımlılıklar
 Canlı servislerde gizli değişkenler platformların secret/variable alanlarında tutulmalıdır:
 
 - Hugging Face: `RAGFIN_DATABASE_URL`, `RAGFIN_REDIS_URL` ve KAP/API anahtarları secret olarak.
+- Hugging Face: performans geçmişi için Fintables birincildir; çıkış IP'si Gate tarafından engellenirse `RAGFIN_FINTABLES_PROXY_BASE_URL` ile token korumalı Cloudflare proxy kullanılabilir. Proxy token'ı boş bırakılırsa `RAGFIN_ADMIN_REFRESH_TOKEN` kullanılır.
 - Hugging Face: `RAGFIN_CACHE_BACKEND=redis` variable olarak.
 - Hugging Face: `RAGFIN_ADMIN_REFRESH_TOKEN` secret olarak.
 - Cloudflare: `VITE_API_BASE_URL` build variable olarak.

@@ -2,6 +2,11 @@ const FAST_REFRESH_PATH = "/admin/kap/refresh?fast=1";
 const DEEP_REFRESH_PATH = "/admin/kap/refresh";
 const REFRESH_TIMEOUT_MS = 90_000;
 const REFRESH_ATTEMPTS = 2;
+const FINTABLES_GATE_BASE_URL = "https://gate.fintables.com";
+const FINTABLES_PROXY_PATHS = new Set([
+    "/internal/fintables/udf/history",
+    "/internal/fintables/yield-summary",
+]);
 
 function asErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
@@ -9,6 +14,96 @@ function asErrorMessage(error: unknown): string {
 
 async function wait(milliseconds: number): Promise<void> {
     await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function jsonResponse(body: Record<string, unknown>, status: number): Response {
+    return new Response(JSON.stringify(body), {
+        status,
+        headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+        },
+    });
+}
+
+async function secretsMatch(provided: string, expected: string): Promise<boolean> {
+    if (!provided || !expected) return false;
+    const encoder = new TextEncoder();
+    const [providedHash, expectedHash] = await Promise.all([
+        crypto.subtle.digest("SHA-256", encoder.encode(provided)),
+        crypto.subtle.digest("SHA-256", encoder.encode(expected)),
+    ]);
+    return crypto.subtle.timingSafeEqual(providedHash, expectedHash);
+}
+
+function copyQueryParam(source: URL, target: URL, name: string): string | null {
+    const value = source.searchParams.get(name)?.trim() || "";
+    if (!value) return null;
+    target.searchParams.set(name, value);
+    return value;
+}
+
+async function handleFintablesProxy(request: Request, env: Env): Promise<Response | null> {
+    const requestUrl = new URL(request.url);
+    if (!FINTABLES_PROXY_PATHS.has(requestUrl.pathname)) return null;
+    if (request.method !== "GET") {
+        return jsonResponse({ error: "method_not_allowed" }, 405);
+    }
+
+    const expectedToken = String(env.FIN_API_ADMIN_TOKEN || "").trim();
+    const providedToken = request.headers.get("Authorization") || "";
+    if (!expectedToken) {
+        return jsonResponse({ error: "proxy_not_configured" }, 503);
+    }
+    if (!(await secretsMatch(providedToken, `Bearer ${expectedToken}`))) {
+        return jsonResponse({ error: "unauthorized" }, 401);
+    }
+
+    const target = new URL(
+        requestUrl.pathname === "/internal/fintables/udf/history"
+            ? `${FINTABLES_GATE_BASE_URL}/barbar/udf/history`
+            : `${FINTABLES_GATE_BASE_URL}/barbar/server/yield`,
+    );
+    if (requestUrl.pathname === "/internal/fintables/udf/history") {
+        const symbol = copyQueryParam(requestUrl, target, "symbol");
+        const resolution = copyQueryParam(requestUrl, target, "resolution");
+        const from = copyQueryParam(requestUrl, target, "from");
+        const to = copyQueryParam(requestUrl, target, "to");
+        if (!symbol || !/^[A-Z0-9._-]{1,20}$/.test(symbol) || resolution !== "D" ||
+            !from || !/^\d{8,12}$/.test(from) || !to || !/^\d{8,12}$/.test(to)) {
+            return jsonResponse({ error: "invalid_history_query" }, 400);
+        }
+    } else {
+        const code = copyQueryParam(requestUrl, target, "code");
+        if (!code || !/^[A-Z0-9._-]{1,20}$/.test(code)) {
+            return jsonResponse({ error: "invalid_yield_query" }, 400);
+        }
+    }
+
+    try {
+        const upstream = await fetch(target, {
+            headers: {
+                Accept: "*/*",
+                "Cache-Control": "no-cache",
+                "User-Agent": "PostmanRuntime/7.51.0",
+            },
+        });
+        const headers = new Headers(upstream.headers);
+        headers.set("Cache-Control", "no-store");
+        headers.delete("Set-Cookie");
+        return new Response(upstream.body, {
+            status: upstream.status,
+            statusText: upstream.statusText,
+            headers,
+        });
+    } catch (error) {
+        console.error(JSON.stringify({
+            message: "Fintables proxy upstream request failed",
+            path: requestUrl.pathname,
+            error: asErrorMessage(error),
+        }));
+        return jsonResponse({ error: "upstream_unavailable" }, 502);
+    }
 }
 
 async function requestKapRefresh(baseUrl: string, token: string, path: string): Promise<Response> {
@@ -105,6 +200,8 @@ async function refreshKapFlow(controller: ScheduledController, env: Env): Promis
 export default {
     async fetch(request: Request, env: Env): Promise<Response> {
         const url = new URL(request.url);
+        const fintablesResponse = await handleFintablesProxy(request, env);
+        if (fintablesResponse) return fintablesResponse;
         if (url.pathname === "/__scheduled") {
             return new Response("Not Found", { status: 404 });
         }
