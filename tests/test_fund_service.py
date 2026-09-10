@@ -499,6 +499,45 @@ def test_fintables_client_uses_curl_fallback_after_waf(monkeypatch) -> None:
     assert fallback_calls[0][3] == "Fintables yield summary"
 
 
+def test_fintables_client_uses_curl_cffi_after_shell_curl_fails(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 403
+        headers = {"content-type": "text/html"}
+        content = b"<html><title>Just a moment...</title>cloudflare</html>"
+
+    class FakeHttpxClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    cffi_calls = []
+
+    def fail_shell_curl(*_args, **_kwargs):
+        raise fund_service.FintablesUpstreamError("shell curl unavailable")
+
+    def fake_curl_cffi_payload(url, *, params, headers, timeout_seconds, context):
+        cffi_calls.append((url, params, headers, timeout_seconds, context))
+        return {"1w": {"prev_close_date": "2026-04-23T21:00:00Z", "prev_close": 10, "high": 12, "low": 9}}
+
+    monkeypatch.setattr(fund_service.httpx, "Client", FakeHttpxClient)
+    monkeypatch.setattr(fund_service, "_fintables_curl_payload", fail_shell_curl)
+    monkeypatch.setattr(fund_service, "_fintables_curl_cffi_payload", fake_curl_cffi_payload)
+
+    payload = fund_service.FintablesClient().fetch_yield_summary("TLY")
+
+    assert payload["periods"]["1w"]["prev_close"] == 10
+    assert cffi_calls
+    assert cffi_calls[0][4] == "Fintables yield summary"
+
+
 def test_normalize_tefas_fund_list_payload_maps_list_snapshot_rows() -> None:
     rows = fund_service._normalize_tefas_fund_list_payload(
         {

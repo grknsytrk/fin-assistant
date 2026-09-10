@@ -1032,6 +1032,40 @@ def _fintables_curl_payload(
     )
 
 
+def _fintables_curl_cffi_payload(
+    url: str,
+    *,
+    params: Dict[str, Any],
+    headers: Dict[str, str],
+    timeout_seconds: float,
+    context: str,
+) -> Dict[str, Any]:
+    """Use a browser-shaped TLS client when the shell curl fallback is absent."""
+
+    try:
+        from curl_cffi import requests as curl_requests  # type: ignore
+    except Exception as exc:
+        raise FintablesUpstreamError(f"{context}: curl_cffi fallback is unavailable") from exc
+
+    try:
+        response = curl_requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=timeout_seconds,
+            allow_redirects=True,
+            impersonate="chrome131",
+        )
+    except Exception as exc:
+        raise FintablesUpstreamError(f"{context}: curl_cffi fallback failed: {exc}") from exc
+    return _decode_fintables_json_response(
+        response.status_code,
+        dict(response.headers),
+        response.content,
+        context=context,
+    )
+
+
 def _decode_tefas_json_response(
     status_code: int,
     headers: Dict[str, str],
@@ -2972,13 +3006,26 @@ class FintablesClient:
         except FintablesUpstreamError as exc:
             if not FINTABLES_CURL_FALLBACK_ENABLED or FINTABLES_GATE_BLOCKED_MESSAGE not in str(exc):
                 raise
-            return _fintables_curl_payload(
-                endpoint,
-                params=params,
-                headers=self._curl_headers(fund_code),
-                timeout_seconds=self.timeout_seconds,
-                context=context,
-            )
+            curl_headers = self._curl_headers(fund_code)
+            try:
+                return _fintables_curl_payload(
+                    endpoint,
+                    params=params,
+                    headers=curl_headers,
+                    timeout_seconds=self.timeout_seconds,
+                    context=context,
+                )
+            except FintablesUpstreamError as curl_exc:
+                try:
+                    return _fintables_curl_cffi_payload(
+                        endpoint,
+                        params=params,
+                        headers=curl_headers,
+                        timeout_seconds=self.timeout_seconds,
+                        context=context,
+                    )
+                except FintablesUpstreamError as cffi_exc:
+                    raise FintablesUpstreamError(f"{curl_exc}; {cffi_exc}") from cffi_exc
 
     def fetch_udf_history(self, fund_code: str, start_date: date, end_date: date) -> List[Dict[str, Any]]:
         normalized_code = normalize_fund_code(fund_code)
