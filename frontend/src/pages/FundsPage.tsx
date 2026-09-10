@@ -3610,6 +3610,32 @@ function summaryReturnForCompareRange(
     return null;
 }
 
+function returnFromDatedValues(
+    points: Array<{ date: string; value: number }> | undefined,
+    period: ComparisonPeriod,
+): number | null {
+    const ordered = [...(points || [])]
+        .filter((point) => point.date && Number.isFinite(Number(point.value)) && Number(point.value) > 0)
+        .sort((a, b) => a.date.localeCompare(b.date));
+    if (ordered.length < 2) return null;
+    const latest = ordered[ordered.length - 1];
+    const startDate = rangeStartDate(period, latest.date, '');
+    let base: (typeof ordered)[number] | null = null;
+    for (const point of ordered) {
+        if (point.date > startDate) break;
+        base = point;
+    }
+    if (!base) return null;
+    return returnBetween(latest.value, base.value);
+}
+
+function returnFromFundPoints(points: FundPricePoint[], period: ComparisonPeriod): number | null {
+    return returnFromDatedValues(
+        sortFundPoints(points).map((point) => ({ date: point.date, value: Number(point.price) })),
+        period,
+    );
+}
+
 function cagrForRange(points: FundPricePoint[], years: number, endIso: string): number | null {
     const ordered = sortFundPoints(points);
     if (ordered.length < 2) return null;
@@ -4918,9 +4944,13 @@ function FundComparisonControls({
 function FundReturnComparison({
     comparison,
     containerRef,
+    comparisonHistory,
+    basePerformancePoints,
 }: {
     comparison: FundComparisonState;
     containerRef: { current: HTMLDivElement | null };
+    comparisonHistory: MarketComparisonHistoryResponse | null;
+    basePerformancePoints: FundPricePoint[];
 }) {
     const [hover, setHover] = useState<{ assetId: string; x: number; y: number; width: number; height: number } | null>(null);
     const {
@@ -4933,10 +4963,14 @@ function FundReturnComparison({
 
     const chartItems = useMemo(() => {
         if (!baseAsset) return [];
+        const comparisonHistoryById = new Map((comparisonHistory?.assets || []).map((asset) => [asset.id, asset]));
         const items = [baseAsset, ...selectedAssets]
             .map((asset) => ({
                 asset,
-                value: periodReturnFromAsset(asset, period),
+                value: asset.id === baseAsset.id
+                    ? returnFromFundPoints(basePerformancePoints, period) ?? periodReturnFromAsset(asset, period)
+                    : returnFromDatedValues(comparisonHistoryById.get(asset.id)?.points, period)
+                        ?? periodReturnFromAsset(asset, period),
             }))
             .filter((item) => item.value != null);
         return items.sort((a, b) => {
@@ -4944,7 +4978,7 @@ function FundReturnComparison({
             if (valueDiff !== 0) return valueDiff;
             return (a.asset.displaySymbol || a.asset.symbol).localeCompare(b.asset.displaySymbol || b.asset.symbol, 'tr');
         });
-    }, [baseAsset, period, selectedAssets]);
+    }, [baseAsset, basePerformancePoints, comparisonHistory, period, selectedAssets]);
 
     useEffect(() => {
         setHover(null);
@@ -6428,6 +6462,8 @@ export default function FundsPage({
                                             <FundReturnComparison
                                                 comparison={comparisonState}
                                                 containerRef={comparisonPanelRef}
+                                                comparisonHistory={comparisonHistory}
+                                                basePerformancePoints={visiblePerformancePoints}
                                             />
                                             {yieldLoading && !yieldSummary && (
                                                 <FinLoader message="Getiri kartları yükleniyor" />
