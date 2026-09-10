@@ -662,28 +662,6 @@ function rangeStartDate(range: FundChartRange, endDateIso: string, customStartDa
     return start.toISOString().slice(0, 10);
 }
 
-function finitePeriodReturn(value: number | null | undefined): number | null {
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function mergePeriodReturnSources(
-    ...sources: Array<FundSummary['period_returns'] | undefined>
-): FundSummary['period_returns'] {
-    return DETAIL_RETURN_PERIODS.reduce<FundSummary['period_returns']>((returns, period) => {
-        for (const source of sources) {
-            const value = finitePeriodReturn(source?.[period.key]);
-            if (value != null) {
-                returns[period.key] = value;
-                break;
-            }
-        }
-        if (!(period.key in returns)) {
-            returns[period.key] = null;
-        }
-        return returns;
-    }, {});
-}
-
 function filterPointsForRange(
     points: FundPricePoint[],
     range: FundChartRange,
@@ -920,20 +898,6 @@ function formatOverviewMetricFullValue(value: number | null | undefined, suffix?
     const formatted = formatWholeNumber(value);
     if (formatted === '-') return formatted;
     return suffix ? `${formatted} ${suffix}` : formatted;
-}
-
-function periodReturnsFromYieldSummary(
-    summary: FundYieldSummaryResponse | null,
-    latestPrice: number | null,
-): FundSummary['period_returns'] {
-    if (!summary?.periods || latestPrice == null || !Number.isFinite(latestPrice) || latestPrice <= 0) {
-        return {};
-    }
-    const periodKeys = ['1w', '1m', '3m', '6m', 'ytd', '1y'] as const;
-    return periodKeys.reduce<FundSummary['period_returns']>((returns, key) => {
-        returns[key] = returnBetween(latestPrice, summary.periods[key]?.prev_close);
-        return returns;
-    }, {});
 }
 
 function pointOnOrBefore(points: FundPricePoint[], targetDate: string): FundPricePoint | null {
@@ -5535,11 +5499,37 @@ export default function FundsPage({
         setPerformanceLoading(true);
         setPerformanceError(null);
         setHistoryBackfillError(null);
-        apiClient
+            apiClient
             .fundPerformance(normalizedCode, { startDate: isoDateMonthsAgo(FUND_INITIAL_PERFORMANCE_MONTHS) })
             .then((payload) => {
                 if (!alive) return;
                 setPerformance(payload);
+                const completedHistoryJob = payload.source_metadata?.history_job;
+                const requestedStart = payload.source_metadata?.requested_start_date
+                    || completedHistoryJob?.requested_start
+                    || null;
+                const refreshStart = completedHistoryJob?.effective_start || null;
+                const refreshEnd = completedHistoryJob?.effective_end || null;
+                if (
+                    completedHistoryJob?.status === 'succeeded'
+                    && requestedStart
+                    && refreshStart
+                    && refreshEnd
+                    && refreshStart < requestedStart
+                ) {
+                    void apiClient
+                        .fundPerformance(normalizedCode, {
+                            startDate: refreshStart,
+                            endDate: refreshEnd,
+                            refresh: true,
+                        })
+                        .then((refreshed) => {
+                            if (alive) setPerformance((current) => mergeFundPerformancePayloads(current, refreshed));
+                        })
+                        .catch(() => {
+                            // The narrow initial series remains usable if the wider refresh fails.
+                        });
+                }
             })
             .catch((err) => {
                 if (!alive) return;
@@ -5901,11 +5891,9 @@ export default function FundsPage({
                     return returns;
                 }, {});
             }
-            const fromSummary = periodReturnsFromYieldSummary(yieldSummary, detailLatestPrice);
-            const fromPerformance = periodReturnsFromPerformancePoints(visiblePerformancePoints);
-            return mergePeriodReturnSources(fromPerformance, fromSummary, selectedFund?.period_returns);
+            return periodReturnsFromPerformancePoints(visiblePerformancePoints);
         },
-        [detailLatestPrice, fintablesHistoryPending, selectedFund, visiblePerformancePoints, yieldSummary],
+        [fintablesHistoryPending, visiblePerformancePoints],
     );
     const fundsDocumentTitle = useMemo(() => {
         if (fundCode || selectedFund) {
