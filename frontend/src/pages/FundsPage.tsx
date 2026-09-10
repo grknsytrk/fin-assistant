@@ -5728,12 +5728,13 @@ export default function FundsPage({
 
     const fundSearchIndex = useMemo(() => (funds?.rows || []).map((row) => ({
         row,
-        haystack: `${row.fund_code} ${row.name} ${row.fund_type || ''} ${row.founder_company || ''} ${row.manager_company || ''}`
-            .toLocaleLowerCase('tr-TR'),
+        haystack: normalizeCompareSearch(
+            `${row.fund_code} ${row.name} ${row.fund_type || ''} ${row.founder_company || ''} ${row.manager_company || ''}`,
+        ),
     })), [funds]);
 
     const filteredFunds = useMemo(() => {
-        const needle = deferredSearchTerm.trim().toLocaleLowerCase('tr-TR');
+        const needle = normalizeCompareSearch(deferredSearchTerm);
         const filtered = fundSearchIndex
             .filter(({ row, haystack }) => {
             if (needle) {
