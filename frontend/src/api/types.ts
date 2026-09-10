@@ -171,6 +171,10 @@ export interface FundSourceMetadata {
   requested_resolution?: 'daily' | string | null;
   available_start_date?: string | null;
   available_end_date?: string | null;
+  latest_point_date?: string | null;
+  coverage_gap_days?: number | null;
+  coverage_gap_business_days?: number | null;
+  internal_gap_count?: number | null;
   daily_upgrade_state?: 'idle' | 'pending' | 'complete' | 'unavailable' | 'failed' | string | null;
   history_job?: FundHistoryJob | null;
   source_policy?: string | null;

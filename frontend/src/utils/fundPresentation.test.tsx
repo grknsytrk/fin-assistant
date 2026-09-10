@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { FundPerformanceResponse, FundPricePoint } from '../api/types';
 import {
     canonicalFundPrice,
+    buildFundHistoryDiagnosticLines,
     formatFundQuotePrice,
     formatFundReportDate,
     hasFundRangeStartCoverage,
@@ -128,5 +129,51 @@ describe('fund presentation helpers', () => {
 
         expect(merged?.points).toEqual(current.points);
         expect(merged?.status).toBe('ok');
+    });
+
+    it('explains partial young-fund history and the background job state', () => {
+        const performance = performancePayload(
+            [
+                performancePoint('2026-05-05', 1.0, 'fintables_udf_history'),
+                performancePoint('2026-09-10', 1.1, 'fintables_udf_history'),
+            ],
+            {
+                source: 'sqlite',
+                history_source_used: 'fintables_udf_history',
+                primary_source: 'fintables',
+                coverage_state: 'range_incomplete',
+                requested_start_date: '2025-09-10',
+                requested_end_date: '2026-09-10',
+                available_start_date: '2026-05-05',
+                available_end_date: '2026-09-10',
+                coverage_gap_business_days: 0,
+                source_policy: 'fintables_primary_tefas_fallback',
+                history_job: {
+                    job_id: 'history-puk',
+                    fund_code: 'PUK',
+                    status: 'succeeded',
+                    requested_start: '2025-09-10',
+                    requested_end: '2026-09-10',
+                    effective_start: '2025-09-09',
+                    effective_end: '2026-09-10',
+                    fintables_point_count: 2,
+                    phase: 1,
+                },
+            },
+        );
+
+        const lines = buildFundHistoryDiagnosticLines({
+            fundCode: 'PUK',
+            performance,
+            points: performance.points,
+            periodReturns: { '1w': -1, '1m': -2, '3m': 3, '6m': null, ytd: null, '1y': null },
+        });
+
+        expect(lines.join('\n')).toContain('İstenen aralık:');
+        expect(lines.join('\n')).toContain('Mevcut aralık:');
+        expect(lines.join('\n')).toContain('Fintables UDF geçmişi');
+        expect(lines.join('\n')).toContain('güncel uç mevcut');
+        expect(lines.join('\n')).toContain('6A, YBB, 1Y');
+        expect(lines.join('\n')).toContain('history-puk');
     });
 });

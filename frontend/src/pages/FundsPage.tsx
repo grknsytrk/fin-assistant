@@ -65,6 +65,7 @@ import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTit
 import { useWatchlist } from '../hooks/useWatchlist';
 import {
     canonicalFundPrice,
+    buildFundHistoryDiagnosticLines,
     formatFundQuotePrice,
     formatFundReportDate,
     hasFundRangeStartCoverage,
@@ -633,6 +634,13 @@ function sortFundPoints(points: FundPerformanceResponse['points'] | undefined): 
     return [...(points || [])]
         .filter((point) => Number.isFinite(Number(point.price)) && Number(point.price) > 0 && point.date)
         .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+}
+
+function latestFundDate(...values: Array<string | null | undefined>): string | null {
+    return values
+        .filter((value): value is string => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value))
+        .sort((left, right) => left.localeCompare(right))
+        .at(-1) || null;
 }
 
 function rangeStartDate(range: FundChartRange, endDateIso: string, customStartDate: string): string {
@@ -5768,9 +5776,17 @@ export default function FundsPage({
         () => sortFundPoints(heatmapSourcePerformance?.points),
         [heatmapSourcePerformance],
     );
+    const latestPerformanceDate = performancePoints[performancePoints.length - 1]?.date || null;
+    const latestAvailableDate = latestFundDate(
+        selectedFund?.as_of,
+        performance?.as_of,
+        performance?.source_metadata?.available_end_date,
+        performance?.source_metadata?.date_max,
+        latestPerformanceDate,
+    ) || new Date().toISOString().slice(0, 10);
     const chartEndDate = chartRange === 'custom'
-        ? (customEndDate || selectedFund?.as_of || new Date().toISOString().slice(0, 10))
-        : (selectedFund?.as_of || performance?.as_of || new Date().toISOString().slice(0, 10));
+        ? (customEndDate || latestAvailableDate)
+        : latestAvailableDate;
     const chartPoints = useMemo(
         () => filterPointsForRange(performancePoints, chartRange, chartEndDate, customStartDate, customEndDate),
         [performancePoints, chartRange, chartEndDate, customStartDate, customEndDate],
@@ -5879,36 +5895,36 @@ export default function FundsPage({
             controller.abort();
         };
     }, [comparisonAssetRequestKey, comparisonChartEndDate, comparisonChartStartDate, pendingChartRange]);
-    const detailSourceWarnings = useMemo(() => {
-        if (!fundCode) return [];
-        const historyMetadata = performance?.source_metadata;
-        const userHistoryWarnings: string[] = [];
-        if (historyMetadata?.coverage_state === 'range_incomplete' && historyMetadata.available_start_date) {
-            userHistoryWarnings.push(
-                `Bu fon için kullanılabilir geçmiş ${formatDate(historyMetadata.available_start_date)} tarihinden başlıyor.`,
-            );
-        }
-        if (historyMetadata?.coverage_state === 'upgrading') {
-            userHistoryWarnings.push('Mevcut geçmiş gösteriliyor; günlük ayrıntılar arka planda hazırlanıyor.');
-        }
-        if (historyBackfillError) userHistoryWarnings.push(historyBackfillError);
-        const technicalHistoryWarnings = (performance?.source_metadata?.warnings || [])
-            .filter((warning) => !/(internal gap|auto fetch|tefas|fintables|waf|cloudflare|upstream|coverage gap|missing_business_days|already in progress)/i.test(warning));
-        const warnings = [
+    const detailSourceWarnings = useMemo(
+        () => fundCode
+            ? buildFundHistoryDiagnosticLines({
+                fundCode: fundCode.trim().toUpperCase(),
+                performance,
+                points: performancePoints,
+                periodReturns: detailPeriodReturns,
+                historyJob,
+                performanceLoading,
+                performanceError,
+                historyBackfillError,
+                yieldSummary,
+                yieldLoading,
+                yieldError,
+            })
+            : [],
+        [
+            detailPeriodReturns,
+            fundCode,
+            historyBackfillError,
+            historyJob,
+            performance,
             performanceError,
+            performanceLoading,
+            performancePoints,
             yieldError,
-            performanceLoading && !performance ? 'Grafik verisi yükleniyor.' : null,
-            yieldLoading && !yieldSummary ? 'Getiri özeti yükleniyor.' : null,
-            ...userHistoryWarnings,
-            ...technicalHistoryWarnings,
-            performance?.source_metadata?.warning && !/(internal gap|auto fetch|tefas|fintables|waf|cloudflare|upstream|coverage gap|missing_business_days|already in progress)/i.test(performance.source_metadata.warning)
-                ? performance.source_metadata.warning
-                : null,
-            ...(yieldSummary?.source_metadata?.warnings || []),
-            yieldSummary?.source_metadata?.warning,
-        ];
-        return Array.from(new Set(warnings.filter((item): item is string => Boolean(item))));
-    }, [fundCode, historyBackfillError, performance, performanceError, performanceLoading, yieldError, yieldLoading, yieldSummary]);
+            yieldLoading,
+            yieldSummary,
+        ],
+    );
     const visibleFundTypes = categories?.fund_types.length ? categories.fund_types : Array.from(new Set((funds?.rows || []).map((row) => row.fund_type).filter(Boolean))) as string[];
     const visibleRiskValues = categories?.risk_values.length ? categories.risk_values : Array.from(new Set((funds?.rows || []).map((row) => row.risk_value).filter((value): value is number => typeof value === 'number'))).sort((a, b) => a - b);
     const setTableSort = useCallback((key: FundSortKey) => {
@@ -6014,7 +6030,7 @@ export default function FundsPage({
                 .fundPerformance(normalizedCode)
                 .then((payload) => {
                     if (chartRequestIdRef.current !== requestId) return;
-                    setPerformance(payload);
+                    setPerformance((current) => mergeFundPerformancePayloads(current, payload));
                 })
                 .catch((err) => {
                     if (chartRequestIdRef.current !== requestId) return;
@@ -6031,7 +6047,7 @@ export default function FundsPage({
         }
         const endIso = range === 'custom'
             ? (nextCustomEnd || chartEndDate)
-            : (selectedFund?.as_of || performance?.as_of || new Date().toISOString().slice(0, 10));
+            : chartEndDate;
         const startIso = rangeStartDate(range, endIso, nextCustomStart);
         if (hasUsableRangeCoverage(performancePoints, startIso, endIso)) {
             setChartRange(range);
@@ -6047,7 +6063,7 @@ export default function FundsPage({
             .fundPerformance(normalizedCode, { startDate: startIso, endDate: endIso })
             .then((payload) => {
                 if (chartRequestIdRef.current !== requestId) return;
-                setPerformance(payload);
+                setPerformance((current) => mergeFundPerformancePayloads(current, payload));
             })
             .catch((err) => {
                 if (chartRequestIdRef.current !== requestId) return;
@@ -6060,7 +6076,7 @@ export default function FundsPage({
                 setPendingChartRange(null);
                 setPerformanceLoading(false);
             });
-    }, [chartEndDate, customEndDate, customStartDate, fundCode, performance, performancePoints, selectedFund?.as_of]);
+    }, [chartEndDate, customEndDate, customStartDate, fundCode, performance, performancePoints]);
 
     const handleChartRangeSelect = useCallback((range: FundChartRange) => {
         refreshChartRange(range);
@@ -6304,9 +6320,13 @@ export default function FundsPage({
                                     </header>
 
                                     {detailSourceWarnings.length > 0 && (
-                                        <div className="funds-source-warning">
+                                        <div className="funds-source-warning funds-source-warning-detail" role="status" aria-live="polite">
                                             <ShieldAlert size={17} aria-hidden="true" />
-                                            <span>{detailSourceWarnings.slice(0, 2).join(' ')}</span>
+                                            <div className="funds-source-warning-details">
+                                                {detailSourceWarnings.map((warning) => (
+                                                    <div className="funds-source-warning-line" key={warning}>{warning}</div>
+                                                ))}
+                                            </div>
                                         </div>
                                     )}
 

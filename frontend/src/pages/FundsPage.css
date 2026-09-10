@@ -123,6 +123,23 @@
     min-width: 0;
 }
 
+.funds-source-warning-detail {
+    align-items: flex-start;
+}
+
+.funds-source-warning-details {
+    display: grid;
+    flex: 1;
+    min-width: 0;
+    gap: 0.28rem;
+}
+
+.funds-source-warning-line {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+}
+
 .funds-refresh-button {
     display: inline-flex;
     align-items: center;
