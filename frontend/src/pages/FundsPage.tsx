@@ -69,6 +69,7 @@ import {
     formatFundQuotePrice,
     formatFundReportDate,
     hasFundRangeStartCoverage,
+    isFintablesHistoryPending,
     mergeFundPerformancePayloads,
 } from '../utils/fundPresentation';
 import type { FundTab } from '../routing/routes';
@@ -1354,12 +1355,14 @@ function nearestChartPoint<T extends { date: string }>(points: T[], targetDate: 
 
 function FundChartReturnStrip({
     periodReturns,
+    visibleRangeReturn,
     yieldPeriods,
     currency,
     selectedRange,
     onRangeSelect,
 }: {
     periodReturns: FundSummary['period_returns'] | undefined;
+    visibleRangeReturn?: number | null;
     yieldPeriods?: FundYieldSummaryResponse['periods'];
     currency?: string | null;
     selectedRange: FundChartRange;
@@ -1368,7 +1371,9 @@ function FundChartReturnStrip({
     return (
         <div className="fund-chart-return-strip" aria-label="Dönem getirileri">
             {DETAIL_RETURN_PERIODS.map((period) => {
-                const value = periodReturns?.[period.key];
+                const value = selectedRange === period.key
+                    ? visibleRangeReturn
+                    : periodReturns?.[period.key];
                 const bounds = formatYieldBounds(yieldPeriods?.[period.key], currency || 'TRY');
                 return (
                     <button
@@ -1401,6 +1406,7 @@ function FundPerformanceChart({
     customStartDate,
     customEndDate,
     periodReturns,
+    historyPending,
     yieldPeriods,
     currency,
     comparison,
@@ -1420,6 +1426,7 @@ function FundPerformanceChart({
     customStartDate: string;
     customEndDate: string;
     periodReturns: FundSummary['period_returns'] | undefined;
+    historyPending: boolean;
     yieldPeriods?: FundYieldSummaryResponse['periods'];
     currency?: string | null;
     comparison: FundComparisonState;
@@ -1433,7 +1440,10 @@ function FundPerformanceChart({
     const width = 860;
     const height = 430;
     const padding = { top: 34, right: 24, bottom: 50, left: 74 };
+    const plotWidth = width - padding.left - padding.right;
+    const plotHeight = height - padding.top - padding.bottom;
     const validPoints = points.filter((point) => Number.isFinite(Number(point.price)) && Number(point.price) > 0);
+    const loading = historyPending || pendingRange === selectedRange;
     const pointWindowKey = `${fundCode}:${selectedRange}:${validPoints.length}:${validPoints[0]?.date || ''}:${validPoints[validPoints.length - 1]?.date || ''}`;
     useEffect(() => {
         setHoverIndex(null);
@@ -1453,11 +1463,13 @@ function FundPerformanceChart({
     const rangeReturn = validPoints.length >= 2
         ? returnBetween(Number(validPoints[validPoints.length - 1].price), Number(validPoints[0].price))
         : null;
+    const visibleRangeReturn = loading ? null : rangeReturn;
     const color = rangeReturn == null || rangeReturn >= 0 ? '#22c55e' : '#ff4d5e';
 
     const returnStrip = (
         <FundChartReturnStrip
-            periodReturns={periodReturns}
+            periodReturns={loading ? undefined : periodReturns}
+            visibleRangeReturn={visibleRangeReturn}
             yieldPeriods={yieldPeriods}
             currency={currency}
             selectedRange={selectedRange}
@@ -1484,7 +1496,7 @@ function FundPerformanceChart({
                     Özel
                 </button>
                 <div className={`fund-chart-return ${selectedRange === 'custom' ? pctClass(rangeReturn) : ''}`}>
-                    {selectedRange === 'custom' ? formatPct(rangeReturn) : '-'}
+                    {selectedRange === 'custom' ? formatPct(visibleRangeReturn) : '-'}
                 </div>
             </div>
         </div>
@@ -1495,6 +1507,39 @@ function FundPerformanceChart({
             <input type="date" value={customEndDate} onChange={(event) => onCustomEndDateChange(event.target.value)} />
         </div>
     ) : null;
+
+    if (loading) {
+        const loadingValues = [18, 22, 20, 27, 24, 30, 26, 34, 32, 38, 35, 42];
+        const loadingMin = Math.min(...loadingValues);
+        const loadingSpan = Math.max(0.01, Math.max(...loadingValues) - loadingMin);
+        const loadingLine = loadingValues.map((value, index) =>
+            `${index === 0 ? 'M' : 'L'} ${padding.left + index / (loadingValues.length - 1) * (width - padding.left - padding.right)} ${padding.top + plotHeight - (value - loadingMin) / loadingSpan * Math.max(80, plotHeight * 0.72)}`,
+        ).join(' ');
+        const loadingTicks = [padding.top, padding.top + plotHeight / 3, padding.top + (plotHeight * 2) / 3, padding.top + plotHeight];
+        return (
+            <section className="fund-chart-panel" aria-busy="true" aria-label={`${fundCode} fiyat grafiği`}>
+                {controls}
+                {customRangeInputs}
+                <svg
+                    className="fund-detail-chart fund-chart-loading"
+                    viewBox={`0 0 ${width} ${height}`}
+                    preserveAspectRatio="xMidYMid meet"
+                    role="img"
+                    aria-label="Grafik yükleniyor"
+                >
+                    {loadingTicks.map((y) => (
+                        <line key={y} x1={padding.left} x2={width - padding.right} y1={y} y2={y} className="fund-chart-gridline" />
+                    ))}
+                    <path className="fund-chart-loading-track" d={loadingLine} />
+                    <path className="fund-chart-loading-line" d={loadingLine} pathLength={100} />
+                    <text x={width / 2} y={height - 18} className="fund-chart-loading-label" textAnchor="middle">
+                        {historyPending ? 'Fintables günlük geçmişi hazırlanıyor…' : 'Grafik verisi yükleniyor…'}
+                    </text>
+                </svg>
+                {rangeError && <div className="fund-chart-error">{rangeError}</div>}
+            </section>
+        );
+    }
 
     if (validPoints.length < 2) {
         return (
@@ -1508,8 +1553,6 @@ function FundPerformanceChart({
         );
     }
 
-    const plotWidth = width - padding.left - padding.right;
-    const plotHeight = height - padding.top - padding.bottom;
     const gradientId = `fund-chart-area-${fundCode.replace(/[^a-zA-Z0-9]/g, '')}-${selectedRange}`;
     const tickIndexes = Array.from(new Set([0, Math.floor((validPoints.length - 1) / 2), validPoints.length - 1]));
     const firstChartDate = validPoints[0]?.date || null;
@@ -4521,11 +4564,13 @@ function FundComparisonPage({
 function useFundComparisonState({
     selectedFund,
     baseReturns,
+    baseReturnsReady,
     funds,
     openSearchSignal,
 }: {
     selectedFund: FundSummary | null;
-    baseReturns: FundSummary['period_returns'];
+    baseReturns: FundSummary['period_returns'] | null;
+    baseReturnsReady: boolean;
     funds: FundSummary[];
     openSearchSignal: number;
 }): FundComparisonState {
@@ -4554,15 +4599,15 @@ function useFundComparisonState({
             label: selectedFund.name,
             logoName: selectedFund.founder_company || selectedFund.manager_company || selectedFund.name,
             returns: {
-                '1w': baseReturns?.['1w'] ?? selectedFund.period_returns?.['1w'] ?? null,
-                '1m': baseReturns?.['1m'] ?? selectedFund.period_returns?.['1m'] ?? null,
-                '3m': baseReturns?.['3m'] ?? selectedFund.period_returns?.['3m'] ?? null,
-                '6m': baseReturns?.['6m'] ?? selectedFund.period_returns?.['6m'] ?? null,
-                ytd: baseReturns?.ytd ?? selectedFund.period_returns?.ytd ?? null,
-                '1y': baseReturns?.['1y'] ?? selectedFund.period_returns?.['1y'] ?? null,
+                '1w': baseReturnsReady ? (baseReturns?.['1w'] ?? selectedFund.period_returns?.['1w'] ?? null) : null,
+                '1m': baseReturnsReady ? (baseReturns?.['1m'] ?? selectedFund.period_returns?.['1m'] ?? null) : null,
+                '3m': baseReturnsReady ? (baseReturns?.['3m'] ?? selectedFund.period_returns?.['3m'] ?? null) : null,
+                '6m': baseReturnsReady ? (baseReturns?.['6m'] ?? selectedFund.period_returns?.['6m'] ?? null) : null,
+                ytd: baseReturnsReady ? (baseReturns?.ytd ?? selectedFund.period_returns?.ytd ?? null) : null,
+                '1y': baseReturnsReady ? (baseReturns?.['1y'] ?? selectedFund.period_returns?.['1y'] ?? null) : null,
             },
         };
-    }, [baseReturns, selectedFund, selectedFundCode]);
+    }, [baseReturns, baseReturnsReady, selectedFund, selectedFundCode]);
 
     useEffect(() => {
         setSelectedIds([...DEFAULT_COMPARISON_IDS]);
@@ -5446,6 +5491,7 @@ export default function FundsPage({
         }
         let alive = true;
         const normalizedCode = fundCode.trim().toUpperCase();
+        setPerformance(null);
         setPerformanceLoading(true);
         setPerformanceError(null);
         setHistoryBackfillError(null);
@@ -5769,6 +5815,9 @@ export default function FundsPage({
 
     const selectedFund = detail || filteredFunds.find((row) => row.fund_code === fundCode) || null;
     const performancePoints = useMemo(() => sortFundPoints(performance?.points), [performance]);
+    const fintablesHistoryPending = performanceLoading && !performance
+        || isFintablesHistoryPending(performance, historyJob);
+    const visiblePerformancePoints = fintablesHistoryPending ? [] : performancePoints;
     const heatmapSourcePerformance = hasFullHistoryPerformance(performance)
         ? performance
         : (hasFullHistoryPerformance(heatmapPerformance) ? heatmapPerformance : performance);
@@ -5776,7 +5825,8 @@ export default function FundsPage({
         () => sortFundPoints(heatmapSourcePerformance?.points),
         [heatmapSourcePerformance],
     );
-    const latestPerformanceDate = performancePoints[performancePoints.length - 1]?.date || null;
+    const visibleHeatmapPerformancePoints = fintablesHistoryPending ? [] : heatmapPerformancePoints;
+    const latestPerformanceDate = visiblePerformancePoints[visiblePerformancePoints.length - 1]?.date || null;
     const latestAvailableDate = latestFundDate(
         selectedFund?.as_of,
         performance?.as_of,
@@ -5788,11 +5838,11 @@ export default function FundsPage({
         ? (customEndDate || latestAvailableDate)
         : latestAvailableDate;
     const chartPoints = useMemo(
-        () => filterPointsForRange(performancePoints, chartRange, chartEndDate, customStartDate, customEndDate),
-        [performancePoints, chartRange, chartEndDate, customStartDate, customEndDate],
+        () => filterPointsForRange(visiblePerformancePoints, chartRange, chartEndDate, customStartDate, customEndDate),
+        [visiblePerformancePoints, chartRange, chartEndDate, customStartDate, customEndDate],
     );
-    const monthlyReturns = useMemo(() => monthlyReturnsFromPoints(heatmapPerformancePoints), [heatmapPerformancePoints]);
-    const overviewMetricSeries = useMemo(() => overviewMetricsFromPoints(performancePoints), [performancePoints]);
+    const monthlyReturns = useMemo(() => monthlyReturnsFromPoints(visibleHeatmapPerformancePoints), [visibleHeatmapPerformancePoints]);
+    const overviewMetricSeries = useMemo(() => overviewMetricsFromPoints(visiblePerformancePoints), [visiblePerformancePoints]);
     const allocationRows = useMemo(
         () => [...(allocations?.allocations || [])]
             .filter((item) => Number.isFinite(Number(item.weight)))
@@ -5805,11 +5855,17 @@ export default function FundsPage({
     const detailLatestPrice = canonicalFundPrice(selectedFundPrice);
     const detailPeriodReturns = useMemo(
         () => {
+            if (fintablesHistoryPending) {
+                return DETAIL_RETURN_PERIODS.reduce<FundSummary['period_returns']>((returns, period) => {
+                    returns[period.key] = null;
+                    return returns;
+                }, {});
+            }
             const fromSummary = periodReturnsFromYieldSummary(yieldSummary, detailLatestPrice);
-            const fromPerformance = periodReturnsFromPerformancePoints(performancePoints);
+            const fromPerformance = periodReturnsFromPerformancePoints(visiblePerformancePoints);
             return mergePeriodReturnSources(fromSummary, selectedFund?.period_returns, fromPerformance);
         },
-        [detailLatestPrice, performancePoints, selectedFund, yieldSummary],
+        [detailLatestPrice, fintablesHistoryPending, selectedFund, visiblePerformancePoints, yieldSummary],
     );
     const fundsDocumentTitle = useMemo(() => {
         if (fundCode || selectedFund) {
@@ -5836,6 +5892,7 @@ export default function FundsPage({
     const comparisonState = useFundComparisonState({
         selectedFund,
         baseReturns: detailPeriodReturns,
+        baseReturnsReady: !fintablesHistoryPending,
         funds: funds?.rows || [],
         openSearchSignal: 0,
     });
@@ -6343,6 +6400,7 @@ export default function FundsPage({
                                                     comparison={comparisonState}
                                                     selectedRange={chartRange}
                                                     pendingRange={pendingChartRange}
+                                                    historyPending={fintablesHistoryPending}
                                                     rangeError={chartRangeError}
                                                     customStartDate={customStartDate}
                                                     customEndDate={customEndDate}
@@ -6435,7 +6493,7 @@ export default function FundsPage({
                                         </div>
                                     )}
 
-                                    {activeTab === 'history' && (
+                                            {activeTab === 'history' && (
                                         <div className="fund-detail-panel fund-history-panel">
                                             <div className="fund-history-head">
                                                 <h2>Geçmiş Veriler</h2>
@@ -6459,16 +6517,14 @@ export default function FundsPage({
                                                 </div>
                                             </div>
                                             {historySubtab === 'prices' ? (
-                                                performanceLoading && !performancePoints.length ? (
-                                                    <FinLoader message="Geçmiş fiyat verisi yükleniyor" />
-                                                ) : historyJob && ['queued', 'running'].includes(historyJob.status) && !performancePoints.length ? (
-                                                    <FinLoader message="Geçmiş veriler arka planda hazırlanıyor" />
+                                                fintablesHistoryPending ? (
+                                                    <FinLoader message="Fintables günlük geçmişi hazırlanıyor" />
                                                 ) : performanceError ? (
                                                     <div className="funds-state funds-state-error">{performanceError}</div>
-                                                ) : performancePoints.length ? (
+                                                ) : visiblePerformancePoints.length ? (
                                                     <>
                                                         <FundPeriodStatsStrip stats={performance?.period_stats} />
-                                                        <FundHistoryTable points={performancePoints} />
+                                                        <FundHistoryTable points={visiblePerformancePoints} />
                                                     </>
                                                 ) : (
                                                     <div className="funds-state">Geçmiş fiyat verisi henüz hazır değil.</div>

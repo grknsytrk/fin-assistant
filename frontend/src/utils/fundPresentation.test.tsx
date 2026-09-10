@@ -8,6 +8,7 @@ import {
     formatFundQuotePrice,
     formatFundReportDate,
     hasFundRangeStartCoverage,
+    isFintablesHistoryPending,
     mergeFundPerformancePayloads,
 } from './fundPresentation';
 
@@ -119,6 +120,20 @@ describe('fund presentation helpers', () => {
         expect(merged?.points[0].price).toBe(99.0);
         expect(merged?.points[0].source).toBe('fintables_udf_history');
         expect(merged?.source_metadata.history_source_used).toBe('fintables_udf_history');
+    });
+
+    it('hides a provisional TEFAS series while its Fintables job is active', () => {
+        const tefasPending = performancePayload(
+            [performancePoint('2026-04-01', 1.0, 'tefasfon_funds')],
+            { history_source_used: 'tefasfon_funds', history_job: { job_id: 'history-2', fund_code: 'BOH', status: 'running' } },
+        );
+        const fintablesPending = performancePayload(
+            [performancePoint('2026-04-01', 1.0, 'fintables_udf_history')],
+            { history_source_used: 'fintables_udf_history', primary_source: 'fintables', history_job: { job_id: 'history-3', fund_code: 'BOH', status: 'running' } },
+        );
+
+        expect(isFintablesHistoryPending(tefasPending)).toBe(true);
+        expect(isFintablesHistoryPending(fintablesPending)).toBe(false);
     });
 
     it('preserves existing points when a refresh response has no usable data', () => {

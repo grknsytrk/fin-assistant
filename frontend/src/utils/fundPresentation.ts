@@ -63,6 +63,24 @@ function validPerformancePoints(points: FundPricePoint[] | undefined): FundPrice
         .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+export function isFintablesHistoryPending(
+    performance: FundPerformanceResponse | null | undefined,
+    historyJob?: FundHistoryJob | null,
+): boolean {
+    const job = historyJob || performance?.source_metadata?.history_job;
+    const status = String(job?.status || '').trim().toLowerCase();
+    if (!['queued', 'running'].includes(status)) return false;
+
+    const metadata = performance?.source_metadata;
+    const historySource = String(metadata?.history_source_used || '').trim().toLowerCase();
+    const primarySource = String(metadata?.primary_source || '').trim().toLowerCase();
+    const hasFintablesPoints = validPerformancePoints(performance?.points)
+        .some((point) => String(point.source || '').trim().toLowerCase() === 'fintables_udf_history');
+    return historySource !== 'fintables_udf_history'
+        && primarySource !== 'fintables'
+        && !hasFintablesPoints;
+}
+
 function performanceSourcePriority(source: string | null | undefined): number {
     return FUND_PERFORMANCE_SOURCE_PRIORITY[String(source || '').trim().toLowerCase()] || 0;
 }
@@ -308,6 +326,7 @@ export function buildFundHistoryDiagnosticLines(input: FundHistoryDiagnosticInpu
     const missingPeriods = FUND_HISTORY_DIAGNOSTIC_PERIODS
         .filter((period) => input.periodReturns && input.periodReturns[period.key] == null)
         .map((period) => period.label);
+    const fintablesHistoryPending = isFintablesHistoryPending(input.performance, job);
     const hasDiagnosticSignal = Boolean(
         input.performanceLoading
         || input.performanceError
@@ -363,7 +382,9 @@ export function buildFundHistoryDiagnosticLines(input: FundHistoryDiagnosticInpu
             `Başlangıç durumu: Kaynakta istenen başlangıçtan önce kayıt yok; seri mevcut ilk kayıt olan ${formatFundReportDate(availableStart)} tarihinden başlıyor.`,
         );
     }
-    if (coverage === 'complete') {
+    if (fintablesHistoryPending) {
+        lines.push('Kapsama durumu: Fintables günlük geçmişi hazırlanıyor; geçici TEFAS serisi grafiklerde gizleniyor.');
+    } else if (coverage === 'complete') {
         lines.push('Kapsama durumu: İstenen aralığın başlangıç ve bitiş uçları mevcut.');
     } else if (coverage === 'range_incomplete') {
         lines.push('Kapsama durumu: Aralığın en az bir ucu eksik; grafikte mevcut kayıtlar gösteriliyor.');

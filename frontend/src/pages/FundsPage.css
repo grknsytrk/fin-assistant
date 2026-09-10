@@ -1073,6 +1073,36 @@
     user-select: none;
 }
 
+.fund-chart-loading {
+    cursor: default;
+}
+
+.fund-chart-loading-track,
+.fund-chart-loading-line {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.15;
+}
+
+.fund-chart-loading-track {
+    stroke: color-mix(in srgb, var(--text-secondary) 16%, transparent);
+}
+
+.fund-chart-loading-line {
+    stroke: color-mix(in srgb, var(--text-secondary) 78%, #dbe4f0);
+    stroke-dasharray: 100;
+    stroke-dashoffset: 100;
+    animation: fund-chart-line-draw 2.05s linear infinite;
+}
+
+@keyframes fund-chart-line-draw {
+    0% { stroke-dashoffset: 100; opacity: 0; }
+    12% { opacity: 0.9; }
+    72%, 88% { stroke-dashoffset: 0; opacity: 0.92; }
+    100% { stroke-dashoffset: 0; opacity: 0; }
+}
+
 .fund-chart-reveal {
     transform-box: fill-box;
     transform-origin: left center;
@@ -1115,8 +1145,13 @@
     .fund-chart-endpoint,
     .fund-chart-node,
     .fund-chart-hoverline,
-    .fund-chart-hover-point {
+    .fund-chart-hover-point,
+    .fund-chart-loading-line {
         animation: none;
+    }
+    .fund-chart-loading-line {
+        stroke-dashoffset: 0;
+        opacity: 0.5;
     }
 }
 
