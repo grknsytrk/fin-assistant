@@ -1555,21 +1555,28 @@ function FundPerformanceChart({
 
     const gradientId = `fund-chart-area-${fundCode.replace(/[^a-zA-Z0-9]/g, '')}-${selectedRange}`;
     const tickIndexes = Array.from(new Set([0, Math.floor((validPoints.length - 1) / 2), validPoints.length - 1]));
-    const firstChartDate = validPoints[0]?.date || null;
-    const lastChartDate = validPoints[validPoints.length - 1]?.date || null;
+    const firstChartDate = validPoints[0]?.date || '';
+    const lastChartDate = validPoints[validPoints.length - 1]?.date || '';
     const selectedComparisonIds = comparisonAssets.map((asset) => asset.id);
     const comparisonHistoryAssets = comparisonHistory?.assets || [];
     const comparisonHistoryById = new Map(comparisonHistoryAssets.map((asset) => [asset.id, asset]));
+    const comparisonPointsById = new Map(
+        comparisonHistoryAssets.map((asset) => [
+            asset.id,
+            (asset.points || []).filter((point) => (
+                point.date >= firstChartDate
+                && point.date <= lastChartDate
+                && Number.isFinite(Number(point.value))
+                && Number(point.value) > 0
+            )),
+        ]),
+    );
     const comparisonHistoryMatches = comparisonAssets.length > 0
         && Boolean(comparisonHistory)
-        && comparisonHistory?.start_date === firstChartDate
-        && comparisonHistory?.end_date === lastChartDate
         && selectedComparisonIds.every((id) => comparisonHistoryById.has(id));
     const hasUsableComparisonSeries = comparisonHistoryMatches
         && selectedComparisonIds.some((id) => (
-            (comparisonHistoryById.get(id)?.points || [])
-                .filter((point) => Number.isFinite(Number(point.value)) && Number(point.value) > 0)
-                .length >= 2
+            (comparisonPointsById.get(id) || []).length >= 2
         ));
     const comparisonMode = comparisonHistoryMatches && hasUsableComparisonSeries;
     const waitingForComparison = comparisonAssets.length > 0
@@ -1632,8 +1639,7 @@ function FundPerformanceChart({
             const history = historyById.get(asset.id);
             return {
                 asset,
-                points: (history?.points || [])
-                    .filter((point) => Number.isFinite(Number(point.value)) && Number(point.value) > 0)
+                points: (comparisonPointsById.get(asset.id) || [])
                     .map((point) => ({ date: point.date, value: Number(point.value) })),
                 source: history?.source,
                 error: history?.error,
@@ -5932,6 +5938,13 @@ export default function FundsPage({
     });
     const comparisonChartStartDate = chartPoints[0]?.date || null;
     const comparisonChartEndDate = chartPoints[chartPoints.length - 1]?.date || null;
+    const comparisonReturnStartDate = comparisonChartEndDate
+        ? rangeStartDate(comparisonState.period, comparisonChartEndDate, '')
+        : null;
+    const comparisonHistoryStartDate = [comparisonChartStartDate, comparisonReturnStartDate]
+        .filter((value): value is string => Boolean(value))
+        .sort()
+        .at(0) || null;
     const comparisonAssets = comparisonState.selectedAssets;
     const comparisonAssetRequests = useMemo(
         () => comparisonAssets.map((asset) => ({
@@ -5946,24 +5959,26 @@ export default function FundsPage({
         .map((asset) => `${asset.id}:${asset.kind}:${asset.symbol}:${asset.label || ''}`)
         .join('|');
     useEffect(() => {
-        if (!comparisonAssetRequests.length || !comparisonChartStartDate || !comparisonChartEndDate) {
+        if (!comparisonAssetRequests.length || !comparisonHistoryStartDate || !comparisonChartEndDate) {
             setComparisonHistory(null);
             setComparisonHistoryError(null);
             setComparisonHistoryLoading(false);
             return;
         }
         if (pendingChartRange) {
+            setComparisonHistory(null);
             setComparisonHistoryError(null);
             setComparisonHistoryLoading(true);
             return;
         }
         const controller = new AbortController();
+        setComparisonHistory(null);
         setComparisonHistoryError(null);
         setComparisonHistoryLoading(true);
         apiClient
             .marketComparisonHistory(
                 {
-                    start_date: comparisonChartStartDate,
+                    start_date: comparisonHistoryStartDate,
                     end_date: comparisonChartEndDate,
                     assets: comparisonAssetRequests,
                 },
@@ -5985,7 +6000,7 @@ export default function FundsPage({
         return () => {
             controller.abort();
         };
-    }, [comparisonAssetRequestKey, comparisonChartEndDate, comparisonChartStartDate, pendingChartRange]);
+    }, [comparisonAssetRequestKey, comparisonChartEndDate, comparisonChartStartDate, comparisonHistoryStartDate, pendingChartRange]);
     const detailSourceWarnings = useMemo(
         () => fundCode
             ? buildFundHistoryDiagnosticLines({
