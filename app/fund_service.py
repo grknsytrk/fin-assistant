@@ -117,7 +117,7 @@ TEFAS_DIRECT_RETURNS_SOURCE = "tefas_direct_returns"
 TEFAS_DIRECT_PORTFOLIO_SOURCE = "tefas_direct_portfolio"
 FINTABLES_UDF_HISTORY_SOURCE = "fintables_udf_history"
 FINTABLES_YIELD_SUMMARY_SOURCE = "fintables_yield_summary"
-FUND_HISTORY_SOURCE_POLICY = "tefasfon_daily_fintables_fallback"
+FUND_HISTORY_SOURCE_POLICY = "fintables_daily_tefas_fallback"
 _TEFAS_ALLOWED_FUND_TYPES = {"SEC", "PEN", "ETF", "RE", "VC"}
 TEFAS_FUND_TYPES = tuple(
     item.strip().upper()
@@ -2685,6 +2685,37 @@ def _history_resolution(points: List[Dict[str, Any]]) -> str:
     return "daily"
 
 
+def _history_is_usable_daily_range(
+    points: List[Dict[str, Any]],
+    *,
+    start_date: date,
+    end_date: date,
+) -> bool:
+    """Return whether a source covers the requested range as a daily series."""
+
+    parsed_dates = sorted(
+        {
+            date.fromisoformat(point_date)
+            for point in points
+            for point_date in [_fund_date(point.get("date"))]
+            if point_date
+        }
+    )
+    if len(parsed_dates) < 2:
+        return False
+    if parsed_dates[0] > start_date and _business_days_between(
+        start_date,
+        parsed_dates[0] - timedelta(days=1),
+    ) > 3:
+        return False
+    if parsed_dates[-1] < end_date and _business_days_between(
+        parsed_dates[-1] + timedelta(days=1),
+        end_date,
+    ) > 3:
+        return False
+    return not _history_internal_gap_warnings(points, resolution="daily")
+
+
 def _history_needs_detail_fill(
     points: List[Dict[str, Any]],
     start_date: date,
@@ -2740,14 +2771,22 @@ def _dedupe_price_points(points: Iterable[Dict[str, Any]]) -> List[Dict[str, Any
 
 
 def _dominant_price_source(points: Iterable[Dict[str, Any]]) -> Optional[str]:
-    sources = {
-        _normalize_price_source(str(point.get("source") or ""))
-        for point in points
-        if isinstance(point, dict) and point.get("source")
-    }
-    if not sources:
+    source_counts: Dict[str, int] = {}
+    for point in points:
+        if not isinstance(point, dict) or not point.get("source"):
+            continue
+        source = _normalize_price_source(str(point.get("source") or ""))
+        if source:
+            source_counts[source] = source_counts.get(source, 0) + 1
+    if not source_counts:
         return None
-    return max(sources, key=lambda source: _FUND_PRICE_SOURCE_PRIORITY.get(source, 0))
+    return max(
+        source_counts,
+        key=lambda source: (
+            source_counts[source],
+            _FUND_PRICE_SOURCE_PRIORITY.get(source, 0),
+        ),
+    )
 
 
 def _summary_from_points(fund_code: str, points: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -7261,43 +7300,53 @@ def _fetch_fast_long_fund_history(
 ) -> Tuple[List[Dict[str, Any]], List[str], bool, Optional[str]]:
     normalized = normalize_fund_code(fund_code)
     points: List[Dict[str, Any]] = []
-    price_points: List[Dict[str, Any]] = []
     warnings: List[str] = []
     fallback_used = False
     fallback_reason: Optional[str] = None
 
-    # A long chart range must still be a daily series.  The old fast path
-    # started with Fintables and supplemented it with TEFAS month-end anchors,
-    # which made funds that were missing from Fintables look like they had
-    # missing TEFAS data.  Query the official, bounded TEFAS range first and
-    # accept it when it is internally daily.  Fintables remains a fallback for
-    # upstream outages or genuinely incomplete TEFAS responses.
-    try:
-        direct_rows = TefasClient().fetch_fund_history(
-            fund_codes=[normalized],
-            start_date=start_date,
-            end_date=end_date,
-        )
-    except TefasUpstreamError as exc:
-        direct_rows = []
-        warnings.append(f"tefas_fund_list daily history bootstrap failed: {exc}")
-    valid_direct_rows = _valid_performance_points(direct_rows, normalized)
-    if (
-        len(valid_direct_rows) >= 2
-        and not _history_internal_gap_warnings(valid_direct_rows, resolution="daily")
-    ):
-        return valid_direct_rows, warnings, fallback_used, fallback_reason
-
+    # Fintables is the fast path for long chart ranges. Keep the response only
+    # when it covers the requested range as a usable daily series; otherwise
+    # continue to the official TEFAS range and combine the sources if both are
+    # partial. This keeps fast openings without silently replacing a complete
+    # series with a short cache boundary.
     try:
         price_points = fetch_fintables_udf_history(normalized, start_date, end_date)
-        if price_points:
-            fallback_used = True
-            fallback_reason = "fast_long_range_price_bootstrap"
-            points.extend(price_points)
     except FintablesUpstreamError as exc:
+        price_points = []
         warnings.append(f"fintables_udf_history fast bootstrap failed: {exc}")
+    valid_fintables_rows = _valid_performance_points(price_points, normalized)
+    fintables_daily = _history_is_usable_daily_range(
+        valid_fintables_rows,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if fintables_daily:
+        # Preserve the existing recent-metadata enrichment for price-only UDF
+        # rows, but skip the expensive full-range TEFAS request.
+        points.extend(valid_fintables_rows)
+    else:
+        try:
+            direct_rows = TefasClient().fetch_fund_history(
+                fund_codes=[normalized],
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except TefasUpstreamError as exc:
+            direct_rows = []
+            warnings.append(f"tefas_fund_list daily history bootstrap failed: {exc}")
+        valid_direct_rows = _valid_performance_points(direct_rows, normalized)
+        if _history_is_usable_daily_range(
+            valid_direct_rows,
+            start_date=start_date,
+            end_date=end_date,
+        ):
+            return valid_direct_rows, warnings, fallback_used, fallback_reason
 
-    points.extend(direct_rows)
+        if valid_fintables_rows:
+            fallback_used = True
+            fallback_reason = "fintables_long_range_partial_with_tefas_fallback"
+            points.extend(valid_fintables_rows)
+        points.extend(valid_direct_rows)
 
     recent_start = max(start_date, end_date - timedelta(days=max(1, FUNDS_RECENT_DETAIL_LOOKBACK_DAYS) - 1))
     recent_rows, recent_warnings = _fetch_recent_detail_rows(
@@ -7377,6 +7426,8 @@ def refresh_fund_performance(
         except FintablesUpstreamError as exc:
             warnings.append(f"fintables_udf_history failed: {exc}")
             raise FundUpstreamError("; ".join(warnings)) from exc
+
+    source_used = _dominant_price_source(points) or source_used
 
     storage_result = upsert_fund_price_points(
         processed_dir,
