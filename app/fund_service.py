@@ -2187,6 +2187,68 @@ def _read_daily_fund_price_points(
     )
 
 
+def _read_preferred_fund_price_points(
+    processed_dir: Path,
+    fund_code: str,
+    *,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> List[Dict[str, Any]]:
+    """Read performance prices with Fintables as the uniform source.
+
+    TEFAS still supplies optional point metadata such as portfolio size and
+    investor count, but it must never replace a Fintables price or daily
+    return for the same date. If Fintables has no usable rows at all, the
+    regular daily-source reader remains the compatibility fallback.
+    """
+
+    fintables_points = _read_fintables_udf_price_points(
+        processed_dir,
+        fund_code,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if not fintables_points:
+        return _read_daily_fund_price_points(
+            processed_dir,
+            fund_code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    supplemental_by_date = {
+        str(point.get("date")): point
+        for point in _read_daily_fund_price_points(
+            processed_dir,
+            fund_code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if isinstance(point, dict) and point.get("date")
+    }
+    metadata_fields = (
+        "aum",
+        "investor_count",
+        "share_count",
+        "name",
+        "fund_type",
+        "founder_company",
+        "manager_company",
+        "tefas_open",
+        "risk_value",
+        "currency",
+    )
+    preferred: List[Dict[str, Any]] = []
+    for point in fintables_points:
+        merged = dict(point)
+        supplemental = supplemental_by_date.get(str(point.get("date"))) or {}
+        for field in metadata_fields:
+            if merged.get(field) is None and supplemental.get(field) is not None:
+                merged[field] = supplemental[field]
+        preferred.append(merged)
+    return preferred
+
+
 # Maximum allowed gap (in days) between the latest snapshot point and the
 # previous local close when back-filling a missing daily_return.  Keeps weekend
 # / holiday transitions usable while filtering out long-stale points.
@@ -6214,9 +6276,9 @@ def get_fund_yield_summary_payload(fund_code: str, processed_dir: Optional[Path]
     normalized = normalize_fund_code(fund_code)
     warnings: List[str] = []
     fallback_used = False
-    source = TEFASFON_FUNDS_SOURCE
-    source_url = TEFASFON_SOURCE_URL
-    summary_source_used = TEFASFON_FUNDS_SOURCE
+    source = FINTABLES_YIELD_SUMMARY_SOURCE
+    source_url = FINTABLES_YIELD_SUMMARY_ENDPOINT
+    summary_source_used = FINTABLES_YIELD_SUMMARY_SOURCE
     latest_price: Optional[float] = None
     latest_date: Optional[str] = None
     if processed_dir is not None:
@@ -6224,32 +6286,47 @@ def get_fund_yield_summary_payload(fund_code: str, processed_dir: Optional[Path]
         if latest_row:
             latest_price = _coerce_float(latest_row.get("price"))
             latest_date = _fund_date(latest_row.get("as_of"))
+    summary: Dict[str, Any] = {}
     try:
-        summary = TefasFonClient().fetch_yield_summary(
-            normalized,
-            latest_price=latest_price,
-            latest_date=latest_date,
-        )
-        source = _public_price_source(str(summary.get("source") or source))
-        source_url = str(summary.get("source_url") or source_url)
-        summary_source_used = source
-    except TefasUpstreamError as exc:
-        warnings.append(f"tefasfon_yield_summary failed: {exc}")
-        fallback_used = True
-        source = FINTABLES_YIELD_SUMMARY_SOURCE
-        source_url = FINTABLES_YIELD_SUMMARY_ENDPOINT
-        summary_source_used = FINTABLES_YIELD_SUMMARY_SOURCE
+        summary = fetch_fintables_yield_summary(normalized)
+        periods = summary.get("periods") if isinstance(summary, dict) else None
+        if not isinstance(periods, dict) or not periods:
+            warnings.append("fintables_yield_summary returned no usable periods")
+            summary = {}
+        else:
+            source = _public_price_source(str(summary.get("source") or source))
+            source_url = str(summary.get("source_url") or source_url)
+            summary_source_used = source
+    except FintablesUpstreamError as exc:
+        warnings.append(f"fintables_yield_summary failed: {exc}")
+
+    if not summary:
         try:
-            summary = fetch_fintables_yield_summary(normalized)
-        except FintablesUpstreamError as fallback_exc:
-            warnings.append(f"fintables_yield_summary failed: {fallback_exc}")
-            summary = {
-                "fund_code": normalized,
-                "source": FINTABLES_YIELD_SUMMARY_SOURCE,
-                "source_url": FINTABLES_YIELD_SUMMARY_ENDPOINT,
-                "periods": {},
-                "raw": {},
-            }
+            summary = TefasFonClient().fetch_yield_summary(
+                normalized,
+                latest_price=latest_price,
+                latest_date=latest_date,
+            )
+            periods = summary.get("periods") if isinstance(summary, dict) else None
+            if isinstance(periods, dict) and periods:
+                fallback_used = True
+                source = _public_price_source(str(summary.get("source") or TEFASFON_FUNDS_SOURCE))
+                source_url = str(summary.get("source_url") or TEFASFON_SOURCE_URL)
+                summary_source_used = source
+            else:
+                warnings.append("tefasfon_yield_summary returned no usable periods")
+                summary = {}
+        except TefasUpstreamError as exc:
+            warnings.append(f"tefasfon_yield_summary failed: {exc}")
+
+    if not summary:
+        summary = {
+            "fund_code": normalized,
+            "source": FINTABLES_YIELD_SUMMARY_SOURCE,
+            "source_url": FINTABLES_YIELD_SUMMARY_ENDPOINT,
+            "periods": {},
+            "raw": {},
+        }
     periods = summary.get("periods") or {}
     return {
         "fund_code": normalized,
@@ -6410,10 +6487,11 @@ def _fund_performance_payload_from_points(
         "history_source_used": history_source_used,
         "history_source_policy": FUND_HISTORY_SOURCE_POLICY,
         "source_policy": FUND_HISTORY_SOURCE_POLICY,
-        "primary_source": "tefasfon",
+        "primary_source": "fintables",
         "tefasfon_adapter_version": _tefasfon_adapter_version(),
         "fallback_used": fallback_used,
         "fallback_reason": fallback_reason,
+        "fintables_point_count": fallback_point_count,
         "cached_fallback_points_present": fallback_point_count > 0,
         "cached_fallback_point_count": fallback_point_count,
         "final_points_count": len(ordered),
@@ -6883,12 +6961,22 @@ def _missing_overview_metric_targets(
 ) -> List[Dict[str, Any]]:
     missing: List[Dict[str, Any]] = []
     selected_targets = _overview_metric_targets(end_date) if targets is None else targets
+    has_fintables_points = any(
+        isinstance(point, dict)
+        and _normalize_price_source(str(point.get("source") or "")) == FINTABLES_UDF_HISTORY_SOURCE
+        for point in points
+    )
     for target in selected_targets:
         point = _latest_point_for_month(
             points,
             month=str(target["month"]),
             target_date=target["target_date"],
         )
+        if point is None and has_fintables_points:
+            # A TEFAS-only monthly anchor without a Fintables price would be
+            # discarded by the preferred performance reader. Do not fetch it
+            # repeatedly or reintroduce a mixed history through the cache.
+            continue
         if not _has_overview_metrics(point):
             missing.append(target)
     return missing
@@ -7351,25 +7439,19 @@ def _fetch_fast_long_fund_history(
     fallback_used = False
     fallback_reason: Optional[str] = None
 
-    # Fintables is the fast path for long chart ranges. Keep the response only
-    # when it covers the requested range as a usable daily series; otherwise
-    # continue to the official TEFAS range and combine the sources if both are
-    # partial. This keeps fast openings without silently replacing a complete
-    # series with a short cache boundary.
+    # Fintables is the uniform price source for long chart ranges. A partial
+    # Fintables range is still authoritative for the dates it does provide;
+    # do not fill its boundary with TEFAS because that creates a synthetic
+    # mixed series. TEFAS is queried only when Fintables has no usable rows.
     try:
         price_points = fetch_fintables_udf_history(normalized, start_date, end_date)
     except FintablesUpstreamError as exc:
         price_points = []
         warnings.append(f"fintables_udf_history fast bootstrap failed: {exc}")
     valid_fintables_rows = _valid_performance_points(price_points, normalized)
-    fintables_daily = _history_is_usable_daily_range(
-        valid_fintables_rows,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    if fintables_daily:
+    if valid_fintables_rows:
         # Preserve the existing recent-metadata enrichment for price-only UDF
-        # rows, but skip the expensive full-range TEFAS request.
+        # rows, but skip the expensive TEFAS price-history request entirely.
         points.extend(valid_fintables_rows)
     else:
         try:
@@ -7387,12 +7469,12 @@ def _fetch_fast_long_fund_history(
             start_date=start_date,
             end_date=end_date,
         ):
-            return valid_direct_rows, warnings, fallback_used, fallback_reason
-
-        if valid_fintables_rows:
             fallback_used = True
-            fallback_reason = "fintables_long_range_partial_with_tefas_fallback"
-            points.extend(valid_fintables_rows)
+            fallback_reason = "fintables_udf_history_unavailable_tefas_fallback"
+            return valid_direct_rows, warnings, fallback_used, fallback_reason
+        if valid_direct_rows:
+            fallback_used = True
+            fallback_reason = "fintables_udf_history_unavailable_tefas_fallback"
         points.extend(valid_direct_rows)
 
     recent_start = max(start_date, end_date - timedelta(days=max(1, FUNDS_RECENT_DETAIL_LOOKBACK_DAYS) - 1))
@@ -7407,9 +7489,15 @@ def _fetch_fast_long_fund_history(
     warnings.extend(recent_warnings)
 
     metric_targets = _long_range_metric_targets(start_date, end_date)
+    if valid_fintables_rows:
+        fintables_months = {str(point.get("date"))[:7] for point in valid_fintables_rows}
+        metric_targets = [
+            target for target in metric_targets
+            if str(target.get("month")) in fintables_months
+        ]
     metric_rows: List[Dict[str, Any]] = []
     metric_warnings: List[str] = []
-    if metric_targets:
+    if metric_targets and hasattr(client, "fetch_daily_funds_snapshot"):
         metric_rows, _fetched_months, metric_warnings = _fetch_fund_overview_metric_rows(
             normalized,
             metric_targets,
@@ -7436,7 +7524,7 @@ def refresh_fund_performance(
     normalized = normalize_fund_code(fund_code)
     warnings: List[str] = []
     points: List[Dict[str, Any]] = []
-    source_used = TEFASFON_FUNDS_SOURCE
+    source_used = FINTABLES_UDF_HISTORY_SOURCE
     fallback_used = False
     fallback_reason: Optional[str] = None
     tefas_failure_reason: Optional[str] = None
@@ -7454,25 +7542,31 @@ def refresh_fund_performance(
             points = []
     else:
         try:
-            points = client.fetch_history(normalized, start_date, end_date)
-            if not _valid_performance_points(points, normalized):
-                tefas_failure_reason = "tefasfon_funds returned no valid points"
-                warnings.append(tefas_failure_reason)
-                points = []
-        except TefasUpstreamError as exc:
-            tefas_failure_reason = f"tefasfon_funds failed: {exc}"
-            warnings.append(tefas_failure_reason)
-            points = []
-
-    if not points:
-        fallback_used = True
-        fallback_reason = tefas_failure_reason or "tefasfon_funds returned no valid points"
-        source_used = FINTABLES_UDF_HISTORY_SOURCE
-        try:
-            points = fetch_fintables_udf_history(normalized, start_date, end_date)
+            fintables_points = fetch_fintables_udf_history(normalized, start_date, end_date)
+            points = _valid_performance_points(fintables_points, normalized)
+            if not points:
+                warnings.append("fintables_udf_history returned no valid points")
         except FintablesUpstreamError as exc:
             warnings.append(f"fintables_udf_history failed: {exc}")
-            raise FundUpstreamError("; ".join(warnings)) from exc
+            points = []
+
+        if not points:
+            fallback_used = True
+            fallback_reason = "fintables_udf_history_unavailable_tefas_fallback"
+            source_used = TEFASFON_FUNDS_SOURCE
+            try:
+                points = client.fetch_history(normalized, start_date, end_date)
+                if not _valid_performance_points(points, normalized):
+                    tefas_failure_reason = "tefasfon_funds returned no valid points"
+                    warnings.append(tefas_failure_reason)
+                    points = []
+            except TefasUpstreamError as exc:
+                tefas_failure_reason = f"tefasfon_funds failed: {exc}"
+                warnings.append(tefas_failure_reason)
+                points = []
+
+    if not points:
+        raise FundUpstreamError("; ".join(warnings) or "fund history returned no valid points")
 
     source_used = _dominant_price_source(points) or source_used
 
@@ -7482,7 +7576,7 @@ def refresh_fund_performance(
         source=source_used,
         fallback_code=normalized,
     )
-    merged_points = _read_daily_fund_price_points(
+    merged_points = _read_preferred_fund_price_points(
         processed_dir,
         normalized,
         start_date=start_date,
@@ -7546,7 +7640,7 @@ def get_fund_performance_payload(
         )
     )
 
-    points = _read_daily_fund_price_points(
+    points = _read_preferred_fund_price_points(
         processed_dir,
         normalized,
         start_date=query_start,
@@ -7566,7 +7660,7 @@ def get_fund_performance_payload(
             end_date=effective_end,
             prefer_fast_long_range=not full_history_requested,
         )
-        points = _read_daily_fund_price_points(
+        points = _read_preferred_fund_price_points(
             processed_dir,
             normalized,
             start_date=query_start,
@@ -7584,7 +7678,7 @@ def get_fund_performance_payload(
                 end_date=_recent_tail_refresh_target(effective_end),
                 write_history_cache=False,
             )
-            points = _read_daily_fund_price_points(
+            points = _read_preferred_fund_price_points(
                 processed_dir,
                 normalized,
                 start_date=query_start,
@@ -7603,7 +7697,7 @@ def get_fund_performance_payload(
         )
         recent_detail_backfill_attempted = bool(recent_detail_backfill.get("attempted"))
         if recent_detail_backfill_attempted:
-            points = _read_daily_fund_price_points(
+            points = _read_preferred_fund_price_points(
                 processed_dir,
                 normalized,
                 start_date=query_start,
@@ -7627,7 +7721,7 @@ def get_fund_performance_payload(
         )
         overview_metric_backfill_attempted = bool(overview_metric_backfill.get("attempted"))
         if overview_metric_backfill_attempted:
-            points = _read_daily_fund_price_points(
+            points = _read_preferred_fund_price_points(
                 processed_dir,
                 normalized,
                 start_date=query_start,
@@ -7659,7 +7753,7 @@ def get_fund_performance_payload(
                 "history_source_used": None,
                 "history_source_policy": FUND_HISTORY_SOURCE_POLICY,
                 "source_policy": FUND_HISTORY_SOURCE_POLICY,
-                "primary_source": "tefasfon",
+                "primary_source": "fintables",
                 "tefasfon_adapter_version": _tefasfon_adapter_version(),
                 "fallback_used": any("fintables_udf_history" in warning for warning in warnings),
                 "fallback_reason": "tefasfon_and_fintables_unavailable" if any("fintables_udf_history" in warning for warning in warnings) else None,
@@ -7682,8 +7776,6 @@ def get_fund_performance_payload(
                 "history_job": history_job,
             },
         }
-    dominant_source = _dominant_price_source(points)
-    cached_fallback_is_primary = dominant_source == FINTABLES_UDF_HISTORY_SOURCE
     recent_detail_warnings = list((recent_detail_backfill or {}).get("warnings") or [])
     effective_backfill_used = (
         auto_fetch_attempted
@@ -7709,12 +7801,8 @@ def get_fund_performance_payload(
         ),
         warnings=auto_warnings + recent_detail_warnings,
         backfill_used=effective_backfill_used,
-        fallback_used=cached_fallback_is_primary,
-        fallback_reason=(
-            "cached_fintables_points_primary"
-            if cached_fallback_is_primary
-            else None
-        ),
+        fallback_used=False,
+        fallback_reason=None,
         recent_detail_backfill=recent_detail_backfill,
         overview_metric_backfill=overview_metric_backfill,
         full_history_requested=full_history_requested,

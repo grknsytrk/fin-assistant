@@ -102,6 +102,24 @@ describe('fund presentation helpers', () => {
         expect(merged?.source_metadata.available_end_date).toBe('2026-04-01');
     });
 
+    it('keeps Fintables as the source when async responses overlap', () => {
+        const current = performancePayload([
+            performancePoint('2026-04-01', 100.0, 'tefasfon_funds'),
+        ]);
+        const next = performancePayload([
+            performancePoint('2026-04-01', 99.0, 'fintables_udf_history'),
+        ], {
+            history_source_used: 'fintables_udf_history',
+            primary_source: 'fintables',
+        });
+
+        const merged = mergeFundPerformancePayloads(current, next);
+
+        expect(merged?.points[0].price).toBe(99.0);
+        expect(merged?.points[0].source).toBe('fintables_udf_history');
+        expect(merged?.source_metadata.history_source_used).toBe('fintables_udf_history');
+    });
+
     it('preserves existing points when a refresh response has no usable data', () => {
         const current = performancePayload([performancePoint('2026-01-02', 1.0)]);
         const unavailable = performancePayload([], { coverage_state: 'unavailable' }, { status: 'unavailable' });

@@ -5897,8 +5897,8 @@ export default function FundsPage({
         const warnings = [
             performanceError,
             yieldError,
-            performanceLoading && !performance ? 'Grafik verisi TEFAS üzerinden yükleniyor.' : null,
-            yieldLoading && !yieldSummary ? 'Getiri özeti TEFAS üzerinden yükleniyor.' : null,
+            performanceLoading && !performance ? 'Grafik verisi yükleniyor.' : null,
+            yieldLoading && !yieldSummary ? 'Getiri özeti yükleniyor.' : null,
             ...userHistoryWarnings,
             ...technicalHistoryWarnings,
             performance?.source_metadata?.warning && !/(internal gap|auto fetch|tefas|fintables|waf|cloudflare|upstream|coverage gap|missing_business_days|already in progress)/i.test(performance.source_metadata.warning)

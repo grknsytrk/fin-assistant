@@ -38,9 +38,9 @@ export function hasFundRangeStartCoverage(startIso: string, actualStartIso: stri
 }
 
 const FUND_PERFORMANCE_SOURCE_PRIORITY: Record<string, number> = {
+    fintables_udf_history: 100,
     tefasfon_funds: 90,
     tefas_direct_funds: 85,
-    fintables_udf_history: 70,
     legacy_json: 10,
 };
 
@@ -71,6 +71,26 @@ function performanceFetchedAt(payload: FundPerformanceResponse): number {
     const value = payload.fetched_at || payload.source_metadata?.fetched_at || null;
     const timestamp = value ? Date.parse(value) : NaN;
     return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function dominantPerformanceSource(points: FundPricePoint[]): string | null {
+    const counts = new Map<string, number>();
+    for (const point of points) {
+        const source = String(point.source || '').trim().toLowerCase();
+        if (source) counts.set(source, (counts.get(source) || 0) + 1);
+    }
+    let selected: string | null = null;
+    for (const [source, count] of counts) {
+        const selectedCount = selected ? (counts.get(selected) || 0) : 0;
+        if (
+            !selected
+            || count > selectedCount
+            || (count === selectedCount && performanceSourcePriority(source) > performanceSourcePriority(selected))
+        ) {
+            selected = source;
+        }
+    }
+    return selected;
 }
 
 function comparePerformancePoints(
@@ -156,6 +176,7 @@ export function mergeFundPerformancePayloads(
     const rangePayload = comparePerformancePayloadRange(current, next) >= 0 ? current : next;
     const recencyPayload = comparePerformancePayloadRecency(current, next) >= 0 ? current : next;
     const rangeMetadata = rangePayload.source_metadata || next.source_metadata;
+    const mergedHistorySource = dominantPerformanceSource(mergedPoints);
     const nextJob = next.source_metadata?.history_job;
     const currentJob = current.source_metadata?.history_job;
     const firstDate = mergedPoints[0]?.date || rangePayload.source_metadata?.date_min || null;
@@ -171,6 +192,8 @@ export function mergeFundPerformancePayloads(
         points: mergedPoints,
         source_metadata: {
             ...rangeMetadata,
+            ...(mergedHistorySource ? { history_source_used: mergedHistorySource } : {}),
+            ...(mergedHistorySource === 'fintables_udf_history' ? { primary_source: 'fintables' } : {}),
             history_job: nextJob || currentJob || null,
             full_history_requested: Boolean(
                 current.source_metadata?.full_history_requested || next.source_metadata?.full_history_requested,

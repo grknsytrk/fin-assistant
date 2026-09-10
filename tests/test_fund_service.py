@@ -1722,7 +1722,39 @@ def test_daily_snapshot_backfill_skips_weekends(monkeypatch) -> None:
     assert warnings == []
 
 
-def test_refresh_fund_performance_uses_tefasfon_primary(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("fund_code", ["TLY", "TI2", "BOH"])
+def test_refresh_fund_performance_prefers_fintables_for_all_funds(monkeypatch, tmp_path, fund_code) -> None:
+    class FakeTefasFonClient:
+        def fetch_history(self, fund_code, start_date, end_date):
+            raise AssertionError("TEFAS should not be called when Fintables has a valid history")
+
+    class FakeFintablesClient:
+        def fetch_udf_history(self, fund_code, start_date, end_date):
+            return [
+                {"fund_code": fund_code, "date": "2026-04-28", "price": 3.1, "source": "fintables_udf_history"},
+                {"fund_code": fund_code, "date": "2026-04-29", "price": 3.2, "source": "fintables_udf_history"},
+            ]
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    monkeypatch.setattr(fund_service, "FintablesClient", lambda: FakeFintablesClient())
+
+    payload = fund_service.refresh_fund_performance(
+        tmp_path,
+        fund_code,
+        start_date=date(2026, 4, 28),
+        end_date=date(2026, 4, 29),
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["source_metadata"]["history_source_used"] == "fintables_udf_history"
+    assert payload["source_metadata"]["history_source_policy"] == "fintables_daily_tefas_fallback"
+    assert payload["source_metadata"]["primary_source"] == "fintables"
+    assert payload["source_metadata"]["fallback_used"] is False
+    assert payload["source_metadata"]["fallback_reason"] is None
+    assert payload["source_metadata"]["tefasfon_adapter_version"] == fund_service._tefasfon_adapter_version()
+
+
+def test_refresh_fund_performance_falls_back_to_tefas_when_fintables_fails(monkeypatch, tmp_path) -> None:
     class FakeTefasFonClient:
         def fetch_history(self, fund_code, start_date, end_date):
             return [
@@ -1732,7 +1764,7 @@ def test_refresh_fund_performance_uses_tefasfon_primary(monkeypatch, tmp_path) -
 
     class FakeFintablesClient:
         def fetch_udf_history(self, fund_code, start_date, end_date):
-            raise AssertionError("Fintables should not be called when TEFAS has data")
+            raise fund_service.FintablesUpstreamError("blocked")
 
     monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
     monkeypatch.setattr(fund_service, "FintablesClient", lambda: FakeFintablesClient())
@@ -1746,38 +1778,8 @@ def test_refresh_fund_performance_uses_tefasfon_primary(monkeypatch, tmp_path) -
 
     assert payload["status"] == "ok"
     assert payload["source_metadata"]["history_source_used"] == "tefasfon_funds"
-    assert payload["source_metadata"]["history_source_policy"] == "fintables_daily_tefas_fallback"
-    assert payload["source_metadata"]["primary_source"] == "tefasfon"
-    assert payload["source_metadata"]["fallback_used"] is False
-    assert payload["source_metadata"]["fallback_reason"] is None
-    assert payload["source_metadata"]["tefasfon_adapter_version"] == fund_service._tefasfon_adapter_version()
-
-
-def test_refresh_fund_performance_falls_back_to_fintables_when_tefasfon_fails(monkeypatch, tmp_path) -> None:
-    class FakeTefasFonClient:
-        def fetch_history(self, fund_code, start_date, end_date):
-            raise fund_service.TefasUpstreamError("blocked")
-
-    class FakeFintablesClient:
-        def fetch_udf_history(self, fund_code, start_date, end_date):
-            return [
-                {"fund_code": fund_code, "date": "2026-04-29", "price": 3.2, "source": "fintables_udf_history"}
-            ]
-
-    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
-    monkeypatch.setattr(fund_service, "FintablesClient", lambda: FakeFintablesClient())
-
-    payload = fund_service.refresh_fund_performance(
-        tmp_path,
-        "TLY",
-        start_date=date(2026, 4, 28),
-        end_date=date(2026, 4, 29),
-    )
-
-    assert payload["status"] == "ok"
-    assert payload["source_metadata"]["history_source_used"] == "fintables_udf_history"
     assert payload["source_metadata"]["fallback_used"] is True
-    assert payload["source_metadata"]["fallback_reason"] == "tefasfon_funds failed: blocked"
+    assert payload["source_metadata"]["fallback_reason"] == "fintables_udf_history_unavailable_tefas_fallback"
     assert "blocked" in " ".join(payload["source_metadata"]["warnings"])
 
 
@@ -1872,7 +1874,7 @@ def test_fast_long_history_prefers_complete_daily_fintables_history(monkeypatch)
     assert fallback_reason is None
 
 
-def test_fast_long_history_uses_tefas_when_fintables_range_is_incomplete(monkeypatch) -> None:
+def test_fast_long_history_keeps_partial_fintables_without_tefas_mixing(monkeypatch) -> None:
     calls = []
 
     def partial_fintables_history(fund_code, start_date, end_date):
@@ -1888,26 +1890,12 @@ def test_fast_long_history_uses_tefas_when_fintables_range_is_incomplete(monkeyp
 
     class FakeTefasClient:
         def fetch_fund_history(self, *, fund_codes, start_date, end_date):
-            calls.append("tefas")
-            rows = []
-            current = start_date
-            price = 1.0
-            while current <= end_date:
-                if current.weekday() < 5:
-                    rows.append(
-                        {
-                            "fund_code": fund_codes[0],
-                            "date": current.isoformat(),
-                            "price": price,
-                            "source": "tefasfon_funds",
-                        }
-                    )
-                    price += 0.01
-                current += timedelta(days=1)
-            return rows
+            raise AssertionError("TEFAS should not fill a partial Fintables range")
 
     monkeypatch.setattr(fund_service, "fetch_fintables_udf_history", partial_fintables_history)
     monkeypatch.setattr(fund_service, "TefasClient", lambda: FakeTefasClient())
+    monkeypatch.setattr(fund_service, "_fetch_recent_detail_rows", lambda *_args, **_kwargs: ([], []))
+    monkeypatch.setattr(fund_service, "_fetch_fund_overview_metric_rows", lambda *_args, **_kwargs: ([], [], []))
 
     points, warnings, fallback_used, fallback_reason = fund_service._fetch_fast_long_fund_history(
         None,
@@ -1917,16 +1905,16 @@ def test_fast_long_history_uses_tefas_when_fintables_range_is_incomplete(monkeyp
         client=object(),
     )
 
-    assert calls == ["fintables", "tefas"]
-    assert len(points) == 98
-    assert points[0]["source"] == "tefasfon_funds"
-    assert points[-1]["source"] == "tefasfon_funds"
+    assert calls == ["fintables"]
+    assert len(points) == 1
+    assert points[0]["source"] == "fintables_udf_history"
+    assert points[-1]["source"] == "fintables_udf_history"
     assert warnings == []
     assert fallback_used is False
     assert fallback_reason is None
 
 
-def test_get_fund_performance_payload_fetches_tefasfon_on_cache_miss(monkeypatch, tmp_path) -> None:
+def test_get_fund_performance_payload_uses_tefasfon_only_when_fintables_unavailable(monkeypatch, tmp_path) -> None:
     calls = []
 
     class FakeTefasFonClient:
@@ -1948,6 +1936,11 @@ def test_get_fund_performance_payload_fetches_tefasfon_on_cache_miss(monkeypatch
             ]
 
     monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    monkeypatch.setattr(
+        fund_service,
+        "fetch_fintables_udf_history",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(fund_service.FintablesUpstreamError("unavailable")),
+    )
 
     payload = fund_service.get_fund_performance_payload(
         tmp_path,
@@ -1991,6 +1984,11 @@ def test_get_fund_performance_payload_defaults_to_full_history(monkeypatch, tmp_
 
     monkeypatch.setattr(fund_service, "FUNDS_FULL_HISTORY_START_DATE", "2020-01-01")
     monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    monkeypatch.setattr(
+        fund_service,
+        "fetch_fintables_udf_history",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(fund_service.FintablesUpstreamError("unavailable")),
+    )
 
     payload = fund_service.get_fund_performance_payload(tmp_path, "TLY")
     cached_payload = fund_service.get_fund_performance_payload(tmp_path, "TLY")
@@ -2326,7 +2324,6 @@ def test_get_fund_performance_payload_backfills_missing_overview_metrics(monkeyp
     by_date = {point["date"]: point for point in payload["points"]}
 
     assert calls == [
-        "2025-11-28",
         "2025-12-31",
         "2026-01-30",
         "2026-02-27",
@@ -2338,14 +2335,14 @@ def test_get_fund_performance_payload_backfills_missing_overview_metrics(monkeyp
     assert by_date["2026-01-30"]["investor_count"] == 47_788
     assert by_date["2026-02-27"]["aum"] == 60_607_168_862.97
     assert by_date["2026-03-31"]["investor_count"] == 70_964
-    assert by_date["2026-04-30"]["source"] == "tefasfon_funds"
+    assert by_date["2026-04-30"]["source"] == "fintables_udf_history"
     assert payload["source_metadata"]["overview_metric_backfill"]["attempted"] is True
-    assert payload["source_metadata"]["overview_metric_backfill"]["upserted_count"] == 7
+    assert payload["source_metadata"]["overview_metric_backfill"]["upserted_count"] == 6
     assert payload["source_metadata"]["backfill_used"] is True
 
     cached_payload = fund_service.get_fund_performance_payload(tmp_path, "TLY")
 
-    assert len(calls) == 7
+    assert len(calls) == 6
     assert cached_payload["source_metadata"]["cache_hit"] is True
     assert cached_payload["source_metadata"]["overview_metric_backfill"]["attempted"] is False
 
@@ -2501,7 +2498,7 @@ def test_get_fund_performance_payload_backfills_recent_details_from_cache(monkey
     assert history_calls == [("RDT", date(2026, 5, 4), date(2026, 5, 21))]
     assert by_date["2026-05-20"]["aum"] == 900_000_000.0
     assert by_date["2026-05-20"]["investor_count"] == 9_000
-    assert by_date["2026-05-20"]["source"] == "tefasfon_funds"
+    assert by_date["2026-05-20"]["source"] == "fintables_udf_history"
     assert payload["source_metadata"]["cache_hit"] is False
     assert payload["source_metadata"]["recent_detail_backfill"]["attempted"] is True
 
@@ -2699,6 +2696,58 @@ def test_read_fund_price_points_prefers_tefasfon_over_fintables_for_same_date(tm
     assert points[0]["source"] == "tefasfon_funds"
 
 
+def test_read_preferred_fund_price_points_keeps_fintables_prices_without_mixing(tmp_path) -> None:
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "GEN", "date": "2026-04-01", "price": 100.0, "source": "fintables_udf_history"},
+            {"fund_code": "GEN", "date": "2026-04-02", "price": 102.0, "source": "fintables_udf_history"},
+        ],
+        source="fintables_udf_history",
+    )
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {
+                "fund_code": "GEN",
+                "date": "2026-04-01",
+                "price": 101.0,
+                "aum": 1_000_000,
+                "investor_count": 12,
+                "source": "tefasfon_funds",
+            },
+            {
+                "fund_code": "GEN",
+                "date": "2026-04-02",
+                "price": 103.0,
+                "aum": 1_100_000,
+                "investor_count": 13,
+                "source": "tefasfon_funds",
+            },
+        ],
+        source="tefasfon_funds",
+    )
+
+    points = fund_service._read_preferred_fund_price_points(tmp_path, "GEN")
+
+    assert [point["price"] for point in points] == [100.0, 102.0]
+    assert {point["source"] for point in points} == {"fintables_udf_history"}
+    assert [point["aum"] for point in points] == [1_000_000, 1_100_000]
+    assert [point["investor_count"] for point in points] == [12, 13]
+
+    payload = fund_service.get_fund_performance_payload(
+        tmp_path,
+        "GEN",
+        start_date=date(2026, 4, 1),
+        end_date=date(2026, 4, 2),
+        auto_refresh=False,
+    )
+
+    assert [point["price"] for point in payload["points"]] == [100.0, 102.0]
+    assert payload["source_metadata"]["history_source_used"] == "fintables_udf_history"
+    assert payload["source_metadata"]["primary_source"] == "fintables"
+
+
 def test_fund_price_upsert_does_not_write_fintables_yield_summary(tmp_path) -> None:
     result = fund_service.upsert_fund_price_points(
         tmp_path,
@@ -2740,32 +2789,37 @@ def test_get_fund_yield_summary_payload_returns_unavailable_without_price_writes
     assert fund_service.read_fund_price_points(tmp_path, "TLY") == []
 
 
-def test_get_fund_yield_summary_payload_uses_tefasfon_first(monkeypatch) -> None:
+def test_get_fund_yield_summary_payload_uses_fintables_first(monkeypatch) -> None:
     class FakeTefasFonClient:
         def fetch_yield_summary(self, fund_code, **kwargs):
-            return {
-                "fund_code": fund_code,
-                "source": "tefasfon_funds",
-                "source_url": "https://pypi.org/project/tefasfon/",
-                "periods": {
-                    "1m": {
-                        "prev_close_date": "2026-04-01",
-                        "prev_close": 10.0,
-                        "high": 12.0,
-                        "low": 9.5,
-                    }
-                },
-                "raw": {},
-            }
+            raise AssertionError("TEFAS should not be called when Fintables has a valid summary")
 
     monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    monkeypatch.setattr(
+        fund_service,
+        "fetch_fintables_yield_summary",
+        lambda _fund_code: {
+            "fund_code": "TLY",
+            "source": "fintables_yield_summary",
+            "source_url": "https://fintables.example/yield",
+            "periods": {
+                "1m": {
+                    "prev_close_date": "2026-04-01",
+                    "prev_close": 10.0,
+                    "high": 12.0,
+                    "low": 9.5,
+                }
+            },
+            "raw": {},
+        },
+    )
 
     payload = fund_service.get_fund_yield_summary_payload("TLY")
 
     assert payload["status"] == "ok"
-    assert payload["source"] == "tefasfon_funds"
+    assert payload["source"] == "fintables_yield_summary"
     assert payload["periods"]["1m"]["prev_close"] == 10.0
-    assert payload["source_metadata"]["summary_source_used"] == "tefasfon_funds"
+    assert payload["source_metadata"]["summary_source_used"] == "fintables_yield_summary"
     assert payload["source_metadata"]["fallback_used"] is False
 
 
