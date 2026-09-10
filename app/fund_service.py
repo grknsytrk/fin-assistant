@@ -117,7 +117,7 @@ TEFAS_DIRECT_RETURNS_SOURCE = "tefas_direct_returns"
 TEFAS_DIRECT_PORTFOLIO_SOURCE = "tefas_direct_portfolio"
 FINTABLES_UDF_HISTORY_SOURCE = "fintables_udf_history"
 FINTABLES_YIELD_SUMMARY_SOURCE = "fintables_yield_summary"
-FUND_HISTORY_SOURCE_POLICY = "fintables_long_range_tefas_recent"
+FUND_HISTORY_SOURCE_POLICY = "tefasfon_daily_fintables_fallback"
 _TEFAS_ALLOWED_FUND_TYPES = {"SEC", "PEN", "ETF", "RE", "VC"}
 TEFAS_FUND_TYPES = tuple(
     item.strip().upper()
@@ -4778,15 +4778,33 @@ class TefasClient:
             return []
         if len(codes) == 1:
             # TEFAS accepts a fund-specific range request, but rejects a
-            # range longer than one month. Do not fall back to one request per
-            # business day: split the range into bounded calendar windows and
-            # merge the returned daily rows. This is both faster and fixes
-            # newly-launched funds whose local cache has no older points yet.
+            # range longer than one calendar month. Do not fall back to one
+            # request per business day: split the range at calendar-month
+            # boundaries and merge the returned daily rows. Consecutive fixed
+            # 31-day chunks can cross February/March and silently lose the
+            # first part of the next month because TEFAS rejects that request.
+            # This is both faster and fixes newly-launched funds whose local
+            # cache has no older points yet.
             normalized_code = next(iter(codes))
             chunk_days = max(2, min(31, int(TEFAS_FUND_HISTORY_CHUNK_DAYS)))
             chunk_rows: List[Dict[str, Any]] = []
             chunk_errors: List[TefasUpstreamError] = []
-            chunks = list(_split_date_range(start_date, end_date, chunk_days))
+            chunks: List[Tuple[date, date]] = []
+            current = start_date
+            while current <= end_date:
+                next_month = (
+                    date(current.year + 1, 1, 1)
+                    if current.month == 12
+                    else date(current.year, current.month + 1, 1)
+                )
+                calendar_month_end = next_month - timedelta(days=1)
+                chunk_end = min(
+                    end_date,
+                    calendar_month_end,
+                    current + timedelta(days=chunk_days - 1),
+                )
+                chunks.append((current, chunk_end))
+                current = chunk_end + timedelta(days=1)
             for chunk_index, (chunk_start, chunk_end) in enumerate(chunks):
                 try:
                     chunk_rows.extend(
@@ -7248,6 +7266,28 @@ def _fetch_fast_long_fund_history(
     fallback_used = False
     fallback_reason: Optional[str] = None
 
+    # A long chart range must still be a daily series.  The old fast path
+    # started with Fintables and supplemented it with TEFAS month-end anchors,
+    # which made funds that were missing from Fintables look like they had
+    # missing TEFAS data.  Query the official, bounded TEFAS range first and
+    # accept it when it is internally daily.  Fintables remains a fallback for
+    # upstream outages or genuinely incomplete TEFAS responses.
+    try:
+        direct_rows = TefasClient().fetch_fund_history(
+            fund_codes=[normalized],
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except TefasUpstreamError as exc:
+        direct_rows = []
+        warnings.append(f"tefas_fund_list daily history bootstrap failed: {exc}")
+    valid_direct_rows = _valid_performance_points(direct_rows, normalized)
+    if (
+        len(valid_direct_rows) >= 2
+        and not _history_internal_gap_warnings(valid_direct_rows, resolution="daily")
+    ):
+        return valid_direct_rows, warnings, fallback_used, fallback_reason
+
     try:
         price_points = fetch_fintables_udf_history(normalized, start_date, end_date)
         if price_points:
@@ -7256,6 +7296,8 @@ def _fetch_fast_long_fund_history(
             points.extend(price_points)
     except FintablesUpstreamError as exc:
         warnings.append(f"fintables_udf_history fast bootstrap failed: {exc}")
+
+    points.extend(direct_rows)
 
     recent_start = max(start_date, end_date - timedelta(days=max(1, FUNDS_RECENT_DETAIL_LOOKBACK_DAYS) - 1))
     recent_rows, recent_warnings = _fetch_recent_detail_rows(
@@ -7280,39 +7322,6 @@ def _fetch_fast_long_fund_history(
         )
     points.extend(metric_rows)
     warnings.extend(metric_warnings)
-
-    # Fintables is an excellent fast path when its daily UDF history exists,
-    # but it is not available for every TEFAS fund. If the cached series starts
-    # after the requested range, fill that missing prefix from TEFAS using the
-    # bounded month-chunk requests above. TLY/PHE keep their existing Fintables
-    # path; funds such as THF no longer get stuck at the local cache boundary.
-    # Monthly overview rows are useful for AUM/investor metadata, but they do
-    # not prove that the requested daily price range is covered.  Counting
-    # them here makes a range such as YTD look complete as soon as the first
-    # month-end anchor arrives, which prevents the chunked TEFAS daily history
-    # request below from filling the missing January-to-present series.
-    price_point_dates = [
-        point_date
-        for point in price_points
-        for point_date in [_fund_date(point.get("date"))]
-        if point_date and _coerce_float(point.get("price")) is not None
-    ]
-    first_price_date = min((date.fromisoformat(item) for item in price_point_dates), default=None)
-    needs_tefas_prefix = (
-        first_price_date is None
-        or _business_days_between(start_date, first_price_date - timedelta(days=1)) > 3
-    )
-    if needs_tefas_prefix:
-        try:
-            direct_rows = TefasClient().fetch_fund_history(
-                fund_codes=[normalized],
-                start_date=start_date,
-                end_date=end_date,
-            )
-            if direct_rows:
-                points.extend(direct_rows)
-        except TefasUpstreamError as exc:
-            warnings.append(f"tefas_fund_list chunked history backfill failed: {exc}")
 
     if not points:
         warnings.append("fast long range bootstrap returned no points")
