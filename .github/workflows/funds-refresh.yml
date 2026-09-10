@@ -3,10 +3,10 @@ name: refresh funds snapshot
 on:
   workflow_dispatch:
   schedule:
-    # 09:55, 13:30 and 23:55 Europe/Istanbul (UTC+3), weekdays.
-    - cron: "55 6 * * 1-5"
-    - cron: "30 10 * * 1-5"
-    - cron: "55 20 * * 1-5"
+    # Every 30 minutes on weekdays in Europe/Istanbul (UTC+3).
+    # GitHub Actions evaluates cron in UTC, so the day boundary needs two ranges.
+    - cron: "*/30 0-20 * * 1-5"
+    - cron: "*/30 21-23 * * 0-4"
 
 permissions: {}
 
