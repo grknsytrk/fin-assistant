@@ -652,6 +652,48 @@ def test_fund_public_daily_return_uses_previous_business_day_price(tmp_path) -> 
     assert detail_payload["daily_return"] == pytest.approx(0.2351, abs=0.0001)
 
 
+def test_fund_public_daily_return_fills_missing_direct_snapshot_return(tmp_path) -> None:
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "AAL", "date": "2026-09-09", "price": 3.5556, "source": "tefasfon_funds"},
+            {"fund_code": "AAL", "date": "2026-09-10", "price": 3.559048, "source": "tefas_direct_funds"},
+        ],
+        source="tefas_direct_funds",
+    )
+    snapshot = {
+        "status": "ok",
+        "rows": [
+            {
+                "fund_code": "AAL",
+                "name": "ATA PORTFOY PARA PIYASASI FONU",
+                "price": 3.559048,
+                "daily_return": None,
+                "tefas_open": True,
+                "as_of": "2026-09-10",
+                "source": "tefas_direct_funds",
+            }
+        ],
+        "source": "tefas_direct_funds",
+        "as_of": "2026-09-10",
+        "fetched_at": "2026-09-10T13:31:07+03:00",
+        "stale": False,
+        "degraded": False,
+        "warnings": [],
+        "source_metadata": {"source": "tefas_direct_funds"},
+    }
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    list_payload = fund_service.get_funds_payload(tmp_path, min_aum=None)
+    detail_payload = fund_service.get_fund_detail_payload(tmp_path, "AAL")
+
+    expected = ((3.559048 / 3.5556) - 1.0) * 100.0
+    assert list_payload["rows"][0]["daily_return"] == pytest.approx(expected, abs=0.0001)
+    assert detail_payload["daily_return"] == pytest.approx(expected, abs=0.0001)
+
+
 def test_fund_payload_overlays_newer_history_point_on_stale_snapshot(tmp_path) -> None:
     fund_service.upsert_fund_price_points(
         tmp_path,

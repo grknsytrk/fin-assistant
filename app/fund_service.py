@@ -1365,12 +1365,18 @@ def _upsert_fund_reference_data(
 
 _FUND_PRICE_SOURCE_PRIORITY = {
     TEFASFON_FUNDS_SOURCE: 90,
+    TEFAS_DIRECT_FUNDS_SOURCE: 85,
     FINTABLES_UDF_HISTORY_SOURCE: 70,
     "legacy_json": 10,
 }
 _TEFASFON_DAILY_PRICE_SOURCES = (TEFASFON_FUNDS_SOURCE,)
+_TEFAS_DIRECT_DAILY_PRICE_SOURCES = (TEFAS_DIRECT_FUNDS_SOURCE,)
 _FINTABLES_DAILY_PRICE_SOURCES = (FINTABLES_UDF_HISTORY_SOURCE,)
-_DAILY_PRICE_SOURCES = _TEFASFON_DAILY_PRICE_SOURCES + _FINTABLES_DAILY_PRICE_SOURCES
+_DAILY_PRICE_SOURCES = (
+    _TEFASFON_DAILY_PRICE_SOURCES
+    + _TEFAS_DIRECT_DAILY_PRICE_SOURCES
+    + _FINTABLES_DAILY_PRICE_SOURCES
+)
 _NON_DAILY_PRICE_SOURCES = {FINTABLES_YIELD_SUMMARY_SOURCE, TEFASFON_RETURNS_SOURCE, TEFASFON_PORTFOLIO_SOURCE}
 
 
@@ -1958,13 +1964,20 @@ def read_latest_fund_price_points(
     return {code: dict(point) for code, point in points.items()}
 
 
-def _daily_return_reconciliation_candidates(rows: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+def _daily_return_reconciliation_candidates(
+    rows: Iterable[Dict[str, Any]],
+    *,
+    include_missing: bool = False,
+) -> Dict[str, str]:
     """Return fund/date pairs whose snapshot return may use a stale range.
 
     The TEFAS list snapshot can contain a ``getiriOrani`` value calculated for
     a wider range than the previous market business day.  Those rows are
     marked either by the list-snapshot source or by the returns merge that
     supplied the value.  A normal official ``gunlukGetiri`` is left intact.
+    When ``include_missing`` is true, rows without a daily return are also
+    candidates so public payloads can derive the previous-market-close change
+    from the daily price history.
     """
 
     candidates: Dict[str, str] = {}
@@ -1973,7 +1986,12 @@ def _daily_return_reconciliation_candidates(rows: Iterable[Dict[str, Any]]) -> D
             continue
         source = _normalize_price_source(str(row.get("source") or ""))
         return_source = _normalize_price_source(str(row.get("daily_return_source") or ""))
-        if source != TEFAS_LIST_SNAPSHOT_SOURCE and return_source != TEFASFON_RETURNS_SOURCE:
+        has_daily_return = _coerce_float(_first_present(row, "daily_return", "gunlukGetiri")) is not None
+        if not (
+            source == TEFAS_LIST_SNAPSHOT_SOURCE
+            or return_source == TEFASFON_RETURNS_SOURCE
+            or (include_missing and not has_daily_return)
+        ):
             continue
         code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
         point_date = _fund_date(row.get("as_of") or row.get("date") or row.get("tarih"))
@@ -1987,15 +2005,16 @@ def _daily_return_overrides_from_price_history(
     rows: Iterable[Dict[str, Any]],
     *,
     max_gap_days: Optional[int] = None,
+    include_missing: bool = False,
 ) -> Dict[Tuple[str, str], float]:
-    """Compute previous-market-business-day returns for flagged snapshots."""
+    """Compute previous-market-business-day returns for eligible snapshots."""
 
     effective_max_gap_days = (
         _DAILY_RETURN_LOCAL_FALLBACK_MAX_GAP_DAYS
         if max_gap_days is None
         else max_gap_days
     )
-    candidates = _daily_return_reconciliation_candidates(rows)
+    candidates = _daily_return_reconciliation_candidates(rows, include_missing=include_missing)
     if not candidates or effective_max_gap_days <= 0:
         return {}
     candidate_dates = [date.fromisoformat(value) for value in candidates.values()]
@@ -2060,9 +2079,15 @@ def _daily_return_overrides_from_price_history(
 def _apply_daily_return_overrides(
     processed_dir: Path,
     rows: Iterable[Dict[str, Any]],
+    *,
+    include_missing: bool = False,
 ) -> List[Dict[str, Any]]:
     materialized = [dict(row) for row in rows if isinstance(row, dict)]
-    overrides = _daily_return_overrides_from_price_history(processed_dir, materialized)
+    overrides = _daily_return_overrides_from_price_history(
+        processed_dir,
+        materialized,
+        include_missing=include_missing,
+    )
     if not overrides:
         return materialized
     for row in materialized:
@@ -5883,7 +5908,7 @@ def get_funds_payload(
         and _row_matches(row, q=q, fund_type=fund_type, founder=founder, manager=manager, risk=risk)
     ]
     filtered = time.perf_counter()
-    rows = _apply_daily_return_overrides(processed_dir, rows)
+    rows = _apply_daily_return_overrides(processed_dir, rows, include_missing=True)
     reconciled = time.perf_counter()
     rows = _sort_rows(rows, sort, order)
     finished = time.perf_counter()
@@ -5968,7 +5993,7 @@ def _find_fund_row(processed_dir: Path, fund_code: str) -> Optional[Dict[str, An
             ):
                 if row.get(key) is None and ref_meta.get(key) is not None:
                     row[key] = ref_meta[key]
-            return _apply_daily_return_overrides(processed_dir, [row])[0]
+            return _apply_daily_return_overrides(processed_dir, [row], include_missing=True)[0]
     return None
 
 
