@@ -6508,7 +6508,8 @@ def _fund_performance_payload_from_points(
         # A late tail is a refresh/freshness concern, not evidence that the
         # fund's historical range starts later. The API can expose the local
         # points immediately while its background job fills that tail.
-        if start_gap > 3:
+        end_gap = int(coverage.get("coverage_gap_business_days") or 0)
+        if start_gap > 3 or end_gap > 3:
             coverage_state = "range_incomplete"
     else:
         coverage_state = "unavailable"

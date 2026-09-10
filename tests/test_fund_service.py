@@ -1182,6 +1182,26 @@ def test_fund_performance_metadata_exposes_monthly_anchor_resolution(tmp_path) -
     assert metadata["internal_gap_count"] == 0
 
 
+def test_fund_performance_metadata_marks_material_tail_gap_incomplete(tmp_path) -> None:
+    points = [
+        {"fund_code": "AFT", "date": "2026-05-25", "price": 10.0},
+        {"fund_code": "AFT", "date": "2026-05-26", "price": 11.0},
+    ]
+
+    payload = fund_service._fund_performance_payload_from_points(
+        tmp_path,
+        "AFT",
+        points,
+        start_date=date(2026, 3, 10),
+        end_date=date(2026, 9, 10),
+    )
+
+    metadata = payload["source_metadata"]
+    assert metadata["coverage_state"] == "range_incomplete"
+    assert metadata["coverage_gap_business_days"] > 3
+    assert metadata["available_end_date"] == "2026-05-26"
+
+
 def test_refresh_funds_snapshot_backfills_daily_return_from_local_prices(monkeypatch, tmp_path) -> None:
     """When TEFAS does not publish a daily return for a fund (typical for
     qualified-investor / TEFAS-closed funds), the snapshot should still pick up
