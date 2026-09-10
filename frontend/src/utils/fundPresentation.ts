@@ -307,10 +307,9 @@ export type FundHistoryDiagnosticInput = {
 };
 
 /**
- * Build the detail-view diagnostic lines shown beside the fund history.
- * Keep this intentionally explicit: when a series is partial, the user needs
- * enough information to tell a young fund, a stale tail, a source fallback,
- * and a failed background job apart.
+ * Build detail-view diagnostics only when the user has an actionable data
+ * problem. Normal partial coverage, source selection, loading, and completed
+ * background work are internal state and should not be shown as a warning.
  */
 export function buildFundHistoryDiagnosticLines(input: FundHistoryDiagnosticInput): string[] {
     const metadata = input.performance?.source_metadata;
@@ -327,21 +326,21 @@ export function buildFundHistoryDiagnosticLines(input: FundHistoryDiagnosticInpu
         .filter((period) => input.periodReturns && input.periodReturns[period.key] == null)
         .map((period) => period.label);
     const fintablesHistoryPending = isFintablesHistoryPending(input.performance, job);
-    const hasDiagnosticSignal = Boolean(
-        input.performanceLoading
-        || input.performanceError
+    const sourceWarnings = [...(metadata?.warnings || []), metadata?.warning].filter(Boolean);
+    const performanceStatus = String(input.performance?.status || '').trim().toLowerCase();
+    const hasActionableIssue = Boolean(
+        input.performanceError
         || input.historyBackfillError
-        || input.yieldLoading
         || input.yieldError
-        || (metadata?.coverage_state && metadata.coverage_state !== 'complete')
-        || metadata?.warnings?.length
-        || metadata?.warning
-        || metadata?.fallback_used
-        || metadata?.fallback_reason
-        || (job && !['succeeded', 'idle'].includes(job.status))
-        || missingPeriods.length,
+        || sourceWarnings.length
+        || input.performance?.stale
+        || ['error', 'failed', 'unavailable'].includes(performanceStatus)
+        || metadata?.coverage_state === 'unavailable'
+        || metadata?.daily_upgrade_state === 'failed'
+        || job?.status === 'failed'
+        || Boolean(job?.error),
     );
-    if (!hasDiagnosticSignal) return [];
+    if (!hasActionableIssue) return [];
 
     const lines: string[] = [
         `Fon geçmişi: ${input.fundCode} · API durumu: ${input.performance?.status || 'bilinmiyor'} · kapsama: ${coverage}`,
@@ -434,7 +433,7 @@ export function buildFundHistoryDiagnosticLines(input: FundHistoryDiagnosticInpu
 
     const errors = [input.performanceError, input.historyBackfillError, input.yieldError].filter(Boolean);
     for (const error of errors) lines.push(`Hata: ${error}`);
-    for (const warning of [...(metadata?.warnings || []), metadata?.warning].filter(Boolean)) {
+    for (const warning of sourceWarnings) {
         lines.push(`Kaynak uyarısı: ${warning}`);
     }
 

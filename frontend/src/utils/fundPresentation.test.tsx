@@ -146,7 +146,7 @@ describe('fund presentation helpers', () => {
         expect(merged?.status).toBe('ok');
     });
 
-    it('explains partial young-fund history and the background job state', () => {
+    it('does not expose successful partial history as a warning', () => {
         const performance = performancePayload(
             [
                 performancePoint('2026-05-05', 1.0, 'fintables_udf_history'),
@@ -184,15 +184,10 @@ describe('fund presentation helpers', () => {
             periodReturns: { '1w': -1, '1m': -2, '3m': 3, '6m': null, ytd: null, '1y': null },
         });
 
-        expect(lines.join('\n')).toContain('İstenen aralık:');
-        expect(lines.join('\n')).toContain('Mevcut aralık:');
-        expect(lines.join('\n')).toContain('Fintables UDF geçmişi');
-        expect(lines.join('\n')).toContain('güncel uç mevcut');
-        expect(lines.join('\n')).toContain('6A, YBB, 1Y');
-        expect(lines.join('\n')).toContain('history-puk');
+        expect(lines).toEqual([]);
     });
 
-    it('explains a clean source head boundary without claiming a missing job', () => {
+    it('does not expose a clean source head boundary as a warning', () => {
         const performance = performancePayload(
             [
                 performancePoint('2026-04-01', 1.0, 'fintables_udf_history'),
@@ -220,8 +215,22 @@ describe('fund presentation helpers', () => {
             periodReturns: { '1w': 1, '1m': 2, '3m': 3, '6m': 4, ytd: 5, '1y': 6 },
         });
 
-        expect(lines.join('\n')).toContain('yeniden backfill planlanmadı');
-        expect(lines.join('\n')).toContain('yeniden job başlatılmadı');
-        expect(lines.join('\n')).not.toContain('bu yanıtta job kaydı yok');
+        expect(lines).toEqual([]);
+    });
+
+    it('keeps actionable history errors visible', () => {
+        const performance = performancePayload(
+            [performancePoint('2026-09-10', 1.0, 'fintables_udf_history')],
+            { coverage_state: 'unavailable' },
+        );
+
+        const lines = buildFundHistoryDiagnosticLines({
+            fundCode: 'BYZ',
+            performance,
+            points: performance.points,
+            performanceError: 'Geçmiş verisi alınamadı.',
+        });
+
+        expect(lines.join('\n')).toContain('Hata: Geçmiş verisi alınamadı.');
     });
 });
