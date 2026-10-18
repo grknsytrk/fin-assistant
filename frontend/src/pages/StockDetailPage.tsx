@@ -15,6 +15,7 @@ import { prepareOrderedQuarters } from '../utils/chartBuilders';
 import SymbolLogo from '../components/SymbolLogo';
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
+import { useMobileChartLayout } from '../hooks/useMobileChartLayout';
 import { useWatchlist } from '../hooks/useWatchlist';
 import type { StockTab } from '../routing/routes';
 
@@ -179,6 +180,8 @@ function StockDetailPriceChart({
     const chartRequestIdRef = useRef(0);
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
+    const [selectedMeasureRange, setSelectedMeasureRange] = useState<{ start: number; end: number } | null>(null);
+    const isMobileChart = useMobileChartLayout();
 
     useEffect(() => {
         const cached = chartDataByRange[selectedRange];
@@ -228,6 +231,7 @@ function StockDetailPriceChart({
         if (nextRange === selectedRange && !rangeErrors[nextRange]) return;
         setHoverIndex(null);
         setMeasureAnchorIndex(null);
+        setSelectedMeasureRange(null);
         if (rangeErrors[nextRange]) {
             setRangeErrors((previous) => ({ ...previous, [nextRange]: null }));
         }
@@ -244,6 +248,12 @@ function StockDetailPriceChart({
         .map((point) => ({ ...point, close: Number(point.close) }));
     const rangeError = rangeErrors[selectedRange] || (validPoints.length < 2 ? chart?.error : null);
     const isLoading = !chart && !rangeError;
+
+    useEffect(() => {
+        setHoverIndex(null);
+        setMeasureAnchorIndex(null);
+        setSelectedMeasureRange(null);
+    }, [ticker, selectedRange, validPoints.length, validPoints[0]?.time, validPoints[validPoints.length - 1]?.time]);
 
     const controls = (
         <div className="sd-price-chart-toolbar">
@@ -276,14 +286,17 @@ function StockDetailPriceChart({
         const values = previousValues.length >= 2 ? previousValues : [18, 22, 20, 27, 24, 30, 26, 34, 32, 38, 35, 42];
         const min = Math.min(...values);
         const span = Math.max(0.01, Math.max(...values) - min);
+        const loadingHeight = isMobileChart ? 900 : 400;
+        const loadingTop = isMobileChart ? 52 : 60;
+        const loadingBottom = loadingHeight - (isMobileChart ? 112 : 60);
         const line = values.map((value, index) =>
-            `${index === 0 ? 'M' : 'L'} ${16 + index / (values.length - 1) * 1028} ${340 - (value - min) / span * 280}`,
+            `${index === 0 ? 'M' : 'L'} ${16 + index / (values.length - 1) * 1028} ${loadingBottom - (value - min) / span * (loadingBottom - loadingTop) * 0.86}`,
         ).join(' ');
         return (
             <section className="sd-price-chart-panel" aria-label={`${ticker} fiyat grafiği`} aria-busy="true">
                 {controls}
-                <svg className="sd-price-chart-svg sd-price-chart-loading" viewBox="0 0 1120 400" role="img" aria-label="Grafik yükleniyor">
-                    {[70, 150, 230, 310].map(y => (
+                <svg className="sd-price-chart-svg sd-price-chart-loading" viewBox={`0 0 1120 ${loadingHeight}`} role="img" aria-label="Grafik yükleniyor">
+                    {[0.18, 0.4, 0.62, 0.84].map((ratio) => loadingTop + ratio * (loadingBottom - loadingTop)).map(y => (
                         <line key={y} className="sd-price-chart-gridline" x1="16" x2="1044" y1={y} y2={y} />
                     ))}
                     <path className="sd-price-chart-loading-track" d={line} />
@@ -303,8 +316,10 @@ function StockDetailPriceChart({
     }
 
     const width = 1120;
-    const height = 400;
-    const padding = { top: 30, right: 76, bottom: 44, left: 16 };
+    const height = isMobileChart ? 900 : 400;
+    const padding = isMobileChart
+        ? { top: 52, right: 190, bottom: 112, left: 16 }
+        : { top: 30, right: 76, bottom: 44, left: 16 };
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
     const values = validPoints.map((point) => point.close);
@@ -400,11 +415,41 @@ function StockDetailPriceChart({
         const x = chartXFromEvent(event);
         if (x == null) return;
         const closestIndex = closestIndexForX(x);
-        setHoverIndex(closestIndex);
-        setMeasureAnchorIndex(closestIndex);
+        const rect = event.currentTarget.getBoundingClientRect();
+        const handleHitRadius = rect.width > 0 ? (20 * width) / rect.width : 32;
+        let anchorIndex = closestIndex;
+        let hoverTargetIndex = closestIndex;
+        if (selectedMeasureRange) {
+            const startDistance = Math.abs(xFor(selectedMeasureRange.start) - x);
+            const endDistance = Math.abs(xFor(selectedMeasureRange.end) - x);
+            if (Math.min(startDistance, endDistance) <= handleHitRadius) {
+                if (startDistance <= endDistance) {
+                    anchorIndex = selectedMeasureRange.end;
+                    hoverTargetIndex = selectedMeasureRange.start;
+                } else {
+                    anchorIndex = selectedMeasureRange.start;
+                    hoverTargetIndex = selectedMeasureRange.end;
+                }
+            } else {
+                setSelectedMeasureRange(null);
+            }
+        }
+        setHoverIndex(hoverTargetIndex);
+        setMeasureAnchorIndex(anchorIndex);
         event.currentTarget.setPointerCapture?.(event.pointerId);
     };
     const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const x = chartXFromEvent(event);
+        if (x != null && measureAnchorIndex != null) {
+            const endIndex = closestIndexForX(x);
+            setHoverIndex(endIndex);
+            if (measureAnchorIndex !== endIndex) {
+                setSelectedMeasureRange({
+                    start: Math.min(measureAnchorIndex, endIndex),
+                    end: Math.max(measureAnchorIndex, endIndex),
+                });
+            }
+        }
         setMeasureAnchorIndex(null);
         try {
             if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
@@ -419,30 +464,28 @@ function StockDetailPriceChart({
     const hoverPoint = activeHoverIndex == null ? null : validPoints[activeHoverIndex];
     const hoverX = activeHoverIndex == null ? null : xFor(activeHoverIndex);
     const hoverY = hoverPoint ? yFor(hoverPoint.close) : null;
-    const measureAnchorPoint = measureAnchorIndex == null
-        ? null
-        : validPoints[Math.min(Math.max(measureAnchorIndex, 0), validPoints.length - 1)];
-    const measureEndPoint = measureAnchorPoint && hoverPoint && activeHoverIndex != null && activeHoverIndex !== measureAnchorIndex
-        ? hoverPoint
+    const dragSelection = measureAnchorIndex != null && activeHoverIndex != null && measureAnchorIndex !== activeHoverIndex
+        ? { start: Math.min(measureAnchorIndex, activeHoverIndex), end: Math.max(measureAnchorIndex, activeHoverIndex) }
         : null;
-    const measureAnchorX = measureAnchorIndex == null
-        ? null
-        : xFor(Math.min(Math.max(measureAnchorIndex, 0), validPoints.length - 1));
+    const visibleMeasureRange = dragSelection || selectedMeasureRange;
+    const measureAnchorPoint = visibleMeasureRange ? validPoints[visibleMeasureRange.start] : null;
+    const measureEndPoint = visibleMeasureRange ? validPoints[visibleMeasureRange.end] : null;
+    const measureAnchorX = visibleMeasureRange ? xFor(visibleMeasureRange.start) : null;
     const measureAnchorY = measureAnchorPoint ? yFor(measureAnchorPoint.close) : null;
-    const measureEndX = measureEndPoint && activeHoverIndex != null ? xFor(activeHoverIndex) : null;
+    const measureEndX = visibleMeasureRange ? xFor(visibleMeasureRange.end) : null;
     const measureEndY = measureEndPoint ? yFor(measureEndPoint.close) : null;
     const measureDelta = measureAnchorPoint && measureEndPoint ? measureEndPoint.close - measureAnchorPoint.close : null;
     const measureReturn = measureAnchorPoint && measureEndPoint
         ? stockDetailChartReturn(measureEndPoint.close, measureAnchorPoint.close)
         : null;
     const measureLineY = measureAnchorY != null && measureEndY != null
-        ? Math.max(padding.top + 12, Math.min(measureAnchorY, measureEndY) - 18)
+        ? Math.max(padding.top + (isMobileChart ? 28 : 12), Math.min(measureAnchorY, measureEndY) - (isMobileChart ? 34 : 18))
         : null;
-    const measureTooltipWidth = 190;
-    const measureTooltipHeight = 70;
-    const measureTooltipGap = 14;
-    const measureTooltipAnchorX = hoverX ?? measureEndX;
-    const measureTooltipAnchorY = hoverY ?? measureEndY;
+    const measureTooltipWidth = isMobileChart ? 320 : 190;
+    const measureTooltipHeight = isMobileChart ? 112 : 70;
+    const measureTooltipGap = isMobileChart ? 22 : 14;
+    const measureTooltipAnchorX = measureEndX;
+    const measureTooltipAnchorY = measureEndY;
     const measureTooltipShouldFlip = measureTooltipAnchorX != null
         && measureTooltipAnchorX + measureTooltipGap + measureTooltipWidth > width - 8;
     const measureTooltipX = measureTooltipAnchorX == null
@@ -461,8 +504,12 @@ function StockDetailPriceChart({
     const measureClass = measureReturn == null ? '' : pctClass(measureReturn);
     const measureLeftX = measureAnchorX != null && measureEndX != null ? Math.min(measureAnchorX, measureEndX) : null;
     const measureRightX = measureAnchorX != null && measureEndX != null ? Math.max(measureAnchorX, measureEndX) : null;
-    const tooltipWidth = 166;
-    const tooltipHeight = 60;
+    const hasVisibleSelection = Boolean(
+        visibleMeasureRange && measureLeftX != null && measureRightX != null && measureRightX > measureLeftX,
+    );
+    const selectionClipId = `sd-price-chart-selection-${ticker}-${selectedRange}`;
+    const tooltipWidth = isMobileChart ? 270 : 166;
+    const tooltipHeight = isMobileChart ? 90 : 60;
     const tooltipX = hoverX == null ? 0 : Math.min(Math.max(hoverX + 16, padding.left), width - tooltipWidth - 8);
     const tooltipY = hoverY == null
         ? 0
@@ -470,7 +517,10 @@ function StockDetailPriceChart({
             ? padding.top
             : Math.min(hoverY - tooltipHeight / 2, height - tooltipHeight - padding.bottom);
     const markerLabel = formatQuotePrice(markerPrice, currency);
-    const markerWidth = Math.max(70, markerLabel.length * 8 + 18);
+    const markerWidth = Math.max(
+        isMobileChart ? 132 : 70,
+        markerLabel.length * (isMobileChart ? 17 : 8) + (isMobileChart ? 28 : 18),
+    );
     const markerY = yFor(markerPrice);
     const markerX = width - padding.right + 4;
 
@@ -494,9 +544,18 @@ function StockDetailPriceChart({
             >
                 <defs>
                     <linearGradient id={`sd-price-chart-area-${ticker}-${selectedRange}`} x1="0%" y1="0%" x2="0%" y2="100%">
-                        <stop offset="0%" stopColor={chartColor} stopOpacity="0.24" />
-                        <stop offset="100%" stopColor={chartColor} stopOpacity="0" />
+                        <stop offset="0%" stopColor={hasVisibleSelection ? '#9aa3ad' : chartColor} stopOpacity={hasVisibleSelection ? '0.14' : '0.24'} />
+                        <stop offset="100%" stopColor={hasVisibleSelection ? '#9aa3ad' : chartColor} stopOpacity="0" />
                     </linearGradient>
+                    <linearGradient id={`sd-price-chart-selected-area-${ticker}-${selectedRange}`} x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" stopColor={chartColor} stopOpacity="0.28" />
+                        <stop offset="100%" stopColor={chartColor} stopOpacity="0.02" />
+                    </linearGradient>
+                    {hasVisibleSelection && measureLeftX != null && measureRightX != null && (
+                        <clipPath id={selectionClipId}>
+                            <rect x={measureLeftX} y={padding.top} width={measureRightX - measureLeftX} height={plotHeight} />
+                        </clipPath>
+                    )}
                 </defs>
                 <rect x="0" y="0" width={width} height={height} fill="#0d1113" />
                 {tickValues.map((value) => (
@@ -524,7 +583,7 @@ function StockDetailPriceChart({
                         />
                         <text
                             x={x}
-                            y={height - 15}
+                            y={height - (isMobileChart ? 34 : 15)}
                             className="sd-price-chart-axis"
                             textAnchor={x === padding.left ? 'start' : x === width - padding.right ? 'end' : 'middle'}
                         >
@@ -533,15 +592,33 @@ function StockDetailPriceChart({
                     </g>
                 ))}
                 <path d={areaData} fill={`url(#sd-price-chart-area-${ticker}-${selectedRange})`} />
-                <path d={pathData} fill="none" stroke={chartColor} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+                <path d={pathData} fill="none" stroke={hasVisibleSelection ? '#8f98a3' : chartColor} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
                 <circle cx={xFor(validPoints.length - 1)} cy={yFor(validPoints[validPoints.length - 1].close)} r="4" fill={chartColor} />
                 <g transform={`translate(${markerX}, ${markerY})`}>
-                    <rect width={markerWidth} height="20" y="-10" rx="2" fill={chartColor} />
+                    <rect width={markerWidth} height={isMobileChart ? 32 : 20} y={isMobileChart ? -16 : -10} rx="2" fill={chartColor} />
                     <path d="M 0 0 L -6 -6 L -6 6 Z" fill={chartColor} />
-                    <text x={markerWidth / 2} y="3" fill="#ffffff" fontSize="11" fontFamily="monospace" textAnchor="middle" fontWeight="bold">
+                    <text x={markerWidth / 2} y="4" fill="#ffffff" fontSize={isMobileChart ? 26 : 11} fontFamily="monospace" textAnchor="middle" fontWeight="bold">
                         {markerLabel}
                     </text>
                 </g>
+
+                {hasVisibleSelection && measureLeftX != null && measureRightX != null && (
+                    <g className="sd-price-chart-selection" aria-hidden="true">
+                        <rect x={padding.left} y={padding.top} width={Math.max(0, measureLeftX - padding.left)} height={plotHeight} className="sd-price-chart-selection-outside" />
+                        <rect x={measureRightX} y={padding.top} width={Math.max(0, width - padding.right - measureRightX)} height={plotHeight} className="sd-price-chart-selection-outside" />
+                        <rect x={measureLeftX} y={padding.top} width={measureRightX - measureLeftX} height={plotHeight} fill={chartColor} className="sd-price-chart-selection-band" />
+                        <path d={areaData} fill={`url(#sd-price-chart-selected-area-${ticker}-${selectedRange})`} clipPath={`url(#${selectionClipId})`} />
+                        <path d={pathData} fill="none" stroke={chartColor} strokeWidth="2.7" strokeLinejoin="round" strokeLinecap="round" clipPath={`url(#${selectionClipId})`} />
+                        {[measureLeftX, measureRightX].map((x, index) => (
+                            <g key={`${x}-${index}`}>
+                                <line x1={x} x2={x} y1={padding.top} y2={height - padding.bottom} className="sd-price-chart-selection-edge" />
+                                <rect x={x - 18} y={height - padding.bottom - 24} width="36" height="30" rx="7" className="sd-price-chart-selection-handle" />
+                                <line x1={x - 6} x2={x - 6} y1={height - padding.bottom - 17} y2={height - padding.bottom - 1} className="sd-price-chart-selection-grip" />
+                                <line x1={x + 6} x2={x + 6} y1={height - padding.bottom - 17} y2={height - padding.bottom - 1} className="sd-price-chart-selection-grip" />
+                            </g>
+                        ))}
+                    </g>
+                )}
 
                 {measureAnchorPoint
                     && measureEndPoint
@@ -566,30 +643,30 @@ function StockDetailPriceChart({
                             style={{ transform: `translate(${measureTooltipX}px, ${measureTooltipY}px)` }}
                         >
                             <rect width={measureTooltipWidth} height={measureTooltipHeight} rx="7" className="sd-price-chart-measure-tooltip-bg" />
-                            <text x="10" y="18" className="sd-price-chart-measure-muted">
+                            <text x="10" y={isMobileChart ? 30 : 18} className="sd-price-chart-measure-muted">
                                 {formatStockDetailChartTime(measureAnchorPoint.time, selectedRange)} - {formatStockDetailChartTime(measureEndPoint.time, selectedRange)}
                             </text>
-                            <text x="10" y="42" className={`sd-price-chart-measure-value ${measureClass}`}>
+                            <text x="10" y={isMobileChart ? 65 : 42} className={`sd-price-chart-measure-value ${measureClass}`}>
                                 {formatPct(measureReturn)}
                             </text>
-                            <text x="10" y="60" className="sd-price-chart-measure-muted">
+                            <text x="10" y={isMobileChart ? 96 : 60} className="sd-price-chart-measure-muted">
                                 {measureDeltaText}
                             </text>
                         </g>
                     </g>
                 )}
 
-                {measureAnchorIndex == null && hoverPoint && hoverX != null && hoverY != null && (
+                {measureAnchorIndex == null && selectedMeasureRange == null && hoverPoint && hoverX != null && hoverY != null && (
                     <g className="sd-price-chart-hover">
                         <line x1={hoverX} x2={hoverX} y1={padding.top} y2={height - padding.bottom} className="sd-price-chart-hoverline" />
                         <line x1={padding.left} x2={width - padding.right} y1={hoverY} y2={hoverY} className="sd-price-chart-hoverline horizontal" />
                         <circle cx={hoverX} cy={hoverY} r="4" fill={chartColor} stroke="#0a0c0f" strokeWidth="2" />
                         <g transform={`translate(${tooltipX}, ${tooltipY})`}>
                             <rect width={tooltipWidth} height={tooltipHeight} rx="4" className="sd-price-chart-tooltip-bg" />
-                            <text x="12" y="21" className="sd-price-chart-tooltip-muted">
+                            <text x="12" y={isMobileChart ? 31 : 21} className="sd-price-chart-tooltip-muted">
                                 {formatStockDetailChartTime(hoverPoint.time, selectedRange)}
                             </text>
-                            <text x="12" y="45" className="sd-price-chart-tooltip-value">
+                            <text x="12" y={isMobileChart ? 66 : 45} className="sd-price-chart-tooltip-value">
                                 {formatQuotePrice(hoverPoint.close, currency)}
                             </text>
                         </g>

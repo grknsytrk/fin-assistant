@@ -1640,6 +1640,147 @@
     margin-left: 0;
 }
 
+.stock-screener {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    padding: 0.95rem 1.15rem 0.8rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 74%, transparent);
+    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+}
+
+.stock-screener-topline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.stock-screener-topline > div {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.stock-screener-topline strong {
+    color: var(--text-primary);
+    font-size: 0.82rem;
+}
+
+.stock-screener-topline span,
+.stock-screener-status {
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+}
+
+.stock-screener-clear {
+    flex: 0 0 auto;
+    min-height: 32px;
+    padding: 0 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 86%, transparent);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.7rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.stock-screener-clear:hover {
+    border-color: var(--accent-color);
+    color: var(--text-primary);
+}
+
+.stock-screener-presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.stock-screener-chip {
+    min-height: 32px;
+    padding: 0 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 80%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-color) 70%, transparent);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.68rem;
+    font-weight: 750;
+    cursor: pointer;
+    transition: border-color 0.16s ease, color 0.16s ease, background 0.16s ease;
+}
+
+.stock-screener-chip:hover,
+.stock-screener-chip.active {
+    border-color: color-mix(in srgb, var(--accent-color) 72%, var(--surface-border));
+    background: color-mix(in srgb, var(--accent-color) 14%, var(--surface-color));
+    color: var(--text-primary);
+}
+
+.stock-screener-filters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    align-items: end;
+    gap: 0.55rem;
+}
+
+.stock-screener-filters label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.32rem;
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: 0.66rem;
+    font-weight: 700;
+}
+
+.stock-screener-filters select,
+.stock-screener-filters input[type='number'] {
+    width: 100%;
+    min-width: 0;
+    height: 36px;
+    padding: 0 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 84%, transparent);
+    border-radius: 7px;
+    outline: none;
+    background: var(--bg-color);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.74rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.stock-screener-filters select:focus,
+.stock-screener-filters input[type='number']:focus {
+    border-color: var(--accent-color);
+}
+
+.stock-screener-filters .stock-screener-check {
+    min-height: 36px;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 70%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--bg-color) 70%, transparent);
+    color: var(--text-primary);
+}
+
+.stock-screener-check input {
+    accent-color: var(--accent-color);
+}
+
+.stock-screener-status {
+    min-height: 0.9rem;
+}
+
+.stock-screener-status .is-error {
+    color: var(--danger-color);
+}
+
 .stocks-segment {
     position: relative;
     display: inline-grid;
@@ -1792,6 +1933,12 @@
     display: inline-flex;
     align-items: center;
     gap: 0.42rem;
+}
+
+.stocks-symbol-link {
+    display: inline-flex;
+    color: inherit;
+    text-decoration: none;
 }
 
 .stocks-symbol-logo {
@@ -2548,6 +2695,33 @@
         width: 100%;
     }
 
+    .stock-screener {
+        padding: 0.85rem 0.75rem;
+    }
+
+    .stock-screener-topline {
+        align-items: flex-start;
+    }
+
+    .stock-screener-topline span {
+        line-height: 1.45;
+    }
+
+    .stock-screener-presets {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding-bottom: 0.2rem;
+        scrollbar-width: thin;
+    }
+
+    .stock-screener-chip {
+        flex: 0 0 auto;
+    }
+
+    .stock-screener-filters {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .indices-hero {
         align-items: flex-start;
         flex-direction: column;
@@ -3185,9 +3359,9 @@
         position: relative;
         z-index: 1;
         display: grid;
-        grid-template-columns: auto minmax(0, 1fr) auto auto;
+        grid-template-columns: auto minmax(0, 1fr) auto minmax(38px, 0.62fr) auto;
         align-items: center;
-        gap: 0.55rem;
+        gap: 0.42rem;
         width: 100%;
         min-height: 58px;
         padding: 0.45rem 0.15rem;
@@ -3265,6 +3439,40 @@
         font-size: 0.62rem;
     }
 
+    .mobile-market-watchlist-chart {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        min-width: 0;
+        height: 22px;
+        color: var(--text-secondary);
+    }
+
+    .mobile-market-watchlist-chart svg {
+        display: block;
+        width: 100%;
+        height: 100%;
+        overflow: visible;
+    }
+
+    .mobile-market-watchlist-chart path {
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2.2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        vector-effect: non-scaling-stroke;
+    }
+
+    .mobile-market-watchlist-chart.stocks-up {
+        color: var(--success-color);
+    }
+
+    .mobile-market-watchlist-chart.stocks-down {
+        color: var(--danger-color);
+    }
+
     .mobile-market-watchlist-change {
         min-width: 60px;
         padding: 0.34rem 0.35rem;
@@ -3281,6 +3489,8 @@
     }
 
     .mobile-market-watchlist-search-area {
+        position: relative;
+        z-index: 3;
         margin-top: 0.75rem;
     }
 
@@ -3335,13 +3545,22 @@
     }
 
     .mobile-market-watchlist-search-results {
+        position: absolute;
+        z-index: 4;
+        right: 0;
+        bottom: calc(100% + 0.45rem);
+        left: 0;
         display: flex;
         flex-direction: column;
-        margin-top: 0.45rem;
-        overflow: hidden;
+        max-height: min(42vh, 300px);
+        max-height: min(42dvh, 300px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
         border: 1px solid color-mix(in srgb, var(--surface-border) 62%, transparent);
         border-radius: 12px;
         background: var(--bg-color);
+        box-shadow: 0 16px 36px rgba(0, 0, 0, 0.3);
+        scrollbar-width: thin;
     }
 
     .mobile-market-watchlist-search-results button {
@@ -3402,5 +3621,11 @@
 
     .mobile-market-overview + .stock-cards-panel {
         display: none;
+    }
+}
+
+@media (max-width: 760px) {
+    .market-page > .market-content.mobile-watchlist-search-open {
+        z-index: 160;
     }
 }

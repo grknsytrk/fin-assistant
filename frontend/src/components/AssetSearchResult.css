@@ -1,0 +1,183 @@
+.asset-search-result {
+    display: grid;
+    grid-template-areas: "logo main values kind";
+    grid-template-columns: 40px minmax(0, 1fr) 7.5rem 4.5rem;
+    align-items: center;
+    gap: 0.7rem;
+    width: 100%;
+    min-height: 56px;
+    box-sizing: border-box;
+    padding: 0.42rem 0.55rem;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-primary, #f8fafc);
+    cursor: pointer;
+    text-align: left;
+    text-decoration: none;
+}
+
+.asset-search-result > :first-child {
+    grid-area: logo;
+}
+
+.asset-search-result:hover,
+.asset-search-result.active {
+    background: color-mix(in srgb, var(--surface-color, #25272b) 72%, transparent);
+}
+
+.asset-search-result-main {
+    display: flex;
+    grid-area: main;
+    align-items: baseline;
+    gap: 0.75rem;
+    min-width: 0;
+}
+
+.asset-search-result-main strong {
+    flex: 0 0 auto;
+    color: var(--text-primary, #fff);
+    font-size: 0.96rem;
+    font-weight: 850;
+    letter-spacing: 0.01em;
+}
+
+.asset-search-result-main > span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-secondary, #c9cbd0);
+    font-size: 0.88rem;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.asset-search-result-values {
+    display: flex;
+    grid-area: values;
+    align-items: flex-end;
+    justify-content: center;
+    flex-direction: column;
+    gap: 0.12rem;
+    min-width: 0;
+    min-height: 2.25rem;
+    color: var(--text-primary, #c9cbd0);
+    font-family: var(--font-mono, monospace);
+    font-size: 0.82rem;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.asset-search-result-price {
+    display: inline-flex;
+    width: 100%;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 0.2rem;
+}
+
+.asset-search-result-price small {
+    color: #f4b400;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.68rem;
+    font-weight: 900;
+}
+
+.asset-search-result-change {
+    width: 100%;
+    font-size: 0.74rem;
+    line-height: 1.1;
+    text-align: right;
+}
+
+.asset-search-result-change.up {
+    color: #00c853;
+}
+
+.asset-search-result-change.down {
+    color: #ff4d5e;
+}
+
+.asset-search-result-change.flat {
+    color: #8b8d91;
+}
+
+.asset-search-result-kind {
+    display: inline-flex;
+    grid-area: kind;
+    align-items: center;
+    justify-content: center;
+    justify-self: end;
+    gap: 0.34rem;
+    box-sizing: border-box;
+    width: 4.5rem;
+    min-height: 1.5rem;
+    padding: 0 0.48rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font-family: var(--font-family, sans-serif);
+    font-size: 0.7rem;
+    font-weight: 750;
+    letter-spacing: 0.01em;
+    line-height: 1;
+}
+
+.asset-search-result-kind::before {
+    width: 0.34rem;
+    height: 0.34rem;
+    border-radius: 50%;
+    content: "";
+}
+
+.asset-search-result-kind.fund {
+    border-color: rgba(167, 139, 250, 0.2);
+    background: rgba(139, 92, 246, 0.13);
+    color: #c4b5fd;
+}
+
+.asset-search-result-kind.fund::before {
+    background: #a78bfa;
+}
+
+.asset-search-result-kind.stock {
+    border-color: rgba(103, 196, 235, 0.18);
+    background: rgba(56, 189, 248, 0.1);
+    color: #9bdcf7;
+}
+
+.asset-search-result-kind.stock::before {
+    background: #67c4eb;
+}
+
+@media (max-width: 600px) {
+    .asset-search-result {
+        grid-template-areas:
+            "logo main kind"
+            "logo values values";
+        grid-template-columns: 40px minmax(0, 1fr) 4.5rem;
+        column-gap: 0.62rem;
+        row-gap: 0;
+    }
+
+    .asset-search-result.has-values {
+        row-gap: 0.28rem;
+    }
+
+    .asset-search-result-main {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.08rem;
+    }
+
+    .asset-search-result-main > span {
+        font-size: 0.76rem;
+    }
+
+    .asset-search-result-values {
+        align-items: flex-end;
+        justify-self: end;
+        width: min(100%, 7.5rem);
+        min-height: 1.8rem;
+        font-size: 0.76rem;
+    }
+}

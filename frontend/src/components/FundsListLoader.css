@@ -1,0 +1,164 @@
+.funds-list-loader {
+    display: flex;
+    min-height: 206px;
+    width: 100%;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.65rem;
+    padding: 1.4rem 1rem;
+}
+
+.funds-list-loader-art {
+    display: block;
+    width: min(100%, 300px);
+    height: auto;
+    overflow: visible;
+}
+
+.funds-list-loader-frame {
+    fill: color-mix(in srgb, var(--bg-color) 42%, var(--surface-color));
+    stroke: color-mix(in srgb, var(--surface-border) 82%, transparent);
+    stroke-width: 1;
+}
+
+.funds-list-loader-divider {
+    fill: none;
+    stroke: color-mix(in srgb, var(--surface-border) 75%, transparent);
+    stroke-width: 1;
+}
+
+.funds-list-loader-heading {
+    fill: none;
+    stroke: color-mix(in srgb, var(--text-secondary) 47%, transparent);
+    stroke-linecap: round;
+    stroke-width: 2;
+}
+
+.funds-list-loader-row {
+    animation: funds-list-row-arrive 2.25s ease-in-out infinite;
+}
+
+.funds-list-loader-row.row-two {
+    animation-delay: 180ms;
+}
+
+.funds-list-loader-row.row-three {
+    animation-delay: 360ms;
+}
+
+.funds-list-loader-row-bg {
+    fill: color-mix(in srgb, var(--surface-color) 69%, var(--bg-color));
+    stroke: color-mix(in srgb, var(--surface-border) 50%, transparent);
+    stroke-width: 0.7;
+}
+
+.funds-list-loader-logo {
+    fill: color-mix(in srgb, var(--accent-color) 17%, var(--surface-color));
+    stroke: color-mix(in srgb, var(--accent-color) 28%, var(--surface-border));
+    stroke-width: 0.75;
+}
+
+.funds-list-loader-mark {
+    fill: none;
+    stroke: color-mix(in srgb, var(--accent-color) 80%, #9ebce6);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.15;
+}
+
+.funds-list-loader-code,
+.funds-list-loader-copy,
+.funds-list-loader-value {
+    fill: none;
+    stroke-linecap: round;
+}
+
+.funds-list-loader-code {
+    stroke: color-mix(in srgb, var(--text-secondary) 66%, var(--text-primary));
+    stroke-width: 2.6;
+}
+
+.funds-list-loader-copy {
+    stroke: color-mix(in srgb, var(--text-secondary) 37%, transparent);
+    stroke-width: 2.2;
+}
+
+.funds-list-loader-tag {
+    fill: color-mix(in srgb, var(--accent-color) 9%, var(--surface-color));
+    stroke: color-mix(in srgb, var(--accent-color) 24%, var(--surface-border));
+    stroke-width: 0.75;
+}
+
+.funds-list-loader-value {
+    stroke: color-mix(in srgb, var(--text-secondary) 56%, var(--text-primary));
+    stroke-width: 2.3;
+}
+
+.funds-list-loader-progress-track {
+    fill: color-mix(in srgb, var(--surface-border) 78%, transparent);
+}
+
+.funds-list-loader-progress {
+    transform-box: fill-box;
+    transform-origin: left center;
+    opacity: 0.82;
+    animation: funds-list-progress-fill 2.35s cubic-bezier(0.62, 0, 0.32, 1) infinite;
+}
+
+.funds-list-loader-sheen {
+    opacity: 0;
+    animation: funds-list-sweep 2.25s ease-in-out infinite;
+}
+
+.row-two-sheen {
+    animation-delay: 180ms;
+}
+
+.row-three-sheen {
+    animation-delay: 360ms;
+}
+
+.funds-list-loader-text {
+    color: color-mix(in srgb, var(--text-secondary) 88%, var(--text-primary));
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    animation: funds-list-message-in 220ms ease-out both;
+}
+
+@keyframes funds-list-row-arrive {
+    0%, 100% { opacity: 0.72; }
+    45%, 70% { opacity: 1; }
+}
+
+@keyframes funds-list-sweep {
+    0%, 10% { opacity: 0; transform: translateX(0); }
+    30%, 72% { opacity: 1; }
+    92%, 100% { opacity: 0; transform: translateX(174px); }
+}
+
+@keyframes funds-list-progress-fill {
+    0% { opacity: 0.62; transform: scaleX(0.025); }
+    62% { opacity: 1; transform: scaleX(0.76); }
+    78% { opacity: 1; transform: scaleX(0.9); }
+    86% { opacity: 0.9; transform: scaleX(0.9); }
+    100% { opacity: 0.62; transform: scaleX(0.025); }
+}
+
+@keyframes funds-list-message-in {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .funds-list-loader-row,
+    .funds-list-loader-sheen,
+    .funds-list-loader-progress,
+    .funds-list-loader-text {
+        animation-duration: 0.01ms;
+        animation-iteration-count: 1;
+    }
+}

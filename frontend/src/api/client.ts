@@ -9,6 +9,8 @@ import type {
     MarketStocksDeltaEvent,
     MarketStockSearchResponse,
     MarketStockIndex,
+    MarketScreenerParams,
+    MarketScreenerResponse,
     MarketIndexCode,
     MarketIndicesResponse,
     MarketIndexDetailResponse,
@@ -46,7 +48,8 @@ import type {
 } from './types';
 
 const rawApiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
-const API_BASE = (rawApiBase && rawApiBase !== '/' ? rawApiBase : 'http://localhost:8000').replace(/\/+$/, '');
+const DEFAULT_API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:8000';
+const API_BASE = (rawApiBase && rawApiBase !== '/' ? rawApiBase : DEFAULT_API_BASE).replace(/\/+$/, '');
 
 const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
 const STARTUP_HINT = 'Uygulama yeni baslatiliyor olabilir. Lutfen 5-10 saniye bekleyip tekrar deneyin.';
@@ -72,6 +75,8 @@ const MARKET_STOCKS_OFFHOURS_MEMORY_CACHE_TTL_MS = 60_000;
 const marketStocksMemoryCache = new Map<string, { payload: MarketStocksResponse; fetchedAt: number }>();
 const marketStocksInFlight = new Map<string, Promise<MarketStocksResponse>>();
 const marketStocksListeners = new Set<(index: MarketStockIndex, payload: MarketStocksResponse) => void>();
+const CONDITIONAL_GET_CACHE_MAX_ENTRIES = 64;
+const conditionalGetMemoryCache = new Map<string, { etag: string; payload: unknown; fetchedAt: number }>();
 
 interface MarketStocksStreamHandle {
     refCount: number;
@@ -108,6 +113,20 @@ function mergeDeltaIntoPayload(
             ...(delta.return_6m_pct !== undefined ? { return_6m_pct: delta.return_6m_pct } : {}),
             ...(delta.return_ytd_pct !== undefined ? { return_ytd_pct: delta.return_ytd_pct } : {}),
             ...(delta.return_1y_pct !== undefined ? { return_1y_pct: delta.return_1y_pct } : {}),
+            ...(delta.latest_quarter !== undefined ? { latest_quarter: delta.latest_quarter } : {}),
+            ...(delta.fundamental_period !== undefined ? { fundamental_period: delta.fundamental_period } : {}),
+            ...(delta.sector !== undefined ? { sector: delta.sector } : {}),
+            ...(delta.fk !== undefined ? { fk: delta.fk } : {}),
+            ...(delta.pd_dd !== undefined ? { pd_dd: delta.pd_dd } : {}),
+            ...(delta.fd_favok !== undefined ? { fd_favok: delta.fd_favok } : {}),
+            ...(delta.fd_satis !== undefined ? { fd_satis: delta.fd_satis } : {}),
+            ...(delta.net_borc_favok !== undefined ? { net_borc_favok: delta.net_borc_favok } : {}),
+            ...(delta.roe_pct !== undefined ? { roe_pct: delta.roe_pct } : {}),
+            ...(delta.favok_margin_pct !== undefined ? { favok_margin_pct: delta.favok_margin_pct } : {}),
+            ...(delta.net_margin_pct !== undefined ? { net_margin_pct: delta.net_margin_pct } : {}),
+            ...(delta.free_float_pct !== undefined ? { free_float_pct: delta.free_float_pct } : {}),
+            ...(delta.ttm_net_kar !== undefined ? { ttm_net_kar: delta.ttm_net_kar } : {}),
+            ...(delta.net_borc !== undefined ? { net_borc: delta.net_borc } : {}),
         };
     });
     if (!anyRowChanged) {
@@ -152,6 +171,19 @@ function applyMarketStocksDeltaInternal(
         const { nextPayload, changed } = mergeDeltaIntoPayload(cached.payload, deltaMap, deltaEvent.as_of);
         if (changed) {
             marketStocksMemoryCache.set(targetIndex, { payload: nextPayload, fetchedAt: now });
+            const conditionalUpdates: Array<[string, { etag: string; payload: unknown; fetchedAt: number }]> = [];
+            for (const [url, conditionalEntry] of conditionalGetMemoryCache) {
+                try {
+                    const parsedUrl = new URL(url);
+                    const cachedIndex = parsedUrl.searchParams.get('index') || 'XUTUM';
+                    if (parsedUrl.pathname === '/market/stocks' && cachedIndex === targetIndex) {
+                        conditionalUpdates.push([url, { ...conditionalEntry, payload: nextPayload, fetchedAt: now }]);
+                    }
+                } catch {
+                    // Ignore malformed cache keys; normal API URLs are absolute.
+                }
+            }
+            for (const [url, entry] of conditionalUpdates) storeConditionalGetEntry(url, entry);
             for (const listener of marketStocksListeners) {
                 listener(targetIndex, nextPayload);
             }
@@ -283,6 +315,12 @@ type FetchApiOptions = RequestInit & {
     timeoutMs?: number;
     debugLabel?: string;
     exposeErrorDetail?: boolean;
+    conditionalCache?: boolean;
+};
+
+type FetchApiResult<T> = {
+    payload: T;
+    notModified: boolean;
 };
 
 function isIdempotentMethod(method?: string): boolean {
@@ -319,13 +357,25 @@ function retryAfterMs(response: Response): number | null {
     return Number.isFinite(when) ? Math.min(Math.max(0, when - Date.now()), 300_000) : null;
 }
 
-async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Promise<T> {
+function storeConditionalGetEntry(url: string, entry: { etag: string; payload: unknown; fetchedAt: number }): void {
+    conditionalGetMemoryCache.delete(url);
+    conditionalGetMemoryCache.set(url, entry);
+    while (conditionalGetMemoryCache.size > CONDITIONAL_GET_CACHE_MAX_ENTRIES) {
+        const oldestKey = conditionalGetMemoryCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        conditionalGetMemoryCache.delete(oldestKey);
+    }
+}
+
+async function fetchApiWithMetadata<T>(endpoint: string, options: FetchApiOptions = {}): Promise<FetchApiResult<T>> {
     const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
     const url = `${API_BASE}${normalizedEndpoint}`;
     const method = (options.method || 'GET').toUpperCase();
     const allowRetry = isIdempotentMethod(method);
     const maxAttempts = allowRetry ? 2 : 1;
-    const { timeoutMs, debugLabel, exposeErrorDetail, ...requestOptions } = options;
+    const { timeoutMs, debugLabel, exposeErrorDetail, conditionalCache, ...requestOptions } = options;
+    const conditionalEntry = conditionalCache ? conditionalGetMemoryCache.get(url) : undefined;
+    let notModifiedEntry = conditionalEntry;
     const effectiveTimeoutMs = timeoutMs ?? REQUEST_TIMEOUT_MS;
 
     // Keep the timeout per attempt so a timed-out idempotent request still has
@@ -346,6 +396,7 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
         if (Date.now() >= deadline) throw new Error(TIMEOUT_MESSAGE);
         let response: Response;
         let body: any;
+        let notModified = false;
         const controller = new AbortController();
         const externalSignal = requestOptions.signal;
         const startedAt = window.performance?.now?.() ?? Date.now();
@@ -365,19 +416,29 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
             });
         }
         try {
+            const headers = new Headers({ 'Content-Type': 'application/json' });
+            new Headers(requestOptions.headers).forEach((value, key) => headers.set(key, value));
+            if (conditionalEntry?.etag) headers.set('If-None-Match', conditionalEntry.etag);
             response = await fetch(url, {
                 ...requestOptions,
                 signal: controller.signal,
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...requestOptions.headers,
-                },
+                headers,
             });
-            body = await response.json().catch((error: unknown) => {
-                if (controller.signal.aborted) throw error;
-                if (response.ok) throw error;
-                return {};
-            });
+            if (response.status === 304 && conditionalCache && conditionalEntry) {
+                // 304 has no body; reuse the locally cached payload.
+                // A newer response or SSE delta may have updated this cache while
+                // the conditional request was in flight; never overwrite it with
+                // the older object captured when the request started.
+                notModifiedEntry = conditionalGetMemoryCache.get(url) || conditionalEntry;
+                body = notModifiedEntry.payload;
+                notModified = true;
+            } else {
+                body = await response.json().catch((error: unknown) => {
+                    if (controller.signal.aborted) throw error;
+                    if (response.ok) throw error;
+                    return {};
+                });
+            }
         } catch (error) {
             const elapsedMs = Math.round((window.performance?.now?.() ?? Date.now()) - startedAt);
             if ((error as Error)?.name === 'AbortError') {
@@ -417,7 +478,7 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
             externalSignal?.removeEventListener('abort', abortFromExternal);
         }
 
-        if (!response.ok) {
+        if (!response.ok && !notModified) {
             const elapsedMs = Math.round((window.performance?.now?.() ?? Date.now()) - startedAt);
             if (allowRetry && RETRYABLE_HTTP_STATUSES.has(response.status) && attempt < maxAttempts) {
                 await waitForRetry(retryDelayMs(attempt, retryAfterMs(response)));
@@ -458,19 +519,36 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
                 status: response.status,
             });
         }
-        return body as T;
+        if (conditionalCache) {
+            const fetchedAt = Date.now();
+            if (notModified && notModifiedEntry) {
+                storeConditionalGetEntry(url, { ...notModifiedEntry, fetchedAt });
+            } else if (response.ok) {
+                const etag = response.headers.get('ETag');
+                if (etag) storeConditionalGetEntry(url, { etag, payload: body, fetchedAt });
+                else conditionalGetMemoryCache.delete(url);
+            }
+        }
+        return { payload: body as T, notModified };
     }
 
     throw new Error(STARTUP_HINT);
 }
 
-async function fetchFundResponse<T extends { status: string }>(endpoint: string, options: FetchApiOptions = {}): Promise<T> {
+async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Promise<T> {
+    return (await fetchApiWithMetadata<T>(endpoint, options)).payload;
+}
+
+async function fetchFundResponseWithMetadata<T extends { status: string }>(
+    endpoint: string,
+    options: FetchApiOptions = {},
+): Promise<FetchApiResult<T>> {
     const deadline = Date.now() + 120_000;
     let delay = 1000;
     while (true) {
         if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-        const payload = await fetchApi<T>(endpoint, options);
-        if (payload.status !== 'pending') return payload;
+        const result = await fetchApiWithMetadata<T>(endpoint, options);
+        if (result.payload.status !== 'pending') return result;
         if (Date.now() >= deadline) throw new Error('Veri hazırlama işlemi beklenenden uzun sürüyor.');
         await new Promise<void>((resolve, reject) => {
             const signal = options.signal;
@@ -481,6 +559,10 @@ async function fetchFundResponse<T extends { status: string }>(endpoint: string,
         });
         delay = Math.min(5000, delay * 1.5);
     }
+}
+
+async function fetchFundResponse<T extends { status: string }>(endpoint: string, options: FetchApiOptions = {}): Promise<T> {
+    return (await fetchFundResponseWithMetadata<T>(endpoint, options)).payload;
 }
 
 export const apiClient = {
@@ -529,10 +611,15 @@ export const apiClient = {
         if (options?.index) params.append('index', options.index);
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
-        const request = fetchApi<MarketStocksResponse>(query ? `/market/stocks?${query}` : '/market/stocks')
-            .then((payload) => {
+        const request = fetchApiWithMetadata<MarketStocksResponse>(
+            query ? `/market/stocks?${query}` : '/market/stocks',
+            { conditionalCache: true },
+        )
+            .then(({ payload, notModified }) => {
                 marketStocksMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
-                for (const listener of marketStocksListeners) listener(cacheKey, payload);
+                if (!notModified) {
+                    for (const listener of marketStocksListeners) listener(cacheKey, payload);
+                }
                 return payload;
             })
             .finally(() => {
@@ -540,6 +627,18 @@ export const apiClient = {
             });
         marketStocksInFlight.set(cacheKey, request);
         return request;
+    },
+    marketScreener: (options: MarketScreenerParams, requestOptions?: { signal?: AbortSignal }) => {
+        const params = new URLSearchParams({ index: options.index });
+        for (const [key, rawValue] of Object.entries(options)) {
+            if (key === 'index' || rawValue == null || rawValue === false) continue;
+            const value = typeof rawValue === 'string' ? rawValue.trim() : String(rawValue);
+            if (!value) continue;
+            params.append(key, value);
+        }
+        return fetchApi<MarketScreenerResponse>(`/market/screener?${params.toString()}`, {
+            signal: requestOptions?.signal,
+        });
     },
     getCachedMarketStocks: (index: MarketStockIndex) => marketStocksMemoryCache.get(index)?.payload || null,
     getCachedMarketStocksEntry: (index: MarketStockIndex) => marketStocksMemoryCache.get(index) || null,
@@ -703,11 +802,16 @@ export const apiClient = {
         const canShareCatalogRequest = isUnfilteredCatalog && !options?.signal;
         if (canShareCatalogRequest && fundsCatalogInFlight) return fundsCatalogInFlight;
 
-        const request = fetchFundResponse<FundsResponse>(query ? `/funds?${query}` : '/funds', { signal: options?.signal })
-            .then((payload) => {
+        const request = fetchFundResponseWithMetadata<FundsResponse>(
+            query ? `/funds?${query}` : '/funds',
+            { signal: options?.signal, conditionalCache: true },
+        )
+            .then(({ payload, notModified }) => {
                 if (isUnfilteredCatalog) {
                     latestFundsCatalog = { payload, fetchedAt: Date.now() };
-                    for (const listener of fundsCatalogListeners) listener(payload);
+                    if (!notModified) {
+                        for (const listener of fundsCatalogListeners) listener(payload);
+                    }
                 }
                 return payload;
             })

@@ -57,6 +57,58 @@ describe('request wait budget', () => {
         expect(await apiClient.funds()).toEqual(stale);
         expect(fetch).toHaveBeenCalledTimes(1);
     });
+    it('reuses market stock payload on 304 without notifying subscribers again', async () => {
+        const payload = { index: 'XU030', rows: [{ company: 'AAA', price: 10 }] };
+        const etag = 'W/"market-stock-test"';
+        const notModifiedJson = vi.fn();
+        const notModifiedResponse = {
+            status: 304,
+            ok: false,
+            headers: new Headers({ ETag: etag }),
+            json: notModifiedJson,
+        } as unknown as Response;
+        const fetch = vi.fn()
+            .mockResolvedValueOnce(new Response(JSON.stringify(payload), { headers: { ETag: etag } }))
+            .mockResolvedValueOnce(notModifiedResponse);
+        vi.stubGlobal('fetch', fetch);
+        const listener = vi.fn();
+        const unsubscribe = apiClient.subscribeMarketStocks(listener);
+
+        const first = await apiClient.marketStocks({ index: 'XU030', refresh: true });
+        const second = await apiClient.marketStocks({ index: 'XU030', refresh: true });
+
+        unsubscribe();
+        expect(second).toBe(first);
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(notModifiedJson).not.toHaveBeenCalled();
+        expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get('If-None-Match')).toBe(etag);
+    });
+    it('reuses the fund catalogue on 304 without notifying subscribers again', async () => {
+        const payload = { status: 'ok', rows: [{ fund_code: 'ETAG_TEST' }] };
+        const etag = 'W/"fund-catalog-test"';
+        const notModifiedJson = vi.fn();
+        const notModifiedResponse = {
+            status: 304,
+            ok: false,
+            headers: new Headers({ ETag: etag }),
+            json: notModifiedJson,
+        } as unknown as Response;
+        const fetch = vi.fn()
+            .mockResolvedValueOnce(new Response(JSON.stringify(payload), { headers: { ETag: etag } }))
+            .mockResolvedValueOnce(notModifiedResponse);
+        vi.stubGlobal('fetch', fetch);
+        const listener = vi.fn();
+        const unsubscribe = apiClient.subscribeFundsCatalog(listener);
+
+        const first = await apiClient.funds();
+        const second = await apiClient.funds();
+
+        unsubscribe();
+        expect(second).toBe(first);
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(notModifiedJson).not.toHaveBeenCalled();
+        expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get('If-None-Match')).toBe(etag);
+    });
     it('cancels cold fund polling when its consumer leaves', async () => {
         vi.useFakeTimers();
         const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: 'pending' })));

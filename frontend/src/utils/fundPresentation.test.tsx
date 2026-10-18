@@ -187,7 +187,7 @@ describe('fund presentation helpers', () => {
         expect(lines).toEqual([]);
     });
 
-    it('does not expose a clean source head boundary as a warning', () => {
+    it('does not expose normal partial coverage as a warning', () => {
         const performance = performancePayload(
             [
                 performancePoint('2026-04-01', 1.0, 'fintables_udf_history'),
@@ -198,7 +198,6 @@ describe('fund presentation helpers', () => {
                 history_source_used: 'fintables_udf_history',
                 primary_source: 'fintables',
                 coverage_state: 'range_incomplete',
-                coverage_boundary: 'head',
                 requested_start_date: '2026-03-10',
                 requested_end_date: '2026-09-10',
                 available_start_date: '2026-04-01',

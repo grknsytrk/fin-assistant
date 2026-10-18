@@ -1,27 +1,228 @@
-import { useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { Search, BarChart2, TrendingUp, PieChart, ShieldAlert, LineChart, Activity, ChevronRight, LayoutGrid } from 'lucide-react';
+import { apiClient } from '../api/client';
+import type { FundSummary, MarketUniverseRow } from '../api/types';
+import AssetSearchResult from '../components/AssetSearchResult';
 import { buildDocumentTitle, useDocumentTitle } from '../hooks/useDocumentTitle';
+import { toFundDetail, toStockDetail } from '../routing/routes';
 import './MarketPage.css';
+
+type HeroSearchResult = {
+    kind: 'stock' | 'fund';
+    symbol: string;
+    name: string;
+    logoUrl?: string | null;
+    price: number | null;
+    changePct: number | null;
+};
+
+function normalizeHeroSearchText(value: string | null | undefined): string {
+    return String(value || '')
+        .toLocaleUpperCase('tr-TR')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^A-Z0-9]+/g, ' ')
+        .trim();
+}
 
 interface MarketPageProps {
     onOpenTicker?: (ticker: string) => void;
+    onOpenFund?: (fundCode: string) => void;
     onOpenMarkets?: () => void;
 }
 
-export default function MarketPage({ onOpenTicker, onOpenMarkets }: MarketPageProps) {
+export default function MarketPage({ onOpenTicker, onOpenFund, onOpenMarkets }: MarketPageProps) {
     const [searchTerm, setSearchTerm] = useState('');
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [stockCatalogRows, setStockCatalogRows] = useState<MarketUniverseRow[]>(() => (
+        apiClient.getCachedMarketUniverse()?.rows || []
+    ));
+    const [fundCatalogRows, setFundCatalogRows] = useState<FundSummary[]>(() => (
+        apiClient.getCachedFundsCatalog()?.payload.rows || []
+    ));
+    const [stockCatalogLoading, setStockCatalogLoading] = useState(() => !apiClient.getCachedMarketUniverse());
+    const [fundCatalogLoading, setFundCatalogLoading] = useState(() => !apiClient.getCachedFundsCatalog());
+    const [stockCatalogError, setStockCatalogError] = useState(false);
+    const [fundCatalogError, setFundCatalogError] = useState(false);
+    const [highlightedSearchIndex, setHighlightedSearchIndex] = useState(0);
     const [activeTab, setActiveTab] = useState('Piyasa ve Tablolar');
+    const deferredSearchTerm = useDeferredValue(searchTerm);
     useDocumentTitle(buildDocumentTitle('Piyasa ve Finansal Analiz'));
+
+    useEffect(() => {
+        let active = true;
+        const cachedUniverse = apiClient.getCachedMarketUniverse();
+        if (cachedUniverse) setStockCatalogRows(cachedUniverse.rows || []);
+        else setStockCatalogLoading(true);
+        void apiClient.marketUniverse()
+            .then((payload) => {
+                if (!active) return;
+                setStockCatalogRows(payload.rows || []);
+                setStockCatalogError(false);
+            })
+            .catch(() => {
+                if (active) setStockCatalogError(true);
+            })
+            .finally(() => {
+                if (active) setStockCatalogLoading(false);
+            });
+
+        const applyFundCatalog = (payload: Awaited<ReturnType<typeof apiClient.funds>>) => {
+            if (!active || payload.status === 'pending') return;
+            setFundCatalogRows(payload.rows || []);
+            setFundCatalogError(false);
+            setFundCatalogLoading(false);
+        };
+        const unsubscribeFunds = apiClient.subscribeFundsCatalog(applyFundCatalog);
+        const cachedFundsCatalog = apiClient.getCachedFundsCatalog();
+        if (cachedFundsCatalog) {
+            setFundCatalogRows(cachedFundsCatalog.payload.rows || []);
+        }
+        if (!cachedFundsCatalog || Date.now() - cachedFundsCatalog.fetchedAt >= 5 * 60 * 1000) {
+            setFundCatalogLoading(!cachedFundsCatalog);
+            void apiClient.funds()
+                .then(applyFundCatalog)
+                .catch(() => {
+                    if (active) setFundCatalogError(true);
+                })
+                .finally(() => {
+                    if (active) setFundCatalogLoading(false);
+                });
+        } else {
+            setFundCatalogLoading(false);
+        }
+
+        return () => {
+            active = false;
+            unsubscribeFunds();
+        };
+    }, []);
+
+    const stockSearchIndex = useMemo(() => stockCatalogRows.map((row, index) => {
+        const symbol = normalizeHeroSearchText(row.symbol || row.company);
+        const name = normalizeHeroSearchText(row.name || row.company);
+        return {
+            row,
+            symbol,
+            name,
+            haystack: normalizeHeroSearchText(`${row.symbol || ''} ${row.name || ''} ${row.company}`),
+            index,
+        };
+    }), [stockCatalogRows]);
+    const fundSearchIndex = useMemo(() => fundCatalogRows.map((fund, index) => {
+        const code = normalizeHeroSearchText(fund.fund_code);
+        const name = normalizeHeroSearchText(fund.name);
+        return {
+            fund,
+            code,
+            name,
+            haystack: normalizeHeroSearchText(
+                `${fund.fund_code} ${fund.name} ${fund.fund_type || ''} ${fund.founder_company || ''} ${fund.manager_company || ''}`,
+            ),
+            index,
+        };
+    }), [fundCatalogRows]);
+    const searchResults: HeroSearchResult[] = useMemo(() => {
+        const normalizedQuery = normalizeHeroSearchText(deferredSearchTerm);
+        if (!normalizedQuery) return [];
+        const stockMatches = stockSearchIndex
+            .filter(({ haystack }) => haystack.includes(normalizedQuery))
+            .map((entry) => ({
+                ...entry,
+                rank: entry.symbol === normalizedQuery
+                    ? 0
+                    : entry.symbol.startsWith(normalizedQuery)
+                        ? 1
+                        : entry.name.startsWith(normalizedQuery)
+                            ? 2
+                            : entry.symbol.includes(normalizedQuery)
+                                ? 3
+                                : entry.name.includes(normalizedQuery)
+                                    ? 4
+                                    : 5,
+            }))
+            .sort((left, right) => left.rank - right.rank || left.index - right.index)
+            .slice(0, 6)
+            .map(({ row }) => ({
+                kind: 'stock' as const,
+                symbol: String(row.symbol || row.company).trim().toUpperCase(),
+                name: row.name || row.company,
+                logoUrl: row.logo_url,
+                price: row.price,
+                changePct: row.change_pct,
+            }));
+        const fundMatches = fundSearchIndex
+            .filter(({ haystack }) => haystack.includes(normalizedQuery))
+            .map((entry) => ({
+                ...entry,
+                rank: entry.code === normalizedQuery
+                    ? 0
+                    : entry.code.startsWith(normalizedQuery)
+                        ? 1
+                        : entry.name.startsWith(normalizedQuery)
+                            ? 2
+                            : entry.code.includes(normalizedQuery)
+                                ? 3
+                                : entry.name.includes(normalizedQuery)
+                                    ? 4
+                                    : 5,
+            }))
+            .sort((left, right) => left.rank - right.rank || left.index - right.index)
+            .slice(0, 6)
+            .map(({ fund }) => ({
+                kind: 'fund' as const,
+                symbol: fund.fund_code.trim().toUpperCase(),
+                name: fund.name,
+                price: fund.price,
+                changePct: fund.daily_return,
+            }));
+        return [...stockMatches, ...fundMatches];
+    }, [deferredSearchTerm, fundSearchIndex, stockSearchIndex]);
+    const searchResultsAreCurrent = normalizeHeroSearchText(deferredSearchTerm) === normalizeHeroSearchText(searchTerm);
+    const searchLoading = Boolean(searchOpen && searchTerm.trim())
+        && (stockCatalogLoading || fundCatalogLoading || !searchResultsAreCurrent);
+    const searchError = stockCatalogError || fundCatalogError;
+
+    const openSearchResult = (result: HeroSearchResult) => {
+        setSearchOpen(false);
+        if (result.kind === 'fund') {
+            if (onOpenFund) onOpenFund(result.symbol);
+            else window.location.href = `/?fund=${encodeURIComponent(result.symbol)}`;
+            return;
+        }
+        if (onOpenTicker) onOpenTicker(result.symbol);
+        else window.location.href = `/?ticker=${encodeURIComponent(result.symbol)}`;
+    };
 
     const handleSearch = (e: React.FormEvent) => {
         e.preventDefault();
-        if (searchTerm.trim()) {
-            const nextTicker = searchTerm.trim().toUpperCase();
-            if (onOpenTicker) {
-                onOpenTicker(nextTicker);
-            } else {
-                window.location.href = `/?ticker=${nextTicker}`;
-            }
+        if (!searchTerm.trim()) return;
+        if (!searchResultsAreCurrent) return;
+        const selected = searchResults[highlightedSearchIndex] || searchResults[0];
+        if (selected) {
+            openSearchResult(selected);
+            return;
+        }
+        if (searchLoading) return;
+        const nextTicker = searchTerm.trim().toUpperCase();
+        if (onOpenTicker) {
+            onOpenTicker(nextTicker);
+        } else {
+            window.location.href = `/?ticker=${nextTicker}`;
+        }
+    };
+
+    const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+        if (event.key === 'Escape') {
+            setSearchOpen(false);
+            return;
+        }
+        if (event.key === 'ArrowDown' && searchResultsAreCurrent && searchResults.length) {
+            event.preventDefault();
+            setHighlightedSearchIndex((current) => (current + 1) % searchResults.length);
+        } else if (event.key === 'ArrowUp' && searchResultsAreCurrent && searchResults.length) {
+            event.preventDefault();
+            setHighlightedSearchIndex((current) => (current <= 0 ? searchResults.length - 1 : current - 1));
         }
     };
 
@@ -43,16 +244,84 @@ export default function MarketPage({ onOpenTicker, onOpenMarkets }: MarketPagePr
                     <h1 className="hero-title">Doğru yatırımı keşfedin</h1>
                     <p className="hero-subtitle">Türkiye'nin en kapsamlı halka açık hisse senedi temel ve teknik analiz platformu.</p>
                     
-                    <form className="hero-search" onSubmit={handleSearch}>
-                        <Search className="hero-search-icon" size={20} />
-                        <input 
-                            type="text" 
-                            placeholder="Hisse, şirket ara..." 
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                        />
-                        <button type="submit" className="hero-search-btn">Hisse ara</button>
-                    </form>
+                    <div
+                        className="hero-search-container"
+                        onBlur={(event) => {
+                            const nextTarget = event.relatedTarget as Node | null;
+                            if (!nextTarget || !event.currentTarget.contains(nextTarget)) setSearchOpen(false);
+                        }}
+                    >
+                        <form className="hero-search" onSubmit={handleSearch}>
+                            <Search className="hero-search-icon" size={16} aria-hidden="true" />
+                            <input
+                                type="text"
+                                placeholder="Hisse veya fon kodu, ad ya da kurucu ara"
+                                value={searchTerm}
+                                onFocus={() => setSearchOpen(true)}
+                                onKeyDown={handleSearchKeyDown}
+                                onChange={(event) => {
+                                    setSearchTerm(event.target.value);
+                                    setSearchOpen(true);
+                                    setHighlightedSearchIndex(0);
+                                }}
+                                role="combobox"
+                                aria-autocomplete="list"
+                                aria-expanded={searchOpen && Boolean(searchTerm.trim())}
+                                aria-controls="hero-search-results"
+                                aria-activedescendant={searchResults[highlightedSearchIndex]
+                                    ? `hero-search-option-${searchResults[highlightedSearchIndex].kind}-${searchResults[highlightedSearchIndex].symbol}`
+                                    : undefined}
+                            />
+                        </form>
+                        {searchOpen && searchTerm.trim() && (
+                            <div className="hero-search-results" id="hero-search-results" role="listbox" aria-label="Arama sonuçları">
+                                {searchLoading && searchResults.length === 0 ? (
+                                    <div className="hero-search-status">Aranıyor...</div>
+                                ) : searchResults.length === 0 ? (
+                                    <div className="hero-search-status">
+                                        {searchError ? 'Arama şu anda yapılamıyor.' : 'Sonuç bulunamadı.'}
+                                    </div>
+                                ) : (
+                                    (['stock', 'fund'] as const).map((kind) => {
+                                        const groupResults = searchResults
+                                            .map((result, index) => ({ result, index }))
+                                            .filter(({ result }) => result.kind === kind);
+                                        if (!groupResults.length) return null;
+                                        return (
+                                            <div className="hero-search-group" role="group" aria-label={kind === 'stock' ? 'Hisseler' : 'Fonlar'} key={kind}>
+                                                <div className="hero-search-group-title">{kind === 'stock' ? 'HİSSELER' : 'FONLAR'}</div>
+                                                {groupResults.map(({ result, index }) => (
+                                                    <AssetSearchResult
+                                                        id={`hero-search-option-${result.kind}-${result.symbol}`}
+                                                        key={`${result.kind}-${result.symbol}`}
+                                                        href={result.kind === 'fund' ? toFundDetail(result.symbol) : toStockDetail(result.symbol)}
+                                                        kind={result.kind}
+                                                        symbol={result.symbol}
+                                                        name={result.name}
+                                                        price={result.price}
+                                                        changePct={result.changePct}
+                                                        logoUrl={result.logoUrl}
+                                                        active={index === highlightedSearchIndex}
+                                                        onMouseDown={(event) => {
+                                                            if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+                                                                event.preventDefault();
+                                                            }
+                                                        }}
+                                                        onMouseEnter={() => setHighlightedSearchIndex(index)}
+                                                        onClick={(event) => {
+                                                            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                                                            event.preventDefault();
+                                                            openSearchResult(result);
+                                                        }}
+                                                    />
+                                                ))}
+                                            </div>
+                                        );
+                                    })
+                                )}
+                            </div>
+                        )}
+                    </div>
                 </div>
 
                 <div 

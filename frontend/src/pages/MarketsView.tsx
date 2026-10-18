@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { PointerEvent as ReactPointerEvent } from 'react';
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { CalendarDays, GripHorizontal, Plus, Search, Trash2, X } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type {
@@ -17,11 +17,13 @@ import type {
     MarketStockIndex,
     MarketStockRow,
     MarketStocksResponse,
+    MarketScreenerParams,
+    MarketScreenerResponse,
     MarketUniverseResponse,
     MarketUniverseRow,
     FundSummary,
 } from '../api/types';
-import { DEFAULT_STOCK_RETURN_MODE } from '../routing/routes';
+import { DEFAULT_STOCK_RETURN_MODE, toStockDetail } from '../routing/routes';
 import type { StockReturnMode } from '../routing/routes';
 import MarketWatchRail from '../components/MarketWatchRail';
 import MarketWatchStrip from '../components/MarketWatchStrip';
@@ -44,6 +46,15 @@ type IndexConstituentSortKey = IndexConstituentDataSortKey | 'impact_pct' | 'imp
 type StockCardDropPlacement = 'before' | 'after';
 type StockSortKey =
     | 'company'
+    | 'sector'
+    | 'fundamental_period'
+    | 'fk'
+    | 'pd_dd'
+    | 'fd_favok'
+    | 'fd_satis'
+    | 'net_borc_favok'
+    | 'roe_pct'
+    | 'free_float_pct'
     | 'price'
     | 'change_pct'
     | 'volume'
@@ -60,8 +71,44 @@ type StockReturnKey = Extract<
     StockSortKey,
     'return_1w_pct' | 'return_1m_pct' | 'return_3m_pct' | 'return_6m_pct' | 'return_ytd_pct' | 'return_1y_pct'
 >;
+type StockTableMode = 'performance' | 'fundamentals';
+type StockScreenerPresetId = 'discount' | 'low_debt' | 'net_cash' | 'roe_value' | 'below_book';
+type StockScreenerNumericFilterKey =
+    | 'max_fk'
+    | 'max_pd_dd'
+    | 'max_fd_favok'
+    | 'max_net_borc_favok'
+    | 'min_roe_pct';
+type StockScreenerFilterState = {
+    sector: string;
+    min_fk: string;
+    max_fk: string;
+    min_pd_dd: string;
+    max_pd_dd: string;
+    min_fd_favok: string;
+    max_fd_favok: string;
+    max_net_borc_favok: string;
+    min_roe_pct: string;
+    positive_net_profit: boolean;
+    net_cash_only: boolean;
+};
+type StockTableColumn = { key: StockSortKey; label: string; sublabel?: string; align?: 'left' | 'right' };
 
-const STOCK_COLUMNS: Array<{ key: StockSortKey; label: string; sublabel?: string; align?: 'left' | 'right' }> = [
+const EMPTY_STOCK_SCREENER_FILTERS: StockScreenerFilterState = {
+    sector: '',
+    min_fk: '',
+    max_fk: '',
+    min_pd_dd: '',
+    max_pd_dd: '',
+    min_fd_favok: '',
+    max_fd_favok: '',
+    max_net_borc_favok: '',
+    min_roe_pct: '',
+    positive_net_profit: false,
+    net_cash_only: false,
+};
+
+const STOCK_COLUMNS: StockTableColumn[] = [
     { key: 'company', label: 'Hisse', align: 'left' },
     { key: 'price', label: 'Fiyat', align: 'right' },
     { key: 'change_pct', label: 'Gün %', align: 'right' },
@@ -74,7 +121,33 @@ const STOCK_COLUMNS: Array<{ key: StockSortKey; label: string; sublabel?: string
     { key: 'return_ytd_pct', label: 'Getiri %', sublabel: 'YTA', align: 'right' },
     { key: 'return_1y_pct', label: 'Getiri %', sublabel: 'Son 1 yıl', align: 'right' },
 ];
+const STOCK_FUNDAMENTAL_COLUMNS: StockTableColumn[] = [
+    { key: 'company', label: 'Hisse', align: 'left' },
+    { key: 'sector', label: 'Sektör', align: 'left' },
+    { key: 'fundamental_period', label: 'Dönem', align: 'left' },
+    { key: 'fk', label: 'F/K', align: 'right' },
+    { key: 'pd_dd', label: 'PD/DD', align: 'right' },
+    { key: 'fd_favok', label: 'FD/FAVÖK', align: 'right' },
+    { key: 'fd_satis', label: 'FD/Satış', align: 'right' },
+    { key: 'net_borc_favok', label: 'Net Borç/FAVÖK', align: 'right' },
+    { key: 'roe_pct', label: 'ROE %', align: 'right' },
+    { key: 'free_float_pct', label: 'Halka Açıklık %', align: 'right' },
+];
+const STOCK_SCREENER_PRESETS: Array<{
+    id: StockScreenerPresetId;
+    label: string;
+    filters: Partial<StockScreenerFilterState>;
+}> = [
+    { id: 'discount', label: 'Çarpan İskontosu', filters: { min_fk: '0.01', max_fk: '12', min_fd_favok: '0.01', max_fd_favok: '8' } },
+    { id: 'low_debt', label: 'Güçlü Bilanço / Düşük Borç', filters: { max_net_borc_favok: '1' } },
+    { id: 'net_cash', label: 'Net Nakit Şirketler', filters: { net_cash_only: true } },
+    { id: 'roe_value', label: 'Yüksek ROE & Makul PD/DD', filters: { min_roe_pct: '25', min_pd_dd: '0.01', max_pd_dd: '4' } },
+    { id: 'below_book', label: 'Defter Değerinin Altında', filters: { min_pd_dd: '0.01', max_pd_dd: '1' } },
+];
 const STOCK_INDEX_OPTIONS: MarketStockIndex[] = ['XUTUM', 'XU100', 'XU030'];
+const PRIMARY_MARKET_INDEX_RANK = new Map<string, number>(
+    ['XU100', 'XU030', 'XUTUM'].map((symbol, index) => [symbol, index]),
+);
 const RETURN_MODE_OPTIONS: Array<{ id: StockReturnMode; label: string }> = [
     { id: 'absolute', label: 'Mutlak' },
     { id: 'relative_xu100', label: "XU100'a göre" },
@@ -194,6 +267,23 @@ function formatVolume(value: number | null): string {
 function formatMarketCap(value: number | null): string {
     if (value == null) return '-';
     return `₺${formatVolume(value)}`;
+}
+
+function formatFundamentalRatio(value: number | null | undefined): string {
+    if (value == null || !Number.isFinite(value)) return '—';
+    return `${value.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}x`;
+}
+
+function formatFundamentalPercent(value: number | null | undefined): string {
+    if (value == null || !Number.isFinite(value)) return '—';
+    return `%${value.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}`;
+}
+
+function parseScreenerNumber(raw: string): number | undefined {
+    const text = String(raw || '').trim().replace(',', '.');
+    if (!text) return undefined;
+    const value = Number(text);
+    return Number.isFinite(value) ? value : undefined;
 }
 
 function formatCardCurrency(value: number | null | undefined, currency?: string | null): string {
@@ -428,12 +518,14 @@ function MobileMarketOverview({
     stockCardItems,
     watchlistItems,
     fundRows,
+    isMobileViewport,
     onSelectTicker,
     onSelectIndex,
     onOpenFund,
     onAddStock,
     onAddFund,
     onRemoveWatchlistItem,
+    onSearchOpenChange,
 }: {
     index: MarketIndexDetailResponse | null;
     rows: MarketUniverseRow[];
@@ -441,12 +533,14 @@ function MobileMarketOverview({
     stockCardItems: MarketStockCardItem[];
     watchlistItems: WatchlistItem[];
     fundRows: Record<string, FundSummary | null>;
+    isMobileViewport: boolean;
     onSelectTicker: (ticker: string) => void;
     onSelectIndex: (index: MarketIndexCode) => void;
     onOpenFund?: (fundCode: string) => void;
     onAddStock: (symbol: string) => void;
     onAddFund: (fund: FundSummary) => void;
     onRemoveWatchlistItem: (item: WatchlistItem) => void;
+    onSearchOpenChange: (open: boolean) => void;
 }) {
     const [searchOpen, setSearchOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
@@ -454,13 +548,61 @@ function MobileMarketOverview({
     const [companySearchLoading, setCompanySearchLoading] = useState(false);
     const [fundSearchItems, setFundSearchItems] = useState<FundSummary[]>([]);
     const [fundSearchLoading, setFundSearchLoading] = useState(false);
+    const [watchlistChartPoints, setWatchlistChartPoints] = useState<Record<string, MarketIndexLinePoint[] | null>>({});
     const [swipedWatchlistKey, setSwipedWatchlistKey] = useState<string | null>(null);
     const swipeStartRef = useRef<{ key: string; x: number; y: number } | null>(null);
     const suppressRowClickRef = useRef(false);
     const rowBySymbol = new Map(rows.map((row) => [normalizeWatchlistSymbol(row.company), row]));
     const quoteRowBySymbol = new Map(stockQuoteRows.map((row) => [normalizeWatchlistSymbol(row.symbol || row.company), row]));
-    const cardBySymbol = new Map(stockCardItems.map((row) => [normalizeWatchlistSymbol(row.symbol), row]));
+    const cardBySymbol = useMemo(
+        () => new Map(stockCardItems.map((row) => [normalizeWatchlistSymbol(row.symbol), row])),
+        [stockCardItems],
+    );
     const indexRowBySymbol = new Map((index?.constituents || []).map((row) => [normalizeWatchlistSymbol(row.symbol), row]));
+    const visibleWatchlistChartSymbols = useMemo(
+        () => watchlistItems
+            .slice(0, 5)
+            .filter((item) => item.kind === 'stock')
+            .map((item) => normalizeWatchlistSymbol(item.symbol))
+            .filter(Boolean),
+        [watchlistItems],
+    );
+    const watchlistChartSymbolsToLoad = useMemo(
+        () => visibleWatchlistChartSymbols.filter((symbol) => (
+            !mobileSparklinePath(cardBySymbol.get(symbol)?.line_points ?? [])
+            && !(symbol in watchlistChartPoints)
+        )),
+        [cardBySymbol, visibleWatchlistChartSymbols, watchlistChartPoints],
+    );
+
+    useEffect(() => {
+        if (!isMobileViewport || watchlistChartSymbolsToLoad.length === 0) return undefined;
+        const controller = new AbortController();
+        let active = true;
+        void Promise.all(watchlistChartSymbolsToLoad.map(async (symbol) => {
+            try {
+                const payload = await apiClient.marketStockCardChart(symbol, '1d', { signal: controller.signal });
+                return [symbol, payload.line_points ?? []] as const;
+            } catch {
+                return [symbol, null] as const;
+            }
+        })).then((entries) => {
+            if (!active || controller.signal.aborted) return;
+            setWatchlistChartPoints((current) => ({
+                ...current,
+                ...Object.fromEntries(entries),
+            }));
+        });
+        return () => {
+            active = false;
+            controller.abort();
+        };
+    }, [isMobileViewport, watchlistChartSymbolsToLoad]);
+
+    useEffect(() => {
+        onSearchOpenChange(searchOpen);
+        return () => onSearchOpenChange(false);
+    }, [onSearchOpenChange, searchOpen]);
     const savedStockSymbols = new Set(
         watchlistItems
             .filter((item) => item.kind === 'stock')
@@ -555,7 +697,7 @@ function MobileMarketOverview({
         .slice(0, 8);
     const visibleWatchlist = watchlistItems.slice(0, 5).map((item) => ({
         item,
-                             row: item.kind === 'stock' ? rowBySymbol.get(normalizeWatchlistSymbol(item.symbol)) || null : null,
+        row: item.kind === 'stock' ? rowBySymbol.get(normalizeWatchlistSymbol(item.symbol)) || null : null,
     }));
     const sparkline = mobileSparklinePath(index?.line_points || []);
 
@@ -592,7 +734,7 @@ function MobileMarketOverview({
     };
 
     return (
-        <section className="mobile-market-overview" aria-label="Mobil piyasa özeti">
+        <section className={`mobile-market-overview${searchOpen ? ' is-watchlist-search-open' : ''}`} aria-label="Mobil piyasa özeti">
             <button
                 type="button"
                 className="mobile-market-index-card"
@@ -647,6 +789,10 @@ function MobileMarketOverview({
                             const price = quoteRow?.price ?? cardRow?.price ?? indexRow?.price ?? row?.price ?? fundRow?.price ?? null;
                             const changePct = quoteRow?.change_pct ?? cardRow?.change_pct ?? indexRow?.change_pct ?? row?.change_pct ?? fundRow?.daily_return ?? null;
                             const asOf = quoteRow?.price_as_of ?? cardRow?.as_of ?? row?.price_as_of ?? fundRow?.as_of ?? null;
+                            const chartPoints = cardRow?.line_points?.length
+                                ? cardRow.line_points
+                                : (watchlistChartPoints[symbol] || []);
+                            const chartPath = item.kind === 'stock' ? mobileSparklinePath(chartPoints) : '';
                             return (
                                 <div
                                     key={itemKey}
@@ -674,6 +820,13 @@ function MobileMarketOverview({
                                         <span className="mobile-market-watchlist-price">
                                             <small>G</small>
                                             {formatIndexPrice(price)}
+                                        </span>
+                                        <span className={`mobile-market-watchlist-chart ${getTableChangeClass(changePct)}`} aria-hidden="true">
+                                            {chartPath ? (
+                                                <svg viewBox="0 0 220 52" preserveAspectRatio="none">
+                                                    <path d={chartPath} />
+                                                </svg>
+                                            ) : null}
                                         </span>
                                         <span className={`mobile-market-watchlist-change ${getTableChangeClass(changePct)}`}>
                                             {formatTablePct(changePct)}
@@ -1031,7 +1184,7 @@ function stockSortValue(
     key: StockSortKey,
     benchmarks: Record<MarketStockIndex, MarketReturnBenchmark> | undefined,
     returnMode: StockReturnMode,
-): string | number | null {
+): string | number | null | undefined {
     if (key === 'company') return row.company;
     if (isReturnKey(key)) return getReturnValue(row, key, benchmarks, returnMode);
     return row[key];
@@ -1073,7 +1226,19 @@ function FlashStockRow({
     }, [row.price]);
 
     return (
-        <tr className={flashClass} onClick={onClick}>
+        <tr
+            className={flashClass}
+            onClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
+                if (event.button !== 0) return;
+                onClick();
+            }}
+            onAuxClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
+                if (event.button !== 1) return;
+                if ((event.target as Element).closest('a[href]')) return;
+                event.preventDefault();
+                window.open(toStockDetail(row.symbol), '_blank', 'noopener,noreferrer');
+            }}
+        >
             <td className="stocks-rank">{rank}</td>
             {children}
         </tr>
@@ -2607,11 +2772,18 @@ export default function MarketsView({
         typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
     ));
     const [mobileMarketPanelOpen, setMobileMarketPanelOpen] = useState(false);
+    const [mobileWatchlistSearchOpen, setMobileWatchlistSearchOpen] = useState(false);
     const [mobileIndexDetail, setMobileIndexDetail] = useState<MarketIndexDetailResponse | null>(null);
     const [mobileWatchlistFundRows, setMobileWatchlistFundRows] = useState<Record<string, FundSummary | null>>({});
     const [selectedIndex, setSelectedIndex] = useState<MarketIndexCode | null>(routeSelectedIndex);
     const [stockIndex, setStockIndex] = useState<MarketStockIndex>(routeStockIndex);
     const [returnMode, setReturnMode] = useState<StockReturnMode>(routeReturnMode);
+    const [stockTableMode, setStockTableMode] = useState<StockTableMode>('performance');
+    const [screenerFilters, setScreenerFilters] = useState<StockScreenerFilterState>({ ...EMPTY_STOCK_SCREENER_FILTERS });
+    const [activeScreenerPreset, setActiveScreenerPreset] = useState<StockScreenerPresetId | null>(null);
+    const [screenerResults, setScreenerResults] = useState<MarketScreenerResponse | null>(null);
+    const [screenerLoading, setScreenerLoading] = useState(false);
+    const [screenerError, setScreenerError] = useState<string | null>(null);
     const [terminalNow, setTerminalNow] = useState(() => new Date());
     const [stockCardSymbols, setStockCardSymbols] = useState<string[]>(readStoredStockCards);
     const [stockCards, setStockCards] = useState<MarketStockCardsResponse | null>(() => {
@@ -2859,19 +3031,33 @@ export default function MarketsView({
     }, [activeSection]);
 
     useEffect(() => {
+        return apiClient.subscribeMarketStocks((index, payload) => {
+            if (activeSection === 'stocks' && index === latestStockIndexRef.current) {
+                setStocks(payload);
+                setStocksError(null);
+            }
+        });
+    }, [activeSection]);
+
+    useEffect(() => {
         if (activeSection !== 'stocks') return;
         setStocks(null);
         setStocksError(null);
         loadStocks(false, false, stockIndex);
+        const releaseStream = apiClient.retainMarketStocksStream(stockIndex);
         const intervalId = window.setInterval(() => {
-            if (document.visibilityState !== 'visible') return;
+            if (document.visibilityState !== 'visible' || !isBistTradingHours()) return;
+            if (apiClient.isMarketStocksStreamActive(stockIndex)) return;
             loadStocks(true, false, stockIndex);
         }, marketListRefreshMs);
         const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible') loadStocks(true, false, stockIndex);
+            if (document.visibilityState === 'visible' && isBistTradingHours()) {
+                loadStocks(true, false, stockIndex);
+            }
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
+            releaseStream();
             window.clearInterval(intervalId);
             document.removeEventListener('visibilitychange', onVisibilityChange);
         };
@@ -2951,15 +3137,17 @@ export default function MarketsView({
         // periodic refresh below still revalidates the complete selection.
         void loadBatches(initialSymbols);
         const intervalId = window.setInterval(() => {
-            if (document.visibilityState !== 'visible') return;
+            if (document.visibilityState !== 'visible' || !isBistTradingHours()) return;
             void loadBatches(stockCardSymbols, true);
         }, marketDetailRefreshMs);
         const quoteIntervalId = window.setInterval(() => {
-            if (document.visibilityState !== 'visible') return;
+            if (document.visibilityState !== 'visible' || !isBistTradingHours()) return;
             void loadBatches(stockCardSymbols, false);
         }, MARKET_QUOTE_REFRESH_MS);
         const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible') void loadBatches(stockCardSymbols, true);
+            if (document.visibilityState === 'visible' && isBistTradingHours()) {
+                void loadBatches(stockCardSymbols, true);
+            }
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
@@ -2975,11 +3163,11 @@ export default function MarketsView({
         if (activeSection !== 'indices') return;
         loadIndices(false, false);
         const intervalId = window.setInterval(() => {
-            if (document.visibilityState !== 'visible') return;
+            if (document.visibilityState !== 'visible' || !isBistTradingHours()) return;
             loadIndices(true, false);
         }, marketListRefreshMs);
         const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible') loadIndices(true, false);
+            if (document.visibilityState === 'visible' && isBistTradingHours()) loadIndices(true, false);
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
@@ -3174,12 +3362,68 @@ export default function MarketsView({
         [market?.rows, normalizedStockCardSearch, stockCardSymbols],
     );
 
+    const screenerParams = useMemo<MarketScreenerParams>(() => ({
+        index: stockIndex,
+        sector: screenerFilters.sector || undefined,
+        min_fk: parseScreenerNumber(screenerFilters.min_fk),
+        max_fk: parseScreenerNumber(screenerFilters.max_fk),
+        min_pd_dd: parseScreenerNumber(screenerFilters.min_pd_dd),
+        max_pd_dd: parseScreenerNumber(screenerFilters.max_pd_dd),
+        min_fd_favok: parseScreenerNumber(screenerFilters.min_fd_favok),
+        max_fd_favok: parseScreenerNumber(screenerFilters.max_fd_favok),
+        max_net_borc_favok: parseScreenerNumber(screenerFilters.max_net_borc_favok),
+        min_roe_pct: parseScreenerNumber(screenerFilters.min_roe_pct),
+        positive_net_profit: screenerFilters.positive_net_profit || undefined,
+        net_cash_only: screenerFilters.net_cash_only || undefined,
+        sort_by: STOCK_FUNDAMENTAL_COLUMNS.some((column) => column.key === stockSort.key)
+            ? stockSort.key
+            : 'company',
+        sort_dir: stockSort.direction,
+    }), [stockIndex, screenerFilters, stockSort]);
+
+    useEffect(() => {
+        if (activeSection !== 'stocks' || stockTableMode !== 'fundamentals') return;
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => {
+            setScreenerLoading(true);
+            setScreenerError(null);
+            apiClient.marketScreener(screenerParams, { signal: controller.signal })
+                .then((payload) => {
+                    if (!controller.signal.aborted) setScreenerResults(payload);
+                })
+                .catch((error: any) => {
+                    if (!controller.signal.aborted) {
+                        setScreenerError(error?.message || 'Temel analiz taraması yüklenemedi.');
+                    }
+                })
+                .finally(() => {
+                    if (!controller.signal.aborted) setScreenerLoading(false);
+                });
+        }, 250);
+        return () => {
+            window.clearTimeout(timer);
+            controller.abort();
+        };
+    // Re-run the lightweight filter against the latest quote snapshot while
+    // the fundamentals table is open so price-sensitive multiples stay live.
+    }, [activeSection, stockTableMode, screenerParams, stocks?.as_of]);
+
+    const stockRowsForMode = useMemo(() => {
+        if (stockTableMode === 'performance') return stocks?.rows || [];
+        if (!screenerResults || screenerResults.index !== stockIndex) return [];
+        const latestBySymbol = new Map((stocks?.rows || []).map((row) => [row.company, row]));
+        return screenerResults.rows.map((row) => ({
+            ...row,
+            ...(latestBySymbol.get(row.company) || {}),
+        }));
+    }, [stockTableMode, screenerResults, stockIndex, stocks?.rows]);
+
     const filteredStocks = useMemo(
         () =>
-            (stocks?.rows || []).filter((row) =>
+            stockRowsForMode.filter((row) =>
                 row.company.toLowerCase().includes(normalizedSearch),
             ),
-        [stocks?.rows, normalizedSearch],
+        [stockRowsForMode, normalizedSearch],
     );
 
     const filteredIndices = useMemo(
@@ -3198,6 +3442,14 @@ export default function MarketsView({
     const sortedIndices = useMemo(() => {
         const arr = [...filteredIndices];
         arr.sort((a, b) => {
+            const aPrimaryRank = PRIMARY_MARKET_INDEX_RANK.get(a.symbol);
+            const bPrimaryRank = PRIMARY_MARKET_INDEX_RANK.get(b.symbol);
+            if (aPrimaryRank !== undefined || bPrimaryRank !== undefined) {
+                if (aPrimaryRank === undefined) return 1;
+                if (bPrimaryRank === undefined) return -1;
+                return aPrimaryRank - bPrimaryRank;
+            }
+
             const av = a[indexSort.key];
             const bv = b[indexSort.key];
             const aMissing = av == null || av === '';
@@ -3379,6 +3631,32 @@ export default function MarketsView({
         if (mode === returnMode) return;
         setReturnMode(mode);
         onNavigateReturnMode?.(mode);
+    };
+
+    const handleStockTableModeChange = (mode: StockTableMode) => {
+        if (mode === stockTableMode) return;
+        setStockTableMode(mode);
+        setStockSort({ key: mode === 'fundamentals' ? 'fk' : 'company', direction: 'asc' });
+    };
+
+    const handleScreenerFilterChange = <K extends keyof StockScreenerFilterState,>(
+        key: K,
+        value: StockScreenerFilterState[K],
+    ) => {
+        setScreenerFilters((current) => ({ ...current, [key]: value }));
+        setActiveScreenerPreset(null);
+    };
+
+    const applyScreenerPreset = (presetId: StockScreenerPresetId) => {
+        const preset = STOCK_SCREENER_PRESETS.find((option) => option.id === presetId);
+        if (!preset) return;
+        setScreenerFilters({ ...EMPTY_STOCK_SCREENER_FILTERS, ...preset.filters });
+        setActiveScreenerPreset(presetId);
+    };
+
+    const clearScreenerFilters = () => {
+        setScreenerFilters({ ...EMPTY_STOCK_SCREENER_FILTERS });
+        setActiveScreenerPreset(null);
     };
 
     const handleSelectIndex = (index: MarketIndexCode | null) => {
@@ -3606,7 +3884,7 @@ export default function MarketsView({
             )}
 
             {activeSection === 'markets' && !loading && !error && market && (
-                <div className="market-content market-content-terminal">
+                <div className={`market-content market-content-terminal${mobileWatchlistSearchOpen ? ' mobile-watchlist-search-open' : ''}`}>
                     <div className="market-main-column">
                         <MobileMarketOverview
                             index={mobileIndexDetail}
@@ -3615,6 +3893,7 @@ export default function MarketsView({
                             stockCardItems={stockCards?.items ?? []}
                             watchlistItems={watchlist.items}
                             fundRows={mobileWatchlistFundRows}
+                            isMobileViewport={isMobileViewport}
                             onSelectTicker={onCompanyClick}
                             onSelectIndex={handleSelectIndex}
                             onOpenFund={onOpenFund}
@@ -3624,6 +3903,7 @@ export default function MarketsView({
                                 watchlist.addItem({ kind: 'fund', symbol: fund.fund_code, label: fund.name });
                             }}
                             onRemoveWatchlistItem={(item) => watchlist.removeItem(item.kind, item.symbol)}
+                            onSearchOpenChange={setMobileWatchlistSearchOpen}
                         />
                         {!isMobileViewport && (
                         <section className="panel stock-cards-panel">
@@ -3799,8 +4079,7 @@ export default function MarketsView({
                             <div>
                                 <h2>Hisseler</h2>
                                 <span className="panel-kicker">
-                                    {stocks?.index || stockIndex} ·{' '}
-                                    {sortedStocks.length || stocks?.rows.length || 0} hisse
+                                    {stockIndex} · {sortedStocks.length} hisse
                                 </span>
                             </div>
                             <div className="stocks-panel-actions">
@@ -3825,25 +4104,47 @@ export default function MarketsView({
                                     ))}
                                 </div>
                                 <div
-                                    className="stocks-segment stocks-return-segment"
-                                    aria-label="Getiri modu"
+                                    className="stocks-segment stocks-table-mode-segment"
+                                    aria-label="Tablo görünümü"
                                     style={{
-                                        '--item-count': RETURN_MODE_OPTIONS.length,
-                                        '--active-index': RETURN_MODE_OPTIONS.findIndex(o => o.id === returnMode)
+                                        '--item-count': 2,
+                                        '--active-index': stockTableMode === 'performance' ? 0 : 1,
                                     } as React.CSSProperties}
                                 >
-                                    {RETURN_MODE_OPTIONS.map((option) => (
+                                    {([['performance', 'Getiri %'], ['fundamentals', 'Temel Analiz']] as const).map(([mode, label]) => (
                                         <button
-                                            key={option.id}
+                                            key={mode}
                                             type="button"
-                                            className={returnMode === option.id ? 'active' : ''}
-                                            aria-pressed={returnMode === option.id}
-                                            onClick={() => handleReturnModeChange(option.id)}
+                                            className={stockTableMode === mode ? 'active' : ''}
+                                            aria-pressed={stockTableMode === mode}
+                                            onClick={() => handleStockTableModeChange(mode)}
                                         >
-                                            {option.label}
+                                            {label}
                                         </button>
                                     ))}
                                 </div>
+                                {stockTableMode === 'performance' && (
+                                    <div
+                                        className="stocks-segment stocks-return-segment"
+                                        aria-label="Getiri modu"
+                                        style={{
+                                            '--item-count': RETURN_MODE_OPTIONS.length,
+                                            '--active-index': RETURN_MODE_OPTIONS.findIndex(o => o.id === returnMode),
+                                        } as React.CSSProperties}
+                                    >
+                                        {RETURN_MODE_OPTIONS.map((option) => (
+                                            <button
+                                                key={option.id}
+                                                type="button"
+                                                className={returnMode === option.id ? 'active' : ''}
+                                                aria-pressed={returnMode === option.id}
+                                                onClick={() => handleReturnModeChange(option.id)}
+                                            >
+                                                {option.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
                                 <div className="search-box">
                                     <input
                                         type="text"
@@ -3855,6 +4156,80 @@ export default function MarketsView({
                                 </div>
                             </div>
                         </div>
+
+                        {stockTableMode === 'fundamentals' && (
+                            <section className="stock-screener" aria-label="Temel analiz tarayıcı filtreleri">
+                                <div className="stock-screener-topline">
+                                    <div>
+                                        <strong>Temel Analiz Tarayıcısı</strong>
+                                        <span>Güncel piyasa fiyatı ve son açıklanan KAP finansallarıyla hesaplanır.</span>
+                                    </div>
+                                    <button type="button" className="stock-screener-clear" onClick={clearScreenerFilters}>
+                                        Filtreleri temizle
+                                    </button>
+                                </div>
+                                <div className="stock-screener-presets" aria-label="Hazır taramalar">
+                                    {STOCK_SCREENER_PRESETS.map((preset) => (
+                                        <button
+                                            key={preset.id}
+                                            type="button"
+                                            className={`stock-screener-chip${activeScreenerPreset === preset.id ? ' active' : ''}`}
+                                            aria-pressed={activeScreenerPreset === preset.id}
+                                            onClick={() => applyScreenerPreset(preset.id)}
+                                        >
+                                            {preset.label}
+                                        </button>
+                                    ))}
+                                </div>
+                                <div className="stock-screener-filters">
+                                    <label>
+                                        <span>Sektör</span>
+                                        <select
+                                            value={screenerFilters.sector}
+                                            onChange={(event) => handleScreenerFilterChange('sector', event.currentTarget.value)}
+                                        >
+                                            <option value="">Tüm sektörler</option>
+                                            {(screenerResults?.sectors || []).map((sector) => (
+                                                <option key={sector} value={sector}>{sector}</option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                    {([
+                                        ['max_fk', 'Maks F/K'],
+                                        ['max_pd_dd', 'Maks PD/DD'],
+                                        ['max_fd_favok', 'Maks FD/FAVÖK'],
+                                        ['max_net_borc_favok', 'Maks Net Borç/FAVÖK'],
+                                        ['min_roe_pct', 'Min ROE %'],
+                                    ] as Array<[StockScreenerNumericFilterKey, string]>).map(([key, label]) => (
+                                        <label key={key}>
+                                            <span>{label}</span>
+                                            <input
+                                                type="number"
+                                                step="any"
+                                                inputMode="decimal"
+                                                value={screenerFilters[key] as string}
+                                                onChange={(event) => handleScreenerFilterChange(key, event.currentTarget.value)}
+                                            />
+                                        </label>
+                                    ))}
+                                    <label className="stock-screener-check">
+                                        <input
+                                            type="checkbox"
+                                            checked={screenerFilters.positive_net_profit}
+                                            onChange={(event) => handleScreenerFilterChange('positive_net_profit', event.currentTarget.checked)}
+                                        />
+                                        <span>Pozitif net kâr</span>
+                                    </label>
+                                </div>
+                                <div className="stock-screener-status" aria-live="polite">
+                                    {screenerLoading && <span>Tarama güncelleniyor…</span>}
+                                    {screenerError && <span className="is-error">{screenerError}</span>}
+                                    {!screenerLoading && !screenerError && screenerResults && (
+                                        <span>{screenerResults.count} hisse bulundu · {screenerResults.sectors.length} sektör</span>
+                                    )}
+                                </div>
+                            </section>
+                        )}
 
                         {stocksLoading && !stocks && (
                             <div className="loading-state"><div className="spinner" /> Hisseler yükleniyor...</div>
@@ -3877,8 +4252,8 @@ export default function MarketsView({
                             <>
                                 <div className="stocks-table-meta">
                                     <span>Son güncelleme: {formatUpdateTime(stocks.as_of)}</span>
-                                    <span>Getiri: {activeReturnModeLabel}</span>
-                                    {activeBenchmarkIndex && (
+                                    {stockTableMode === 'performance' && <span>Getiri: {activeReturnModeLabel}</span>}
+                                    {stockTableMode === 'performance' && activeBenchmarkIndex && (
                                         <span>
                                             Benchmark: {activeBenchmarkIndex} ·{' '}
                                             {formatUpdateTime(stocks.benchmarks?.[activeBenchmarkIndex]?.as_of)}
@@ -3897,7 +4272,12 @@ export default function MarketsView({
                                     )}
                                 </div>
 
-                                {sortedStocks.length === 0 ? (
+                                {stockTableMode === 'fundamentals'
+                                    && (screenerLoading && (!screenerResults || screenerResults.index !== stockIndex)) ? (
+                                    <div className="loading-state"><div className="spinner" /> Temel analiz verileri yükleniyor...</div>
+                                ) : screenerError && !screenerResults ? (
+                                    <div className="error-message">{screenerError}</div>
+                                ) : sortedStocks.length === 0 ? (
                                     <div className="no-results">Aranan kritere uyan hisse bulunamadı.</div>
                                 ) : (
                                     <div className="stocks-table-wrap">
@@ -3905,7 +4285,7 @@ export default function MarketsView({
                                             <thead>
                                                 <tr>
                                                     <th className="stocks-rank">#</th>
-                                                    {STOCK_COLUMNS.map((column) => (
+                                                    {(stockTableMode === 'fundamentals' ? STOCK_FUNDAMENTAL_COLUMNS : STOCK_COLUMNS).map((column) => (
                                                         <th
                                                             key={column.key}
                                                             className={column.align === 'right' ? 'stocks-cell-right' : undefined}
@@ -3922,7 +4302,7 @@ export default function MarketsView({
                                                                         : 'none'
                                                                 }
                                                             >
-                                                                <span>{getColumnLabel(column.key, returnMode)}</span>
+                                                                <span>{stockTableMode === 'fundamentals' ? column.label : getColumnLabel(column.key, returnMode)}</span>
                                                                 {column.sublabel && <small>{column.sublabel}</small>}
                                                                 {stockSort.key === column.key && (
                                                                     <span className="stocks-sort-indicator">
@@ -3943,32 +4323,59 @@ export default function MarketsView({
                                                         onClick={() => onCompanyClick(row.company)}
                                                     >
                                                         <td className="stocks-symbol-cell">
-                                                            <span className="stocks-symbol-main">
-                                                                <SymbolLogo
-                                                                    symbol={row.company}
-                                                                    name={row.company}
-                                                                    kind="stock"
-                                                                    logoUrl={row.logo_url}
-                                                                    size="xs"
-                                                                    className="stocks-symbol-logo"
-                                                                />
-                                                                <span>{row.company}</span>
-                                                            </span>
+                                                            <a
+                                                                className="stocks-symbol-link"
+                                                                href={toStockDetail(row.company)}
+                                                                onClick={(event) => {
+                                                                    event.stopPropagation();
+                                                                    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                                                                    event.preventDefault();
+                                                                    onCompanyClick(row.company);
+                                                                }}
+                                                            >
+                                                                <span className="stocks-symbol-main">
+                                                                    <SymbolLogo
+                                                                        symbol={row.company}
+                                                                        name={row.company}
+                                                                        kind="stock"
+                                                                        logoUrl={row.logo_url}
+                                                                        size="xs"
+                                                                        className="stocks-symbol-logo"
+                                                                    />
+                                                                    <span>{row.company}</span>
+                                                                </span>
+                                                            </a>
                                                         </td>
-                                                        <td className="stocks-cell-right stocks-price-cell">{formatStockPrice(row)}</td>
-                                                        <td className={`stocks-cell-right ${getTableChangeClass(row.change_pct)}`}>
-                                                            {formatTablePct(row.change_pct)}
-                                                        </td>
-                                                        <td className="stocks-cell-right stocks-volume-cell">{formatVolume(row.volume)}</td>
-                                                        <td className="stocks-cell-right stocks-market-cap-cell">
-                                                            {formatMarketCap(row.market_cap)}
-                                                        </td>
-                                                        {renderReturnCell(row, 'return_1w_pct')}
-                                                        {renderReturnCell(row, 'return_1m_pct')}
-                                                        {renderReturnCell(row, 'return_3m_pct')}
-                                                        {renderReturnCell(row, 'return_6m_pct')}
-                                                        {renderReturnCell(row, 'return_ytd_pct')}
-                                                        {renderReturnCell(row, 'return_1y_pct')}
+                                                        {stockTableMode === 'fundamentals' ? (
+                                                            <>
+                                                                <td>{row.sector || '—'}</td>
+                                                                <td>{row.fundamental_period || row.latest_quarter || '—'}</td>
+                                                                <td className="stocks-cell-right">{formatFundamentalRatio(row.fk)}</td>
+                                                                <td className="stocks-cell-right">{formatFundamentalRatio(row.pd_dd)}</td>
+                                                                <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_favok)}</td>
+                                                                <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_satis)}</td>
+                                                                <td className="stocks-cell-right">{formatFundamentalRatio(row.net_borc_favok)}</td>
+                                                                <td className="stocks-cell-right">{formatFundamentalPercent(row.roe_pct)}</td>
+                                                                <td className="stocks-cell-right">{formatFundamentalPercent(row.free_float_pct)}</td>
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <td className="stocks-cell-right stocks-price-cell">{formatStockPrice(row)}</td>
+                                                                <td className={`stocks-cell-right ${getTableChangeClass(row.change_pct)}`}>
+                                                                    {formatTablePct(row.change_pct)}
+                                                                </td>
+                                                                <td className="stocks-cell-right stocks-volume-cell">{formatVolume(row.volume)}</td>
+                                                                <td className="stocks-cell-right stocks-market-cap-cell">
+                                                                    {formatMarketCap(row.market_cap)}
+                                                                </td>
+                                                                {renderReturnCell(row, 'return_1w_pct')}
+                                                                {renderReturnCell(row, 'return_1m_pct')}
+                                                                {renderReturnCell(row, 'return_3m_pct')}
+                                                                {renderReturnCell(row, 'return_6m_pct')}
+                                                                {renderReturnCell(row, 'return_ytd_pct')}
+                                                                {renderReturnCell(row, 'return_1y_pct')}
+                                                            </>
+                                                        )}
                                                     </FlashStockRow>
                                                 ))}
                                             </tbody>
@@ -4326,19 +4733,42 @@ export default function MarketsView({
                                         </thead>
                                         <tbody>
                                             {sortedIndexConstituents.map((row) => (
-                                                <tr key={row.symbol} onClick={() => onCompanyClick(row.symbol)}>
+                                                <tr
+                                                    key={row.symbol}
+                                                    onClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
+                                                        if (event.button !== 0) return;
+                                                        onCompanyClick(row.symbol);
+                                                    }}
+                                                    onAuxClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
+                                                        if (event.button !== 1) return;
+                                                        if ((event.target as Element).closest('a[href]')) return;
+                                                        event.preventDefault();
+                                                        window.open(toStockDetail(row.symbol), '_blank', 'noopener,noreferrer');
+                                                    }}
+                                                >
                                                     <td className="stocks-symbol-cell">
-                                                        <span className="stocks-symbol-main">
-                                                            <SymbolLogo
-                                                                symbol={row.symbol}
-                                                                name={row.symbol}
-                                                                kind="stock"
-                                                                logoUrl={row.logo_url}
-                                                                size="xs"
-                                                                className="stocks-symbol-logo"
-                                                            />
-                                                            <span>{row.symbol}</span>
-                                                        </span>
+                                                        <a
+                                                            className="stocks-symbol-link"
+                                                            href={toStockDetail(row.symbol)}
+                                                            onClick={(event) => {
+                                                                event.stopPropagation();
+                                                                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                                                                event.preventDefault();
+                                                                onCompanyClick(row.symbol);
+                                                            }}
+                                                        >
+                                                            <span className="stocks-symbol-main">
+                                                                <SymbolLogo
+                                                                    symbol={row.symbol}
+                                                                    name={row.symbol}
+                                                                    kind="stock"
+                                                                    logoUrl={row.logo_url}
+                                                                    size="xs"
+                                                                    className="stocks-symbol-logo"
+                                                                />
+                                                                <span>{row.symbol}</span>
+                                                            </span>
+                                                        </a>
                                                     </td>
                                                     <td data-label="Fiyat" className="stocks-cell-right stocks-price-cell">{constituentPrice(row)}</td>
                                                     <td data-label="Değişim" className={`stocks-cell-right ${getTableChangeClass(row.change_pct)}`}>

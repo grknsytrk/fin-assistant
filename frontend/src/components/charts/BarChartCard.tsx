@@ -105,9 +105,23 @@ export function BarChartCard({
         if (onHighlight) onHighlight(idx);
     };
 
-    const onLeave = () => {
-        setTooltip(null);
+    const clearHighlight = () => {
         if (onHighlight) onHighlight(null);
+    };
+
+    const onChartMove = (event: MouseEvent<SVGSVGElement>) => {
+        const target = event.target;
+        const isDataMark = target instanceof Element && Boolean(target.closest('.kap-bar-positive, .kap-bar-negative'));
+        if (isDataMark) {
+            return;
+        }
+        setTooltip(null);
+        clearHighlight();
+    };
+
+    const onChartLeave = () => {
+        setTooltip(null);
+        clearHighlight();
     };
 
     const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -129,7 +143,7 @@ export function BarChartCard({
             aria-label={onOpen ? `${title} grafiğini büyüt` : undefined}
             onClick={onOpen}
             onKeyDown={onKeyDown}
-            onMouseLeave={onLeave}
+            onMouseLeave={onChartLeave}
         >
             <h4>{title}</h4>
             <svg
@@ -137,7 +151,8 @@ export function BarChartCard({
                 viewBox={`0 0 ${width} ${height}`}
                 role="img"
                 aria-label={title}
-                onMouseLeave={onLeave}
+                onMouseMove={onChartMove}
+                onMouseLeave={onChartLeave}
             >
                 {[0, 1, 2, 3, 4].map((i) => {
                     const yy = padTop + (plotHeight / 4) * i;
@@ -187,7 +202,6 @@ export function BarChartCard({
                                 rx={1}
                                 className={`${point.value < 0 ? 'kap-bar-negative' : 'kap-bar-positive'} ${isFocus ? 'kap-bar-highlighted' : ''} ${isFaded ? 'kap-bar-faded' : ''}`}
                                 onMouseEnter={(event) => onHover(event, point, idx)}
-                                onMouseLeave={onLeave}
                             />
                             {shouldShowXAxisLabel(idx, series.length) && (
                                 <text x={x + barWidth / 2} y={height - 16} textAnchor="middle" className="kap-x-label">
@@ -302,14 +316,24 @@ export function LineChartCard({
         if (onHighlightKey) onHighlightKey(point.key);
     };
 
-    const onLeave = () => {
+    const clearHighlight = () => {
+        if (onHighlight) onHighlight(null);
+        if (onHighlightKey) onHighlightKey(null);
+    };
+
+    const onChartMove = (event: MouseEvent<SVGSVGElement>) => {
+        const target = event.target;
+        const isDataMark = target instanceof Element && Boolean(target.closest('.kap-line-point'));
+        if (isDataMark) {
+            return;
+        }
         setTooltip(null);
+        clearHighlight();
     };
 
     const onChartLeave = () => {
-        onLeave();
-        if (onHighlight) onHighlight(null);
-        if (onHighlightKey) onHighlightKey(null);
+        setTooltip(null);
+        clearHighlight();
     };
 
     const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -339,6 +363,7 @@ export function LineChartCard({
                 viewBox={`0 0 ${width} ${height}`}
                 role="img"
                 aria-label={title}
+                onMouseMove={onChartMove}
                 onMouseLeave={onChartLeave}
             >
                 {[0, 1, 2, 3, 4].map((i) => {
@@ -410,7 +435,6 @@ export function LineChartCard({
                                 r={isFocus ? 6 : 4}
                                 className={`kap-line-point ${isFocus ? 'kap-point-highlighted' : ''} ${isFaded ? 'kap-point-faded' : ''}`}
                                 onMouseEnter={(event) => onHover(event, point, idx)}
-                                onMouseLeave={onLeave}
                             />
                             {shouldShowXAxisLabel(idx, series.length) && (
                                 <text x={point.x} y={height - 16} textAnchor="middle" className="kap-x-label">

@@ -1,0 +1,265 @@
+.fund-request-state {
+    display: grid;
+    grid-template-columns: minmax(150px, 188px) minmax(0, 1fr);
+    align-items: center;
+    gap: 1.5rem;
+    width: min(100%, 820px);
+    min-height: 194px;
+    margin: 1.25rem auto;
+    padding: 1.1rem 1.3rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 86%, #334155);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--surface-color) 90%, var(--bg-color));
+    color: var(--text-primary);
+    font-family: var(--font-family);
+}
+
+.fund-request-state.compact {
+    grid-template-columns: minmax(112px, 148px) minmax(0, 1fr);
+    width: 100%;
+    min-height: 154px;
+    margin: 0.9rem 0 1rem;
+    padding: 0.8rem 1rem;
+}
+
+.fund-request-illustration {
+    display: grid;
+    min-width: 0;
+    place-items: center;
+}
+
+.fund-request-art {
+    display: block;
+    width: min(100%, 188px);
+    height: auto;
+    overflow: visible;
+}
+
+.fund-request-state.compact .fund-request-art {
+    width: min(100%, 148px);
+}
+
+.fund-request-card {
+    fill: #151a22;
+    stroke: #323c4a;
+    stroke-width: 1.2;
+}
+
+.fund-request-mark {
+    fill: #273750;
+    stroke: #526887;
+    stroke-width: 1;
+}
+
+.fund-request-mark-line {
+    fill: none;
+    stroke: #c2d1e8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.7;
+}
+
+.fund-request-copy-line {
+    fill: none;
+    stroke: #637184;
+    stroke-linecap: round;
+    stroke-width: 2.3;
+}
+
+.fund-request-chart-panel {
+    fill: #10151c;
+    stroke: #28313d;
+    stroke-width: 1;
+}
+
+.fund-request-grid-line {
+    fill: none;
+    stroke: #26303b;
+    stroke-width: 0.8;
+}
+
+.fund-request-bars rect {
+    fill: #53698f;
+    transform-box: fill-box;
+    transform-origin: center bottom;
+    animation: fund-request-bar-rise 2.6s ease-in-out infinite;
+}
+
+.fund-request-bars rect:nth-child(2) {
+    fill: #637fae;
+    animation-delay: -0.45s;
+}
+
+.fund-request-bars rect:nth-child(3) {
+    fill: #778dba;
+    animation-delay: -0.9s;
+}
+
+.fund-request-bars rect:nth-child(4) {
+    fill: #679684;
+    animation-delay: -1.35s;
+}
+
+.fund-request-bars rect:nth-child(5) {
+    fill: #7da590;
+    animation-delay: -1.8s;
+}
+
+.fund-request-trend {
+    fill: none;
+    stroke: #9bb8a4;
+    stroke-dasharray: 82;
+    stroke-dashoffset: 82;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.8;
+    animation: fund-request-trend-draw 3.8s ease-in-out infinite;
+}
+
+.fund-request-units path,
+.fund-request-units ellipse {
+    fill: #293647;
+    stroke: #60718a;
+    stroke-width: 1.15;
+}
+
+.fund-request-units {
+    animation: fund-request-unit-float 3.2s ease-in-out infinite;
+    transform-box: fill-box;
+    transform-origin: center;
+}
+
+.fund-request-copy {
+    min-width: 0;
+}
+
+.fund-request-kicker {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0 0.45rem;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    font-weight: 750;
+    letter-spacing: 0.09em;
+    line-height: 1.2;
+    text-transform: uppercase;
+}
+
+.fund-request-kicker span {
+    padding: 0.18rem 0.38rem;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 30%, var(--surface-border));
+    border-radius: 4px;
+    color: #b6c7e9;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.02em;
+}
+
+.fund-request-copy h2 {
+    margin: 0;
+    color: var(--text-primary);
+    font-family: var(--font-heading, var(--font-family));
+    font-size: 1.12rem;
+    font-weight: 700;
+    line-height: 1.3;
+}
+
+.fund-request-name {
+    margin: 0.28rem 0 0;
+    color: color-mix(in srgb, var(--text-secondary) 75%, var(--text-primary));
+    font-size: 0.82rem;
+    line-height: 1.45;
+}
+
+.fund-request-description {
+    max-width: 54ch;
+    margin: 0.55rem 0 0;
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+    line-height: 1.5;
+}
+
+.fund-request-retry {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 34px;
+    margin-top: 0.8rem;
+    padding: 0.35rem 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--accent-color) 38%, var(--surface-border));
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent-color) 13%, var(--surface-color));
+    color: #c5d4ef;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background-color 150ms ease, border-color 150ms ease;
+}
+
+.fund-request-retry:hover,
+.fund-request-retry:focus-visible {
+    border-color: color-mix(in srgb, var(--accent-color) 64%, var(--surface-border));
+    background: color-mix(in srgb, var(--accent-color) 22%, var(--surface-color));
+}
+
+.fund-request-retry:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent-color) 62%, transparent);
+    outline-offset: 2px;
+}
+
+.fund-request-state.error .fund-request-trend {
+    stroke: #aa9a7f;
+}
+
+@keyframes fund-request-bar-rise {
+    0%, 100% { transform: scaleY(0.82); }
+    48% { transform: scaleY(1); }
+}
+
+@keyframes fund-request-trend-draw {
+    0% { stroke-dashoffset: 82; opacity: 0.55; }
+    56%, 86% { stroke-dashoffset: 0; opacity: 1; }
+    100% { stroke-dashoffset: -82; opacity: 0.55; }
+}
+
+@keyframes fund-request-unit-float {
+    0%, 100% { transform: translateY(1px); }
+    50% { transform: translateY(-2px); }
+}
+
+@media (max-width: 640px) {
+    .fund-request-state,
+    .fund-request-state.compact {
+        grid-template-columns: 1fr;
+        justify-items: center;
+        gap: 0.45rem;
+        min-height: 0;
+        padding: 1rem 1rem 1.15rem;
+        text-align: center;
+    }
+
+    .fund-request-art,
+    .fund-request-state.compact .fund-request-art {
+        width: min(100%, 164px);
+    }
+
+    .fund-request-kicker {
+        justify-content: center;
+    }
+
+    .fund-request-description {
+        margin-inline: auto;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .fund-request-state *,
+    .fund-request-state *::before,
+    .fund-request-state *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+    }
+}

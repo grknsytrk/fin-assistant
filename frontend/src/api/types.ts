@@ -43,6 +43,46 @@ export interface MarketStockRow extends MarketUniverseRow {
   return_6m_pct: number | null;
   return_ytd_pct: number | null;
   return_1y_pct: number | null;
+  fundamental_period?: string | null;
+  sector?: string | null;
+  fk?: number | null;
+  pd_dd?: number | null;
+  fd_favok?: number | null;
+  fd_satis?: number | null;
+  net_borc_favok?: number | null;
+  roe_pct?: number | null;
+  favok_margin_pct?: number | null;
+  net_margin_pct?: number | null;
+  free_float_pct?: number | null;
+  ttm_net_kar?: number | null;
+  net_borc?: number | null;
+}
+
+export interface MarketScreenerParams {
+  index: MarketStockIndex;
+  sector?: string;
+  min_fk?: number;
+  max_fk?: number;
+  min_pd_dd?: number;
+  max_pd_dd?: number;
+  min_fd_favok?: number;
+  max_fd_favok?: number;
+  max_net_borc_favok?: number;
+  min_roe_pct?: number;
+  min_favok_margin_pct?: number;
+  positive_net_profit?: boolean;
+  net_cash_only?: boolean;
+  sort_by?: string;
+  sort_dir?: 'asc' | 'desc';
+}
+
+export interface MarketScreenerResponse {
+  index: MarketStockIndex;
+  count: number;
+  rows: MarketStockRow[];
+  sectors: string[];
+  as_of: string | null;
+  filters?: Omit<MarketScreenerParams, 'index'>;
 }
 
 export type MarketStockIndex = 'XUTUM' | 'XU100' | 'XU030';
@@ -141,6 +181,20 @@ export interface MarketStockDeltaItem {
   return_6m_pct?: number | null;
   return_ytd_pct?: number | null;
   return_1y_pct?: number | null;
+  latest_quarter?: string | null;
+  fundamental_period?: string | null;
+  sector?: string | null;
+  fk?: number | null;
+  pd_dd?: number | null;
+  fd_favok?: number | null;
+  fd_satis?: number | null;
+  net_borc_favok?: number | null;
+  roe_pct?: number | null;
+  favok_margin_pct?: number | null;
+  net_margin_pct?: number | null;
+  free_float_pct?: number | null;
+  ttm_net_kar?: number | null;
+  net_borc?: number | null;
 }
 
 export interface MarketStocksDeltaEvent {
@@ -192,7 +246,6 @@ export interface FundSourceMetadata {
   cached_fallback_points_present?: boolean;
   cached_fallback_point_count?: number | null;
   coverage_state?: 'complete' | 'range_incomplete' | 'upgrading' | 'unavailable' | string | null;
-  coverage_boundary?: 'head' | string | null;
   resolution?: 'daily' | 'monthly_anchor' | 'mixed' | 'unknown' | string | null;
   requested_resolution?: 'daily' | string | null;
   available_start_date?: string | null;

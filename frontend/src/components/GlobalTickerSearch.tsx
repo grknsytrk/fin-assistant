@@ -1,8 +1,9 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Search, X } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { FundSummary, MarketUniverseRow } from '../api/types';
-import SymbolLogo from './SymbolLogo';
+import { DEFAULT_FUND_TAB, DEFAULT_STOCK_TAB, toFundDetail, toStockDetail } from '../routing/routes';
+import AssetSearchResult from './AssetSearchResult';
 import './GlobalTickerSearch.css';
 
 type SearchAssetType = 'stock' | 'fund';
@@ -28,6 +29,7 @@ type SearchField = {
 };
 
 type SearchTerms = SearchField;
+type SearchCatalogStatus = 'loading' | 'ready' | 'error';
 
 interface GlobalTickerSearchProps {
   currentTicker?: string | null;
@@ -37,7 +39,100 @@ interface GlobalTickerSearchProps {
 
 const RECENT_SEARCHES_KEY = 'ragfin.globalSearch.recent.v1';
 const MAX_RECENT_SEARCHES = 8;
-const MIN_FUND_SEARCH_QUERY_LENGTH = 2;
+const MIN_FUND_SEARCH_QUERY_LENGTH = 1;
+const SEARCH_CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
+const STOCK_SEARCH_CATALOG_CACHE_TTL_MS = 60 * 1000;
+
+type SearchCatalogCache<T> = { rows: T[]; fetchedAt: number };
+let stockSearchCatalogCache: SearchCatalogCache<MarketUniverseRow> | null = null;
+let fundSearchCatalogCache: SearchCatalogCache<FundSummary> | null = null;
+let stockSearchCatalogRequest: Promise<MarketUniverseRow[]> | null = null;
+let fundSearchCatalogRequest: Promise<FundSummary[]> | null = null;
+
+function cachedCatalogRows<T>(
+  cache: SearchCatalogCache<T> | null,
+  ttlMs = SEARCH_CATALOG_CACHE_TTL_MS,
+): T[] | null {
+  if (!cache || Date.now() - cache.fetchedAt >= ttlMs) return null;
+  return cache.rows;
+}
+
+function availableStockSearchRows(): MarketUniverseRow[] {
+  return stockSearchCatalogCache?.rows
+    || apiClient.getCachedMarketUniverse?.()?.rows
+    || [];
+}
+
+function hasStockSearchRows(): boolean {
+  return Boolean(stockSearchCatalogCache || apiClient.getCachedMarketUniverse?.());
+}
+
+function availableFundSearchRows(): FundSummary[] {
+  const shared = apiClient.getCachedFundsCatalog?.();
+  if (shared && (!fundSearchCatalogCache || shared.fetchedAt >= fundSearchCatalogCache.fetchedAt)) {
+    return shared.payload.rows || [];
+  }
+  return fundSearchCatalogCache?.rows || [];
+}
+
+function hasFundSearchRows(): boolean {
+  return Boolean(fundSearchCatalogCache || apiClient.getCachedFundsCatalog?.());
+}
+
+function cachedMarketStockRows(): MarketUniverseRow[] {
+  const cached = apiClient.getCachedMarketStocksEntry?.('XUTUM');
+  if (!cached || Date.now() - cached.fetchedAt >= 15_000) return [];
+  return cached.payload.rows || [];
+}
+
+function loadStockSearchCatalog(): Promise<MarketUniverseRow[]> {
+  const cached = cachedCatalogRows(stockSearchCatalogCache, STOCK_SEARCH_CATALOG_CACHE_TTL_MS);
+  if (cached) return Promise.resolve(cached);
+  if (stockSearchCatalogRequest) return stockSearchCatalogRequest;
+
+  const request = Promise.resolve()
+    .then(() => apiClient.marketUniverse())
+    .then((payload) => {
+      const rows = payload.rows || [];
+      stockSearchCatalogCache = { rows, fetchedAt: Date.now() };
+      return rows;
+    })
+    .finally(() => {
+      if (stockSearchCatalogRequest === request) stockSearchCatalogRequest = null;
+    });
+  stockSearchCatalogRequest = request;
+  return request;
+}
+
+function loadFundSearchCatalog(): Promise<FundSummary[]> {
+  const shared = apiClient.getCachedFundsCatalog?.();
+  const sharedIsFresh = shared && Date.now() - shared.fetchedAt < SEARCH_CATALOG_CACHE_TTL_MS;
+  if (
+    sharedIsFresh
+    && (!fundSearchCatalogCache || shared.fetchedAt >= fundSearchCatalogCache.fetchedAt)
+  ) {
+    const rows = shared.payload.rows || [];
+    fundSearchCatalogCache = { rows, fetchedAt: shared.fetchedAt };
+    return Promise.resolve(rows);
+  }
+
+  const cached = cachedCatalogRows(fundSearchCatalogCache);
+  if (cached) return Promise.resolve(cached);
+  if (fundSearchCatalogRequest) return fundSearchCatalogRequest;
+
+  const request = Promise.resolve()
+    .then(() => apiClient.funds())
+    .then((payload) => {
+      const rows = payload.rows || [];
+      fundSearchCatalogCache = { rows, fetchedAt: Date.now() };
+      return rows;
+    })
+    .finally(() => {
+      if (fundSearchCatalogRequest === request) fundSearchCatalogRequest = null;
+    });
+  fundSearchCatalogRequest = request;
+  return request;
+}
 
 const STOCK_SYMBOL_ALIASES: Record<string, string> = {
   BIM: 'BIMAS',
@@ -107,7 +202,8 @@ function readRecentSearches(): SearchResult[] {
           && typeof item.title === 'string'
         );
       })
-      .slice(0, MAX_RECENT_SEARCHES);
+      .slice(0, MAX_RECENT_SEARCHES)
+      .map((item) => ({ ...item, price: null, changePct: null, searchFields: undefined }));
   } catch {
     return [];
   }
@@ -117,7 +213,7 @@ function writeRecentSearches(items: SearchResult[]): void {
   if (typeof window === 'undefined') return;
   try {
     const persisted = items.slice(0, MAX_RECENT_SEARCHES).map((item) => {
-      const copy = { ...item };
+      const copy = { ...item, price: null, changePct: null };
       delete copy.searchFields;
       return copy;
     });
@@ -160,6 +256,28 @@ function stockRowToResult(row: MarketUniverseRow): SearchResult {
   };
 }
 
+function mergeStockQuoteRows(
+  catalogRows: MarketUniverseRow[],
+  quoteRows: MarketUniverseRow[],
+): MarketUniverseRow[] {
+  const quotesBySymbol = new Map(
+    quoteRows.map((row) => [normalizeStockSymbol(row.symbol || row.company), row]),
+  );
+  return catalogRows.map((row) => {
+    const quote = quotesBySymbol.get(normalizeStockSymbol(row.symbol || row.company));
+    if (!quote) return row;
+    return {
+      ...row,
+      price: quote.price,
+      price_currency: quote.price_currency,
+      change: quote.change,
+      change_pct: quote.change_pct,
+      price_as_of: quote.price_as_of,
+      market_cap: quote.market_cap ?? row.market_cap,
+    };
+  });
+}
+
 function fundRowToResult(row: FundSummary): SearchResult {
   const symbol = normalizeSymbol(row.fund_code);
   return {
@@ -175,50 +293,83 @@ function fundRowToResult(row: FundSummary): SearchResult {
   };
 }
 
-function formatSearchPrice(value: number | null | undefined, type: SearchAssetType): string {
-  if (value == null || !Number.isFinite(value)) return '-';
-  return value.toLocaleString('tr-TR', {
-    minimumFractionDigits: type === 'fund' ? 4 : 2,
-    maximumFractionDigits: type === 'fund' ? 6 : 2,
-  });
-}
-
-function formatSearchPct(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return '-';
-  const sign = value > 0 ? '+' : '';
-  return `% ${sign}${value.toLocaleString('tr-TR', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
-
-function changeClass(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return 'flat';
-  if (value > 0) return 'up';
-  if (value < 0) return 'down';
-  return 'flat';
-}
-
 function searchTerms(value: string): SearchTerms {
   const text = normalizeSearchText(value);
   const compact = text.replace(/\s+/g, '');
   return { text, compact, noVowels: compact.replace(/[AEIOU]/g, '') };
 }
 
-function resultMatches(result: SearchResult, terms: SearchTerms): boolean {
-  if (!terms.text) return true;
+const NO_SEARCH_MATCH = Number.POSITIVE_INFINITY;
+
+function resultMatchRank(result: SearchResult, terms: SearchTerms, normalizedSymbolQuery = ''): number {
+  if (!terms.text) return 0;
+
+  if (normalizedSymbolQuery && normalizeSymbol(result.symbol) === normalizedSymbolQuery) {
+    // Fund codes are the authoritative interpretation for a three-letter
+    // query, while still keeping exact fund codes ahead of stock codes for
+    // any future symbol collision.
+    return result.type === 'fund' ? 0 : 1;
+  }
+
   const fields = result.searchFields || prepareSearchResult(result).searchFields || [];
-  return fields.some((field) => (
-    field.text.includes(terms.text)
-    || field.compact.includes(terms.compact)
-    || (terms.noVowels.length >= 3 && field.noVowels.includes(terms.noVowels))
-  ));
+  let bestRank = NO_SEARCH_MATCH;
+  for (const field of fields) {
+    if (field.text === terms.text || field.compact === terms.compact) {
+      bestRank = Math.min(bestRank, 2);
+      continue;
+    }
+    if (field.text.startsWith(terms.text) || field.compact.startsWith(terms.compact)) {
+      bestRank = Math.min(bestRank, 3);
+      continue;
+    }
+    if (field.text.includes(terms.text) || field.compact.includes(terms.compact)) {
+      bestRank = Math.min(bestRank, 4);
+      continue;
+    }
+    if (terms.noVowels.length >= 3 && field.noVowels.includes(terms.noVowels)) {
+      bestRank = Math.min(bestRank, 5);
+    }
+  }
+  return bestRank;
 }
 
-function resultStartsWith(result: SearchResult, terms: SearchTerms): boolean {
-  if (!terms.compact) return false;
-  const fields = result.searchFields || prepareSearchResult(result).searchFields || [];
-  return fields.some((field) => field.compact.startsWith(terms.compact));
+function resultMatches(result: SearchResult, terms: SearchTerms): boolean {
+  return resultMatchRank(result, terms) < NO_SEARCH_MATCH;
+}
+
+function compareSearchResults(a: SearchResult, b: SearchResult, terms: SearchTerms, normalizedSymbolQuery: string): number {
+  const rankDifference = resultMatchRank(a, terms, normalizedSymbolQuery)
+    - resultMatchRank(b, terms, normalizedSymbolQuery);
+  if (rankDifference !== 0) return rankDifference;
+  if (a.type !== b.type) return a.type === 'fund' ? -1 : 1;
+  return a.symbol.localeCompare(b.symbol, 'tr');
+}
+
+function isThreeLetterFundQuery(value: string): boolean {
+  return /^[A-Z]{3}$/.test(normalizeSymbol(value));
+}
+
+function isDirectFundCodeQuery(value: string): boolean {
+  const normalized = normalizeSymbol(value);
+  return isThreeLetterFundQuery(normalized) && !STOCK_SYMBOL_ALIASES[normalized];
+}
+
+function rankSearchResults(results: SearchResult[], query: string, currentTicker?: string | null): SearchResult[] {
+  const normalizedQuery = normalizeSearchText(query);
+  const terms = searchTerms(normalizedQuery);
+  const normalizedSymbolQuery = normalizeSymbol(query);
+  const currentStock = normalizeSymbol(currentTicker);
+  const seen = new Set<string>();
+
+  return results
+    .filter((result) => result.type !== 'stock' || result.symbol !== currentStock)
+    .filter((result) => resultMatchRank(result, terms, normalizedSymbolQuery) < NO_SEARCH_MATCH)
+    .filter((result) => {
+      if (seen.has(result.id)) return false;
+      seen.add(result.id);
+      return true;
+    })
+    .sort((a, b) => compareSearchResults(a, b, terms, normalizedSymbolQuery));
 }
 
 export default function GlobalTickerSearch({
@@ -226,6 +377,17 @@ export default function GlobalTickerSearch({
   onSelectTicker,
   onSelectFund,
 }: GlobalTickerSearchProps) {
+  const [stockCatalogRows, setStockCatalogRows] = useState<MarketUniverseRow[]>(availableStockSearchRows);
+  const [stockCatalogStatus, setStockCatalogStatus] = useState<SearchCatalogStatus>(() => (
+    hasStockSearchRows() ? 'ready' : 'loading'
+  ));
+  const [stockQuoteRows, setStockQuoteRows] = useState<MarketUniverseRow[]>(() => (
+    cachedMarketStockRows()
+  ));
+  const [fundCatalogRows, setFundCatalogRows] = useState<FundSummary[]>(availableFundSearchRows);
+  const [fundCatalogStatus, setFundCatalogStatus] = useState<SearchCatalogStatus>(() => (
+    hasFundSearchRows() ? 'ready' : 'loading'
+  ));
   const [stockRows, setStockRows] = useState<MarketUniverseRow[]>([]);
   const [stocksLoading, setStocksLoading] = useState(false);
   const [fundRows, setFundRows] = useState<FundSummary[]>([]);
@@ -234,24 +396,114 @@ export default function GlobalTickerSearch({
   const [isOpen, setIsOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const [recentSearches, setRecentSearches] = useState<SearchResult[]>(() => readRecentSearches());
+  const [isResolving, setIsResolving] = useState(false);
+  const [searchError, setSearchError] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const stockSearchQueryRef = useRef('');
+  const fundSearchQueryRef = useRef('');
+  const submitGenerationRef = useRef(0);
+  const submitControllerRef = useRef<AbortController | null>(null);
 
   const deferredQuery = useDeferredValue(query);
   const trimmedQuery = deferredQuery.trim();
   const normalizedQuery = normalizeSearchText(trimmedQuery);
   const queryTerms = useMemo(() => searchTerms(normalizedQuery), [normalizedQuery]);
   const normalizedSymbolQuery = normalizeSymbol(query.trim());
+  const immediateQueryTerms = useMemo(() => searchTerms(query.trim()), [query]);
+  const useStockSearchFallback = stockCatalogStatus !== 'ready';
+  const useFundSearchFallback = fundCatalogStatus !== 'ready';
 
   useEffect(() => {
+    let active = true;
+
+    setStockQuoteRows(cachedMarketStockRows());
+    const unsubscribeStocks = apiClient.subscribeMarketStocks?.((index, payload) => {
+      if (active && index === 'XUTUM') {
+        setStockQuoteRows(payload.rows || []);
+      }
+    });
+    const unsubscribeFunds = apiClient.subscribeFundsCatalog?.((payload) => {
+      if (!active || payload.status === 'pending') return;
+      const rows = payload.rows || [];
+      fundSearchCatalogCache = { rows, fetchedAt: Date.now() };
+      setFundCatalogRows(rows);
+      setFundCatalogStatus('ready');
+    });
+
+    // Warm both searchable catalogues when the navigation mounts. Once they
+    // are ready, keystrokes only filter these in-memory rows, just like the
+    // fund list search. The market and fund pages share the API client's
+    // existing request/cache paths, so an already-running catalogue load is
+    // reused where possible.
+    loadStockSearchCatalog()
+      .then((rows) => {
+        if (!active) return;
+        setStockCatalogRows(rows);
+        setStockCatalogStatus('ready');
+      })
+      .catch(() => {
+        if (active && !hasStockSearchRows()) setStockCatalogStatus('error');
+      });
+
+    loadFundSearchCatalog()
+      .then((rows) => {
+        if (!active) return;
+        setFundCatalogRows(rows);
+        setFundCatalogStatus('ready');
+      })
+      .catch(() => {
+        if (active && !hasFundSearchRows()) setFundCatalogStatus('error');
+      });
+
+    return () => {
+      active = false;
+      unsubscribeStocks?.();
+      unsubscribeFunds?.();
+    };
+  }, []);
+
+  const cancelSearch = useCallback(() => {
+    submitGenerationRef.current += 1;
+    submitControllerRef.current?.abort();
+    submitControllerRef.current = null;
+    setIsResolving(false);
+    setSearchError(false);
+    setIsOpen(false);
+    setQuery('');
+  }, []);
+
+  useEffect(() => {
+    submitGenerationRef.current += 1;
+    submitControllerRef.current?.abort();
+    submitControllerRef.current = null;
+    setIsResolving(false);
+    setSearchError(false);
+  }, [query]);
+
+  useEffect(() => () => {
+    submitGenerationRef.current += 1;
+    submitControllerRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!useStockSearchFallback) {
+      stockSearchQueryRef.current = trimmedQuery;
+      setStockRows([]);
+      setStocksLoading(false);
+      return;
+    }
     if (!isOpen || trimmedQuery.length < 1) {
+      stockSearchQueryRef.current = trimmedQuery;
       setStockRows([]);
       setStocksLoading(false);
       return;
     }
     let active = true;
+    stockSearchQueryRef.current = '';
+    setStockRows([]);
+    setStocksLoading(true);
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      setStocksLoading(true);
       apiClient.marketStockSearch({
         q: trimmedQuery,
         index: 'XUTUM',
@@ -259,11 +511,17 @@ export default function GlobalTickerSearch({
         signal: controller.signal,
       })
         .then((payload) => {
-          if (active) setStockRows(payload.rows || []);
+          if (active) {
+            stockSearchQueryRef.current = trimmedQuery;
+            setStockRows(payload.rows || []);
+          }
         })
         .catch((error) => {
           if ((error as Error)?.name === 'AbortError') return;
-          if (active) setStockRows([]);
+          if (active) {
+            stockSearchQueryRef.current = trimmedQuery;
+            setStockRows([]);
+          }
         })
         .finally(() => {
           if (active) setStocksLoading(false);
@@ -274,27 +532,42 @@ export default function GlobalTickerSearch({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [isOpen, trimmedQuery]);
+  }, [isOpen, trimmedQuery, useStockSearchFallback]);
 
   useEffect(() => {
+    if (!useFundSearchFallback) {
+      fundSearchQueryRef.current = trimmedQuery;
+      setFundRows([]);
+      setFundsLoading(false);
+      return;
+    }
     if (!isOpen || trimmedQuery.length < MIN_FUND_SEARCH_QUERY_LENGTH) {
+      fundSearchQueryRef.current = trimmedQuery;
       setFundRows([]);
       setFundsLoading(false);
       return;
     }
     let active = true;
+    fundSearchQueryRef.current = '';
+    setFundRows([]);
+    setFundsLoading(true);
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       if (!active) return;
-      setFundsLoading(true);
       apiClient
         .fundSearch(trimmedQuery, 12, { signal: controller.signal })
         .then((payload) => {
-          if (active) setFundRows(payload.rows || []);
+          if (active) {
+            fundSearchQueryRef.current = trimmedQuery;
+            setFundRows(payload.rows || []);
+          }
         })
         .catch((error) => {
           if ((error as Error)?.name === 'AbortError') return;
-          if (active) setFundRows([]);
+          if (active) {
+            fundSearchQueryRef.current = trimmedQuery;
+            setFundRows([]);
+          }
         })
         .finally(() => {
           if (active) setFundsLoading(false);
@@ -305,15 +578,14 @@ export default function GlobalTickerSearch({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [isOpen, trimmedQuery]);
+  }, [isOpen, trimmedQuery, useFundSearchFallback]);
 
   useEffect(() => {
     if (!isOpen) return;
     const timer = window.setTimeout(() => inputRef.current?.focus(), 0);
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setIsOpen(false);
-        setQuery('');
+        cancelSearch();
       }
     };
     document.addEventListener('keydown', handleKeyDown);
@@ -321,39 +593,51 @@ export default function GlobalTickerSearch({
       window.clearTimeout(timer);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen]);
+  }, [cancelSearch, isOpen]);
 
   const stockBaseResults = useMemo(() => {
-    return stockRows.map(stockRowToResult).map(prepareSearchResult);
-  }, [stockRows]);
+    const rows = stockCatalogStatus === 'ready' ? stockCatalogRows : stockRows;
+    return mergeStockQuoteRows(rows, stockQuoteRows).map(stockRowToResult).map(prepareSearchResult);
+  }, [stockCatalogRows, stockCatalogStatus, stockQuoteRows, stockRows]);
 
-  const stockResults = useMemo(() => {
-    return stockBaseResults
-      .filter((item) => item.symbol !== normalizeSymbol(currentTicker))
-      .filter((item) => resultMatches(item, queryTerms))
-      .map((item) => ({ item, starts: resultStartsWith(item, queryTerms) ? 0 : 1 }))
-      .sort((a, b) => a.starts - b.starts || a.item.symbol.localeCompare(b.item.symbol, 'tr'))
-      .slice(0, 10)
-      .map(({ item }) => item);
-  }, [currentTicker, queryTerms, stockBaseResults]);
+  const fundBaseResults = useMemo(() => {
+    const rows = fundCatalogStatus === 'ready' ? fundCatalogRows : fundRows;
+    return rows
+      .map(fundRowToResult)
+      .map(prepareSearchResult);
+  }, [fundCatalogRows, fundCatalogStatus, fundRows]);
 
   const fundResults = useMemo(() => {
-    return fundRows
-      .map(fundRowToResult)
-      .map(prepareSearchResult)
+    return fundBaseResults
       .filter((item) => resultMatches(item, queryTerms))
+      .sort((a, b) => compareSearchResults(a, b, queryTerms, normalizeSymbol(trimmedQuery)))
       .slice(0, 10);
-  }, [fundRows, queryTerms]);
+  }, [fundBaseResults, queryTerms, trimmedQuery]);
+
+  const allSearchCandidates = useMemo(
+    () => [...stockBaseResults, ...fundBaseResults],
+    [fundBaseResults, stockBaseResults],
+  );
+
+  useEffect(() => {
+    if (recentSearches.length === 0) return;
+    const currentResults = new Map(allSearchCandidates.map((result) => [result.id, result]));
+    setRecentSearches((current) => {
+      let changed = false;
+      const next = current.map((recent) => {
+        const refreshed = currentResults.get(recent.id) || { ...recent, price: null, changePct: null };
+        if (refreshed.price !== recent.price || refreshed.changePct !== recent.changePct) changed = true;
+        return refreshed;
+      });
+      if (changed) writeRecentSearches(next);
+      return changed ? next : current;
+    });
+  }, [allSearchCandidates, recentSearches.length]);
 
   const visibleResults = useMemo(() => {
     if (!normalizedQuery) return recentSearches;
-    const seen = new Set<string>();
-    return [...stockResults, ...fundResults].filter((item) => {
-      if (seen.has(item.id)) return false;
-      seen.add(item.id);
-      return true;
-    }).slice(0, 14);
-  }, [fundResults, normalizedQuery, recentSearches, stockResults]);
+    return rankSearchResults(allSearchCandidates, trimmedQuery, currentTicker).slice(0, 14);
+  }, [allSearchCandidates, currentTicker, normalizedQuery, recentSearches, trimmedQuery]);
 
   useEffect(() => {
     setHighlightedIndex(0);
@@ -367,16 +651,7 @@ export default function GlobalTickerSearch({
     });
   };
 
-  const commitResult = (result?: SearchResult) => {
-    const selected = result || visibleResults[highlightedIndex];
-    if (!selected) {
-      if (normalizedSymbolQuery.length >= 2) {
-        onSelectTicker(normalizedSymbolQuery);
-        setIsOpen(false);
-        setQuery('');
-      }
-      return;
-    }
+  const commitKnownResult = (selected: SearchResult) => {
     rememberResult(selected);
     setIsOpen(false);
     setQuery('');
@@ -389,6 +664,165 @@ export default function GlobalTickerSearch({
       return;
     }
     onSelectTicker(selected.symbol);
+  };
+
+  const commitFundCode = (fundCode: string) => {
+    const normalizedFundCode = normalizeSymbol(fundCode);
+    if (!normalizedFundCode) return;
+    cancelSearch();
+    if (onSelectFund) {
+      onSelectFund(normalizedFundCode);
+    } else {
+      window.location.href = `/funds/${encodeURIComponent(normalizedFundCode)}/overview`;
+    }
+  };
+
+  const openSearch = () => {
+    setIsOpen(true);
+
+    setStockQuoteRows(cachedMarketStockRows());
+
+    if (!cachedCatalogRows(stockSearchCatalogCache, STOCK_SEARCH_CATALOG_CACHE_TTL_MS)) {
+      if (!hasStockSearchRows()) setStockCatalogStatus('loading');
+      loadStockSearchCatalog()
+        .then((rows) => {
+          setStockCatalogRows(rows);
+          setStockCatalogStatus('ready');
+        })
+        .catch(() => {
+          if (!hasStockSearchRows()) setStockCatalogStatus('error');
+        });
+    }
+
+    if (!cachedCatalogRows(fundSearchCatalogCache)) {
+      if (!hasFundSearchRows()) setFundCatalogStatus('loading');
+      loadFundSearchCatalog()
+        .then((rows) => {
+          setFundCatalogRows(rows);
+          setFundCatalogStatus('ready');
+        })
+        .catch(() => {
+          if (!hasFundSearchRows()) setFundCatalogStatus('error');
+        });
+    }
+  };
+
+  const resolveQueryOnEnter = async () => {
+    const searchQuery = query.trim();
+    const normalizedSubmitQuery = normalizeSymbol(searchQuery);
+    if (!normalizedSubmitQuery || isResolving) return;
+
+    const generation = submitGenerationRef.current;
+    const controller = new AbortController();
+    submitControllerRef.current?.abort();
+    submitControllerRef.current = controller;
+    setIsResolving(true);
+    setSearchError(false);
+
+    try {
+      const candidates: SearchResult[] = [];
+      let hadError = false;
+
+      if (isThreeLetterFundQuery(searchQuery)) {
+        try {
+          const payload = await apiClient.fundSearch(searchQuery, 12, { signal: controller.signal });
+          const exactFundRows = (payload.rows || []).filter((row) => (
+            normalizeSymbol(row.fund_code) === normalizedSubmitQuery
+          ));
+          candidates.push(...exactFundRows.map(fundRowToResult).map(prepareSearchResult));
+        } catch {
+          if (controller.signal.aborted) return;
+          hadError = true;
+        }
+      } else {
+        const [stockResult, fundResult] = await Promise.allSettled([
+          apiClient.marketStockSearch({
+            q: searchQuery,
+            index: 'XUTUM',
+            limit: 12,
+            signal: controller.signal,
+          }),
+          apiClient.fundSearch(searchQuery, 12, { signal: controller.signal }),
+        ]);
+
+        if (stockResult.status === 'fulfilled') {
+          candidates.push(...(stockResult.value.rows || []).map(stockRowToResult).map(prepareSearchResult));
+        } else if (!controller.signal.aborted) {
+          hadError = true;
+        }
+        if (fundResult.status === 'fulfilled') {
+          candidates.push(...(fundResult.value.rows || []).map(fundRowToResult).map(prepareSearchResult));
+        } else if (!controller.signal.aborted) {
+          hadError = true;
+        }
+      }
+
+      if (controller.signal.aborted || generation !== submitGenerationRef.current) return;
+      if (hadError) {
+        setSearchError(true);
+        return;
+      }
+
+      const rankedResults = rankSearchResults(candidates, searchQuery, currentTicker);
+      const selected = rankedResults[0];
+      if (!selected) {
+        setSearchError(hadError);
+        return;
+      }
+      commitKnownResult(selected);
+    } finally {
+      if (generation === submitGenerationRef.current) {
+        setIsResolving(false);
+        if (submitControllerRef.current === controller) submitControllerRef.current = null;
+      }
+    }
+  };
+
+  const commitResult = (result?: SearchResult) => {
+    if (isResolving) return;
+
+    if (result) {
+      const matchesCurrentQuery = !immediateQueryTerms.text
+        || resultMatchRank(result, immediateQueryTerms, normalizedSymbolQuery) < NO_SEARCH_MATCH;
+      const requiresFundResolution = isThreeLetterFundQuery(query) && result.type === 'stock';
+      if (matchesCurrentQuery && !requiresFundResolution) {
+        commitKnownResult(result);
+        return;
+      }
+      if (stockCatalogStatus === 'ready' && fundCatalogStatus === 'ready') {
+        const matchingResult = rankSearchResults(allSearchCandidates, query, currentTicker)
+          .find((candidate) => candidate.id === result.id);
+        if (matchingResult) commitKnownResult(matchingResult);
+        return;
+      }
+    } else if (!immediateQueryTerms.text) {
+      const highlighted = visibleResults[highlightedIndex];
+      if (highlighted) {
+        commitKnownResult(highlighted);
+      }
+      return;
+    } else if (stockCatalogStatus === 'ready' && fundCatalogStatus === 'ready') {
+      const selected = rankSearchResults(allSearchCandidates, query, currentTicker)[highlightedIndex];
+      if (selected) commitKnownResult(selected);
+      return;
+    } else if (
+      trimmedQuery === query.trim()
+      && stockSearchQueryRef.current === trimmedQuery
+      && fundSearchQueryRef.current === trimmedQuery
+    ) {
+      const highlighted = visibleResults[highlightedIndex];
+      const isAllowedFundCodeResult = !isThreeLetterFundQuery(query)
+        || (
+          highlighted?.type === 'fund'
+          && normalizeSymbol(highlighted.symbol) === normalizedSymbolQuery
+        );
+      if (highlighted && isAllowedFundCodeResult) {
+        commitKnownResult(highlighted);
+        return;
+      }
+    }
+
+    void resolveQueryOnEnter();
   };
 
   const handleInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -408,13 +842,17 @@ export default function GlobalTickerSearch({
     }
     if (event.key === 'Enter') {
       event.preventDefault();
+      if (isDirectFundCodeQuery(event.currentTarget.value)) {
+        commitFundCode(event.currentTarget.value);
+        return;
+      }
       commitResult();
     }
   };
 
   const isSearching = Boolean(normalizedQuery) && (
     (stocksLoading && stockBaseResults.length === 0) ||
-    fundsLoading
+    (fundsLoading && fundResults.length === 0)
   );
 
   return (
@@ -422,7 +860,7 @@ export default function GlobalTickerSearch({
       <button
         type="button"
         className="global-search-trigger"
-        onClick={() => setIsOpen(true)}
+        onClick={openSearch}
         aria-haspopup="dialog"
         aria-expanded={isOpen}
       >
@@ -431,7 +869,7 @@ export default function GlobalTickerSearch({
       </button>
 
       {isOpen && (
-        <div className="global-search-modal-backdrop" role="presentation" onMouseDown={() => setIsOpen(false)}>
+        <div className="global-search-modal-backdrop" role="presentation" onMouseDown={cancelSearch}>
           <section
             className="global-search-modal"
             role="dialog"
@@ -462,50 +900,34 @@ export default function GlobalTickerSearch({
               {visibleResults.length > 0 ? (
                 <div className="global-search-results" role="listbox">
                   {visibleResults.map((result, index) => (
-                    <button
+                    <AssetSearchResult
                       key={result.id}
-                      type="button"
-                      className={`global-search-result${index === highlightedIndex ? ' active' : ''}`}
+                      href={result.type === 'fund'
+                        ? toFundDetail(result.symbol, DEFAULT_FUND_TAB)
+                        : toStockDetail(result.symbol, DEFAULT_STOCK_TAB)}
+                      kind={result.type}
+                      symbol={result.symbol}
+                      name={result.subtitle}
+                      price={result.price}
+                      changePct={result.changePct}
+                      logoUrl={result.logoUrl}
+                      logoName={result.logoName || result.subtitle || result.title}
+                      active={index === highlightedIndex}
                       onMouseEnter={() => setHighlightedIndex(index)}
-                      onClick={() => commitResult(result)}
-                      role="option"
-                      aria-selected={index === highlightedIndex}
-                    >
-                      <SymbolLogo
-                        symbol={result.symbol}
-                        name={result.logoName || result.subtitle || result.title}
-                        kind={result.type === 'fund' ? 'fund' : 'stock'}
-                        logoUrl={result.logoUrl}
-                        size="md"
-                      />
-                      <span className="global-search-result-main">
-                        <strong>{result.symbol}</strong>
-                        <em>{result.subtitle}</em>
-                      </span>
-                      <span className="global-search-result-meta">
-                        {result.price == null && result.changePct == null ? (
-                          <span className="global-search-result-kind">
-                            {result.type === 'fund' ? 'Fon' : 'Hisse'}
-                          </span>
-                        ) : (
-                          <>
-                            <span className="global-search-result-price">
-                              {result.type === 'stock' && result.price != null ? <small>G</small> : null}
-                              {formatSearchPrice(result.price, result.type)}
-                            </span>
-                            <span className={`global-search-result-change ${changeClass(result.changePct)}`}>
-                              {formatSearchPct(result.changePct)}
-                            </span>
-                          </>
-                        )}
-                      </span>
-                    </button>
+                      onClick={(event) => {
+                        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                        event.preventDefault();
+                        commitResult(result);
+                      }}
+                    />
                   ))}
                 </div>
               ) : (
                 <div className="global-search-empty">
-                  {isSearching
+                  {isResolving || isSearching
                     ? 'Aranıyor...'
+                    : searchError
+                      ? 'Arama yapılamadı. Lütfen tekrar deneyin.'
                     : normalizedQuery
                       ? 'Sonuç bulunamadı.'
                       : 'Arama yaptıkça fonlar ve hisseler burada görünecek.'}

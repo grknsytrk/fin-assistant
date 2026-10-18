@@ -450,6 +450,40 @@
     pointer-events: none;
 }
 
+.sd-price-chart-selection {
+    pointer-events: none;
+}
+
+.sd-price-chart-selection-outside {
+    fill: #9aa3ad;
+    fill-opacity: 0.16;
+}
+
+.sd-price-chart-selection-band {
+    fill-opacity: 0.07;
+}
+
+.sd-price-chart-selection-edge {
+    stroke: currentColor;
+    stroke-opacity: 0.78;
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+}
+
+.sd-price-chart-selection-handle {
+    fill: currentColor;
+    stroke: #0b1015;
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+}
+
+.sd-price-chart-selection-grip {
+    stroke: rgba(255, 255, 255, 0.9);
+    stroke-linecap: round;
+    stroke-width: 1.8;
+    vector-effect: non-scaling-stroke;
+}
+
 .sd-price-chart-measure-path {
     stroke: color-mix(in srgb, var(--accent-color) 56%, var(--text-primary));
     stroke-width: 1.4;
@@ -559,11 +593,38 @@
 
     .sd-price-chart-ranges button {
         flex: 1 1 0;
+        min-height: 42px;
+        font-size: 0.84rem;
     }
 
     .sd-price-chart-svg,
     .sd-price-chart-state {
-        min-height: 200px;
+        min-height: 280px;
+    }
+
+    .sd-price-chart-kicker {
+        font-size: 0.78rem;
+    }
+
+    .sd-price-chart-toolbar strong {
+        font-size: 1rem;
+    }
+
+    .sd-price-chart-axis {
+        font-size: 30px;
+    }
+
+    .sd-price-chart-tooltip-muted,
+    .sd-price-chart-measure-muted {
+        font-size: 24px;
+    }
+
+    .sd-price-chart-tooltip-value {
+        font-size: 28px;
+    }
+
+    .sd-price-chart-measure-value {
+        font-size: 31px;
     }
 
     .stock-detail-page {

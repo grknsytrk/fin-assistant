@@ -336,6 +336,12 @@
     white-space: nowrap;
 }
 
+.funds-symbol-link {
+    display: block;
+    color: inherit;
+    text-decoration: none;
+}
+
 .funds-symbol,
 .fund-detail-title {
     display: flex;
@@ -1155,6 +1161,39 @@
     }
 }
 
+@media (max-width: 640px) {
+    .fund-detail-chart.is-mobile-chart {
+        height: auto;
+        min-height: 0;
+        aspect-ratio: 860 / 760;
+    }
+
+    .fund-chart-axis {
+        font-size: 24px;
+    }
+
+    .fund-chart-tooltip-muted,
+    .fund-chart-measure-muted {
+        font-size: 22px;
+    }
+
+    .fund-chart-tooltip-value {
+        font-size: 26px;
+    }
+
+    .fund-chart-measure-value {
+        font-size: 30px;
+    }
+
+    .fund-chart-loading-label {
+        font-size: 24px;
+    }
+
+    .fund-chart-range {
+        min-height: 2.55rem;
+    }
+}
+
 .fund-chart-gridline {
     stroke: color-mix(in srgb, var(--surface-border) 58%, transparent);
     stroke-dasharray: 4 6;
@@ -1200,6 +1239,40 @@
 
 .fund-chart-measure {
     pointer-events: none;
+}
+
+.fund-chart-selection {
+    pointer-events: none;
+}
+
+.fund-chart-selection-outside {
+    fill: #9aa3ad;
+    fill-opacity: 0.16;
+}
+
+.fund-chart-selection-band {
+    fill-opacity: 0.07;
+}
+
+.fund-chart-selection-edge {
+    stroke: currentColor;
+    stroke-opacity: 0.78;
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+}
+
+.fund-chart-selection-handle {
+    fill: currentColor;
+    stroke: #0b1015;
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+}
+
+.fund-chart-selection-grip {
+    stroke: rgba(255, 255, 255, 0.9);
+    stroke-linecap: round;
+    stroke-width: 1.8;
+    vector-effect: non-scaling-stroke;
 }
 
 .fund-chart-measure-path {

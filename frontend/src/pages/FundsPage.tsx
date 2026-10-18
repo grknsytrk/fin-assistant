@@ -10,6 +10,7 @@ import {
     useState,
     type CSSProperties,
     type Dispatch,
+    type MouseEvent as ReactMouseEvent,
     type PointerEvent as ReactPointerEvent,
     type ReactNode,
     type RefObject,
@@ -36,6 +37,7 @@ import {
     X,
 } from 'lucide-react';
 import { apiClient } from '../api/client';
+import { useMobileChartLayout } from '../hooks/useMobileChartLayout';
 import { useBackgroundRefresh } from '../hooks/useBackgroundRefresh';
 import type {
     FundAllocation,
@@ -60,9 +62,12 @@ import type {
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo, { type SymbolLogoKind } from '../components/SymbolLogo';
 import { FinLoader } from '../components/FinLoader';
+import FundsListLoader from '../components/FundsListLoader';
+import FundRequestState from '../components/FundRequestState';
 import { STOCK_LOGO_DOMAIN_MAP } from '../components/symbolLogoMaps';
 import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useWatchlist } from '../hooks/useWatchlist';
+import { toFundDetail } from '../routing/routes';
 import {
     canonicalFundPrice,
     buildFundHistoryDiagnosticLines,
@@ -949,20 +954,42 @@ const FundTableRow = memo(function FundTableRow({
     }, [onOpenFund, row.fund_code]);
 
     return (
-        <tr onClick={handleOpen}>
+        <tr
+            onClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
+                if (event.button !== 0) return;
+                handleOpen();
+            }}
+            onAuxClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
+                if (event.button !== 1) return;
+                if ((event.target as Element).closest('a[href]')) return;
+                event.preventDefault();
+                window.open(toFundDetail(row.fund_code, 'overview'), '_blank', 'noopener,noreferrer');
+            }}
+        >
             <td>
-                <div className="funds-symbol">
-                    <SymbolLogo
-                        symbol={row.fund_code}
-                        name={row.founder_company || row.manager_company || row.name}
-                        kind="fund"
-                        size="sm"
-                    />
-                    <span>
-                        <strong>{row.fund_code}</strong>
-                        <small>{row.name}</small>
-                    </span>
-                </div>
+                <a
+                    className="funds-symbol-link"
+                    href={toFundDetail(row.fund_code, 'overview')}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                        event.preventDefault();
+                        handleOpen();
+                    }}
+                >
+                    <div className="funds-symbol">
+                        <SymbolLogo
+                            symbol={row.fund_code}
+                            name={row.founder_company || row.manager_company || row.name}
+                            kind="fund"
+                            size="sm"
+                        />
+                        <span>
+                            <strong>{row.fund_code}</strong>
+                            <small>{row.name}</small>
+                        </span>
+                    </div>
+                </a>
             </td>
             <td>{row.fund_type || '-'}</td>
             <td>{row.founder_company || row.manager_company || '-'}</td>
@@ -1406,9 +1433,13 @@ function FundPerformanceChart({
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const [hoverPointer, setHoverPointer] = useState<{ x: number; y: number } | null>(null);
     const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
+    const [selectedMeasureRange, setSelectedMeasureRange] = useState<{ start: number; end: number } | null>(null);
+    const isMobileChart = useMobileChartLayout();
     const width = 860;
-    const height = 430;
-    const padding = { top: 34, right: 24, bottom: 50, left: 74 };
+    const height = isMobileChart ? 760 : 430;
+    const padding = isMobileChart
+        ? { top: 44, right: 24, bottom: 90, left: 92 }
+        : { top: 34, right: 24, bottom: 50, left: 74 };
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
     const validPoints = points.filter((point) => Number.isFinite(Number(point.price)) && Number(point.price) > 0);
@@ -1418,6 +1449,7 @@ function FundPerformanceChart({
         setHoverIndex(null);
         setHoverPointer(null);
         setMeasureAnchorIndex(null);
+        setSelectedMeasureRange(null);
     }, [pointWindowKey]);
     const chartPointerFromEvent = (event: ReactPointerEvent<SVGSVGElement>) => {
         const rect = event.currentTarget.getBoundingClientRect();
@@ -1490,7 +1522,7 @@ function FundPerformanceChart({
                 {controls}
                 {customRangeInputs}
                 <svg
-                    className="fund-detail-chart fund-chart-loading"
+                    className={`fund-detail-chart${isMobileChart ? ' is-mobile-chart' : ''} fund-chart-loading`}
                     viewBox={`0 0 ${width} ${height}`}
                     preserveAspectRatio="xMidYMid meet"
                     role="img"
@@ -1501,8 +1533,8 @@ function FundPerformanceChart({
                     ))}
                     <path className="fund-chart-loading-track" d={loadingLine} />
                     <path className="fund-chart-loading-line" d={loadingLine} pathLength={100} />
-                    <text x={width / 2} y={height - 18} className="fund-chart-loading-label" textAnchor="middle">
-                        {historyPending ? 'Fintables günlük geçmişi hazırlanıyor…' : 'Grafik verisi yükleniyor…'}
+                    <text x={width / 2} y={height - (isMobileChart ? 32 : 18)} className="fund-chart-loading-label" textAnchor="middle">
+                        {historyPending ? 'Getiri geçmişi hazırlanıyor…' : 'Grafik verisi yükleniyor…'}
                     </text>
                 </svg>
                 {rangeError && <div className="fund-chart-error">{rangeError}</div>}
@@ -1560,7 +1592,7 @@ function FundPerformanceChart({
                 {controls}
                 {customRangeInputs}
                 <svg
-                    className="fund-detail-chart"
+                        className={`fund-detail-chart${isMobileChart ? ' is-mobile-chart' : ''}`}
                     viewBox={`0 0 ${width} ${height}`}
                     preserveAspectRatio="xMidYMid meet"
                     role="img"
@@ -1573,7 +1605,7 @@ function FundPerformanceChart({
                         <text
                             key={index}
                             x={padding.left + (index / Math.max(1, validPoints.length - 1)) * plotWidth}
-                            y={height - 10}
+                            y={height - (isMobileChart ? 30 : 10)}
                             className="fund-chart-axis"
                             textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
                         >
@@ -1647,22 +1679,89 @@ function FundPerformanceChart({
         const yFor = (value: number) => padding.top + ((maxValue - value) / span) * plotHeight;
         const yTicks = Array.from({ length: 5 }, (_, index) => maxValue - (span * index) / 4);
         const zeroY = yFor(0);
-        const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
-            const pointer = chartPointerFromEvent(event);
-            if (!pointer) return;
-            setHoverPointer(pointer);
+        const closestIndexForX = (x: number) => {
             let closestIndex = 0;
             let minDiff = Infinity;
             for (let index = 0; index < validPoints.length; index += 1) {
-                const diff = Math.abs(xForDate(validPoints[index].date) - pointer.x);
+                const diff = Math.abs(xForDate(validPoints[index].date) - x);
                 if (diff < minDiff) {
                     minDiff = diff;
                     closestIndex = index;
                 }
             }
-            setHoverIndex(closestIndex);
+            return closestIndex;
+        };
+        const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+            const pointer = chartPointerFromEvent(event);
+            if (!pointer) return;
+            setHoverPointer(pointer);
+            setHoverIndex(closestIndexForX(pointer.x));
+        };
+        const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+            if (event.pointerType === 'mouse' && event.button !== 0) return;
+            event.preventDefault();
+            const pointer = chartPointerFromEvent(event);
+            if (!pointer) return;
+            const closestIndex = closestIndexForX(pointer.x);
+            const rect = event.currentTarget.getBoundingClientRect();
+            const handleHitRadius = rect.width > 0 ? (20 * width) / rect.width : 32;
+            let anchorIndex = closestIndex;
+            let hoverTargetIndex = closestIndex;
+            if (selectedMeasureRange) {
+                const startDistance = Math.abs(xForDate(validPoints[selectedMeasureRange.start].date) - pointer.x);
+                const endDistance = Math.abs(xForDate(validPoints[selectedMeasureRange.end].date) - pointer.x);
+                if (Math.min(startDistance, endDistance) <= handleHitRadius) {
+                    if (startDistance <= endDistance) {
+                        anchorIndex = selectedMeasureRange.end;
+                        hoverTargetIndex = selectedMeasureRange.start;
+                    } else {
+                        anchorIndex = selectedMeasureRange.start;
+                        hoverTargetIndex = selectedMeasureRange.end;
+                    }
+                } else {
+                    setSelectedMeasureRange(null);
+                }
+            }
+            setHoverPointer(pointer);
+            setHoverIndex(hoverTargetIndex);
+            setMeasureAnchorIndex(anchorIndex);
+            event.currentTarget.setPointerCapture?.(event.pointerId);
+        };
+        const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+            const pointer = chartPointerFromEvent(event);
+            if (pointer && measureAnchorIndex != null) {
+                const endIndex = closestIndexForX(pointer.x);
+                setHoverPointer(pointer);
+                setHoverIndex(endIndex);
+                if (measureAnchorIndex !== endIndex) {
+                    setSelectedMeasureRange({
+                        start: Math.min(measureAnchorIndex, endIndex),
+                        end: Math.max(measureAnchorIndex, endIndex),
+                    });
+                }
+            }
+            setMeasureAnchorIndex(null);
+            try {
+                if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                }
+            } catch {
+                // Ignore release errors when the browser has already cancelled capture.
+            }
         };
         const hoverPoint = hoverIndex == null ? null : validPoints[Math.max(0, Math.min(validPoints.length - 1, hoverIndex))];
+        const dragSelection = measureAnchorIndex != null && hoverIndex != null && measureAnchorIndex !== hoverIndex
+            ? { start: Math.min(measureAnchorIndex, hoverIndex), end: Math.max(measureAnchorIndex, hoverIndex) }
+            : null;
+        const visibleMeasureRange = dragSelection || selectedMeasureRange;
+        const measureStartX = visibleMeasureRange ? xForDate(validPoints[visibleMeasureRange.start].date) : null;
+        const measureEndX = visibleMeasureRange ? xForDate(validPoints[visibleMeasureRange.end].date) : null;
+        const measureLeftX = measureStartX != null && measureEndX != null ? Math.min(measureStartX, measureEndX) : null;
+        const measureRightX = measureStartX != null && measureEndX != null ? Math.max(measureStartX, measureEndX) : null;
+        const hasVisibleSelection = Boolean(
+            visibleMeasureRange && measureLeftX != null && measureRightX != null && measureRightX > measureLeftX,
+        );
+        const selectionClipId = `${gradientId}-compare-selection`;
         const hoverX = hoverPoint ? xForDate(hoverPoint.date) : null;
         const tooltipRows = hoverPoint
             ? normalizedSeries
@@ -1673,9 +1772,11 @@ function FundPerformanceChart({
                 .filter((item): item is { series: typeof normalizedSeries[number]; point: { date: string; value: number } } => Boolean(item))
                 .slice(0, 4)
             : [];
-        const tooltipWidth = 172;
-        const tooltipHeight = Math.max(48, 24 + tooltipRows.length * 15);
-        const tooltipGap = 12;
+        const tooltipWidth = isMobileChart ? 300 : 172;
+        const tooltipHeight = isMobileChart
+            ? Math.max(86, 42 + tooltipRows.length * 30)
+            : Math.max(48, 24 + tooltipRows.length * 15);
+        const tooltipGap = isMobileChart ? 18 : 12;
         const tooltipAnchorX = hoverPointer?.x ?? hoverX;
         const tooltipAnchorY = hoverPointer?.y ?? padding.top;
         const tooltipShouldFlip = tooltipAnchorX != null && tooltipAnchorX + tooltipGap + tooltipWidth > width - 8;
@@ -1694,12 +1795,15 @@ function FundPerformanceChart({
                 {customRangeInputs}
                 <svg
                     key={`${fundCode}-${selectedRange}-${validPoints.length}-compare-${comparisonAssets.map((asset) => asset.id).join('-')}`}
-                    className="fund-detail-chart"
+                    className={`fund-detail-chart${isMobileChart ? ' is-mobile-chart' : ''}`}
                     viewBox={`0 0 ${width} ${height}`}
                     preserveAspectRatio="xMidYMid meet"
                     role="img"
                     aria-label={`${fundCode} karşılaştırmalı getiri grafiği`}
                     onPointerMove={handlePointerMove}
+                    onPointerDown={handlePointerDown}
+                    onPointerUp={handlePointerUp}
+                    onPointerCancel={handlePointerUp}
                     onPointerLeave={() => {
                         setHoverIndex(null);
                         setHoverPointer(null);
@@ -1710,6 +1814,11 @@ function FundPerformanceChart({
                         <clipPath id={`${gradientId}-compare-clip`}>
                             <rect x={padding.left} y={0} width={plotWidth} height={height} className="fund-chart-reveal" />
                         </clipPath>
+                        {hasVisibleSelection && measureLeftX != null && measureRightX != null && (
+                            <clipPath id={selectionClipId}>
+                                <rect x={measureLeftX} y={padding.top} width={measureRightX - measureLeftX} height={plotHeight} />
+                            </clipPath>
+                        )}
                     </defs>
                     {yTicks.map((tick) => {
                         const y = yFor(tick);
@@ -1727,7 +1836,7 @@ function FundPerformanceChart({
                         <text
                             key={index}
                             x={xForDate(validPoints[index].date)}
-                            y={height - 10}
+                            y={height - (isMobileChart ? 30 : 10)}
                             className="fund-chart-axis"
                             textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
                         >
@@ -1744,7 +1853,7 @@ function FundPerformanceChart({
                                     key={series.asset.id}
                                     d={pathData}
                                     fill="none"
-                                    stroke={series.color}
+                                    stroke={hasVisibleSelection ? '#89939e' : series.color}
                                     strokeWidth={series.asset.id === baseAsset.id ? 3 : 2.2}
                                     strokeLinecap="round"
                                     strokeLinejoin="round"
@@ -1760,7 +1869,7 @@ function FundPerformanceChart({
                                     cx={xForDate(point.date)}
                                     cy={yFor(point.value)}
                                     r={series.asset.id === baseAsset.id ? 1.9 : 1.6}
-                                    fill={series.color}
+                                    fill={hasVisibleSelection ? '#89939e' : series.color}
                                 />
                             ))
                         ))}
@@ -1774,10 +1883,40 @@ function FundPerformanceChart({
                                 cx={xForDate(lastPoint.date)}
                                 cy={yFor(lastPoint.value)}
                                 r={series.asset.id === baseAsset.id ? 4 : 3.4}
-                                fill={series.color}
+                                fill={hasVisibleSelection ? '#89939e' : series.color}
                             />
                         ) : null;
                     })}
+                    {hasVisibleSelection && measureLeftX != null && measureRightX != null && (
+                        <g className="fund-chart-selection" aria-hidden="true">
+                            <rect x={padding.left} y={padding.top} width={Math.max(0, measureLeftX - padding.left)} height={plotHeight} className="fund-chart-selection-outside" />
+                            <rect x={measureRightX} y={padding.top} width={Math.max(0, width - padding.right - measureRightX)} height={plotHeight} className="fund-chart-selection-outside" />
+                            <rect x={measureLeftX} y={padding.top} width={measureRightX - measureLeftX} height={plotHeight} className="fund-chart-selection-band" style={{ color: normalizedSeries[0]?.color, fill: normalizedSeries[0]?.color }} />
+                            <g clipPath={`url(#${selectionClipId})`}>
+                                {normalizedSeries.map((series) => {
+                                    const pathData = series.points
+                                        .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xForDate(point.date)} ${yFor(point.value)}`)
+                                        .join(' ');
+                                    return (
+                                        <g key={`${series.asset.id}-selected`}>
+                                            <path d={pathData} fill="none" stroke={series.color} strokeWidth={series.asset.id === baseAsset.id ? 3 : 2.2} strokeLinecap="round" strokeLinejoin="round" />
+                                            {series.points.map((point, index) => (
+                                                <circle key={`${series.asset.id}-selected-node-${index}`} cx={xForDate(point.date)} cy={yFor(point.value)} r={series.asset.id === baseAsset.id ? 1.9 : 1.6} fill={series.color} />
+                                            ))}
+                                        </g>
+                                    );
+                                })}
+                            </g>
+                            {[measureLeftX, measureRightX].map((x, index) => (
+                                <g key={`${x}-${index}`}>
+                                    <line x1={x} x2={x} y1={padding.top} y2={height - padding.bottom} className="fund-chart-selection-edge" />
+                                    <rect x={x - 18} y={height - padding.bottom - 24} width="36" height="30" rx="7" className="fund-chart-selection-handle" />
+                                    <line x1={x - 6} x2={x - 6} y1={height - padding.bottom - 17} y2={height - padding.bottom - 1} className="fund-chart-selection-grip" />
+                                    <line x1={x + 6} x2={x + 6} y1={height - padding.bottom - 17} y2={height - padding.bottom - 1} className="fund-chart-selection-grip" />
+                                </g>
+                            ))}
+                        </g>
+                    )}
                     {hoverPoint && hoverX != null && tooltipRows.length > 0 && (
                         <g>
                             <line x1={hoverX} x2={hoverX} y1={padding.top} y2={height - padding.bottom} className="fund-chart-hoverline" />
@@ -1795,9 +1934,9 @@ function FundPerformanceChart({
                             ))}
                             <g className="fund-chart-tooltip" style={{ transform: `translate(${tooltipX}px, ${tooltipY}px)` }}>
                                 <rect width={tooltipWidth} height={tooltipHeight} rx="6" className="fund-chart-tooltip-bg" />
-                                <text x="8" y="17" className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
+                                <text x="8" y={isMobileChart ? 27 : 17} className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
                                 {tooltipRows.map(({ series, point }, index) => (
-                                    <g key={series.asset.id} transform={`translate(8, ${35 + index * 15})`}>
+                                    <g key={series.asset.id} transform={`translate(8, ${isMobileChart ? 52 + index * 29 : 35 + index * 15})`}>
                                         <circle cx="3.5" cy="-4" r="2.6" fill={series.color} />
                                         <text x="12" y="0" className="fund-chart-tooltip-muted">
                                             {(series.asset.displaySymbol || series.asset.symbol).slice(0, 8)}
@@ -1856,18 +1995,50 @@ function FundPerformanceChart({
         if (!pointer) return;
         setHoverPointer(pointer);
         setHoverIndex(closestPriceIndexForX(pointer.x));
-    };
-    const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
-        event.preventDefault();
+        };
+        const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+            if (event.pointerType === 'mouse' && event.button !== 0) return;
+            event.preventDefault();
         const pointer = chartPointerFromEvent(event);
         if (!pointer) return;
         const closestIndex = closestPriceIndexForX(pointer.x);
+        const rect = event.currentTarget.getBoundingClientRect();
+        const handleHitRadius = rect.width > 0 ? (20 * width) / rect.width : 32;
+        let anchorIndex = closestIndex;
+        let hoverTargetIndex = closestIndex;
+        if (selectedMeasureRange) {
+            const startDistance = Math.abs(xFor(selectedMeasureRange.start) - pointer.x);
+            const endDistance = Math.abs(xFor(selectedMeasureRange.end) - pointer.x);
+            if (Math.min(startDistance, endDistance) <= handleHitRadius) {
+                if (startDistance <= endDistance) {
+                    anchorIndex = selectedMeasureRange.end;
+                    hoverTargetIndex = selectedMeasureRange.start;
+                } else {
+                    anchorIndex = selectedMeasureRange.start;
+                    hoverTargetIndex = selectedMeasureRange.end;
+                }
+            } else {
+                setSelectedMeasureRange(null);
+            }
+        }
         setHoverPointer(pointer);
-        setHoverIndex(closestIndex);
-        setMeasureAnchorIndex(closestIndex);
+        setHoverIndex(hoverTargetIndex);
+        setMeasureAnchorIndex(anchorIndex);
         event.currentTarget.setPointerCapture?.(event.pointerId);
     };
     const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+        const pointer = chartPointerFromEvent(event);
+        if (pointer && measureAnchorIndex != null) {
+            const endIndex = closestPriceIndexForX(pointer.x);
+            setHoverPointer(pointer);
+            setHoverIndex(endIndex);
+            if (measureAnchorIndex !== endIndex) {
+                setSelectedMeasureRange({
+                    start: Math.min(measureAnchorIndex, endIndex),
+                    end: Math.max(measureAnchorIndex, endIndex),
+                });
+            }
+        }
         setMeasureAnchorIndex(null);
         try {
             if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
@@ -1881,28 +2052,28 @@ function FundPerformanceChart({
     const hoverPointIndex = hoverPoint ? validPoints.indexOf(hoverPoint) : null;
     const hoverX = hoverPointIndex == null ? null : xFor(hoverPointIndex);
     const hoverY = hoverPoint ? yFor(Number(hoverPoint.price)) : null;
-    const measureAnchorPoint = measureAnchorIndex == null
-        ? null
-        : validPoints[Math.max(0, Math.min(validPoints.length - 1, measureAnchorIndex))];
-    const measureEndPoint = measureAnchorPoint && hoverPoint && hoverPointIndex != null && hoverPointIndex !== measureAnchorIndex
-        ? hoverPoint
+    const dragSelection = measureAnchorIndex != null && hoverPointIndex != null && measureAnchorIndex !== hoverPointIndex
+        ? { start: Math.min(measureAnchorIndex, hoverPointIndex), end: Math.max(measureAnchorIndex, hoverPointIndex) }
         : null;
-    const measureAnchorX = measureAnchorPoint && measureAnchorIndex != null ? xFor(measureAnchorIndex) : null;
+    const visibleMeasureRange = dragSelection || selectedMeasureRange;
+    const measureAnchorPoint = visibleMeasureRange ? validPoints[visibleMeasureRange.start] : null;
+    const measureEndPoint = visibleMeasureRange ? validPoints[visibleMeasureRange.end] : null;
+    const measureAnchorX = visibleMeasureRange ? xFor(visibleMeasureRange.start) : null;
     const measureAnchorY = measureAnchorPoint ? yFor(Number(measureAnchorPoint.price)) : null;
-    const measureEndX = measureEndPoint && hoverPointIndex != null ? xFor(hoverPointIndex) : null;
+    const measureEndX = visibleMeasureRange ? xFor(visibleMeasureRange.end) : null;
     const measureEndY = measureEndPoint ? yFor(Number(measureEndPoint.price)) : null;
     const measureStartPrice = measureAnchorPoint ? Number(measureAnchorPoint.price) : null;
     const measureEndPrice = measureEndPoint ? Number(measureEndPoint.price) : null;
     const measureDelta = measureStartPrice != null && measureEndPrice != null ? measureEndPrice - measureStartPrice : null;
     const measureReturn = returnBetween(measureEndPrice, measureStartPrice);
     const measureLineY = measureAnchorY != null && measureEndY != null
-        ? Math.max(padding.top + 12, Math.min(measureAnchorY, measureEndY) - 18)
+        ? Math.max(padding.top + (isMobileChart ? 28 : 12), Math.min(measureAnchorY, measureEndY) - (isMobileChart ? 34 : 18))
         : null;
-    const measureTooltipWidth = 180;
-    const measureTooltipHeight = 70;
-    const measureTooltipGap = 14;
-    const measureAnchorXForTooltip = hoverPointer?.x ?? measureEndX;
-    const measureAnchorYForTooltip = hoverPointer?.y ?? measureEndY;
+    const measureTooltipWidth = isMobileChart ? 300 : 180;
+    const measureTooltipHeight = isMobileChart ? 112 : 70;
+    const measureTooltipGap = isMobileChart ? 22 : 14;
+    const measureAnchorXForTooltip = measureEndX;
+    const measureAnchorYForTooltip = measureEndY;
     const measureTooltipShouldFlip = measureAnchorXForTooltip != null
         && measureAnchorXForTooltip + measureTooltipGap + measureTooltipWidth > width - 8;
     const measureTooltipX = measureAnchorXForTooltip == null
@@ -1921,8 +2092,12 @@ function FundPerformanceChart({
     const measureClass = measureReturn == null ? '' : measureReturn >= 0 ? 'is-positive' : 'is-negative';
     const measureLeftX = measureAnchorX != null && measureEndX != null ? Math.min(measureAnchorX, measureEndX) : null;
     const measureRightX = measureAnchorX != null && measureEndX != null ? Math.max(measureAnchorX, measureEndX) : null;
-    const tooltipWidth = 152;
-    const tooltipHeight = 58;
+    const hasVisibleSelection = Boolean(
+        visibleMeasureRange && measureLeftX != null && measureRightX != null && measureRightX > measureLeftX,
+    );
+    const selectionClipId = `${gradientId}-selection`;
+    const tooltipWidth = isMobileChart ? 250 : 152;
+    const tooltipHeight = isMobileChart ? 90 : 58;
     const tooltipGap = 12;
     const tooltipAnchorX = hoverPointer?.x ?? hoverX;
     const tooltipAnchorY = hoverPointer?.y ?? hoverY;
@@ -1944,7 +2119,7 @@ function FundPerformanceChart({
             {customRangeInputs}
             <svg
                 key={`${fundCode}-${selectedRange}-${validPoints.length}`}
-                className="fund-detail-chart"
+                className={`fund-detail-chart${isMobileChart ? ' is-mobile-chart' : ''}`}
                 viewBox={`0 0 ${width} ${height}`}
                 preserveAspectRatio="xMidYMid meet"
                 role="img"
@@ -1961,12 +2136,21 @@ function FundPerformanceChart({
             >
                 <defs>
                     <linearGradient id={gradientId} x1="0%" y1="0%" x2="0%" y2="100%">
-                        <stop offset="0%" stopColor={color} stopOpacity="0.24" />
-                        <stop offset="100%" stopColor={color} stopOpacity="0" />
+                        <stop offset="0%" stopColor={hasVisibleSelection ? '#9aa3ad' : color} stopOpacity={hasVisibleSelection ? '0.14' : '0.24'} />
+                        <stop offset="100%" stopColor={hasVisibleSelection ? '#9aa3ad' : color} stopOpacity="0" />
+                    </linearGradient>
+                    <linearGradient id={`${gradientId}-selected-area`} x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" stopColor={color} stopOpacity="0.28" />
+                        <stop offset="100%" stopColor={color} stopOpacity="0.02" />
                     </linearGradient>
                     <clipPath id={`${gradientId}-clip`}>
                         <rect x={padding.left} y={0} width={plotWidth} height={height} className="fund-chart-reveal" />
                     </clipPath>
+                    {hasVisibleSelection && measureLeftX != null && measureRightX != null && (
+                        <clipPath id={selectionClipId}>
+                            <rect x={measureLeftX} y={padding.top} width={measureRightX - measureLeftX} height={plotHeight} />
+                        </clipPath>
+                    )}
                 </defs>
                 {yTicks.map((tick) => {
                     const y = yFor(tick);
@@ -1983,7 +2167,7 @@ function FundPerformanceChart({
                     <text
                         key={index}
                         x={xFor(index)}
-                        y={height - 10}
+                        y={height - (isMobileChart ? 30 : 10)}
                         className="fund-chart-axis"
                         textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
                     >
@@ -1992,15 +2176,32 @@ function FundPerformanceChart({
                 ))}
                 <g clipPath={`url(#${gradientId}-clip)`}>
                     <path d={areaData} fill={`url(#${gradientId})`} />
-                    <path d={pathData} fill="none" stroke={color} strokeWidth="2.7" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d={pathData} fill="none" stroke={hasVisibleSelection ? '#89939e' : color} strokeWidth="2.7" strokeLinecap="round" strokeLinejoin="round" />
                 </g>
                 <circle
                     className="fund-chart-endpoint"
                     cx={xFor(validPoints.length - 1)}
                     cy={yFor(Number(validPoints[validPoints.length - 1].price))}
                     r="4"
-                    fill={color}
+                    fill={hasVisibleSelection ? '#89939e' : color}
                 />
+                {hasVisibleSelection && measureLeftX != null && measureRightX != null && (
+                    <g className="fund-chart-selection" style={{ color }} aria-hidden="true">
+                        <rect x={padding.left} y={padding.top} width={Math.max(0, measureLeftX - padding.left)} height={plotHeight} className="fund-chart-selection-outside" />
+                        <rect x={measureRightX} y={padding.top} width={Math.max(0, width - padding.right - measureRightX)} height={plotHeight} className="fund-chart-selection-outside" />
+                        <rect x={measureLeftX} y={padding.top} width={measureRightX - measureLeftX} height={plotHeight} className="fund-chart-selection-band" />
+                        <path d={areaData} fill={`url(#${gradientId}-selected-area)`} clipPath={`url(#${selectionClipId})`} />
+                        <path d={pathData} fill="none" stroke={color} strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" clipPath={`url(#${selectionClipId})`} />
+                        {[measureLeftX, measureRightX].map((x, index) => (
+                            <g key={`${x}-${index}`}>
+                                <line x1={x} x2={x} y1={padding.top} y2={height - padding.bottom} className="fund-chart-selection-edge" />
+                                <rect x={x - 18} y={height - padding.bottom - 24} width="36" height="30" rx="7" className="fund-chart-selection-handle" />
+                                <line x1={x - 6} x2={x - 6} y1={height - padding.bottom - 17} y2={height - padding.bottom - 1} className="fund-chart-selection-grip" />
+                                <line x1={x + 6} x2={x + 6} y1={height - padding.bottom - 17} y2={height - padding.bottom - 1} className="fund-chart-selection-grip" />
+                            </g>
+                        ))}
+                    </g>
+                )}
                 {measureAnchorPoint
                     && measureEndPoint
                     && measureAnchorX != null
@@ -2045,26 +2246,26 @@ function FundPerformanceChart({
                         <circle cx={measureEndX} cy={measureEndY} r="4.2" className="fund-chart-measure-point" fill={color} />
                         <g className="fund-chart-measure-tooltip" style={{ transform: `translate(${measureTooltipX}px, ${measureTooltipY}px)` }}>
                             <rect width={measureTooltipWidth} height={measureTooltipHeight} rx="7" className="fund-chart-measure-tooltip-bg" />
-                            <text x="10" y="18" className="fund-chart-measure-muted">
+                            <text x="10" y={isMobileChart ? 30 : 18} className="fund-chart-measure-muted">
                                 {formatChartDate(measureAnchorPoint.date, selectedRange)} - {formatChartDate(measureEndPoint.date, selectedRange)}
                             </text>
-                            <text x="10" y="42" className={`fund-chart-measure-value ${measureClass}`}>
+                            <text x="10" y={isMobileChart ? 65 : 42} className={`fund-chart-measure-value ${measureClass}`}>
                                 {formatPct(measureReturn)}
                             </text>
-                            <text x="10" y="60" className="fund-chart-measure-muted">
+                            <text x="10" y={isMobileChart ? 96 : 60} className="fund-chart-measure-muted">
                                 {measureDeltaText}
                             </text>
                         </g>
                     </g>
                 )}
-                {measureAnchorIndex == null && hoverPoint && hoverX != null && hoverY != null && (
+                {measureAnchorIndex == null && selectedMeasureRange == null && hoverPoint && hoverX != null && hoverY != null && (
                     <g>
                         <line x1={hoverX} x2={hoverX} y1={padding.top} y2={height - padding.bottom} className="fund-chart-hoverline" />
                         <circle className="fund-chart-hover-point" cx={hoverX} cy={hoverY} r="3.6" fill={color} stroke="#0a0c0f" strokeWidth="1.6" />
                         <g className="fund-chart-tooltip" style={{ transform: `translate(${tooltipX}px, ${tooltipY}px)` }}>
                             <rect width={tooltipWidth} height={tooltipHeight} rx="6" className="fund-chart-tooltip-bg" />
-                            <text x="10" y="20" className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
-                            <text x="10" y="43" className="fund-chart-tooltip-value">{formatCurrency(hoverPoint.price, currency || 'TRY')}</text>
+                            <text x="10" y={isMobileChart ? 31 : 20} className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
+                            <text x="10" y={isMobileChart ? 65 : 43} className="fund-chart-tooltip-value">{formatCurrency(hoverPoint.price, currency || 'TRY')}</text>
                         </g>
                     </g>
                 )}
@@ -2588,7 +2789,7 @@ function FundHoldingsHighlightCard({ title, positions }: FundHoldingsHighlightCa
             {positions.length ? (
                 <div className="fund-holdings-highlight-list">
                     {positions.map((position) => {
-                        const symbol = position.asset_code || position.asset_name;
+                        const symbol = holdingLogoSymbol(position);
                         const category = holdingAssetCategory(position) || 'local_equity';
                         return (
                             <div className="fund-holdings-highlight-row" key={`${title}-${holdingPositionKey(position)}`}>
@@ -2600,7 +2801,7 @@ function FundHoldingsHighlightCard({ title, positions }: FundHoldingsHighlightCa
                                         logoUrl={position.logo_url}
                                         size="sm"
                                     />
-                                    <strong>{position.asset_code || '-'}</strong>
+                                    <strong>{holdingDisplayCode(position)}</strong>
                                 </span>
                                 <span className="fund-holdings-highlight-values">
                                     <strong><HoldingWeightDisplay position={position} /></strong>
@@ -5291,6 +5492,7 @@ export default function FundsPage({
     const mountedRef = useRef(false);
     const holdingsRef = useRef<FundHoldingsResponse | null>(null);
     const activeFundCodeRef = useRef('');
+    const fundDetailRequestIdRef = useRef(0);
     const comparisonPanelRef = useRef<HTMLDivElement | null>(null);
     const fundsPageRef = useRef<HTMLDivElement | null>(null);
     const [comparisonHistory, setComparisonHistory] = useState<MarketComparisonHistoryResponse | null>(null);
@@ -5443,30 +5645,55 @@ export default function FundsPage({
         activeFundCodeRef.current = fundCode?.trim().toUpperCase() || '';
     }, [fundCode]);
 
-    useEffect(() => {
-        if (!fundCode) {
-            setDetail(null);
-            setDetailError(null);
-            return;
-        }
-        let alive = true;
+    const loadFundDetail = useCallback(async (rawFundCode: string) => {
+        const normalizedCode = rawFundCode.trim().toUpperCase();
+        if (!normalizedCode) return;
+        const requestId = ++fundDetailRequestIdRef.current;
         setDetailLoading(true);
         setDetailError(null);
-        apiClient
-            .fundDetail(fundCode)
-            .then((payload) => {
-                if (alive) setDetail(payload);
-            })
-            .catch((err) => {
-                if (alive) setDetailError(err instanceof Error ? err.message : 'Fon detayı alınamadı.');
-            })
-            .finally(() => {
-                if (alive) setDetailLoading(false);
-            });
+        setDetail((current) => (
+            current?.fund_code.trim().toUpperCase() === normalizedCode ? current : null
+        ));
+
+        try {
+            const payload = await apiClient.fundDetail(normalizedCode);
+            if (
+                !mountedRef.current
+                || activeFundCodeRef.current !== normalizedCode
+                || requestId !== fundDetailRequestIdRef.current
+            ) return;
+            setDetail(payload);
+        } catch (err) {
+            if (
+                !mountedRef.current
+                || activeFundCodeRef.current !== normalizedCode
+                || requestId !== fundDetailRequestIdRef.current
+            ) return;
+            setDetailError(err instanceof Error ? err.message : 'Fon detayı alınamadı.');
+        } finally {
+            if (
+                mountedRef.current
+                && activeFundCodeRef.current === normalizedCode
+                && requestId === fundDetailRequestIdRef.current
+            ) {
+                setDetailLoading(false);
+            }
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!fundCode) {
+            fundDetailRequestIdRef.current += 1;
+            setDetail(null);
+            setDetailError(null);
+            setDetailLoading(false);
+            return;
+        }
+        void loadFundDetail(fundCode);
         return () => {
-            alive = false;
+            fundDetailRequestIdRef.current += 1;
         };
-    }, [fundCode]);
+    }, [fundCode, loadFundDetail]);
 
     useEffect(() => {
         if (!fundCode) return;
@@ -5848,7 +6075,15 @@ export default function FundsPage({
         return filtered;
     }, [deferredSearchTerm, fundSearchIndex, fundTypeFilter, riskFilter, sortKey, sortOrder]);
 
-    const selectedFund = detail || filteredFunds.find((row) => row.fund_code === fundCode) || null;
+    const normalizedRouteFundCode = fundCode?.trim().toUpperCase() || '';
+    const routeFundSummary = normalizedRouteFundCode
+        ? funds?.rows.find((row) => row.fund_code.trim().toUpperCase() === normalizedRouteFundCode) || null
+        : null;
+    const selectedFund = (
+        detail && (!normalizedRouteFundCode || detail.fund_code.trim().toUpperCase() === normalizedRouteFundCode)
+            ? detail
+            : routeFundSummary || filteredFunds.find((row) => row.fund_code.trim().toUpperCase() === normalizedRouteFundCode) || null
+    );
     const performancePoints = useMemo(() => sortFundPoints(performance?.points), [performance]);
     const fintablesHistoryPending = performanceLoading && !performance
         || isFintablesHistoryPending(performance, historyJob);
@@ -6305,7 +6540,7 @@ export default function FundsPage({
                                 </div>
 
                                 {loading ? (
-                                    <FinLoader message="Fon listesi yükleniyor" />
+                                    <FundsListLoader />
                                 ) : error ? (
                                     <div className="funds-state funds-state-error">{error}</div>
                                 ) : filteredFunds.length === 0 ? (
@@ -6325,10 +6560,8 @@ export default function FundsPage({
                         </>
                     ) : (
                         <section className="fund-detail">
-                            {detailLoading ? (
-                                <FinLoader message="Fon detayı yükleniyor" />
-                            ) : detailError ? (
-                                <div className="funds-state funds-state-error">{detailError}</div>
+                            {detailLoading && !selectedFund ? (
+                                <FundRequestState mode="loading" symbol={fundCode} />
                             ) : selectedFund ? (
                                 <>
                                     <header className="fund-market-shell">
@@ -6420,6 +6653,25 @@ export default function FundsPage({
                                             })}
                                         </nav>
                                     </header>
+
+                                    {detailLoading ? (
+                                        <FundRequestState
+                                            mode="loading"
+                                            symbol={selectedFund.fund_code}
+                                            fundName={selectedFund.name}
+                                            compact
+                                        />
+                                    ) : detailError ? (
+                                        <FundRequestState
+                                            mode="error"
+                                            symbol={selectedFund.fund_code}
+                                            fundName={selectedFund.name}
+                                            compact
+                                            onRetry={() => {
+                                                if (fundCode) void loadFundDetail(fundCode);
+                                            }}
+                                        />
+                                    ) : null}
 
                                     {detailSourceWarnings.length > 0 && (
                                         <div className="funds-source-warning funds-source-warning-detail" role="status" aria-live="polite">
@@ -6565,7 +6817,7 @@ export default function FundsPage({
                                             </div>
                                             {historySubtab === 'prices' ? (
                                                 fintablesHistoryPending ? (
-                                                    <FinLoader message="Fintables günlük geçmişi hazırlanıyor" />
+                                                    <FinLoader message="Getiri geçmişi hazırlanıyor" />
                                                 ) : performanceError ? (
                                                     <div className="funds-state funds-state-error">{performanceError}</div>
                                                 ) : visiblePerformancePoints.length ? (
@@ -6586,6 +6838,14 @@ export default function FundsPage({
                                         </div>
                                     )}
                                 </>
+                            ) : detailError ? (
+                                <FundRequestState
+                                    mode="error"
+                                    symbol={fundCode}
+                                    onRetry={() => {
+                                        if (fundCode) void loadFundDetail(fundCode);
+                                    }}
+                                />
                             ) : (
                                 <div className="funds-state">Fon bulunamadı.</div>
                             )}

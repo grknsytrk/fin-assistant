@@ -55,6 +55,7 @@
   background: #1d1d1d;
   box-shadow: 0 28px 70px rgba(0, 0, 0, 0.55);
   color: #f8fafc;
+  font-family: var(--font-family);
 }
 
 .global-search-modal-head {
@@ -124,108 +125,6 @@
   gap: 0.12rem;
 }
 
-.global-search-result {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.85rem;
-  width: 100%;
-  padding: 0.58rem 0.55rem;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: #f8fafc;
-  cursor: pointer;
-  text-align: left;
-}
-
-.global-search-result:hover,
-.global-search-result.active {
-  background: rgba(255, 255, 255, 0.055);
-}
-
-.global-search-result-main {
-  display: flex;
-  align-items: baseline;
-  gap: 0.75rem;
-  min-width: 0;
-}
-
-.global-search-result-main strong {
-  flex: 0 0 auto;
-  color: #ffffff;
-  font-size: 0.98rem;
-  font-weight: 900;
-  letter-spacing: 0.01em;
-}
-
-.global-search-result-main em {
-  min-width: 0;
-  overflow: hidden;
-  color: #c9cbd0;
-  font-size: 0.92rem;
-  font-style: normal;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.global-search-result-meta {
-  display: flex;
-  align-items: baseline;
-  justify-content: flex-end;
-  gap: 0.45rem;
-  min-width: 190px;
-  color: #c9cbd0;
-  font-family: var(--font-mono);
-  font-weight: 850;
-  white-space: nowrap;
-}
-
-.global-search-result-price {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.18rem;
-}
-
-.global-search-result-price small {
-  color: #f4b400;
-  font-size: 0.68rem;
-  font-family: var(--font-mono);
-  font-weight: 900;
-}
-
-.global-search-result-change {
-  min-width: 4.7rem;
-  text-align: right;
-}
-
-.global-search-result-change.up {
-  color: #00c853;
-}
-
-.global-search-result-change.down {
-  color: #ff4d5e;
-}
-
-.global-search-result-change.flat {
-  color: #8b8d91;
-}
-
-.global-search-result-kind {
-  display: inline-flex;
-  align-items: center;
-  min-height: 1.45rem;
-  padding: 0 0.45rem;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 6px;
-  color: #aeb4bf;
-  font-family: inherit;
-  font-size: 0.76rem;
-  font-weight: 850;
-  letter-spacing: 0;
-}
-
 .global-search-empty {
   padding: 2rem 0.55rem 2.4rem;
   color: #8b8d91;
@@ -256,19 +155,4 @@
     font-size: 1.1rem;
   }
 
-  .global-search-result {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .global-search-result-main {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 0.18rem;
-  }
-
-  .global-search-result-meta {
-    grid-column: 2;
-    min-width: 0;
-    justify-content: flex-start;
-  }
 }

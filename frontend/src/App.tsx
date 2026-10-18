@@ -49,6 +49,7 @@ function LandingRoute() {
     <MarketPage
       onOpenMarkets={() => navigate(toMarketsOverview())}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+      onOpenFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
     />
   );
 }
@@ -441,6 +442,7 @@ function App() {
   const isMarketsView = location.pathname.startsWith(ROUTE_PATHS.markets);
   const isFundsView = location.pathname.startsWith(ROUTE_PATHS.funds);
   const isStocksView = location.pathname.startsWith(ROUTE_PATHS.stocks);
+  const isModelPortfolioView = location.pathname === ROUTE_PATHS.modelPortfolio;
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
@@ -505,6 +507,7 @@ function App() {
             <Route path={ROUTE_PATHS.marketsStocksIndex} element={<MarketsStocksRoute />} />
             <Route path={ROUTE_PATHS.marketsIndices} element={<MarketsIndicesListRoute />} />
             <Route path={ROUTE_PATHS.marketsIndicesDetail} element={<MarketsIndicesDetailRoute />} />
+            <Route path={ROUTE_PATHS.modelPortfolio} element={<ModelPortfolioPage />} />
 
             <Route path={ROUTE_PATHS.funds} element={<FundsListRoute />} />
             <Route path={ROUTE_PATHS.fundComparison} element={<FundsComparisonRoute />} />
