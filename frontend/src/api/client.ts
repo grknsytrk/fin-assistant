@@ -613,7 +613,7 @@ export const apiClient = {
         const query = params.toString();
         const request = fetchApiWithMetadata<MarketStocksResponse>(
             query ? `/market/stocks?${query}` : '/market/stocks',
-            { conditionalCache: true },
+            { conditionalCache: true, credentials: 'omit' },
         )
             .then(({ payload, notModified }) => {
                 marketStocksMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
@@ -804,7 +804,7 @@ export const apiClient = {
 
         const request = fetchFundResponseWithMetadata<FundsResponse>(
             query ? `/funds?${query}` : '/funds',
-            { signal: options?.signal, conditionalCache: true },
+            { signal: options?.signal, conditionalCache: true, credentials: 'omit' },
         )
             .then(({ payload, notModified }) => {
                 if (isUnfilteredCatalog) {
