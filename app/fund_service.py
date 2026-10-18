@@ -26,7 +26,6 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from app.database import (
-    commit_json_cache_if_fenced,
     connect_postgres,
     database_enabled,
     read_json_cache,
@@ -39,6 +38,8 @@ from app.reference_data import (
     get_instrument_names,
     upsert_instruments,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 try:
     from app.cache import get_json_dict as _cache_get_dict
@@ -175,6 +176,10 @@ FUNDS_HISTORY_WARMUP_DAYS = int(os.getenv("RAGFIN_FUNDS_HISTORY_WARMUP_DAYS", "3
 FUNDS_FULL_HISTORY_START_DATE = os.getenv("RAGFIN_FUNDS_FULL_HISTORY_START_DATE", "2000-01-01").strip() or "2000-01-01"
 FUNDS_LIST_MIN_AUM = float(os.getenv("RAGFIN_FUNDS_LIST_MIN_AUM", "0"))
 FUND_PRICES_DB_FILENAME = os.getenv("RAGFIN_FUND_PRICES_DB_FILENAME", "fund_prices.sqlite3")
+FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS = max(
+    0,
+    int(os.getenv("RAGFIN_FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS", str(7 * 24 * 60 * 60))),
+)
 KAP_BASE_URL = os.getenv("RAGFIN_KAP_BASE_URL", "https://www.kap.org.tr").rstrip("/")
 KAP_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_KAP_TIMEOUT_SECONDS", "20"))
 KAP_PORTFOLIO_ALLOCATION_SUBJECT_OID = os.getenv(
@@ -188,6 +193,8 @@ _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
 _SNAPSHOT_REFRESH_LOCK = threading.Lock()
 _FUND_PRICES_SCHEMA_LOCK = threading.Lock()
 _FUND_PRICES_SCHEMA_READY = False
+_FUND_SNAPSHOT_MIGRATION_LOCK = threading.Lock()
+_FUND_SNAPSHOT_COMMIT_LOCK = threading.Lock()
 _AUTO_FETCH_LOCK = threading.Lock()
 _AUTO_FETCH_IN_FLIGHT: Dict[str, threading.Event] = {}
 _AUTO_FETCH_NEGATIVE_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -361,6 +368,10 @@ def _snapshot_path(processed_dir: Path) -> Path:
     return _fund_cache_dir(processed_dir) / "funds_latest.json"
 
 
+def _legacy_snapshot_path(processed_dir: Path) -> Path:
+    return _fund_cache_dir(processed_dir) / "funds_latest.legacy.json"
+
+
 def _history_dir(processed_dir: Path) -> Path:
     return _fund_cache_dir(processed_dir) / "history"
 
@@ -489,6 +500,73 @@ def _init_fund_prices_schema(conn: Any) -> None:
         ON fund_price_warnings (fund_code, date)
         """
     )
+    float_type = "DOUBLE PRECISION" if getattr(conn, "is_postgres", False) else "REAL"
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fund_snapshots (
+            fund_code TEXT PRIMARY KEY,
+            name TEXT,
+            fund_type TEXT,
+            founder_company TEXT,
+            manager_company TEXT,
+            price __FLOAT_TYPE__,
+            daily_return __FLOAT_TYPE__,
+            aum __FLOAT_TYPE__,
+            investor_count INTEGER,
+            share_count __FLOAT_TYPE__,
+            risk_value TEXT,
+            risk_value_json TEXT,
+            risk_value_num __FLOAT_TYPE__,
+            tefas_open INTEGER,
+            currency TEXT,
+            as_of TEXT,
+            source TEXT,
+            period_returns_json TEXT NOT NULL DEFAULT '{}',
+            attributes_json TEXT NOT NULL DEFAULT '{}',
+            present_fields_json TEXT NOT NULL DEFAULT '[]',
+            search_text TEXT NOT NULL DEFAULT '',
+            fund_type_key TEXT NOT NULL DEFAULT '',
+            founder_key TEXT NOT NULL DEFAULT '',
+            manager_key TEXT NOT NULL DEFAULT '',
+            risk_key TEXT NOT NULL DEFAULT '',
+            fund_code_sort TEXT NOT NULL DEFAULT '',
+            name_sort TEXT NOT NULL DEFAULT '',
+            fund_type_sort TEXT NOT NULL DEFAULT '',
+            founder_sort TEXT NOT NULL DEFAULT '',
+            manager_sort TEXT NOT NULL DEFAULT '',
+            row_order INTEGER NOT NULL DEFAULT 0,
+            generation BIGINT NOT NULL DEFAULT 0,
+            content_hash TEXT NOT NULL DEFAULT ''
+        )
+        """.replace("__FLOAT_TYPE__", float_type)
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fund_snapshots_type_aum ON fund_snapshots (fund_type_key, aum)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fund_snapshots_fund_type ON fund_snapshots (fund_type, row_order)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fund_snapshots_aum ON fund_snapshots (aum) WHERE aum IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fund_snapshots_founder ON fund_snapshots (founder_key)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fund_snapshots_manager ON fund_snapshots (manager_key)"
+    )
+    if not getattr(conn, "is_postgres", False):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fund_snapshot_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                generation BIGINT NOT NULL DEFAULT 0,
+                row_count INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
     conn.commit()
 
 
@@ -505,6 +583,434 @@ def ensure_fund_prices_schema(processed_dir: Path) -> None:
         with connect_postgres() as conn:
             _init_fund_prices_schema(conn)
         _FUND_PRICES_SCHEMA_READY = True
+
+
+_FUND_SNAPSHOT_FIELDS = (
+    "fund_code",
+    "name",
+    "fund_type",
+    "founder_company",
+    "manager_company",
+    "price",
+    "daily_return",
+    "aum",
+    "investor_count",
+    "share_count",
+    "risk_value",
+    "currency",
+    "as_of",
+    "source",
+    "period_returns",
+)
+
+
+def _fund_snapshot_record(row: Dict[str, Any], row_order: int, generation: int) -> Optional[Tuple[Any, ...]]:
+    code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+    if not code:
+        return None
+    present_fields = sorted(str(key) for key in row)
+    attributes = {key: value for key, value in row.items() if key not in _FUND_SNAPSHOT_FIELDS}
+    period_returns = row.get("period_returns")
+    risk_value = row.get("risk_value")
+    risk_number = _coerce_float(risk_value)
+    try:
+        tefas_open = _tefas_open_status(row)
+    except NameError:  # schema backfill can run during early module initialization
+        tefas_open = None
+    search_text = " ".join(
+        str(row.get(key) or "")
+        for key in ("fund_code", "name", "fund_type", "founder_company", "manager_company")
+    ).lower()
+    normalized_fields = (
+        str(row.get("fund_type") or "").strip().lower(),
+        str(row.get("founder_company") or "").strip().lower(),
+        str(row.get("manager_company") or "").strip().lower(),
+        str(risk_value or "").strip().lower(),
+    )
+    stable_row = _stable_json_dumps(row)
+    return (
+        code,
+        row.get("name"),
+        row.get("fund_type"),
+        row.get("founder_company"),
+        row.get("manager_company"),
+        _coerce_float(row.get("price")),
+        _coerce_float(row.get("daily_return")),
+        _fund_row_aum(row),
+        _coerce_int(row.get("investor_count")),
+        _coerce_float(row.get("share_count")),
+        None if risk_value is None else str(risk_value),
+        None if risk_value is None else _stable_json_dumps(risk_value),
+        risk_number,
+        None if tefas_open is None else int(tefas_open),
+        row.get("currency"),
+        _fund_date(row.get("as_of")),
+        row.get("source"),
+        _stable_json_dumps(period_returns),
+        _stable_json_dumps(attributes),
+        _stable_json_dumps(present_fields),
+        search_text,
+        *normalized_fields,
+        str(code).lower(),
+        str(row.get("name") or "").lower(),
+        str(row.get("fund_type") or "").lower(),
+        str(row.get("founder_company") or "").lower(),
+        str(row.get("manager_company") or "").lower(),
+        int(row_order),
+        int(generation),
+        hashlib.sha256(stable_row.encode("utf-8")).hexdigest(),
+    )
+
+
+def _fund_snapshot_insert_sql() -> str:
+    columns = (
+        "fund_code, name, fund_type, founder_company, manager_company, price, daily_return, aum, "
+        "investor_count, share_count, risk_value, risk_value_json, risk_value_num, tefas_open, "
+        "currency, as_of, source, period_returns_json, attributes_json, present_fields_json, "
+        "search_text, fund_type_key, founder_key, manager_key, risk_key, fund_code_sort, name_sort, "
+        "fund_type_sort, founder_sort, manager_sort, row_order, generation, content_hash"
+    )
+    values = ", ".join("?" for _ in range(33))
+    updates = ", ".join(
+        f"{column} = excluded.{column}"
+        for column in columns.split(", ")
+        if column != "fund_code"
+    )
+    return (
+        f"INSERT INTO fund_snapshots ({columns}) VALUES ({values}) "
+        f"ON CONFLICT (fund_code) DO UPDATE SET {updates} "
+        "WHERE fund_snapshots.content_hash <> excluded.content_hash"
+    )
+
+
+def _fund_snapshot_records(rows: Iterable[Any], generation: int) -> List[Tuple[Any, ...]]:
+    records_by_code: Dict[str, Tuple[Any, ...]] = {}
+    for row_order, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        record = _fund_snapshot_record(row, row_order, generation)
+        if record is None:
+            continue
+        # Keep the latest occurrence to match the existing reference-data
+        # batch upsert behavior when a legacy payload contains duplicate codes.
+        records_by_code[str(record[0])] = record
+    return sorted(records_by_code.values(), key=lambda record: int(record[30]))
+
+
+def _fund_snapshot_summary(payload: Dict[str, Any], generation: int) -> Dict[str, Any]:
+    summary = {key: value for key, value in payload.items() if key != "rows"}
+    count = len(
+        {
+            normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+            for row in list(payload.get("rows") or [])
+            if isinstance(row, dict)
+            and normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        }
+    )
+    summary["count"] = count
+    summary["total_count"] = count
+    summary["snapshot_generation"] = int(generation)
+    metadata = dict(summary.get("source_metadata") or {})
+    metadata["snapshot_generation"] = int(generation)
+    metadata["catalog_storage"] = "fund_snapshots"
+    summary["source_metadata"] = metadata
+    return summary
+
+
+def _stage_fund_snapshot_codes(conn: Any, records: List[Tuple[Any, ...]]) -> None:
+    """Track the complete incoming set while allowing unchanged rows to stay put."""
+
+    conn.execute(
+        "CREATE TEMP TABLE fund_snapshot_commit_codes (fund_code TEXT PRIMARY KEY)"
+    )
+    conn.executemany(
+        "INSERT INTO fund_snapshot_commit_codes (fund_code) VALUES (?)",
+        [(str(record[0]),) for record in records],
+    )
+
+
+def _delete_fund_snapshot_rows_missing_from_stage(conn: Any) -> None:
+    conn.execute(
+        """
+        DELETE FROM fund_snapshots
+        WHERE NOT EXISTS (
+            SELECT 1 FROM fund_snapshot_commit_codes staged
+            WHERE staged.fund_code = fund_snapshots.fund_code
+        )
+        """
+    )
+    conn.execute("DROP TABLE fund_snapshot_commit_codes")
+
+
+def _snapshot_row_from_record(record: Any) -> Dict[str, Any]:
+    present_fields = _safe_json_loads(record["present_fields_json"], [])
+    if not isinstance(present_fields, list):
+        present_fields = []
+    present = set(str(field) for field in present_fields)
+    attributes = _safe_json_loads(record["attributes_json"], {})
+    row = dict(attributes) if isinstance(attributes, dict) else {}
+    for field in _FUND_SNAPSHOT_FIELDS:
+        if field not in present:
+            continue
+        if field == "period_returns":
+            value = _safe_json_loads(record["period_returns_json"], {})
+        elif field == "risk_value":
+            value = _safe_json_loads(record["risk_value_json"], None)
+        else:
+            value = record[field]
+        row[field] = value
+    if "fund_code" not in row:
+        row["fund_code"] = record["fund_code"]
+    return row
+
+
+def _read_fund_snapshot_rows(
+    processed_dir: Path,
+    *,
+    where: str = "",
+    params: Iterable[Any] = (),
+    order_by: str = "row_order ASC",
+) -> List[Dict[str, Any]]:
+    query = f"SELECT * FROM fund_snapshots{(' WHERE ' + where) if where else ''} ORDER BY {order_by}"
+    with _connect_fund_prices_db(processed_dir) as conn:
+        records = conn.execute(query, tuple(params)).fetchall()
+    return [_snapshot_row_from_record(record) for record in records]
+
+
+def _read_fund_snapshot_category_returns(
+    processed_dir: Path,
+    *,
+    fund_type: str,
+    min_aum: Optional[float],
+) -> List[Dict[str, Any]]:
+    conditions = ["fund_type_key = ?"]
+    params: List[Any] = [fund_type.strip().lower()]
+    if TEFAS_OPEN_ONLY:
+        conditions.append("(tefas_open IS NULL OR tefas_open = 1)")
+    if min_aum is not None and min_aum > 0:
+        conditions.append("aum >= ?")
+        params.append(float(min_aum))
+    with _connect_fund_prices_db(processed_dir) as conn:
+        records = conn.execute(
+            "SELECT period_returns_json FROM fund_snapshots WHERE "
+            + " AND ".join(conditions)
+            + " ORDER BY row_order ASC",
+            tuple(params),
+        ).fetchall()
+    return [
+        {"period_returns": _safe_json_loads(record["period_returns_json"], {})}
+        for record in records
+    ]
+
+
+def _copy_legacy_snapshot(processed_dir: Path, payload: Dict[str, Any]) -> None:
+    if not list(payload.get("rows") or []):
+        return
+    legacy = _legacy_snapshot_path(processed_dir)
+    if legacy.exists():
+        return
+    _write_local_json(legacy, payload)
+
+
+def _snapshot_metadata_from_store(processed_dir: Path) -> Optional[Dict[str, Any]]:
+    if database_enabled():
+        summary = _read_json(_snapshot_path(processed_dir))
+        metadata = summary.get("source_metadata") if isinstance(summary, dict) else None
+        if summary is not None and isinstance(metadata, dict) and metadata.get("catalog_storage") == "fund_snapshots":
+            return summary
+        return None
+    with _connect_fund_prices_db(processed_dir) as conn:
+        state = conn.execute("SELECT metadata_json FROM fund_snapshot_state WHERE id = 1").fetchone()
+    if state is None:
+        return None
+    raw = state["metadata_json"] if not isinstance(state, dict) else state.get("metadata_json")
+    summary = _safe_json_loads(raw, None)
+    return summary if isinstance(summary, dict) else None
+
+
+def ensure_fund_snapshot_store(processed_dir: Path) -> Dict[str, Any]:
+    """Idempotently migrate the legacy JSON catalogue into the row store."""
+
+    with _FUND_SNAPSHOT_MIGRATION_LOCK:
+        ensure_fund_prices_schema(processed_dir)
+        summary = _snapshot_metadata_from_store(processed_dir)
+        if summary is not None:
+            if database_enabled():
+                return summary
+            # Local tools and legacy tests may replace the JSON file directly.
+            # Treat a full document as a new import while the normal on-disk
+            # representation is the compact metadata summary.
+            disk_payload = _read_json(_snapshot_path(processed_dir)) or {}
+            if not isinstance(disk_payload.get("rows"), list):
+                return summary
+
+        legacy = _read_json(_snapshot_path(processed_dir)) or _read_json(_legacy_snapshot_path(processed_dir)) or {}
+        rows = [row for row in list(legacy.get("rows") or []) if isinstance(row, dict)]
+        if not rows:
+            return legacy
+
+        if database_enabled():
+            from app.database import _cache_key
+
+            path = _snapshot_path(processed_dir)
+            cache_key = _cache_key(path)
+            legacy_key = _cache_key(_legacy_snapshot_path(processed_dir))
+            with connect_postgres() as conn:
+                # Serialize concurrent first-start migrations across API replicas.
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext('fund_snapshots_migration_v1'))")
+                # Coordinate with refresh commits, which lock the same lease row.
+                conn.execute(
+                    "SELECT resource_key FROM ragfin_refresh_lease WHERE resource_key = ? FOR UPDATE",
+                    ("funds_snapshot",),
+                ).fetchone()
+                count_row = conn.execute("SELECT COUNT(*) AS row_count FROM fund_snapshots").fetchone()
+                count = int(count_row.get("row_count") or 0) if isinstance(count_row, dict) else 0
+                cache_row = conn.execute(
+                    "SELECT payload, version FROM ragfin_json_cache WHERE cache_key = ? FOR UPDATE",
+                    (cache_key,),
+                ).fetchone()
+                current_payload = cache_row.get("payload") if isinstance(cache_row, dict) else None
+                current_meta = current_payload.get("source_metadata") if isinstance(current_payload, dict) else None
+                if (
+                    count
+                    and isinstance(current_meta, dict)
+                    and current_meta.get("catalog_storage") == "fund_snapshots"
+                ):
+                    conn.rollback()
+                    _MEMORY_CACHE.clear()
+                    return dict(current_payload)
+                cache_version = int(cache_row.get("version") or 0) if isinstance(cache_row, dict) else 0
+                if count:
+                    conn.execute("DELETE FROM fund_snapshots")
+                max_generation_row = conn.execute(
+                    "SELECT COALESCE(MAX(generation), 0) AS generation FROM fund_snapshots"
+                ).fetchone()
+                max_generation = (
+                    int(max_generation_row.get("generation") or 0)
+                    if isinstance(max_generation_row, dict)
+                    else 0
+                )
+                generation = max(
+                    1,
+                    cache_version + 1,
+                    max_generation + 1,
+                    int(legacy.get("snapshot_generation") or 0),
+                )
+                summary_payload = _fund_snapshot_summary(legacy, generation)
+                conn.execute(
+                    """
+                    INSERT INTO ragfin_json_cache (cache_key, payload, version, updated_at)
+                    SELECT ?, payload, version, NOW() FROM ragfin_json_cache WHERE cache_key = ?
+                    ON CONFLICT (cache_key) DO NOTHING
+                    """,
+                    (legacy_key, cache_key),
+                )
+                conn.executemany(_fund_snapshot_insert_sql(), _fund_snapshot_records(rows, generation))
+                conn.execute(
+                    """
+                    INSERT INTO ragfin_json_cache (cache_key, payload, version, updated_at)
+                    VALUES (?, ?::jsonb, ?, NOW())
+                    ON CONFLICT (cache_key) DO UPDATE SET
+                        payload = EXCLUDED.payload,
+                        version = EXCLUDED.version,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (cache_key, json.dumps(summary_payload, ensure_ascii=False, default=str), generation),
+                )
+                conn.commit()
+            _copy_legacy_snapshot(processed_dir, legacy)
+            _write_local_json(path, summary_payload)
+        else:
+            _copy_legacy_snapshot(processed_dir, legacy)
+            with _connect_fund_prices_db(processed_dir) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                state = conn.execute("SELECT generation FROM fund_snapshot_state WHERE id = 1").fetchone()
+                current_generation = int(state["generation"]) if state is not None else 0
+                generation = max(1, current_generation + 1, int(legacy.get("snapshot_generation") or 0))
+                summary_payload = _fund_snapshot_summary(legacy, generation)
+                records = _fund_snapshot_records(rows, generation)
+                _stage_fund_snapshot_codes(conn, records)
+                conn.executemany(_fund_snapshot_insert_sql(), records)
+                _delete_fund_snapshot_rows_missing_from_stage(conn)
+                conn.execute(
+                    """
+                    INSERT INTO fund_snapshot_state (id, generation, row_count, metadata_json, updated_at)
+                    VALUES (1, ?, ?, ?, ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        generation = excluded.generation,
+                        row_count = excluded.row_count,
+                        metadata_json = excluded.metadata_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        generation,
+                        len(records),
+                        _stable_json_dumps(summary_payload),
+                        _utc_now_iso(),
+                    ),
+                )
+            _write_local_json(_snapshot_path(processed_dir), summary_payload)
+        _MEMORY_CACHE.clear()
+        logging.getLogger("uvicorn.error").info(
+            "fund_catalog migration rows=%d generation=%d", len(rows), generation
+        )
+        return summary_payload
+
+
+def prune_fund_snapshot_rollback_copy(processed_dir: Path) -> bool:
+    """Replace the one-time full JSON rollback copy after its retention window."""
+
+    if FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS <= 0:
+        return False
+    path = _legacy_snapshot_path(processed_dir)
+    if database_enabled():
+        from app.database import _cache_key
+
+        try:
+            with connect_postgres() as conn:
+                record = conn.execute(
+                    "SELECT payload, updated_at FROM ragfin_json_cache WHERE cache_key = ?",
+                    (_cache_key(path),),
+                ).fetchone()
+            if not isinstance(record, dict):
+                return False
+            payload = record.get("payload")
+            if not isinstance(payload, dict) or payload.get("rollback_copy_expired"):
+                return False
+            age = _cache_age_seconds(record.get("updated_at"))
+            if age is None or age < FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS:
+                return False
+            row_count = len(list(payload.get("rows") or []))
+        except Exception:
+            LOGGER.warning("fund snapshot rollback retention check failed", exc_info=True)
+            return False
+    else:
+        if not path.exists():
+            return False
+        try:
+            payload = _read_json(path) or {}
+            if payload.get("rollback_copy_expired"):
+                return False
+            age = max(0.0, time.time() - path.stat().st_mtime)
+            if age < FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS:
+                return False
+            row_count = len(list(payload.get("rows") or []))
+        except Exception:
+            LOGGER.warning("local fund snapshot rollback retention check failed", exc_info=True)
+            return False
+
+    compact = {
+        "status": "rollback_copy_expired",
+        "row_count": row_count,
+        "rollback_copy_expired": True,
+        "expired_at": _utc_now_iso(),
+        "source_metadata": {"catalog_storage": "fund_snapshots"},
+    }
+    if database_enabled():
+        write_json_cache(path, compact)
+    _write_local_json(path, compact)
+    LOGGER.info("fund_catalog legacy rollback copy compacted rows=%d", row_count)
+    return True
 
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -531,11 +1037,45 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
 
 def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
     with tmp.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     tmp.replace(path)
     _MEMORY_CACHE.clear()
+
+
+def _commit_local_fund_snapshot_rows(
+    processed_dir: Path,
+    rows: List[Dict[str, Any]],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    with _FUND_SNAPSHOT_COMMIT_LOCK:
+        with _connect_fund_prices_db(processed_dir) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = conn.execute(
+                "SELECT generation FROM fund_snapshot_state WHERE id = 1"
+            ).fetchone()
+            current_generation = int(state["generation"]) if state is not None else 0
+            generation = max(current_generation + 1, 1)
+            records = _fund_snapshot_records(rows, generation)
+            summary = _fund_snapshot_summary(payload, generation)
+            _stage_fund_snapshot_codes(conn, records)
+            conn.executemany(_fund_snapshot_insert_sql(), records)
+            _delete_fund_snapshot_rows_missing_from_stage(conn)
+            conn.execute(
+                """
+                INSERT INTO fund_snapshot_state (id, generation, row_count, metadata_json, updated_at)
+                VALUES (1, ?, ?, ?, ?)
+                ON CONFLICT (id) DO UPDATE SET
+                    generation = excluded.generation,
+                    row_count = excluded.row_count,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (generation, len(records), _stable_json_dumps(summary), _utc_now_iso()),
+            )
+        _write_local_json(_snapshot_path(processed_dir), summary)
+        return summary
 
 
 def commit_funds_snapshot(
@@ -546,25 +1086,102 @@ def commit_funds_snapshot(
     owner_token: str,
     generation: int,
 ) -> bool:
-    """Commit the latest catalogue through the Postgres fencing transaction."""
+    """Publish the entire catalogue and its compact metadata atomically."""
 
     path = _snapshot_path(processed_dir)
-    if database_enabled():
-        committed = commit_json_cache_if_fenced(
-            path,
-            payload,
-            resource_key="funds_snapshot",
-            job_id=job_id,
-            owner_token=owner_token,
-            generation=generation,
+    rows = [row for row in list(payload.get("rows") or []) if isinstance(row, dict)]
+    records = _fund_snapshot_records(rows, generation)
+    has_invalid_codes = any(
+        not normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        for row in rows
+    )
+    if not records or has_invalid_codes:
+        LOGGER.warning(
+            "fund snapshot commit rejected: invalid or empty catalogue rows=%d valid=%d",
+            len(rows),
+            len(records),
         )
-        if not committed:
+        return False
+    ensure_fund_prices_schema(processed_dir)
+    previous = _read_json(path) or {}
+    _copy_legacy_snapshot(processed_dir, previous)
+
+    if database_enabled():
+        from app.database import _cache_key, ensure_refresh_lease_schema
+
+        ensure_refresh_lease_schema()
+        cache_key = _cache_key(path)
+        legacy_key = _cache_key(_legacy_snapshot_path(processed_dir))
+        summary = _fund_snapshot_summary(payload, generation)
+        try:
+            with connect_postgres() as conn:
+                lease = conn.execute(
+                    """
+                    SELECT generation, job_id, owner_token, lease_until
+                    FROM ragfin_refresh_lease
+                    WHERE resource_key = ? AND lease_until > NOW()
+                    FOR UPDATE
+                    """,
+                    ("funds_snapshot",),
+                ).fetchone()
+                if not isinstance(lease, dict) or (
+                    int(lease.get("generation") or -1) != int(generation)
+                    or str(lease.get("job_id") or "") != job_id
+                    or str(lease.get("owner_token") or "") != owner_token
+                    or lease.get("lease_until") is None
+                ):
+                    conn.rollback()
+                    return False
+
+                # Preserve the original monolithic document once for a controlled
+                # rollback window; later generations write only compact metadata.
+                conn.execute(
+                    """
+                    INSERT INTO ragfin_json_cache (cache_key, payload, version, updated_at)
+                    SELECT ?, payload, version, NOW()
+                    FROM ragfin_json_cache
+                    WHERE cache_key = ? AND jsonb_typeof(payload->'rows') = 'array'
+                    ON CONFLICT (cache_key) DO NOTHING
+                    """,
+                    (legacy_key, cache_key),
+                )
+                _stage_fund_snapshot_codes(conn, records)
+                conn.executemany(_fund_snapshot_insert_sql(), records)
+                _delete_fund_snapshot_rows_missing_from_stage(conn)
+                meta_row = conn.execute(
+                    """
+                    INSERT INTO ragfin_json_cache (cache_key, payload, version, updated_at)
+                    VALUES (?, ?::jsonb, ?, NOW())
+                    ON CONFLICT (cache_key) DO UPDATE SET
+                        payload = EXCLUDED.payload,
+                        version = EXCLUDED.version,
+                        updated_at = EXCLUDED.updated_at
+                    WHERE ragfin_json_cache.version < EXCLUDED.version
+                    RETURNING version
+                    """,
+                    (cache_key, json.dumps(summary, ensure_ascii=False, default=str), int(generation)),
+                ).fetchone()
+                if not isinstance(meta_row, dict):
+                    conn.rollback()
+                    return False
+                conn.commit()
+        except Exception:
+            LOGGER.warning("fund snapshot row commit failed", exc_info=True)
             return False
-        # Postgres is authoritative. Mirror only after its transaction has
-        # committed, so a stale worker cannot overwrite the local mirror.
-        _write_local_json(path, payload)
-        return True
-    _write_json(path, payload)
+    else:
+        try:
+            summary = _commit_local_fund_snapshot_rows(processed_dir, rows, payload)
+        except Exception:
+            LOGGER.warning("local fund snapshot row commit failed", exc_info=True)
+            return False
+
+    # Mirror only after the durable rows and metadata have committed.
+    if database_enabled():
+        try:
+            _write_local_json(path, summary)
+        except Exception:
+            LOGGER.warning("fund snapshot local metadata mirror failed", exc_info=True)
+    _MEMORY_CACHE.clear()
     return True
 
 
@@ -2744,7 +3361,10 @@ def _snapshot_is_current_on_market_closure(
         current > target
         and snapshot_as_of is not None
         and snapshot_as_of >= target
-        and list(snapshot.get("rows") or [])
+        and (
+            list(snapshot.get("rows") or [])
+            or int(snapshot.get("total_count") or snapshot.get("count") or 0) > 0
+        )
     )
 
 
@@ -2768,7 +3388,8 @@ def _mark_snapshot_current_for_market_closure(snapshot: Dict[str, Any]) -> Dict[
             "warnings": [],
         }
     )
-    payload["status"] = "ok" if payload.get("rows") else payload.get("status")
+    has_rows = bool(payload.get("rows")) or int(payload.get("total_count") or payload.get("count") or 0) > 0
+    payload["status"] = "ok" if has_rows else payload.get("status")
     payload["stale"] = False
     payload["degraded"] = False
     payload["warnings"] = []
@@ -5342,7 +5963,54 @@ def _overlay_latest_price_history(
     return result
 
 
-def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
+def _catalog_price_overlay_metadata(processed_dir: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
+    with _connect_fund_prices_db(processed_dir) as conn:
+        records = conn.execute("SELECT fund_code, as_of FROM fund_snapshots ORDER BY fund_code").fetchall()
+    catalog_dates: Dict[str, Optional[str]] = {}
+    for record in records:
+        code = str(record["fund_code"] or "")
+        catalog_dates[code] = _fund_date(record["as_of"])
+    if not catalog_dates:
+        return payload
+    latest = read_latest_fund_price_points(
+        processed_dir,
+        catalog_dates.keys(),
+        end_date=_latest_fund_snapshot_target_date(),
+    )
+    newer_dates: List[str] = []
+    fetched_at: List[str] = []
+    overlay_count = 0
+    for code, point in latest.items():
+        point_date = _fund_date(point.get("date"))
+        current_date = catalog_dates.get(code)
+        if not point_date or (current_date and point_date < current_date):
+            continue
+        if not current_date or point_date > current_date:
+            overlay_count += 1
+            newer_dates.append(point_date)
+            if point.get("fetched_at"):
+                fetched_at.append(str(point["fetched_at"]))
+    result = dict(payload)
+    original_as_of = _fund_date(payload.get("as_of") or (payload.get("source_metadata") or {}).get("as_of"))
+    effective_as_of = max([value for value in [original_as_of, *newer_dates] if value], default=None)
+    if effective_as_of:
+        result["as_of"] = effective_as_of
+    metadata = dict(result.get("source_metadata") or {})
+    metadata["snapshot_as_of"] = original_as_of
+    metadata["price_history_as_of"] = max(newer_dates) if newer_dates else None
+    metadata["price_history_overlay_count"] = overlay_count
+    metadata["price_history_overlay_source"] = "fund_prices"
+    metadata["price_history_fetched_at"] = max(fetched_at) if fetched_at else None
+    result["source_metadata"] = metadata
+    return result
+
+
+def load_funds_snapshot(
+    processed_dir: Path,
+    *,
+    include_rows: bool = True,
+    include_price_metadata: bool = True,
+) -> Dict[str, Any]:
     path = _snapshot_path(processed_dir)
     cache_key = f"snapshot:{path}"
     stat = path.stat() if path.exists() else None
@@ -5350,19 +6018,41 @@ def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
         getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)),
         int(stat.st_size),
     ) if stat else None
-    cached = _MEMORY_CACHE.get(cache_key)
-    if cached and stat and cached.get("file_signature") == file_signature:
-        payload = dict(cached["payload"])
+    stored_summary = ensure_fund_snapshot_store(processed_dir)
+    stored_metadata = stored_summary.get("source_metadata") if isinstance(stored_summary, dict) else None
+    row_store_active = (
+        isinstance(stored_metadata, dict)
+        and stored_metadata.get("catalog_storage") == "fund_snapshots"
+    )
+    if row_store_active:
+        payload = dict(stored_summary)
+        payload["total_count"] = int(stored_summary.get("total_count") or stored_summary.get("count") or 0)
+        payload["count"] = int(stored_summary.get("count") or 0)
+        if include_rows:
+            payload["rows"] = _read_fund_snapshot_rows(processed_dir)
+        else:
+            payload.pop("rows", None)
+            if include_price_metadata:
+                payload = _catalog_price_overlay_metadata(processed_dir, payload)
     else:
-        payload = _read_json(path) or _empty_snapshot_payload("fund snapshot cache is empty")
-        if stat:
-            _MEMORY_CACHE[cache_key] = {
-                "file_signature": file_signature,
-                "mtime": stat.st_mtime,
-                "payload": payload,
-            }
+        cached = _MEMORY_CACHE.get(cache_key)
+        if cached and stat and cached.get("file_signature") == file_signature:
+            payload = dict(cached["payload"])
+        else:
+            payload = _read_json(path) or _empty_snapshot_payload("fund snapshot cache is empty")
+            if stat:
+                _MEMORY_CACHE[cache_key] = {
+                    "file_signature": file_signature,
+                    "mtime": stat.st_mtime,
+                    "payload": payload,
+                }
+        if not include_rows:
+            payload.pop("rows", None)
+    initial_metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
     original_snapshot_as_of = _fund_date(
-        payload.get("as_of") or (payload.get("source_metadata") or {}).get("as_of")
+        initial_metadata.get("snapshot_as_of")
+        or payload.get("as_of")
+        or initial_metadata.get("as_of")
     )
     payload = _overlay_latest_price_history(processed_dir, payload)
     fetched_at = payload.get("fetched_at")
@@ -5406,7 +6096,7 @@ def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
     meta["source"] = public_source
     if public_source == "legacy_cache":
         meta["source_url"] = None
-    meta["cache_hit"] = bool(stat)
+    meta["cache_hit"] = bool(stat) or row_store_active
     meta["stale"] = stale
     meta["snapshot_target_date"] = target_date.isoformat()
     meta["snapshot_as_of_lag_days"] = snapshot_lag_days
@@ -5432,12 +6122,13 @@ def load_funds_snapshot(processed_dir: Path) -> Dict[str, Any]:
     payload["source"] = public_source
     if public_source == "legacy_cache":
         payload["source_url"] = None
-    payload["rows"] = [
-        {**row, "source": _public_price_source(str(row.get("source") or public_source))}
-        if isinstance(row, dict)
-        else row
-        for row in list(payload.get("rows") or [])
-    ]
+    if include_rows:
+        payload["rows"] = [
+            {**row, "source": _public_price_source(str(row.get("source") or public_source))}
+            if isinstance(row, dict)
+            else row
+            for row in list(payload.get("rows") or [])
+        ]
     payload["stale"] = stale
     payload["source_metadata"] = meta
     return payload
@@ -5762,7 +6453,9 @@ def refresh_funds_snapshot(
     if _snapshot_is_current_on_market_closure(existing_snapshot):
         retained = _mark_snapshot_current_for_market_closure(existing_snapshot)
         if persist_snapshot and not database_enabled():
-            _write_json(_snapshot_path(processed_dir), retained)
+            commit_funds_snapshot(
+                processed_dir, retained, job_id="local-refresh", owner_token="local-refresh", generation=0
+            )
         return retained
     bounded_lookback_days = min(FUNDS_MAX_LOOKBACK_CALENDAR_DAYS, max(1, int(lookback_days)))
     warnings: List[str] = []
@@ -5853,7 +6546,9 @@ def refresh_funds_snapshot(
         payload["source_metadata"]["fallback_used"] = bool(existing_snapshot.get("rows"))
         payload["source_metadata"]["tefas_open_only"] = TEFAS_OPEN_ONLY
         if persist_snapshot and not database_enabled():
-            _write_json(_snapshot_path(processed_dir), payload)
+            commit_funds_snapshot(
+                processed_dir, payload, job_id="local-refresh", owner_token="local-refresh", generation=0
+            )
         return payload
     snapshot = _build_snapshot(
         rows,
@@ -5893,7 +6588,9 @@ def refresh_funds_snapshot(
         )
         retained.setdefault("source_metadata", {})["source_policy"] = FUND_HISTORY_SOURCE_POLICY
         if persist_snapshot and not database_enabled():
-            _write_json(_snapshot_path(processed_dir), retained)
+            commit_funds_snapshot(
+                processed_dir, retained, job_id="local-refresh", owner_token="local-refresh", generation=0
+            )
         return retained
     snapshot = _add_snapshot_resolution_metadata(
         snapshot,
@@ -5962,7 +6659,9 @@ def refresh_funds_snapshot(
         # Postgres generation lease. The collector may still populate the
         # price-history store, but must not race that fenced snapshot write.
         if not database_enabled():
-            _write_json(_snapshot_path(processed_dir), snapshot)
+            commit_funds_snapshot(
+                processed_dir, snapshot, job_id="local-refresh", owner_token="local-refresh", generation=0
+            )
     return snapshot
 
 
@@ -6070,11 +6769,8 @@ def collect_daily_fund_prices(
         if backfilled:
             snapshot["source_metadata"]["daily_return_local_fallback_count"] = backfilled
         snapshot["source_metadata"]["reference_data"] = _upsert_fund_reference_data(processed_dir, snapshot_rows)
-        # In Postgres mode the refresh job owns the latest catalogue and
-        # commits it with generation fencing. The collector only updates the
-        # separate price-history store there.
-        if not database_enabled():
-            _write_json(_snapshot_path(processed_dir), snapshot)
+        # The collector writes history only. Catalogue refreshes own the row
+        # snapshot, while current list prices are overlaid from fund_prices.
 
     skipped_warnings = [
         str(item.get("warning") or "invalid_price_row")
@@ -6179,6 +6875,87 @@ def _sort_rows(rows: List[Dict[str, Any]], sort: str, order: str) -> List[Dict[s
     return ordered
 
 
+def _query_fund_snapshot_rows(
+    processed_dir: Path,
+    *,
+    q: Optional[str],
+    fund_type: Optional[str],
+    founder: Optional[str],
+    manager: Optional[str],
+    risk: Optional[str],
+    sort: str,
+    order: str,
+    min_aum: Optional[float],
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Filter and sort the current catalogue in SQL, returning only matches."""
+
+    conditions: List[str] = []
+    params: List[Any] = []
+    if TEFAS_OPEN_ONLY:
+        conditions.append("(tefas_open IS NULL OR tefas_open = 1)")
+    if min_aum is not None and min_aum > 0:
+        conditions.append("aum >= ?")
+        params.append(float(min_aum))
+    for value, column in (
+        (fund_type, "fund_type_key"),
+        (founder, "founder_key"),
+        (manager, "manager_key"),
+        (risk, "risk_key"),
+    ):
+        if value:
+            conditions.append(f"{column} = ?")
+            params.append(str(value).strip().lower())
+    needle = q.strip().lower() if q else ""
+    if needle:
+        if database_enabled():
+            conditions.append("strpos(search_text, ?) > 0")
+        else:
+            conditions.append("instr(search_text, ?) > 0")
+        params.append(needle)
+
+    where_sql = " WHERE " + " AND ".join(conditions) if conditions else ""
+    sort_columns = {
+        "fund_code": "fund_code_sort",
+        "name": "name_sort",
+        "fund_type": "fund_type_sort",
+        "founder_company": "founder_sort",
+        "manager_company": "manager_sort",
+        "price": "price",
+        "daily_return": "daily_return",
+        "risk_value": "risk_value_num",
+        "aum": "aum",
+        "investor_count": "investor_count",
+        "as_of": "as_of",
+    }
+    sort_column = sort_columns.get(sort, "fund_code_sort")
+    direction = "DESC" if order.lower() == "desc" else "ASC"
+    text_sort = sort in {
+        "fund_code", "name", "fund_type", "founder_company", "manager_company"
+    }
+    if text_sort:
+        collation = '"C"' if database_enabled() else "BINARY"
+        sort_expression = f"{sort_column} COLLATE {collation}"
+    else:
+        sort_expression = sort_column
+    tie_order = "DESC" if text_sort and direction == "DESC" else "ASC"
+    order_by = f"({sort_column} IS NULL) ASC, {sort_expression} {direction}, row_order {tie_order}"
+    with _connect_fund_prices_db(processed_dir) as conn:
+        matching_row = conn.execute(
+            f"SELECT COUNT(*) AS row_count FROM fund_snapshots{where_sql}",
+            tuple(params),
+        ).fetchone()
+        matching_count = int(
+            matching_row.get("row_count") or 0
+            if isinstance(matching_row, dict)
+            else matching_row["row_count"]
+        )
+        records = conn.execute(
+            f"SELECT * FROM fund_snapshots{where_sql} ORDER BY {order_by}",
+            tuple(params),
+        ).fetchall()
+    return [_snapshot_row_from_record(record) for record in records], matching_count
+
+
 def _refresh_funds_snapshot_if_stale(processed_dir: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not snapshot.get("stale"):
         return snapshot
@@ -6238,7 +7015,7 @@ def get_funds_payload(
     include_revision: bool = False,
 ) -> Dict[str, Any] | Tuple[Dict[str, Any], Dict[str, Any]]:
     started = time.perf_counter()
-    snapshot = load_funds_snapshot(processed_dir)
+    snapshot = load_funds_snapshot(processed_dir, include_rows=False)
     snapshot_loaded = time.perf_counter()
     # A previously failed weekend refresh may already be stored. Present the
     # Friday/last-business-day snapshot as current instead of alarming users.
@@ -6246,14 +7023,33 @@ def get_funds_payload(
         snapshot = _mark_snapshot_current_for_market_closure(snapshot)
     if auto_refresh:
         snapshot = _refresh_funds_snapshot_if_stale(processed_dir, snapshot)
-    rows = [
-        row
-        for row in list(snapshot.get("rows") or [])
-        if isinstance(row, dict)
-        and _is_tefas_open_row(row)
-        and _meets_min_aum(row, min_aum)
-        and _row_matches(row, q=q, fund_type=fund_type, founder=founder, manager=manager, risk=risk)
-    ]
+    row_store_active = bool(
+        isinstance(snapshot.get("source_metadata"), dict)
+        and snapshot["source_metadata"].get("catalog_storage") == "fund_snapshots"
+    )
+    if row_store_active:
+        rows, filtered_count = _query_fund_snapshot_rows(
+            processed_dir,
+            q=q,
+            fund_type=fund_type,
+            founder=founder,
+            manager=manager,
+            risk=risk,
+            sort=sort,
+            order=order,
+            min_aum=min_aum,
+        )
+        rows = _overlay_latest_price_history(processed_dir, {"rows": rows}).get("rows") or []
+    else:
+        rows = [
+            row
+            for row in list(snapshot.get("rows") or [])
+            if isinstance(row, dict)
+            and _is_tefas_open_row(row)
+            and _meets_min_aum(row, min_aum)
+            and _row_matches(row, q=q, fund_type=fund_type, founder=founder, manager=manager, risk=risk)
+        ]
+        filtered_count = len(rows)
     filtered = time.perf_counter()
     if include_revision:
         rows, daily_price_revision = _apply_daily_return_overrides(
@@ -6265,8 +7061,13 @@ def get_funds_payload(
     else:
         rows = _apply_daily_return_overrides(processed_dir, rows, include_missing=True)
         daily_price_revision = None
+    # These fields can be replaced by newer fund_prices rows after the SQL
+    # query, so restore the legacy order using the values the API returns.
+    if row_store_active and sort in {"price", "daily_return", "as_of"}:
+        rows = _sort_rows(rows, sort, order)
     reconciled = time.perf_counter()
-    rows = _sort_rows(rows, sort, order)
+    if not row_store_active:
+        rows = _sort_rows(rows, sort, order)
     finished = time.perf_counter()
     logging.getLogger("uvicorn.error").info(
         "fund_catalog rows=%d snapshot_ms=%.1f filter_ms=%.1f returns_ms=%.1f sort_ms=%.1f total_ms=%.1f",
@@ -6278,8 +7079,8 @@ def get_funds_payload(
     payload = {
         "status": snapshot.get("status") or ("ok" if rows else "empty"),
         "rows": rows,
-        "count": len(rows),
-        "total_count": len(snapshot.get("rows") or []),
+        "count": filtered_count,
+        "total_count": int(snapshot.get("total_count") or snapshot.get("count") or filtered_count),
         "source": _public_price_source(str(snapshot.get("source") or TEFASFON_FUNDS_SOURCE)),
         "source_url": snapshot.get("source_url", TEFASFON_SOURCE_URL),
         "as_of": snapshot.get("as_of"),
@@ -6292,41 +7093,68 @@ def get_funds_payload(
     if not include_revision:
         return payload
 
-    snapshot_path = _snapshot_path(processed_dir)
-    try:
-        stat = snapshot_path.stat()
-        snapshot_file_revision = (stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        snapshot_file_revision = None
     source_revision = {
+        "snapshot_generation": snapshot.get("snapshot_generation")
+        or (snapshot.get("source_metadata") or {}).get("snapshot_generation"),
         "snapshot_fetched_at": snapshot.get("fetched_at"),
         "snapshot_as_of": snapshot.get("as_of"),
-        "snapshot_file": snapshot_file_revision,
         "daily_price_history": daily_price_revision,
     }
     return payload, source_revision
 
 
 def get_fund_categories_payload(processed_dir: Path) -> Dict[str, Any]:
-    snapshot = load_funds_snapshot(processed_dir)
-    rows = [
-        row
-        for row in list(snapshot.get("rows") or [])
-        if isinstance(row, dict) and _is_tefas_open_row(row) and _meets_min_aum(row, FUNDS_LIST_MIN_AUM)
-    ]
+    snapshot = load_funds_snapshot(processed_dir, include_rows=False)
     meta = dict(snapshot.get("source_metadata") or {})
     meta["list_min_aum"] = FUNDS_LIST_MIN_AUM
-
-    def unique(key: str) -> List[str]:
-        values = sorted({str(row.get(key)).strip() for row in rows if row.get(key)})
-        return values
-
-    risk_values = sorted({int(row["risk_value"]) for row in rows if isinstance(row.get("risk_value"), int)})
+    row_store_active = meta.get("catalog_storage") == "fund_snapshots"
+    if row_store_active:
+        conditions: List[str] = []
+        params: List[Any] = []
+        if TEFAS_OPEN_ONLY:
+            conditions.append("(tefas_open IS NULL OR tefas_open = 1)")
+        if FUNDS_LIST_MIN_AUM > 0:
+            conditions.append("aum >= ?")
+            params.append(FUNDS_LIST_MIN_AUM)
+        where_sql = " WHERE " + " AND ".join(conditions) if conditions else ""
+        with _connect_fund_prices_db(processed_dir) as conn:
+            records = conn.execute(
+                "SELECT DISTINCT fund_type, founder_company, manager_company, risk_value_json "
+                f"FROM fund_snapshots{where_sql}",
+                tuple(params),
+            ).fetchall()
+        unique_values: Dict[str, set[str]] = {
+            "fund_type": set(),
+            "founder_company": set(),
+            "manager_company": set(),
+        }
+        risk_set: set[int] = set()
+        for record in records:
+            for key in unique_values:
+                value = record[key]
+                if value:
+                    unique_values[key].add(str(value).strip())
+            risk_value = _safe_json_loads(record["risk_value_json"], None)
+            if isinstance(risk_value, int):
+                risk_set.add(risk_value)
+        risk_values = sorted(risk_set)
+        category_values = {key: sorted(values) for key, values in unique_values.items()}
+    else:
+        rows = [
+            row
+            for row in list(snapshot.get("rows") or [])
+            if isinstance(row, dict) and _is_tefas_open_row(row) and _meets_min_aum(row, FUNDS_LIST_MIN_AUM)
+        ]
+        category_values = {
+            key: sorted({str(row.get(key)).strip() for row in rows if row.get(key)})
+            for key in ("fund_type", "founder_company", "manager_company")
+        }
+        risk_values = sorted({int(row["risk_value"]) for row in rows if isinstance(row.get("risk_value"), int)})
     return {
         "status": snapshot.get("status") or "unavailable",
-        "fund_types": unique("fund_type"),
-        "founder_companies": unique("founder_company"),
-        "manager_companies": unique("manager_company"),
+        "fund_types": category_values["fund_type"],
+        "founder_companies": category_values["founder_company"],
+        "manager_companies": category_values["manager_company"],
         "risk_values": risk_values,
         "source_metadata": meta,
     }
@@ -6345,28 +7173,54 @@ def _fund_reference_metadata(processed_dir: Path, fund_code: str) -> Dict[str, A
 
 def _find_fund_row(processed_dir: Path, fund_code: str) -> Optional[Dict[str, Any]]:
     normalized = normalize_fund_code(fund_code)
-    snapshot = load_funds_snapshot(processed_dir)
-    for row in list(snapshot.get("rows") or []):
-        if (
-            isinstance(row, dict)
-            and _is_tefas_open_row(row)
-            and normalize_fund_code(str(row.get("fund_code") or "")) == normalized
-        ):
-            row = dict(row)
-            # Backfill management fee / tax fields from reference_data so a stale
-            # snapshot keeps surfacing the last-known values when the fund detail
-            # endpoint is hit.
-            ref_meta = _fund_reference_metadata(processed_dir, normalized)
-            for key in (
-                "management_fee_applied",
-                "management_fee_prospectus",
-                "total_expense_ratio",
-                "tax_info",
-            ):
-                if row.get(key) is None and ref_meta.get(key) is not None:
-                    row[key] = ref_meta[key]
-            return _apply_daily_return_overrides(processed_dir, [row], include_missing=True)[0]
-    return None
+    snapshot = load_funds_snapshot(
+        processed_dir,
+        include_rows=False,
+        include_price_metadata=False,
+    )
+    metadata = snapshot.get("source_metadata") if isinstance(snapshot.get("source_metadata"), dict) else {}
+    if metadata.get("catalog_storage") == "fund_snapshots":
+        where = "fund_code = ?"
+        params: List[Any] = [normalized]
+        if TEFAS_OPEN_ONLY:
+            where += " AND (tefas_open IS NULL OR tefas_open = 1)"
+        found = _read_fund_snapshot_rows(
+            processed_dir,
+            where=where,
+            params=params,
+        )
+        row = found[0] if found else None
+    else:
+        # Legacy/empty catalogues have not been migrated into the row store;
+        # keep their existing full-snapshot fallback until a valid refresh.
+        legacy_snapshot = load_funds_snapshot(processed_dir, include_rows=True)
+        row = next(
+            (
+                dict(candidate)
+                for candidate in list(legacy_snapshot.get("rows") or [])
+                if isinstance(candidate, dict)
+                and _is_tefas_open_row(candidate)
+                and normalize_fund_code(str(candidate.get("fund_code") or "")) == normalized
+            ),
+            None,
+        )
+    if row is None:
+        return None
+    overlaid = _overlay_latest_price_history(processed_dir, {"rows": [row]}).get("rows") or []
+    if overlaid:
+        row = overlaid[0]
+    # Backfill management fee / tax fields from reference_data so a stale
+    # snapshot keeps surfacing the last-known values on the detail endpoint.
+    ref_meta = _fund_reference_metadata(processed_dir, normalized)
+    for key in (
+        "management_fee_applied",
+        "management_fee_prospectus",
+        "total_expense_ratio",
+        "tax_info",
+    ):
+        if row.get(key) is None and ref_meta.get(key) is not None:
+            row[key] = ref_meta[key]
+    return _apply_daily_return_overrides(processed_dir, [row], include_missing=True)[0]
 
 
 def _fund_return_rank_value(row: Dict[str, Any], key: str) -> Optional[float]:
@@ -6376,26 +7230,39 @@ def _fund_return_rank_value(row: Dict[str, Any], key: str) -> Optional[float]:
     return _coerce_float(period_returns.get(key))
 
 
-def _fund_category_rankings(snapshot: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
+def _fund_category_rankings(
+    snapshot: Dict[str, Any],
+    row: Dict[str, Any],
+    *,
+    processed_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
     category = str(row.get("fund_type") or "").strip()
     normalized_code = normalize_fund_code(str(row.get("fund_code") or ""))
     if not category or not normalized_code:
         return {"category": category or None, "category_total": 0, "as_of": snapshot.get("as_of"), "items": []}
 
-    category_rows: List[Dict[str, Any]] = []
-    seen_codes: set[str] = set()
-    for candidate in list(snapshot.get("rows") or []):
-        if not isinstance(candidate, dict):
-            continue
-        candidate_code = normalize_fund_code(str(candidate.get("fund_code") or ""))
-        if not candidate_code or candidate_code in seen_codes:
-            continue
-        if str(candidate.get("fund_type") or "").strip() != category:
-            continue
-        if not _is_tefas_open_row(candidate) or not _meets_min_aum(candidate, FUNDS_LIST_MIN_AUM):
-            continue
-        seen_codes.add(candidate_code)
-        category_rows.append(candidate)
+    snapshot_meta = snapshot.get("source_metadata") if isinstance(snapshot.get("source_metadata"), dict) else {}
+    if processed_dir is not None and snapshot_meta.get("catalog_storage") == "fund_snapshots":
+        category_rows = _read_fund_snapshot_category_returns(
+            processed_dir,
+            fund_type=category,
+            min_aum=FUNDS_LIST_MIN_AUM,
+        )
+    else:
+        category_rows = []
+        seen_codes: set[str] = set()
+        for candidate in list(snapshot.get("rows") or []):
+            if not isinstance(candidate, dict):
+                continue
+            candidate_code = normalize_fund_code(str(candidate.get("fund_code") or ""))
+            if not candidate_code or candidate_code in seen_codes:
+                continue
+            if str(candidate.get("fund_type") or "").strip() != category:
+                continue
+            if not _is_tefas_open_row(candidate) or not _meets_min_aum(candidate, FUNDS_LIST_MIN_AUM):
+                continue
+            seen_codes.add(candidate_code)
+            category_rows.append(candidate)
 
     metrics = [
         ("1m", "Aylık Getiri"),
@@ -6443,7 +7310,11 @@ def get_fund_detail_payload(processed_dir: Path, fund_code: str) -> Dict[str, An
     row = _find_fund_row(processed_dir, normalized)
     if not row:
         raise KeyError(normalized)
-    snapshot = load_funds_snapshot(processed_dir)
+    snapshot = load_funds_snapshot(
+        processed_dir,
+        include_rows=False,
+        include_price_metadata=False,
+    )
     applied = row.get("management_fee_applied")
     prospectus = row.get("management_fee_prospectus")
     ter = row.get("total_expense_ratio")
@@ -6473,7 +7344,7 @@ def get_fund_detail_payload(processed_dir: Path, fund_code: str) -> Dict[str, An
         "tax_info": tax_info,
         "fintables_url": f"{FINTABLES_FUND_BASE_URL}/{normalized}",
         "kap_url": None,
-        "category_rankings": _fund_category_rankings(snapshot, row),
+        "category_rankings": _fund_category_rankings(snapshot, row, processed_dir=processed_dir),
         "source_metadata": snapshot.get("source_metadata") or {},
     }
 

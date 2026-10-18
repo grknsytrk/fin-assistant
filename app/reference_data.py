@@ -651,7 +651,11 @@ def sync_reference_data_from_caches(processed_dir: Path) -> Dict[str, Any]:
     _BOOTSTRAPPED_PROCESSED_DIRS.add(path_key)
 
     records: List[Dict[str, Any]] = []
-    funds_payload = _read_json_dict(Path(processed_dir) / "funds_cache" / "funds_latest.json")
+    # The fund catalogue is stored as normalized rows after the snapshot-store
+    # migration, so do not depend on a monolithic JSON file here.
+    from app.fund_service import load_funds_snapshot
+
+    funds_payload = load_funds_snapshot(processed_dir)
     rows = funds_payload.get("rows") if isinstance(funds_payload, dict) else None
     if isinstance(rows, list):
         for row in rows:

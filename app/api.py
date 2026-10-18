@@ -57,10 +57,16 @@ def bootstrap_application_storage() -> None:
     ensure_refresh_lease_schema()
     ensure_kap_flow_schema()
     ensure_reference_data_schema(CONFIG.paths.processed_dir)
-    from app.fund_service import ensure_fund_prices_schema
+    from app.fund_service import (
+        ensure_fund_prices_schema,
+        ensure_fund_snapshot_store,
+        prune_fund_snapshot_rollback_copy,
+    )
 
     ensure_fund_prices_schema(CONFIG.paths.processed_dir)
     hydrate_json_cache(CONFIG.paths.processed_dir)
+    ensure_fund_snapshot_store(CONFIG.paths.processed_dir)
+    prune_fund_snapshot_rollback_copy(CONFIG.paths.processed_dir)
     sync_reference_data_from_caches(CONFIG.paths.processed_dir)
     ensure_financial_snapshot_schema(CONFIG.paths.processed_dir)
     snapshot_sync = sync_financial_snapshots_from_kap_cache(CONFIG.paths.processed_dir)
