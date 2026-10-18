@@ -126,6 +126,31 @@ export interface MarketStocksResponse {
   partial_message?: string | null;
 }
 
+export interface MarketStockDeltaItem {
+  company: string;
+  price?: number | null;
+  price_currency?: string | null;
+  change?: number | null;
+  change_pct?: number | null;
+  price_as_of?: string | null;
+  volume?: number | null;
+  market_cap?: number | null;
+  return_1w_pct?: number | null;
+  return_1m_pct?: number | null;
+  return_3m_pct?: number | null;
+  return_6m_pct?: number | null;
+  return_ytd_pct?: number | null;
+  return_1y_pct?: number | null;
+}
+
+export interface MarketStocksDeltaEvent {
+  index: MarketStockIndex;
+  as_of: string;
+  market_open: boolean;
+  count: number;
+  rows: MarketStockDeltaItem[];
+}
+
 export interface MarketStockSearchResponse {
   index: MarketStockIndex;
   query: string;

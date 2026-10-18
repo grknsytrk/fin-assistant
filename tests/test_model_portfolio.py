@@ -11,6 +11,7 @@ import app.api as api_mod
 from app.model_portfolio_service import (
     compound_relative_return_pct,
     compute_target_progress_pct,
+    reset_admin_rate_limit_for_tests,
     reset_model_portfolio_cache_for_tests,
 )
 
@@ -29,6 +30,7 @@ from dataclasses import replace
 
 def test_model_portfolio_lifecycle_and_cache_reuse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     reset_model_portfolio_cache_for_tests()
+    reset_admin_rate_limit_for_tests()
     monkeypatch.delenv("RAGFIN_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setattr(
@@ -119,11 +121,13 @@ def test_model_portfolio_lifecycle_and_cache_reuse(tmp_path: Path, monkeypatch: 
     )
     assert verify_res.status_code == 200
     assert verify_res.json()["ok"] is True
+    session_token = verify_res.json()["session_token"]
+    auth_headers = {"Authorization": f"Bearer {session_token}"}
 
     # 3. Create position using warm cache
     create_res = client.post(
         "/model-portfolio/positions",
-        headers={"X-Admin-Token": "test-founder-secret"},
+        headers=auth_headers,
         json={
             "symbol": "THYAO",
             "entry_date": "2026-09-01",
@@ -173,7 +177,7 @@ def test_model_portfolio_lifecycle_and_cache_reuse(tmp_path: Path, monkeypatch: 
     pos_id = pos["id"]
     upd_res = client.put(
         f"/model-portfolio/positions/{pos_id}",
-        headers={"X-Admin-Token": "test-founder-secret"},
+        headers=auth_headers,
         json={
             "target_price": 480.0,
             "weight_pct": 30.0,
@@ -190,7 +194,7 @@ def test_model_portfolio_lifecycle_and_cache_reuse(tmp_path: Path, monkeypatch: 
     # 7. Close position and verify Hit Rate
     close_res = client.post(
         f"/model-portfolio/positions/{pos_id}/close",
-        headers={"X-Admin-Token": "test-founder-secret"},
+        headers=auth_headers,
         json={"exit_price": 360.0, "exit_xu100": 10500.0, "close_reason": "Hedef Fiyata Yakınsama"},
     )
     assert close_res.status_code == 200
@@ -213,3 +217,68 @@ def test_model_portfolio_lifecycle_and_cache_reuse(tmp_path: Path, monkeypatch: 
         headers={"X-Admin-Token": "test-founder-secret"},
     )
     assert locked_res.status_code == 429
+
+
+def test_bist_market_hours_and_sse_delta_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime, timedelta, timezone
+    import json
+
+    trt = timezone(timedelta(hours=3))
+    # Wednesday 14:30 TRT -> Open
+    wed_open = datetime(2026, 10, 14, 14, 30, tzinfo=trt)
+    assert api_mod._is_bist_market_open(wed_open) is True
+    assert api_mod._effective_market_quotes_fresh_ttl(wed_open) == 3
+
+    # Wednesday 20:00 TRT -> Closed (Off-hours)
+    wed_night = datetime(2026, 10, 14, 20, 0, tzinfo=trt)
+    assert api_mod._is_bist_market_open(wed_night) is False
+    assert api_mod._effective_market_quotes_fresh_ttl(wed_night) >= 300
+
+    # Sunday 12:00 TRT -> Closed (Weekend)
+    sun_noon = datetime(2026, 10, 18, 12, 0, tzinfo=trt)
+    assert api_mod._is_bist_market_open(sun_noon) is False
+
+    # Delta computation only returns changed rows
+    rows_tick_1 = [
+        {"company": "BIMAS", "price": 510.0, "change": 5.0, "change_pct": 0.99, "volume": 1000.0, "market_cap": 300e9},
+        {"company": "THYAO", "price": 310.0, "change": 2.0, "change_pct": 0.65, "volume": 2000.0, "market_cap": 420e9},
+    ]
+    changed_1, snap_1 = api_mod._compute_market_stocks_delta({}, rows_tick_1)
+    assert len(changed_1) == 2
+
+    rows_tick_2 = [
+        {"company": "BIMAS", "price": 512.5, "change": 7.5, "change_pct": 1.48, "volume": 1200.0, "market_cap": 301e9},
+        {"company": "THYAO", "price": 310.0, "change": 2.0, "change_pct": 0.65, "volume": 2000.0, "market_cap": 420e9},
+    ]
+    changed_2, snap_2 = api_mod._compute_market_stocks_delta(snap_1, rows_tick_2)
+    assert len(changed_2) == 1
+    assert changed_2[0]["company"] == "BIMAS"
+    assert changed_2[0]["price"] == 512.5
+
+    # Tick 3 with no changes emits 0 rows
+    changed_3, _ = api_mod._compute_market_stocks_delta(snap_2, rows_tick_2)
+    assert changed_3 == []
+
+    # Verify GET /market/stream?index=XUTUM&once=true SSE endpoint
+    monkeypatch.setattr(
+        api_mod,
+        "_market_stocks_payload",
+        lambda index_name="XUTUM", force_refresh=False: {
+            "index": index_name,
+            "as_of": "2026-10-18T15:00:00+00:00",
+            "rows": rows_tick_2,
+        },
+    )
+    client = TestClient(api_mod.app)
+    res = client.get("/market/stream?index=XUTUM&once=true")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/event-stream")
+    body_text = res.text
+    assert "event: stocks_delta" in body_text
+    data_line = next(line for line in body_text.splitlines() if line.startswith("data: "))
+    parsed = json.loads(data_line[len("data: "):])
+    assert parsed["index"] == "XUTUM"
+    assert parsed["count"] == 2
+    assert parsed["rows"][0]["company"] == "BIMAS"
+
+

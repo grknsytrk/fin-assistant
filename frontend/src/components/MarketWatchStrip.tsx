@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiClient } from '../api/client';
 import type { MarketWatchItem, MarketWatchResponse } from '../api/types';
 import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
+import { getAdaptiveRefreshMs } from '../utils/marketHours';
 import './MarketWatchStrip.css';
 
 const PRIMARY_SYMBOLS = ['XUTUM', 'XU100', 'XU030', 'USD/TRY', 'EUR/TRY'] as const;
@@ -169,13 +170,36 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
 
     useEffect(() => {
         void loadWatch(marketWatchMemoryCache ? { silent: true } : undefined);
-        const timer = window.setInterval(() => {
-            if (document.visibilityState === 'visible') {
+        let pollTimer: number | null = null;
+        const scheduleAdaptiveTimer = () => {
+            if (pollTimer !== null) {
+                window.clearInterval(pollTimer);
+                pollTimer = null;
+            }
+            const intervalMs = getAdaptiveRefreshMs('global_fx');
+            if (intervalMs !== null) {
+                pollTimer = window.setInterval(() => {
+                    if (document.visibilityState === 'visible') {
+                        void loadWatch({ silent: true });
+                    }
+                }, intervalMs);
+            }
+        };
+        scheduleAdaptiveTimer();
+        const phaseCheckTimer = window.setInterval(scheduleAdaptiveTimer, 60_000);
+        const onVisibilityChange = () => {
+            scheduleAdaptiveTimer();
+            if (document.visibilityState === 'visible' && getAdaptiveRefreshMs('global_fx') !== null) {
                 void loadWatch({ silent: true });
             }
-        }, 3000);
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        const timer = pollTimer ?? undefined;
         return () => {
-            window.clearInterval(timer);
+            if (pollTimer !== null) window.clearInterval(pollTimer);
+            window.clearInterval(phaseCheckTimer);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            void timer;
         };
     }, [loadWatch]);
 

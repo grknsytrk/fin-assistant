@@ -40,6 +40,14 @@
     line-height: 1.48;
 }
 
+.mp-update-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.32rem;
+    color: var(--text-muted);
+    font-size: 0.71rem;
+}
+
 .mp-toolbar-actions {
     display: inline-flex;
     align-items: center;
@@ -243,7 +251,7 @@
 /* 5-Card KPI Strip */
 .mp-kpi-strip {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
     gap: 0.65rem;
 }
 
@@ -274,6 +282,11 @@
     color: var(--text-primary);
 }
 
+.mp-kpi-card .mp-kpi-empty-value {
+    font-family: var(--font-sans);
+    font-size: 1rem;
+}
+
 .mp-kpi-sub {
     font-size: 0.72rem;
     color: var(--text-secondary);
@@ -297,7 +310,7 @@
 
 .mp-analytics-grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr));
     gap: 0.8rem;
 }
 
@@ -326,6 +339,14 @@
     font-size: 0.92rem;
     font-weight: 600;
     color: var(--text-primary);
+}
+
+.mp-chart-note {
+    margin: 0.34rem 0 0;
+    max-width: 68ch;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    line-height: 1.4;
 }
 
 /* Range Tabs */
@@ -717,6 +738,7 @@
 .mp-table-wrap {
     width: 100%;
     overflow-x: auto;
+    overscroll-behavior-x: contain;
 }
 
 .mp-table {
@@ -766,8 +788,19 @@
     background: var(--surface-hover);
 }
 
+.mp-row:focus-visible,
+.mp-table-wrap:focus-visible,
+.mp-perf-svg:focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: -2px;
+}
+
 .mp-row.is-selected {
     background: rgba(59, 130, 246, 0.09);
+}
+
+.mp-table-scroll-hint {
+    display: none;
 }
 
 .mp-stock-cell {
@@ -2124,6 +2157,34 @@
 
     .mp-allocation-body {
         grid-template-columns: 1fr;
+    }
+
+    .mp-table-scroll-hint {
+        display: block;
+        margin: 0.65rem 0.8rem 0.25rem;
+        color: var(--text-muted);
+        font-size: 0.7rem;
+    }
+
+    .mp-active-table {
+        min-width: 1080px;
+    }
+
+    .mp-closed-table {
+        min-width: 900px;
+    }
+
+    .mp-table th:first-child,
+    .mp-table td:first-child {
+        position: sticky;
+        left: 0;
+        z-index: 1;
+        background: var(--surface-color);
+    }
+
+    .mp-table th:first-child {
+        z-index: 2;
+        background: #0a0c0f;
     }
 
     .mp-closed-scorecard,

@@ -5,6 +5,8 @@ import type {
     KapValuationHistoryResponse,
     MarketUniverseResponse,
     MarketStocksResponse,
+    MarketStockDeltaItem,
+    MarketStocksDeltaEvent,
     MarketStockSearchResponse,
     MarketStockIndex,
     MarketIndexCode,
@@ -63,10 +65,201 @@ const marketFlowInFlight = new Map<string, Promise<MarketFlowResponse>>();
 const MARKET_UNIVERSE_MEMORY_CACHE_TTL_MS = 60_000;
 const marketUniverseMemoryCache = new Map<string, { payload: MarketUniverseResponse; fetchedAt: number }>();
 const marketUniverseInFlight = new Map<string, Promise<MarketUniverseResponse>>();
+import { isBistTradingHours } from '../utils/marketHours';
+
 const MARKET_STOCKS_MEMORY_CACHE_TTL_MS = 3_000;
+const MARKET_STOCKS_OFFHOURS_MEMORY_CACHE_TTL_MS = 60_000;
 const marketStocksMemoryCache = new Map<string, { payload: MarketStocksResponse; fetchedAt: number }>();
 const marketStocksInFlight = new Map<string, Promise<MarketStocksResponse>>();
 const marketStocksListeners = new Set<(index: MarketStockIndex, payload: MarketStocksResponse) => void>();
+
+interface MarketStocksStreamHandle {
+    refCount: number;
+    source: EventSource | null;
+    connected: boolean;
+    cleanupListeners: (() => void) | null;
+}
+
+const marketStocksStreams = new Map<MarketStockIndex, MarketStocksStreamHandle>();
+
+function mergeDeltaIntoPayload(
+    basePayload: MarketStocksResponse,
+    deltaMap: Map<string, MarketStockDeltaItem>,
+    asOf?: string,
+): { nextPayload: MarketStocksResponse; changed: boolean } {
+    let anyRowChanged = false;
+    const nextRows = basePayload.rows.map((row) => {
+        const sym = String(row.company || row.symbol || '').trim().toUpperCase();
+        const delta = deltaMap.get(sym);
+        if (!delta) return row;
+        anyRowChanged = true;
+        return {
+            ...row,
+            ...(delta.price !== undefined ? { price: delta.price } : {}),
+            ...(delta.price_currency !== undefined ? { price_currency: delta.price_currency } : {}),
+            ...(delta.change !== undefined ? { change: delta.change } : {}),
+            ...(delta.change_pct !== undefined ? { change_pct: delta.change_pct } : {}),
+            ...(delta.price_as_of !== undefined ? { price_as_of: delta.price_as_of } : {}),
+            ...(delta.volume !== undefined ? { volume: delta.volume } : {}),
+            ...(delta.market_cap !== undefined ? { market_cap: delta.market_cap } : {}),
+            ...(delta.return_1w_pct !== undefined ? { return_1w_pct: delta.return_1w_pct } : {}),
+            ...(delta.return_1m_pct !== undefined ? { return_1m_pct: delta.return_1m_pct } : {}),
+            ...(delta.return_3m_pct !== undefined ? { return_3m_pct: delta.return_3m_pct } : {}),
+            ...(delta.return_6m_pct !== undefined ? { return_6m_pct: delta.return_6m_pct } : {}),
+            ...(delta.return_ytd_pct !== undefined ? { return_ytd_pct: delta.return_ytd_pct } : {}),
+            ...(delta.return_1y_pct !== undefined ? { return_1y_pct: delta.return_1y_pct } : {}),
+        };
+    });
+    if (!anyRowChanged) {
+        return { nextPayload: basePayload, changed: false };
+    }
+    return {
+        changed: true,
+        nextPayload: {
+            ...basePayload,
+            rows: nextRows,
+            as_of: asOf || basePayload.as_of,
+            quote_status: 'fresh',
+            stale: false,
+        },
+    };
+}
+
+function applyMarketStocksDeltaInternal(
+    index: MarketStockIndex,
+    deltaEvent: MarketStocksDeltaEvent,
+): MarketStocksResponse | null {
+    if (!deltaEvent || !Array.isArray(deltaEvent.rows) || deltaEvent.rows.length === 0) {
+        return marketStocksMemoryCache.get(index)?.payload || null;
+    }
+    const deltaMap = new Map<string, MarketStockDeltaItem>();
+    for (const item of deltaEvent.rows) {
+        const sym = String(item?.company || '').trim().toUpperCase();
+        if (sym) deltaMap.set(sym, item);
+    }
+    if (deltaMap.size === 0) {
+        return marketStocksMemoryCache.get(index)?.payload || null;
+    }
+
+    const now = Date.now();
+    const targetIndices: MarketStockIndex[] =
+        index === 'XUTUM' ? ['XUTUM', 'XU100', 'XU030'] : [index];
+
+    let primaryResult: MarketStocksResponse | null = null;
+    for (const targetIndex of targetIndices) {
+        const cached = marketStocksMemoryCache.get(targetIndex);
+        if (!cached) continue;
+        const { nextPayload, changed } = mergeDeltaIntoPayload(cached.payload, deltaMap, deltaEvent.as_of);
+        if (changed) {
+            marketStocksMemoryCache.set(targetIndex, { payload: nextPayload, fetchedAt: now });
+            for (const listener of marketStocksListeners) {
+                listener(targetIndex, nextPayload);
+            }
+        }
+        if (targetIndex === index) {
+            primaryResult = nextPayload;
+        }
+    }
+    return primaryResult || marketStocksMemoryCache.get(index)?.payload || null;
+}
+
+function retainMarketStocksStreamInternal(index: MarketStockIndex = 'XUTUM'): () => void {
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+        return () => {};
+    }
+    let handle = marketStocksStreams.get(index);
+    if (!handle) {
+        handle = { refCount: 0, source: null, connected: false, cleanupListeners: null };
+        marketStocksStreams.set(index, handle);
+    }
+    handle.refCount += 1;
+
+    const closeSource = () => {
+        if (!handle) return;
+        if (handle.source) {
+            try {
+                handle.source.close();
+            } catch {
+                // ignore
+            }
+            handle.source = null;
+        }
+        handle.connected = false;
+    };
+
+    const syncStreamState = () => {
+        if (!handle || handle.refCount <= 0) {
+            closeSource();
+            return;
+        }
+        const tabVisible = typeof document === 'undefined' || document.visibilityState !== 'hidden';
+        const marketOpen = isBistTradingHours();
+        if (!tabVisible || !marketOpen) {
+            closeSource();
+            return;
+        }
+        if (handle.source) return;
+        try {
+            const url = `${API_BASE}/market/stream?index=${encodeURIComponent(index)}`;
+            const es = new EventSource(url);
+            handle.source = es;
+            es.onopen = () => {
+                if (handle) handle.connected = true;
+            };
+            es.onerror = () => {
+                if (handle) handle.connected = false;
+            };
+            es.addEventListener('stocks_delta', (event: MessageEvent) => {
+                try {
+                    const parsed = JSON.parse(String(event.data || '{}')) as MarketStocksDeltaEvent;
+                    applyMarketStocksDeltaInternal(index, parsed);
+                } catch {
+                    // ignore malformed event
+                }
+            });
+        } catch {
+            closeSource();
+        }
+    };
+
+    if (!handle.cleanupListeners) {
+        const onVisibilityChange = () => syncStreamState();
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        const checkTimer = window.setInterval(syncStreamState, 30_000);
+        handle.cleanupListeners = () => {
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            window.clearInterval(checkTimer);
+        };
+    }
+
+    syncStreamState();
+
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        const current = marketStocksStreams.get(index);
+        if (!current) return;
+        current.refCount = Math.max(0, current.refCount - 1);
+        if (current.refCount === 0) {
+            if (current.cleanupListeners) {
+                current.cleanupListeners();
+                current.cleanupListeners = null;
+            }
+            if (current.source) {
+                try {
+                    current.source.close();
+                } catch {
+                    // ignore
+                }
+                current.source = null;
+            }
+            current.connected = false;
+            marketStocksStreams.delete(index);
+        }
+    };
+}
+
 let latestFundsCatalog: { payload: FundsResponse; fetchedAt: number } | null = null;
 let fundsCatalogInFlight: Promise<FundsResponse> | null = null;
 const fundsCatalogListeners = new Set<(payload: FundsResponse) => void>();
@@ -322,7 +515,10 @@ export const apiClient = {
     marketStocks: (options?: { index?: MarketStockIndex; refresh?: boolean }) => {
         const cacheKey = options?.index || 'XUTUM';
         const cached = marketStocksMemoryCache.get(cacheKey);
-        if (!options?.refresh && cached && Date.now() - cached.fetchedAt < MARKET_STOCKS_MEMORY_CACHE_TTL_MS) {
+        const memoryTtlMs = isBistTradingHours()
+            ? MARKET_STOCKS_MEMORY_CACHE_TTL_MS
+            : MARKET_STOCKS_OFFHOURS_MEMORY_CACHE_TTL_MS;
+        if (!options?.refresh && cached && Date.now() - cached.fetchedAt < memoryTtlMs) {
             return Promise.resolve(cached.payload);
         }
 
@@ -353,6 +549,12 @@ export const apiClient = {
             marketStocksListeners.delete(listener);
         };
     },
+    applyMarketStocksDelta: (index: MarketStockIndex, delta: MarketStocksDeltaEvent) =>
+        applyMarketStocksDeltaInternal(index, delta),
+    retainMarketStocksStream: (index: MarketStockIndex = 'XUTUM') =>
+        retainMarketStocksStreamInternal(index),
+    isMarketStocksStreamActive: (index: MarketStockIndex = 'XUTUM') =>
+        Boolean(marketStocksStreams.get(index)?.connected),
     marketStockSearch: (options: {
         q: string;
         index?: MarketStockIndex;
@@ -625,7 +827,7 @@ export const apiClient = {
         };
     },
     modelPortfolioVerifyAdmin: (token: string) =>
-        fetchApi<{ ok: boolean }>('/model-portfolio/admin/verify', {
+        fetchApi<{ ok: boolean; session_token: string; expires_in_seconds: number }>('/model-portfolio/admin/verify', {
             method: 'POST',
             headers: { 'X-Admin-Token': encodeURIComponent(token.trim()) },
             exposeErrorDetail: true,
@@ -641,7 +843,7 @@ export const apiClient = {
     modelPortfolioCreatePosition: (payload: ModelPortfolioPositionCreatePayload, token: string) =>
         fetchApi<ModelPortfolioResponse>('/model-portfolio/positions', {
             method: 'POST',
-            headers: { 'X-Admin-Token': encodeURIComponent(token.trim()) },
+            headers: { Authorization: `Bearer ${token.trim()}` },
             body: JSON.stringify(payload),
             exposeErrorDetail: true,
         }).then((res) => {
@@ -655,7 +857,7 @@ export const apiClient = {
     modelPortfolioUpdatePosition: (positionId: string, payload: ModelPortfolioPositionUpdatePayload, token: string) =>
         fetchApi<ModelPortfolioResponse>(`/model-portfolio/positions/${encodeURIComponent(positionId)}`, {
             method: 'PUT',
-            headers: { 'X-Admin-Token': encodeURIComponent(token.trim()) },
+            headers: { Authorization: `Bearer ${token.trim()}` },
             body: JSON.stringify(payload),
             exposeErrorDetail: true,
         }).then((res) => {
@@ -669,7 +871,7 @@ export const apiClient = {
     modelPortfolioClosePosition: (positionId: string, payload: ModelPortfolioPositionClosePayload, token: string) =>
         fetchApi<ModelPortfolioResponse>(`/model-portfolio/positions/${encodeURIComponent(positionId)}/close`, {
             method: 'POST',
-            headers: { 'X-Admin-Token': encodeURIComponent(token.trim()) },
+            headers: { Authorization: `Bearer ${token.trim()}` },
             body: JSON.stringify(payload),
             exposeErrorDetail: true,
         }).then((res) => {
@@ -683,7 +885,7 @@ export const apiClient = {
     modelPortfolioDeletePosition: (positionId: string, token: string) =>
         fetchApi<ModelPortfolioResponse>(`/model-portfolio/positions/${encodeURIComponent(positionId)}`, {
             method: 'DELETE',
-            headers: { 'X-Admin-Token': encodeURIComponent(token.trim()) },
+            headers: { Authorization: `Bearer ${token.trim()}` },
             exposeErrorDetail: true,
         }).then((res) => {
             modelPortfolioMemoryCache = { payload: res, fetchedAt: Date.now() };

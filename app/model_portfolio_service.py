@@ -10,6 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import base64
+import hashlib
+import hmac
 import secrets
 import threading
 import time
@@ -30,10 +33,9 @@ _MODEL_PORTFOLIO_STATE_CACHE: Dict[str, Dict[str, Any]] = {}
 _MODEL_PORTFOLIO_PERF_MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
 _PERF_MEMORY_TTL_SECONDS = 15 * 60
 
-_AUTH_LOCK = threading.Lock()
-_FAILED_ADMIN_ATTEMPTS: Dict[str, List[float]] = {}
 _ADMIN_MAX_FAILED_ATTEMPTS = 5
 _ADMIN_LOCKOUT_WINDOW_SECONDS = 10 * 60
+ADMIN_SESSION_TTL_SECONDS = 30 * 60
 _SYMBOL_RE = re.compile(r"^[A-Z0-9.]{1,12}$")
 
 
@@ -98,42 +100,101 @@ def expected_admin_token() -> str:
 
 
 def is_admin_locked_out(client_ip: str) -> bool:
-    ip = str(client_ip or "unknown").strip() or "unknown"
-    now = time.monotonic()
-    with _AUTH_LOCK:
-        attempts = [ts for ts in _FAILED_ADMIN_ATTEMPTS.get(ip, []) if now - ts < _ADMIN_LOCKOUT_WINDOW_SECONDS]
-        if attempts:
-            _FAILED_ADMIN_ATTEMPTS[ip] = attempts
-        else:
-            _FAILED_ADMIN_ATTEMPTS.pop(ip, None)
-        return len(attempts) >= _ADMIN_MAX_FAILED_ATTEMPTS
+    from app.rate_limit import rate_limit_count
+
+    return rate_limit_count(
+        _admin_auth_failure_key(client_ip),
+        window_seconds=_ADMIN_LOCKOUT_WINDOW_SECONDS,
+    ) >= _ADMIN_MAX_FAILED_ATTEMPTS
 
 
-def record_admin_auth_result(client_ip: str, success: bool) -> None:
+def _admin_auth_failure_key(client_ip: str) -> str:
     ip = str(client_ip or "unknown").strip() or "unknown"
-    now = time.monotonic()
-    with _AUTH_LOCK:
-        if success:
-            _FAILED_ADMIN_ATTEMPTS.pop(ip, None)
-            return
-        attempts = [ts for ts in _FAILED_ADMIN_ATTEMPTS.get(ip, []) if now - ts < _ADMIN_LOCKOUT_WINDOW_SECONDS]
-        attempts.append(now)
-        _FAILED_ADMIN_ATTEMPTS[ip] = attempts
+    identity = hashlib.sha256(ip.encode("utf-8")).hexdigest()
+    return f"model-portfolio-admin-failure:v1:{identity}"
+
+
+def record_admin_auth_result(client_ip: str, success: bool) -> Tuple[bool, int]:
+    from app.rate_limit import clear_rate_limit, consume_rate_limit
+
+    key = _admin_auth_failure_key(client_ip)
+    if success:
+        clear_rate_limit(key)
+        return True, 0
+    return consume_rate_limit(
+        key,
+        limit=_ADMIN_MAX_FAILED_ATTEMPTS,
+        window_seconds=_ADMIN_LOCKOUT_WINDOW_SECONDS,
+    )
 
 
 def reset_admin_rate_limit_for_tests() -> None:
-    with _AUTH_LOCK:
-        _FAILED_ADMIN_ATTEMPTS.clear()
+    from app.rate_limit import reset_local_rate_limits_for_tests
+
+    reset_local_rate_limits_for_tests()
 
 
 def verify_admin_token(token: Optional[str]) -> bool:
+    if token is not None and len(str(token)) > 512:
+        return False
     candidate = _clean_token_value(token)
-    if not candidate:
+    if not candidate or len(candidate) > 512:
         return False
     expected = expected_admin_token()
     if not expected:
         return False
     return secrets.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+
+
+def create_admin_session_token() -> Optional[str]:
+    expected = expected_admin_token()
+    if not expected:
+        return None
+    issued_at = int(time.time())
+    nonce = secrets.token_urlsafe(18)
+    payload = f"v1.{issued_at}.{nonce}"
+    signing_key = hmac.new(
+        expected.encode("utf-8"),
+        b"ragfin:model-portfolio:admin-session:v1",
+        hashlib.sha256,
+    ).digest()
+    signature = hmac.new(signing_key, payload.encode("ascii"), hashlib.sha256).digest()
+    encoded_signature = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    return f"{payload}.{encoded_signature}"
+
+
+def verify_admin_session_token(token: Optional[str], *, now: Optional[int] = None) -> bool:
+    candidate = str(token or "").strip()
+    if not candidate or len(candidate) > 256:
+        return False
+    parts = candidate.split(".")
+    if len(parts) != 4 or parts[0] != "v1":
+        return False
+    _, issued_at_raw, nonce, provided_signature = parts
+    if (
+        not re.fullmatch(r"[0-9]{1,12}", issued_at_raw)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", nonce)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43}", provided_signature)
+    ):
+        return False
+    issued_at = int(issued_at_raw)
+    current_time = int(time.time()) if now is None else int(now)
+    session_age = current_time - issued_at
+    if session_age < -30 or session_age >= ADMIN_SESSION_TTL_SECONDS:
+        return False
+
+    expected = expected_admin_token()
+    if not expected:
+        return False
+    payload = f"v1.{issued_at}.{nonce}"
+    signing_key = hmac.new(
+        expected.encode("utf-8"),
+        b"ragfin:model-portfolio:admin-session:v1",
+        hashlib.sha256,
+    ).digest()
+    expected_signature = hmac.new(signing_key, payload.encode("ascii"), hashlib.sha256).digest()
+    encoded_signature = base64.urlsafe_b64encode(expected_signature).decode("ascii").rstrip("=")
+    return secrets.compare_digest(provided_signature.encode("ascii"), encoded_signature.encode("ascii"))
 
 
 def _default_state() -> Dict[str, Any]:
@@ -696,6 +757,89 @@ def delete_position(processed_dir: Path, position_id: str) -> Dict[str, Any]:
         return removed
 
 
+_PUBLIC_POSITION_FIELDS = (
+    "id",
+    "symbol",
+    "company_name",
+    "sector",
+    "logo_url",
+    "logo_source",
+    "status",
+    "entry_date",
+    "entry_price",
+    "entry_xu100",
+    "weight_pct",
+    "target_price",
+    "horizon",
+    "rating",
+    "thesis",
+    "catalysts",
+    "risk_note",
+    "revisions",
+    "closed_date",
+    "exit_price",
+    "exit_xu100",
+    "close_reason",
+    "created_at",
+    "updated_at",
+)
+_PUBLIC_REVISION_FIELDS = (
+    "id",
+    "date",
+    "created_at",
+    "prev_target_price",
+    "new_target_price",
+    "prev_weight_pct",
+    "new_weight_pct",
+    "note",
+)
+_PUBLIC_CHANGELOG_FIELDS = (
+    "id",
+    "date",
+    "created_at",
+    "action",
+    "symbol",
+    "company_name",
+    "summary",
+)
+_PUBLIC_CHANGELOG_DETAIL_FIELDS = (
+    "entry_price",
+    "exit_price",
+    "return_pct",
+    "close_reason",
+    "target_price",
+    "weight_pct",
+    "prev_target_price",
+    "new_target_price",
+    "prev_weight_pct",
+    "new_weight_pct",
+    "note",
+)
+
+
+def _public_position_fields(raw_pos: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {key: raw_pos[key] for key in _PUBLIC_POSITION_FIELDS if key in raw_pos}
+    revisions = raw_pos.get("revisions")
+    payload["revisions"] = [
+        {key: revision[key] for key in _PUBLIC_REVISION_FIELDS if key in revision}
+        for revision in revisions[:50]
+        if isinstance(revision, dict)
+    ] if isinstance(revisions, list) else []
+    payload["catalysts"] = _normalize_catalysts(raw_pos.get("catalysts"))
+    return payload
+
+
+def _public_changelog_entry(raw_entry: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {key: raw_entry[key] for key in _PUBLIC_CHANGELOG_FIELDS if key in raw_entry}
+    details = raw_entry.get("details")
+    payload["details"] = (
+        {key: details[key] for key in _PUBLIC_CHANGELOG_DETAIL_FIELDS if key in details}
+        if isinstance(details, dict)
+        else {}
+    )
+    return payload
+
+
 def build_model_portfolio_payload(
     processed_dir: Path,
     *,
@@ -742,7 +886,7 @@ def build_model_portfolio_payload(
             )
             closed_rows.append(
                 {
-                    **raw_pos,
+                    **_public_position_fields(raw_pos),
                     "symbol": symbol,
                     "company_name": company_name,
                     "logo_url": logo_url,
@@ -786,7 +930,7 @@ def build_model_portfolio_payload(
 
         active_rows.append(
             {
-                **raw_pos,
+                **_public_position_fields(raw_pos),
                 "symbol": symbol,
                 "company_name": company_name,
                 "logo_url": logo_url,
@@ -893,7 +1037,11 @@ def build_model_portfolio_payload(
         },
         "active_positions": active_rows,
         "closed_positions": closed_rows,
-        "changelog": state["changelog"],
+        "changelog": [
+            _public_changelog_entry(entry)
+            for entry in state["changelog"][:200]
+            if isinstance(entry, dict)
+        ],
     }
 
 

@@ -34,6 +34,7 @@ import {
     retainMarketStockCardsForSymbols,
 } from '../utils/stockCardData';
 import { searchWatchlistFunds } from '../utils/watchlistData';
+import { isBistTradingHours } from '../utils/marketHours';
 import './MarketsView.css';
 
 type MarketSection = MarketsNavigationSection;
@@ -2692,9 +2693,13 @@ export default function MarketsView({
                 });
         };
         loadMobileIndex();
-        const intervalId = window.setInterval(loadMobileIndex, marketDetailRefreshMs);
+        const intervalId = window.setInterval(() => {
+            if (document.visibilityState === 'visible' && isBistTradingHours()) {
+                loadMobileIndex();
+            }
+        }, marketDetailRefreshMs);
         const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible') loadMobileIndex();
+            if (document.visibilityState === 'visible' && isBistTradingHours()) loadMobileIndex();
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
@@ -2989,11 +2994,11 @@ export default function MarketsView({
         setIndexDetailError(null);
         loadIndexDetail(false, false, selectedIndex);
         const intervalId = window.setInterval(() => {
-            if (document.visibilityState !== 'visible') return;
+            if (document.visibilityState !== 'visible' || !isBistTradingHours()) return;
             loadIndexDetail(true, false, selectedIndex);
         }, marketDetailRefreshMs);
         const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible') loadIndexDetail(true, false, selectedIndex);
+            if (document.visibilityState === 'visible' && isBistTradingHours()) loadIndexDetail(true, false, selectedIndex);
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {

@@ -17,6 +17,7 @@ import type {
 import { normalizeWatchlistSymbol, useWatchlist, watchlistItemKey, type WatchlistItem } from '../hooks/useWatchlist';
 import { cacheWatchlistFund, fetchWatchlistFund, getCachedWatchlistFund, searchWatchlistFunds } from '../utils/watchlistData';
 import MarketFlowPanel from './MarketFlowPanel';
+import { getAdaptiveRefreshMs, isBistTradingHours } from '../utils/marketHours';
 import './MarketWatchRail.css';
 
 type RailTab = 'global' | 'commodities' | 'fx' | 'xutum' | 'xu100' | 'xu030';
@@ -681,15 +682,37 @@ export default function MarketWatchRail({
         xu100Rows.length,
     ]);
 
-    // Tüm sekmeler için 3 saniyelik canlı polling döngüsü.
+    // Paylaşımlı bellek önbelleği / SSE delta güncellemelerini dinle
+    useEffect(() => {
+        return apiClient.subscribeMarketStocks((index, payload) => {
+            if (index === 'XUTUM') setXutumPayload(payload);
+            else if (index === 'XU100') setXu100Payload(payload);
+            else if (index === 'XU030') setXu030Payload(payload);
+        });
+    }, []);
+
+    // BIST seansı açıkken hisse sekmeleri için paylaşımlı SSE Delta akışını tut
+    useEffect(() => {
+        if (panelCollapsed || activeTool !== 'markets') return;
+        if (activeTab !== 'xutum' && activeTab !== 'xu100' && activeTab !== 'xu030') return;
+        const targetIndex = STOCK_TAB_TO_INDEX[activeTab];
+        return apiClient.retainMarketStocksStream(targetIndex);
+    }, [activeTab, activeTool, panelCollapsed]);
+
+    // Seans saati ve sekme görünürlüğüne duyarlı (Adaptive) canlı yenileme döngüsü
     useEffect(() => {
         if (panelCollapsed || activeTool !== 'markets') return;
 
-        const refreshMs = window.matchMedia('(max-width: 767px)').matches
+        const isStockTab = activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030';
+        const marketKind = isStockTab ? 'bist' : 'global_fx';
+        const activeMs = window.matchMedia('(max-width: 767px)').matches
             ? LIVE_RAIL_REFRESH_MOBILE_MS
             : LIVE_RAIL_REFRESH_DESKTOP_MS;
-        const timer = window.setInterval(() => {
+
+        const runSilentRefresh = () => {
             if (document.visibilityState !== 'visible') return;
+            const currentInterval = getAdaptiveRefreshMs(marketKind, { activeMs });
+            if (currentInterval === null) return;
             if (activeTab === 'global') {
                 loadGlobalRows({ silent: true });
             } else if (activeTab === 'commodities') {
@@ -697,22 +720,40 @@ export default function MarketWatchRail({
             } else if (activeTab === 'fx') {
                 loadFxRows({ silent: true });
             } else if (activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030') {
+                const targetIndex = STOCK_TAB_TO_INDEX[activeTab];
+                // SSE delta akışı aktifken gereksiz tam tablo HTTP polling yapma
+                if (apiClient.isMarketStocksStreamActive(targetIndex)) return;
                 loadStockTab(activeTab, { silent: true, refresh: false });
             }
-        }, refreshMs);
+        };
+
+        let pollTimer: number | null = null;
+        const scheduleAdaptiveTimer = () => {
+            if (pollTimer !== null) {
+                window.clearInterval(pollTimer);
+                pollTimer = null;
+            }
+            const intervalMs = getAdaptiveRefreshMs(marketKind, { activeMs });
+            if (intervalMs !== null) {
+                pollTimer = window.setInterval(runSilentRefresh, intervalMs);
+            }
+        };
+
+        scheduleAdaptiveTimer();
+        // Seans açılış/kapanış geçişlerini yakalamak için dakikada bir zamanlayıcıyı güncelle
+        const phaseCheckTimer = window.setInterval(scheduleAdaptiveTimer, 60_000);
+
         const onVisibilityChange = () => {
+            scheduleAdaptiveTimer();
             if (document.visibilityState === 'visible') {
-                if (activeTab === 'global') loadGlobalRows({ silent: true });
-                else if (activeTab === 'commodities') loadCommodityRows({ silent: true });
-                else if (activeTab === 'fx') loadFxRows({ silent: true });
-                else if (activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030') {
-                    loadStockTab(activeTab, { silent: true, refresh: false });
-                }
+                if (isStockTab && !isBistTradingHours()) return;
+                runSilentRefresh();
             }
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
-            window.clearInterval(timer);
+            if (pollTimer !== null) window.clearInterval(pollTimer);
+            window.clearInterval(phaseCheckTimer);
             document.removeEventListener('visibilitychange', onVisibilityChange);
         };
     }, [activeTab, activeTool, panelCollapsed, loadCommodityRows, loadFxRows, loadGlobalRows, loadStockTab]);

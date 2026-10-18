@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent, PointerEvent as ReactPointerEvent } from 'react';
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import {
     AlertTriangle,
     ArrowUpRight,
@@ -73,7 +73,7 @@ const PERF_RANGES: Array<{ id: PerfRange; label: string }> = [
     { id: '6m', label: '6A' },
     { id: 'ytd', label: 'YTD' },
     { id: '1y', label: '1Y' },
-    { id: 'all', label: 'Tümü' },
+    { id: 'all', label: 'Tüm Veri' },
 ];
 
 const RATING_OPTIONS: ExplainedOption[] = [
@@ -223,8 +223,6 @@ const DONUT_PALETTE = [
     '#6366f1',
 ];
 
-const ADMIN_TOKEN_STORAGE_KEY = 'ragfin_model_portfolio_admin_token';
-
 function formatPrice(val: number | null | undefined): string {
     if (val == null || !Number.isFinite(val)) return '—';
     return `${val.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₺`;
@@ -246,6 +244,82 @@ function formatDateTR(iso: string | null | undefined): string {
     const d = new Date(iso.length === 10 ? `${iso}T00:00:00` : iso);
     if (Number.isNaN(d.getTime())) return iso;
     return d.toLocaleDateString('tr-TR', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+function formatDateTimeTR(iso: string | null | undefined): string {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString('tr-TR', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+}
+
+function useAccessibleDialog<T extends HTMLElement>(active: boolean, onClose: () => void) {
+    const dialogRef = useRef<T | null>(null);
+    const onCloseRef = useRef(onClose);
+    onCloseRef.current = onClose;
+
+    useEffect(() => {
+        if (!active) return;
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+
+        const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const previousBodyOverflow = document.body.style.overflow;
+        const focusableSelector = [
+            'a[href]',
+            'button:not([disabled])',
+            'input:not([disabled])',
+            'select:not([disabled])',
+            'textarea:not([disabled])',
+            '[tabindex]:not([tabindex="-1"])',
+        ].join(',');
+        const getFocusable = () => Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector));
+
+        document.body.style.overflow = 'hidden';
+        (dialog.querySelector<HTMLElement>('[data-dialog-autofocus]') || getFocusable()[0] || dialog).focus();
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                onCloseRef.current();
+                return;
+            }
+            if (event.key !== 'Tab') return;
+
+            const focusable = getFocusable();
+            if (!focusable.length) {
+                event.preventDefault();
+                dialog.focus();
+                return;
+            }
+
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        };
+
+        document.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.removeEventListener('keydown', handleKeyDown);
+            document.body.style.overflow = previousBodyOverflow;
+            if (previousFocus?.isConnected) previousFocus.focus();
+            else document.querySelector<HTMLElement>('[data-dialog-return-focus]')?.focus();
+        };
+    }, [active]);
+
+    return dialogRef;
 }
 
 function toneClass(val: number | null | undefined): string {
@@ -363,15 +437,25 @@ export default function ModelPortfolioPage() {
     const [activeTab, setActiveTab] = useState<PortfolioTab>('active');
     const [selectedPositionId, setSelectedPositionId] = useState<string | null>(null);
 
-    // Founder / Admin state (stored in sessionStorage so it clears when browser closes)
-    const [adminToken, setAdminToken] = useState<string>(
-        () => window.sessionStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || '',
-    );
+    // Short-lived admin session stays in memory and is never persisted in browser storage.
+    const [adminToken, setAdminToken] = useState<string>('');
+    const [adminSessionExpiresAt, setAdminSessionExpiresAt] = useState<number | null>(null);
     const [isAdminVerified, setIsAdminVerified] = useState(false);
     const [adminModalOpen, setAdminModalOpen] = useState(false);
     const [adminTokenInput, setAdminTokenInput] = useState('');
     const [adminAuthError, setAdminAuthError] = useState<string | null>(null);
     const [adminAuthLoading, setAdminAuthLoading] = useState(false);
+    const adminDialogRef = useAccessibleDialog<HTMLDivElement>(adminModalOpen, () => setAdminModalOpen(false));
+
+    useEffect(() => {
+        if (!adminToken || adminSessionExpiresAt === null) return;
+        const timeoutId = window.setTimeout(() => {
+            setAdminToken('');
+            setAdminSessionExpiresAt(null);
+            setIsAdminVerified(false);
+        }, Math.max(0, adminSessionExpiresAt - Date.now()));
+        return () => window.clearTimeout(timeoutId);
+    }, [adminSessionExpiresAt, adminToken]);
 
     // Position Add / Edit / Close modal state
     const [editorModalOpen, setEditorModalOpen] = useState(false);
@@ -398,25 +482,6 @@ export default function ModelPortfolioPage() {
             });
         });
     }, [xu100UniverseRows.length]);
-
-    // Verify stored admin token on mount if present
-    useEffect(() => {
-        window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
-        if (!adminToken) {
-            setIsAdminVerified(false);
-            return;
-        }
-        apiClient
-            .modelPortfolioVerifyAdmin(adminToken)
-            .then((res) => {
-                if (res.ok) setIsAdminVerified(true);
-            })
-            .catch(() => {
-                setIsAdminVerified(false);
-                window.sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
-                setAdminToken('');
-            });
-    }, [adminToken]);
 
     const loadPortfolio = useCallback((refresh = false) => {
         if (!portfolioData) setLoading(true);
@@ -453,8 +518,10 @@ export default function ModelPortfolioPage() {
             const liveRow = liveStockMap.get(pos.symbol);
             const livePrice = liveRow?.price != null && liveRow.price > 0 ? liveRow.price : pos.current_price;
             const liveChangePct = liveRow?.change_pct != null ? liveRow.change_pct : pos.daily_change_pct;
+            const livePriceAsOf = liveRow?.price_as_of ?? pos.price_as_of ?? null;
             if (livePrice == null || livePrice === pos.current_price) {
-                return pos;
+                if (liveChangePct === pos.daily_change_pct && livePriceAsOf === pos.price_as_of) return pos;
+                return { ...pos, daily_change_pct: liveChangePct, price_as_of: livePriceAsOf };
             }
             const retPct = pos.entry_price > 0
                 ? Number((((livePrice - pos.entry_price) / pos.entry_price) * 100).toFixed(2))
@@ -473,6 +540,7 @@ export default function ModelPortfolioPage() {
                 ...pos,
                 current_price: livePrice,
                 daily_change_pct: liveChangePct,
+                price_as_of: livePriceAsOf,
                 return_pct: retPct,
                 xu100_return_pct: xuRetPct,
                 relative_return_pct: relRetPct,
@@ -569,9 +637,9 @@ export default function ModelPortfolioPage() {
         setAdminAuthError(null);
         try {
             const res = await apiClient.modelPortfolioVerifyAdmin(cleaned);
-            if (res.ok) {
-                window.sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, cleaned);
-                setAdminToken(cleaned);
+            if (res.ok && res.session_token) {
+                setAdminToken(res.session_token);
+                setAdminSessionExpiresAt(Date.now() + res.expires_in_seconds * 1000);
                 setIsAdminVerified(true);
                 setAdminModalOpen(false);
                 setAdminTokenInput('');
@@ -584,9 +652,8 @@ export default function ModelPortfolioPage() {
     };
 
     const handleAdminLogout = () => {
-        window.sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
-        window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
         setAdminToken('');
+        setAdminSessionExpiresAt(null);
         setIsAdminVerified(false);
     };
 
@@ -637,6 +704,10 @@ export default function ModelPortfolioPage() {
         return items;
     }, [liveActivePositions, liveSummary.cash_weight_pct]);
 
+    const hasPortfolioSetup = Boolean(
+        portfolioData?.active_positions.length || portfolioData?.closed_positions.length,
+    );
+
     return (
         <div className={`mn-layout${navCollapsed ? ' mn-nav-collapsed' : ''}`}>
             <MarketsNavigation
@@ -654,11 +725,15 @@ export default function ModelPortfolioPage() {
                     <header className="market-header mp-header">
                         <div className="market-title">
                             <span className="model-portfolio-kicker">ARAŞTIRMA & YATIRIM STRATEJİLERİ</span>
-                            <h1>Model Portföy</h1>
+                            <h1 tabIndex={-1} data-dialog-return-focus>Model Portföy</h1>
                             <p>
-                                Temel analiz, çarpan iskontosu ve bilanço katalizörleriyle seçilen hisselerin BIST 100
-                                (XU100) endeksine karşı canlı performans ve yatırım tezi takibi.
+                                Temel analizle seçilen hisseleri canlı fiyatlarla ve yatırım tezleriyle takip edin. Geçmiş grafik, bugünkü aktif sepetin XU100 karşısındaki simülasyonunu gösterir.
                             </p>
+                            {hasPortfolioSetup && portfolioData?.updated_at && (
+                                <span className="mp-update-meta">
+                                    <Clock size={12} /> Son portföy düzenlemesi: {formatDateTimeTR(portfolioData.updated_at)}
+                                </span>
+                            )}
                         </div>
                     </header>
 
@@ -675,47 +750,61 @@ export default function ModelPortfolioPage() {
                     {/* 5 KPI Summary Strip */}
                     <section className="market-quick-stats mp-kpi-strip" aria-label="Model portföy özet göstergeleri">
                         <div className="quick-stat mp-kpi-card">
-                            <span className="qs-label">MODEL PORTFÖY GETİRİSİ</span>
-                            <strong className={`qs-value ${toneClass(liveSummary.invested_return_pct)}`}>
+                            <span className="qs-label">AKTİF HİSSELERİN AĞIRLIKLI GETİRİSİ</span>
+                            <strong
+                                className={`qs-value ${toneClass(liveSummary.invested_return_pct)}`}
+                                title="Her pozisyonun getirisi kendi giriş gününden bugüne hesaplanır ve ağırlıkla birleştirilir."
+                            >
                                 {formatPct(liveSummary.invested_return_pct)}
                             </strong>
                             <span className="mp-kpi-sub">
-                                Nakit dahil toplam: <b>{formatPct(liveSummary.portfolio_return_pct)}</b>
+                                Nakit dâhil portföy: <b>{formatPct(liveSummary.portfolio_return_pct)}</b>
                             </span>
                         </div>
 
                         <div className="quick-stat mp-kpi-card">
-                            <span className="qs-label">BIST 100 RÖLATİF (ALFA)</span>
+                            <span className="qs-label">XU100’E GÖRE AĞIRLIKLI GETİRİ (ALFA)</span>
                             <strong className={`qs-value ${toneClass(liveSummary.relative_return_pct)}`}>
                                 {formatPct(liveSummary.relative_return_pct)}
                             </strong>
-                            <span className="mp-kpi-sub">
-                                XU100 karşılaştırma: <b>{formatPct(liveSummary.xu100_return_pct)}</b>
+                            <span
+                                className="mp-kpi-sub"
+                                title="Her pozisyon, kendi giriş günündeki XU100 seviyesinden itibaren kıyaslanır."
+                            >
+                                XU100 baz getirisi: <b>{formatPct(liveSummary.xu100_return_pct)}</b>
                             </span>
                         </div>
 
                         <div className="quick-stat mp-kpi-card">
-                            <span className="qs-label">ORT. HEDEF POTANSİYELİ</span>
+                            <span className="qs-label">AĞIRLIKLI HEDEF POTANSİYELİ</span>
                             <strong className={`qs-value ${toneClass(liveSummary.weighted_target_upside_pct)}`}>
                                 {formatPct(liveSummary.weighted_target_upside_pct)}
                             </strong>
                             <span className="mp-kpi-sub">
-                                Ağırlıklı hedef fiyat beklentisi
+                                Model hedeflerine göre · nakit hariç · garanti değildir
                             </span>
                         </div>
 
                         <div className="quick-stat mp-kpi-card">
-                            <span className="qs-label">PORTFÖY & NAKİT DAĞILIMI</span>
-                            <strong className="qs-value">
-                                {liveSummary.active_count} Hisse · %{liveSummary.total_weight_pct.toFixed(0)}
+                            <span className="qs-label">AKTİF POZİSYON & NAKİT DAĞILIMI</span>
+                            <strong className={`qs-value${!hasPortfolioSetup ? ' mp-kpi-empty-value' : ''}`}>
+                                {!hasPortfolioSetup
+                                    ? 'Kurulmadı'
+                                    : liveSummary.active_count > 0
+                                        ? `${liveSummary.active_count} Hisse · %${liveSummary.total_weight_pct.toFixed(0)}`
+                                        : 'Aktif pozisyon yok'}
                             </strong>
                             <span className="mp-kpi-sub">
-                                Nakit / Boşta Pay: <b>%{liveSummary.cash_weight_pct.toFixed(1)}</b>
+                                {!hasPortfolioSetup
+                                    ? 'Portföy verisi henüz eklenmedi'
+                                    : liveSummary.active_count > 0
+                                        ? <>Nakit / Boşta Pay: <b>%{liveSummary.cash_weight_pct.toFixed(1)}</b></>
+                                        : 'Kapanmış kayıtlar Geçmiş sekmesinde'}
                             </span>
                         </div>
 
                         <div className="quick-stat mp-kpi-card">
-                            <span className="qs-label">KAPALI İŞLEM KARNESİ (HIT RATE)</span>
+                            <span className="qs-label">XU100’Ü GEÇEN KAPALI İŞLEM ORANI</span>
                             <strong className="qs-value mp-tone-accent">
                                 {liveSummary.closed_hit_rate_pct != null
                                     ? `%${liveSummary.closed_hit_rate_pct.toFixed(0)}`
@@ -736,8 +825,11 @@ export default function ModelPortfolioPage() {
                             <div className="mp-panel mp-chart-panel">
                                 <div className="mp-panel-header">
                                     <div>
-                                        <span className="mp-panel-kicker">KÜMÜLATİF PERFORMANS & ALFA EĞRİSİ</span>
-                                        <h2 className="mp-panel-title">Model Portföy vs. BIST 100 (100 ₺ Bazlı)</h2>
+                                        <span className="mp-panel-kicker">BUGÜNKÜ AKTİF SEPETİN GEÇMİŞ SİMÜLASYONU</span>
+                                        <h2 className="mp-panel-title">Aktif Sepet vs. BIST 100 (100 ₺ Bazlı)</h2>
+                                        <p className="mp-chart-note">
+                                            Bugünkü aktif hisseler ve ağırlıklarıyla hesaplanır; kapanmış pozisyonları ve geçmiş ağırlık değişikliklerini içermez. Başlangıç tarihi erişilebilir fiyat geçmişiyle sınırlıdır.
+                                        </p>
                                     </div>
                                     <div className="mp-range-tabs" role="tablist" aria-label="Grafik periyodu">
                                         {PERF_RANGES.map((r) => (
@@ -914,13 +1006,15 @@ export default function ModelPortfolioPage() {
                             ) : liveActivePositions.length === 0 ? (
                                 <div className="mp-empty-box">
                                     <BriefcaseBusiness size={26} className="mp-empty-icon" />
-                                    <h3>Model Portföyde Henüz Aktif Hisse Bulunmuyor</h3>
+                                    <h3>{hasPortfolioSetup ? 'Aktif Pozisyon Bulunmuyor' : 'Model Portföy Henüz Oluşturulmadı'}</h3>
                                     <p>
-                                        {isAdminVerified
-                                            ? 'Kurucu modu açık. Sağ üstteki "+ Hisse Ekle" butonuna tıklayarak ilk hisseyi, hedef fiyatını ve yatırım tezini ekleyebilirsiniz.'
-                                            : 'Kurucu tarafından model portföye hisse eklendiğinde canlı getiri, hedef fiyat ilerlemesi ve yatırım tezleri bu tabloda listelenecektir.'}
+                                        {hasPortfolioSetup
+                                            ? 'Aktif hisseler kapatıldı. Geçmiş sekmesinden gerçekleşen işlemleri, Değişiklik Günlüğü sekmesinden portföy hareketlerini inceleyebilirsiniz.'
+                                            : isAdminVerified
+                                                ? 'Kurucu modu açık. Hisse, hedef fiyat ve yatırım tezi ekleyerek portföyü oluşturabilirsiniz.'
+                                                : 'Model portföye hisse eklendiğinde aktif öneriler, hedef fiyatlar ve yatırım tezleri burada listelenecektir.'}
                                     </p>
-                                    {isAdminVerified && (
+                                    {isAdminVerified && !hasPortfolioSetup && (
                                         <button
                                             type="button"
                                             className="mp-btn mp-btn-primary"
@@ -934,8 +1028,9 @@ export default function ModelPortfolioPage() {
                                     )}
                                 </div>
                             ) : (
-                                <div className="mp-table-wrap">
-                                    <table className="mp-table">
+                                <div className="mp-table-wrap" role="region" aria-label="Aktif pozisyon tablosu; yatay kaydırılabilir" tabIndex={0}>
+                                    <p className="mp-table-scroll-hint">Tabloyu yana kaydırarak tüm sütunları görebilirsiniz.</p>
+                                    <table className="mp-table mp-active-table">
                                         <thead>
                                             <tr>
                                                 <th>Hisse / Strateji</th>
@@ -959,7 +1054,15 @@ export default function ModelPortfolioPage() {
                                                     <tr
                                                         key={pos.id}
                                                         className={`mp-row${isSelected ? ' is-selected' : ''}`}
+                                                        tabIndex={0}
+                                                        aria-label={`${pos.symbol} pozisyon ayrıntılarını aç`}
                                                         onClick={() => setSelectedPositionId(pos.id)}
+                                                        onKeyDown={(e) => {
+                                                            if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+                                                                e.preventDefault();
+                                                                setSelectedPositionId(pos.id);
+                                                            }
+                                                        }}
                                                     >
                                                         <td>
                                                             <div className="mp-stock-cell">
@@ -994,6 +1097,9 @@ export default function ModelPortfolioPage() {
                                                                 <span className={`mp-sub-cell ${toneClass(pos.daily_change_pct)}`}>
                                                                     Günlük {formatPct(pos.daily_change_pct)}
                                                                 </span>
+                                                            )}
+                                                            {pos.price_as_of && (
+                                                                <span className="mp-sub-cell">Fiyat: {formatDateTimeTR(pos.price_as_of)}</span>
                                                             )}
                                                         </td>
                                                         <td className="mp-col-target">
@@ -1048,6 +1154,7 @@ export default function ModelPortfolioPage() {
                                                                             type="button"
                                                                             className="mp-icon-btn"
                                                                             title="Pozisyonu Düzenle / Hedef Revize Et"
+                                                                            aria-label={`${pos.symbol} pozisyonunu düzenle`}
                                                                             onClick={() => {
                                                                                 setEditingPosition(pos);
                                                                                 setEditorModalOpen(true);
@@ -1059,6 +1166,7 @@ export default function ModelPortfolioPage() {
                                                                             type="button"
                                                                             className="mp-icon-btn mp-icon-btn-warn"
                                                                             title="Pozisyonu Kapat"
+                                                                            aria-label={`${pos.symbol} pozisyonunu kapat`}
                                                                             onClick={() => setClosingPosition(pos)}
                                                                         >
                                                                             <CheckCircle2 size={13} />
@@ -1114,8 +1222,9 @@ export default function ModelPortfolioPage() {
                                         </div>
                                     </div>
 
-                                    <div className="mp-table-wrap">
-                                        <table className="mp-table">
+                                    <p className="mp-table-scroll-hint">Tabloyu yana kaydırarak tüm sütunları görebilirsiniz.</p>
+                                    <div className="mp-table-wrap" role="region" aria-label="Kapatılmış pozisyon tablosu; yatay kaydırılabilir" tabIndex={0}>
+                                        <table className="mp-table mp-closed-table">
                                             <thead>
                                                 <tr>
                                                     <th>Hisse</th>
@@ -1133,7 +1242,15 @@ export default function ModelPortfolioPage() {
                                                     <tr
                                                         key={pos.id}
                                                         className="mp-row"
+                                                        tabIndex={0}
+                                                        aria-label={`${pos.symbol} kapanmış pozisyon ayrıntılarını aç`}
                                                         onClick={() => setSelectedPositionId(pos.id)}
+                                                        onKeyDown={(e) => {
+                                                            if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+                                                                e.preventDefault();
+                                                                setSelectedPositionId(pos.id);
+                                                            }
+                                                        }}
                                                     >
                                                         <td>
                                                             <div className="mp-stock-cell">
@@ -1184,6 +1301,7 @@ export default function ModelPortfolioPage() {
                                                                         type="button"
                                                                         className="mp-icon-btn mp-icon-btn-danger"
                                                                         title="Kaydı Sil"
+                                                                        aria-label={`${pos.symbol} kaydını sil`}
                                                                         onClick={() => handleDeletePosition(pos)}
                                                                     >
                                                                         <Trash2 size={13} />
@@ -1262,10 +1380,16 @@ export default function ModelPortfolioPage() {
                     onClose={() => setSelectedPositionId(null)}
                     onOpenStockDetail={(sym) => navigate(toStockDetail(sym, DEFAULT_STOCK_TAB))}
                     onEdit={(pos) => {
+                        document.querySelector<HTMLElement>('[data-dialog-return-focus]')?.focus();
+                        setSelectedPositionId(null);
                         setEditingPosition(pos);
                         setEditorModalOpen(true);
                     }}
-                    onClosePosition={(pos) => setClosingPosition(pos)}
+                    onClosePosition={(pos) => {
+                        document.querySelector<HTMLElement>('[data-dialog-return-focus]')?.focus();
+                        setSelectedPositionId(null);
+                        setClosingPosition(pos);
+                    }}
                     onDeletePosition={handleDeletePosition}
                 />
             )}
@@ -1273,13 +1397,21 @@ export default function ModelPortfolioPage() {
             {/* Founder Login Modal */}
             {adminModalOpen && (
                 <div className="mp-modal-backdrop" onClick={() => setAdminModalOpen(false)}>
-                    <div className="mp-modal mp-modal-sm" onClick={(e) => e.stopPropagation()}>
+                    <div
+                        ref={adminDialogRef}
+                        className="mp-modal mp-modal-sm"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="mp-admin-dialog-title"
+                        tabIndex={-1}
+                        onClick={(e) => e.stopPropagation()}
+                    >
                         <div className="mp-modal-header">
                             <div className="mp-modal-title-row">
                                 <KeyRound size={17} className="mp-accent-icon" />
-                                <h3>Kurucu / Yönetici Girişi</h3>
+                                <h3 id="mp-admin-dialog-title">Kurucu / Yönetici Girişi</h3>
                             </div>
-                            <button type="button" className="mp-icon-btn" onClick={() => setAdminModalOpen(false)}>
+                            <button type="button" className="mp-icon-btn" aria-label="Giriş penceresini kapat" onClick={() => setAdminModalOpen(false)}>
                                 <X size={16} />
                             </button>
                         </div>
@@ -1292,6 +1424,7 @@ export default function ModelPortfolioPage() {
                                 <span>Yönetici Anahtarı</span>
                                 <input
                                     type="password"
+                                    data-dialog-autofocus
                                     value={adminTokenInput}
                                     onChange={(e) => setAdminTokenInput(e.target.value)}
                                     placeholder="••••••••••••••••"
@@ -1435,6 +1568,19 @@ function ModelPortfolioPerformanceChart({
         onHoverIndexChange(idx);
     };
 
+    const handleChartKeyDown = (e: ReactKeyboardEvent<SVGSVGElement>) => {
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
+            e.preventDefault();
+            const current = hoverIndex ?? points.length - 1;
+            const next = e.key === 'Home'
+                ? 0
+                : e.key === 'End'
+                    ? points.length - 1
+                    : Math.max(0, Math.min(points.length - 1, current + (e.key === 'ArrowRight' ? 1 : -1)));
+            onHoverIndexChange(next);
+        }
+    };
+
     return (
         <div className="mp-chart-container">
             <div className="mp-chart-legend">
@@ -1466,9 +1612,14 @@ function ModelPortfolioPerformanceChart({
             <svg
                 className="mp-perf-svg"
                 viewBox={`0 0 ${width} ${height}`}
+                role="group"
+                aria-label="Portföy ve XU100 performans grafiği. Ok tuşlarıyla tarihler arasında gezinin."
+                tabIndex={0}
                 onPointerMove={handlePointerMove}
                 onPointerLeave={() => onHoverIndexChange(null)}
+                onKeyDown={handleChartKeyDown}
             >
+                <title>Portföy ve BIST 100 performansı</title>
                 <defs>
                     <linearGradient id="mpPortFill" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.26" />
@@ -1628,14 +1779,7 @@ function ModelPortfolioThesisDrawer({
 }) {
     const progress = position.target_progress_pct ?? 0;
     const clampedBar = Math.max(0, Math.min(100, progress));
-
-    useEffect(() => {
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') onClose();
-        };
-        window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
-    }, [onClose]);
+    const dialogRef = useAccessibleDialog<HTMLElement>(true, onClose);
 
     const multipleRows = [
         {
@@ -1663,9 +1807,13 @@ function ModelPortfolioThesisDrawer({
     return (
         <div className="mp-drawer-backdrop" onClick={onClose}>
             <aside
+                ref={dialogRef}
                 className="mp-drawer"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="mp-thesis-dialog-title"
+                tabIndex={-1}
                 onClick={(e) => e.stopPropagation()}
-                aria-label={`${position.symbol} yatırım tezi detayı`}
             >
                 {/* Drawer Header */}
                 <div className="mp-drawer-header">
@@ -1679,7 +1827,7 @@ function ModelPortfolioThesisDrawer({
                         />
                         <div>
                             <div className="mp-drawer-title-row">
-                                <h2>{position.symbol}</h2>
+                                <h2 id="mp-thesis-dialog-title">{position.symbol}</h2>
                                 <span className="mp-rating-badge">{position.rating || 'Endeks Üstü Getiri'}</span>
                                 {position.status === 'closed' && (
                                     <span className="mp-closed-badge">KAPATILDI</span>
@@ -1697,7 +1845,7 @@ function ModelPortfolioThesisDrawer({
                             <span>Hisse Detayı</span>
                             <ExternalLink size={13} />
                         </button>
-                        <button type="button" className="mp-icon-btn" onClick={onClose} aria-label="Kapat">
+                        <button type="button" className="mp-icon-btn" onClick={onClose} aria-label="Detay penceresini kapat">
                             <X size={18} />
                         </button>
                     </div>
@@ -1953,6 +2101,7 @@ function MpExplainedDropdown({
             <button
                 type="button"
                 className={`mp-explained-trigger${open ? ' is-open' : ''}`}
+                aria-label={`${label}: ${selected.label}`}
                 aria-expanded={open}
                 onClick={() => setOpen((p) => !p)}
             >
@@ -2033,6 +2182,7 @@ function MpSectorDropdown({
             <div className="mp-sector-input-box">
                 <input
                     type="text"
+                    aria-label="Sektör ve tema etiketi"
                     value={value}
                     onFocus={() => setOpen(true)}
                     onChange={(e) => {
@@ -2149,6 +2299,7 @@ function ModelPortfolioEditorModal({
     const [formError, setFormError] = useState<string | null>(null);
     const [dropdownOpen, setDropdownOpen] = useState(false);
     const prefillAbortRef = useRef<AbortController | null>(null);
+    const dialogRef = useAccessibleDialog<HTMLDivElement>(true, onClose);
 
     const matchingUniverse = useMemo(() => {
         const q = symbolQuery.trim().toUpperCase();
@@ -2175,10 +2326,6 @@ function ModelPortfolioEditorModal({
                 setCompanyName(res.company_name || cleanSym);
                 if (res.entry_price != null) {
                     setEntryPrice(String(res.entry_price));
-                    setTargetPrice((prev) => {
-                        if (prev && Number(prev) > 0) return prev;
-                        return String(Number((res.entry_price! * 1.35).toFixed(2)));
-                    });
                 }
                 if (res.entry_xu100 != null) setEntryXu100(String(res.entry_xu100));
                 if (res.entry_multiples) {
@@ -2316,23 +2463,31 @@ function ModelPortfolioEditorModal({
 
     return (
         <div className="mp-modal-backdrop" onClick={onClose}>
-            <div className="mp-modal mp-modal-lg" onClick={(e) => e.stopPropagation()}>
+            <div
+                ref={dialogRef}
+                className="mp-modal mp-modal-lg"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="mp-editor-dialog-title"
+                tabIndex={-1}
+                onClick={(e) => e.stopPropagation()}
+            >
                 {/* Sticky Header */}
                 <div className="mp-modal-header">
                     <div className="mp-modal-title-row">
                         <BriefcaseBusiness size={18} className="mp-accent-icon" />
                         <div>
-                            <h3>
+                            <h3 id="mp-editor-dialog-title">
                                 {isEdit
                                     ? `${editingPosition?.symbol} Pozisyonunu Düzenle / Revize Et`
                                     : 'Model Portföye Yeni Hisse Ekle'}
                             </h3>
                             <span className="mp-modal-subtitle">
-                                Hisse ve tarih seçtiğinizde giriş fiyatı, BIST 100 seviyesi ve çarpanlar otomatik doldurulur.
+                                Hisse ve tarih seçtiğinizde fiyat, XU100 seviyesi ve çarpanlar otomatik gelir. Hedef fiyatı araştırma varsayımınıza göre belirleyin.
                             </span>
                         </div>
                     </div>
-                    <button type="button" className="mp-icon-btn" onClick={onClose}>
+                    <button type="button" className="mp-icon-btn" aria-label="Pozisyon formunu kapat" onClick={onClose}>
                         <X size={17} />
                     </button>
                 </div>
@@ -2356,6 +2511,12 @@ function ModelPortfolioEditorModal({
                                         <Search size={14} className="mp-search-icon" />
                                         <input
                                             type="text"
+                                            aria-label="Hisse kodu"
+                                            data-dialog-autofocus={!isEdit ? 'true' : undefined}
+                                            role="combobox"
+                                            aria-autocomplete="list"
+                                            aria-expanded={dropdownOpen}
+                                            aria-controls="mp-symbol-options"
                                             value={symbolQuery}
                                             disabled={isEdit}
                                             onFocus={() => setDropdownOpen(true)}
@@ -2375,7 +2536,7 @@ function ModelPortfolioEditorModal({
                                         />
                                     </div>
                                     {!isEdit && dropdownOpen && matchingUniverse.length > 0 && (
-                                        <div className="mp-symbol-dropdown">
+                                        <div className="mp-symbol-dropdown" id="mp-symbol-options" role="listbox" aria-label="Hisse seçenekleri">
                                             {matchingUniverse.map((row) => {
                                                 const sym = String(row.symbol || row.company).toUpperCase();
                                                 return (
@@ -2383,6 +2544,8 @@ function ModelPortfolioEditorModal({
                                                         key={sym}
                                                         type="button"
                                                         className="mp-symbol-option"
+                                                        role="option"
+                                                        aria-selected={symbol === sym}
                                                         onMouseDown={(e) => {
                                                             e.preventDefault();
                                                             setSymbol(sym);
@@ -2428,6 +2591,7 @@ function ModelPortfolioEditorModal({
                                     </div>
                                     <input
                                         type="date"
+                                        aria-label="Portföye giriş tarihi"
                                         value={entryDate}
                                         onChange={(e) => {
                                             const nextDate = e.target.value;
@@ -2546,6 +2710,7 @@ function ModelPortfolioEditorModal({
                                     </div>
                                     <input
                                         type="number"
+                                        aria-label="Giriş fiyatı"
                                         step="0.01"
                                         value={entryPrice}
                                         onChange={(e) => setEntryPrice(e.target.value)}
@@ -2567,6 +2732,7 @@ function ModelPortfolioEditorModal({
                                     </div>
                                     <input
                                         type="number"
+                                        aria-label="Hedef fiyat"
                                         step="0.01"
                                         value={targetPrice}
                                         onChange={(e) => setTargetPrice(e.target.value)}
@@ -2586,6 +2752,9 @@ function ModelPortfolioEditorModal({
                                             </button>
                                         ))}
                                     </div>
+                                    <span className="mp-field-micro-hint">
+                                        Hızlı oranlar giriş fiyatına göre örnek hesaplamadır; seçilen hedefi ayrıca gözden geçirin.
+                                    </span>
                                 </div>
 
                                 <div className="mp-field">
@@ -2597,6 +2766,7 @@ function ModelPortfolioEditorModal({
                                     </div>
                                     <input
                                         type="number"
+                                        aria-label="Portföy ağırlığı yüzde"
                                         step="0.5"
                                         min="0.5"
                                         max="100"
@@ -2686,6 +2856,7 @@ function ModelPortfolioEditorModal({
                                 <div className="mp-custom-catalyst-row">
                                     <input
                                         type="text"
+                                        aria-label="Özel katalizör etiketi"
                                         value={customCatalyst}
                                         onChange={(e) => setCustomCatalyst(e.target.value)}
                                         placeholder="Özel beklenti etiketi yazıp ekleyin (Örn: Bedelsiz Potansiyeli, Eurobond Geliri)..."
@@ -2723,6 +2894,7 @@ function ModelPortfolioEditorModal({
                                 </div>
                                 <textarea
                                     rows={4}
+                                    aria-label="Yatırım tezi ve hedef gerekçesi"
                                     value={thesis}
                                     onChange={(e) => setThesis(e.target.value)}
                                     placeholder="Bu hisseyi alırken ne düşündüğümüzü, temel analiz ve bilanço beklentilerimizi, hedef fiyat gerekçemizi buraya yazın..."
@@ -2733,6 +2905,7 @@ function ModelPortfolioEditorModal({
                                 <span className="mp-field-label">Riskler & Takip Edilecek Metrikler (Opsiyonel)</span>
                                 <textarea
                                     rows={2}
+                                    aria-label="Riskler ve izlenecek metrikler"
                                     value={riskNote}
                                     onChange={(e) => setRiskNote(e.target.value)}
                                     placeholder="Örn: Marj daralması, enerji maliyetleri veya kur duyarlılığı..."
@@ -2811,6 +2984,7 @@ function ModelPortfolioCloseModal({
     const [closeReason, setCloseReason] = useState(CLOSE_REASON_OPTIONS[0].value);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const dialogRef = useAccessibleDialog<HTMLDivElement>(true, onClose);
 
     const previewReturnPct = useMemo(() => {
         const ep = Number(exitPrice);
@@ -2848,18 +3022,26 @@ function ModelPortfolioCloseModal({
 
     return (
         <div className="mp-modal-backdrop" onClick={onClose}>
-            <div className="mp-modal mp-modal-md" onClick={(e) => e.stopPropagation()}>
+            <div
+                ref={dialogRef}
+                className="mp-modal mp-modal-md"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="mp-close-dialog-title"
+                tabIndex={-1}
+                onClick={(e) => e.stopPropagation()}
+            >
                 <div className="mp-modal-header">
                     <div className="mp-modal-title-row">
                         <CheckCircle2 size={18} className="mp-accent-icon" />
                         <div>
-                            <h3>{position.symbol} Pozisyonunu Kapat</h3>
+                            <h3 id="mp-close-dialog-title">{position.symbol} Pozisyonunu Kapat</h3>
                             <span className="mp-modal-subtitle">
                                 Gerçekleşen getiri ve BIST 100 rölatif alfa karnesiyle geçmiş işlemlere arşivlenir.
                             </span>
                         </div>
                     </div>
-                    <button type="button" className="mp-icon-btn" onClick={onClose}>
+                    <button type="button" className="mp-icon-btn" aria-label="Kapatma penceresini kapat" onClick={onClose}>
                         <X size={16} />
                     </button>
                 </div>
@@ -2877,6 +3059,7 @@ function ModelPortfolioCloseModal({
                                 </div>
                                 <input
                                     type="number"
+                                    data-dialog-autofocus
                                     step="0.01"
                                     value={exitPrice}
                                     onChange={(e) => setExitPrice(e.target.value)}

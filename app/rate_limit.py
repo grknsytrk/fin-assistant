@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import secrets
 import threading
 import time
 from collections import defaultdict, deque
@@ -58,6 +59,28 @@ class SlidingWindowRateLimiter:
             bucket.append(now)
             return True, 0
 
+    def count(self, key: str, *, window_seconds: float = 60.0) -> int:
+        now = time.monotonic()
+        cutoff = now - window_seconds
+        with self._lock:
+            bucket = self._buckets.get(key)
+            if not bucket:
+                return 0
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+            if not bucket:
+                self._buckets.pop(key, None)
+                return 0
+            return len(bucket)
+
+    def clear(self, key: str) -> None:
+        with self._lock:
+            self._buckets.pop(key, None)
+
+    def clear_all(self) -> None:
+        with self._lock:
+            self._buckets.clear()
+
 
 _LIMITER = SlidingWindowRateLimiter()
 
@@ -90,32 +113,48 @@ redis.call('EXPIRE', KEYS[1], math.max(1, math.ceil(tonumber(ARGV[2])) + 1))
 return {1, 0}
 """
 
-    def consume(self, key: str, *, limit: int, window_seconds: float = 60.0) -> Tuple[bool, int] | None:
-        if limit <= 0:
-            return True, 0
+    _COUNT_SCRIPT = """
+local now = tonumber(ARGV[1])
+local cutoff = now - tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, cutoff)
+return redis.call('ZCARD', KEYS[1])
+"""
+
+    def _redis_target(self, key: str):
         enabled = str(os.getenv("RAGFIN_RATE_LIMIT_SHARED_REDIS", "1")).strip().lower()
         if enabled in {"0", "false", "no", "off"}:
-            return None
+            return None, None
         try:
             from app.cache import get_cache
 
             backend = get_cache()
             if getattr(backend, "name", "") != "redis":
-                return None
+                return None, None
             client = getattr(backend, "_client", None)
             prefix = getattr(backend, "_prefixed", None)
             if client is None or not callable(prefix):
-                return None
+                return None, None
             digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            return client, prefix(f"rate-limit:v1:{digest}")
+        except Exception:
+            return None, None
+
+    def consume(self, key: str, *, limit: int, window_seconds: float = 60.0) -> Tuple[bool, int] | None:
+        if limit <= 0:
+            return True, 0
+        try:
+            client, redis_key = self._redis_target(key)
+            if client is None or redis_key is None:
+                return None
             now = time.time()
             result = client.eval(
                 self._SCRIPT,
                 1,
-                prefix(f"rate-limit:v1:{digest}"),
+                redis_key,
                 str(now),
                 str(max(1.0, window_seconds)),
                 str(limit),
-                f"{now:.9f}:{threading.get_ident()}",
+                f"{now:.9f}:{threading.get_ident()}:{secrets.token_hex(8)}",
             )
             allowed = bool(int(result[0]))
             retry_after = max(0, int(result[1]))
@@ -123,18 +162,61 @@ return {1, 0}
         except Exception:
             return None
 
+    def count(self, key: str, *, window_seconds: float = 60.0) -> int | None:
+        try:
+            client, redis_key = self._redis_target(key)
+            if client is None or redis_key is None:
+                return None
+            now = time.time()
+            return int(client.eval(self._COUNT_SCRIPT, 1, redis_key, str(now), str(max(1.0, window_seconds))))
+        except Exception:
+            return None
+
+    def clear(self, key: str) -> None:
+        try:
+            client, redis_key = self._redis_target(key)
+            if client is not None and redis_key is not None:
+                client.delete(redis_key)
+        except Exception:
+            pass
+
 
 _SHARED_LIMITER = SharedRedisSlidingWindowRateLimiter()
 
 
 def _consume_limit(key: str, *, limit: int) -> Tuple[bool, int]:
-    shared_result = _SHARED_LIMITER.consume(key, limit=limit)
+    return consume_rate_limit(key, limit=limit)
+
+
+def consume_rate_limit(
+    key: str,
+    *,
+    limit: int,
+    window_seconds: float = 60.0,
+) -> Tuple[bool, int]:
+    shared_result = _SHARED_LIMITER.consume(key, limit=limit, window_seconds=window_seconds)
     if shared_result is not None:
         return shared_result
-    return _LIMITER.consume(key, limit=limit)
+    return _LIMITER.consume(key, limit=limit, window_seconds=window_seconds)
 
 
-def _client_identity(request: Request) -> str:
+def rate_limit_count(key: str, *, window_seconds: float = 60.0) -> int:
+    shared_count = _SHARED_LIMITER.count(key, window_seconds=window_seconds)
+    if shared_count is not None:
+        return shared_count
+    return _LIMITER.count(key, window_seconds=window_seconds)
+
+
+def clear_rate_limit(key: str) -> None:
+    _SHARED_LIMITER.clear(key)
+    _LIMITER.clear(key)
+
+
+def reset_local_rate_limits_for_tests() -> None:
+    _LIMITER.clear_all()
+
+
+def client_identity(request: Request) -> str:
     """Use forwarded addresses only when an upstream proxy is trusted."""
 
     trust_proxy = str(os.getenv("RAGFIN_TRUST_PROXY_HEADERS", "0")).strip().lower() in {"1", "true", "yes", "on"}
@@ -178,7 +260,7 @@ class RequestRateLimitMiddleware(BaseHTTPMiddleware):
         if request.method.upper() == "OPTIONS":
             return await call_next(request)
         limit = _limit_for_request(request)
-        request_key = f"client:{request.method}:{request.url.path}:{_client_identity(request)}"
+        request_key = f"client:{request.method}:{request.url.path}:{client_identity(request)}"
         allowed, retry_after = _consume_limit(request_key, limit=limit)
         provider_limit = _shared_provider_limit_for_request(request)
         if allowed and provider_limit > 0:

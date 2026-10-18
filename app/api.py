@@ -21,8 +21,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
@@ -81,7 +81,7 @@ _FUND_YIELD_SUMMARY_CACHE_TTL = int(os.getenv("RAGFIN_FUND_YIELD_SUMMARY_CACHE_T
 # has not changed.
 _FUND_HOLDINGS_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_CACHE_TTL_SECONDS", "60"))
 _FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT_SECONDS", "120"))
-_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 11
+_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 13
 _FUND_HOLDINGS_LIVE_RESPONSE_CACHE_TTL = int(
     os.getenv("RAGFIN_FUND_HOLDINGS_LIVE_RESPONSE_CACHE_TTL_SECONDS", "10")
 )
@@ -142,7 +142,7 @@ _FUND_HISTORY_HEARTBEAT_INTERVAL_SECONDS = float(
 _FUND_HISTORY_MAX_PHASES = int(os.getenv("RAGFIN_FUND_HISTORY_MAX_PHASES", "2"))
 # Bump when the history assembly strategy changes so legacy partial series and
 # completed jobs cannot suppress a fresh daily backfill.
-_FUND_HISTORY_KEY_VERSION = 5
+_FUND_HISTORY_KEY_VERSION = 7
 _ADMIN_REFRESH_TOKEN_ENV = "RAGFIN_ADMIN_REFRESH_TOKEN"
 _ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS = int(
     os.getenv("RAGFIN_ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS", "370")
@@ -1602,6 +1602,59 @@ def market_stocks(index: str = Query("XUTUM"), refresh: bool = Query(False)) -> 
     return _market_stocks_payload(index_name=index, force_refresh=refresh)
 
 
+@app.get("/market/stream")
+async def market_stream(
+    request: Request,
+    index: str = Query("XUTUM"),
+    once: bool = Query(False),
+) -> StreamingResponse:
+    normalized_index = _normalize_stock_index(index)
+
+    async def event_generator():
+        prev_snapshot: Dict[str, tuple[Any, ...]] = {}
+        last_heartbeat = time.monotonic()
+        tick = 0
+        while True:
+            if not once and await request.is_disconnected():
+                break
+            market_open = _is_bist_market_open()
+            try:
+                payload = await asyncio.to_thread(_market_stocks_payload, index_name=normalized_index)
+                rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+                changed, prev_snapshot = _compute_market_stocks_delta(prev_snapshot, rows)
+                if changed or tick == 0:
+                    data = {
+                        "index": normalized_index,
+                        "as_of": payload.get("as_of") or datetime.now(timezone.utc).isoformat(),
+                        "market_open": market_open,
+                        "count": len(changed),
+                        "rows": changed,
+                    }
+                    yield f"event: stocks_delta\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                    last_heartbeat = time.monotonic()
+            except Exception as exc:
+                LOGGER.debug("market stream tick failed: %s", exc)
+            tick += 1
+            if once:
+                break
+            now_mono = time.monotonic()
+            if now_mono - last_heartbeat >= 15.0:
+                yield ": heartbeat\n\n"
+                last_heartbeat = now_mono
+            sleep_seconds = 3.0 if market_open else 30.0
+            await asyncio.sleep(sleep_seconds)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.get("/market/stocks/cards")
 def market_stock_cards(
     symbols: str = Query(""),
@@ -1847,14 +1900,6 @@ def _history_job_should_schedule(
     points = payload.get("points") if isinstance(payload.get("points"), list) else []
     if not points:
         return True
-    # A daily Fintables series with a current tail, no internal gaps, and only
-    # a missing head has reached the source's earliest available record. A
-    # second request for the same range cannot manufacture pre-inception data;
-    # do not enqueue the same expensive long-range job on every cache expiry.
-    # Failed jobs remain retryable so a transient upstream error is not hidden.
-    if str(metadata.get("coverage_boundary") or "").strip().lower() == "head":
-        if not last_job or not _history_job_failed(last_job):
-            return False
     # Long chart ranges are bootstrapped from Fintables' daily UDF series.
     # Jobs created before that source was made explicit can look successful
     # while containing only the shorter TEFAS detail history. Give each such
@@ -2762,13 +2807,17 @@ def _quote_map_for_holding_stocks(symbols: List[str]) -> Dict[str, Dict[str, Any
 
 
 def _foreign_holding_provider_symbol(position: Dict[str, Any]) -> str:
+    from app.foreign_instruments import is_isin
+
+    if position.get("provider_symbol_status") == "unresolved":
+        return ""
     symbol = str(
         position.get("provider_symbol")
         or position.get("logo_symbol")
         or position.get("asset_code")
         or ""
     ).strip().upper()
-    return symbol
+    return "" if is_isin(symbol) else symbol
 
 
 def _quote_map_for_foreign_holdings(positions: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -3085,10 +3134,14 @@ def _validate_fund_holding_weights(positions: List[Dict[str, Any]]) -> tuple[Lis
 
 
 def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_code: str) -> Dict[str, Any]:
+    from app.foreign_instruments import resolve_foreign_holdings
     from app.fund_service import normalize_fund_code
 
     normalized_fund = normalize_fund_code(fund_code)
     raw_positions = [dict(position) for position in list(payload.get("positions") or []) if isinstance(position, dict)]
+    raw_positions = resolve_foreign_holdings(
+        raw_positions, cache_get=_shared_cache_get_dict, cache_set=_shared_cache_set,
+    )
     positions, holdings_quality = _validate_fund_holding_weights(raw_positions)
     fund_rows, fund_rows_meta = _fund_snapshot_row_map_with_meta()
     fund_row = fund_rows.get(normalized_fund) or {}
@@ -7250,11 +7303,78 @@ def _market_unavailable_stocks_payload(index_name: str) -> Dict[str, Any]:
     }
 
 
+_BIST_STREAM_OPEN_MINUTE = (9 * 60) + 50
+_BIST_STREAM_CLOSE_MINUTE = (18 * 60) + 20
+_MARKET_QUOTES_OFFHOURS_FRESH_TTL = int(
+    os.getenv("RAGFIN_MARKET_QUOTES_OFFHOURS_FRESH_TTL_SECONDS", "300")
+)
+_MARKET_STOCK_DELTA_TRACKED_KEYS = ("price", "change", "change_pct", "volume", "market_cap")
+_MARKET_STOCK_DELTA_PAYLOAD_KEYS = (
+    "company",
+    "price",
+    "price_currency",
+    "change",
+    "change_pct",
+    "price_as_of",
+    "volume",
+    "market_cap",
+    "return_1w_pct",
+    "return_1m_pct",
+    "return_3m_pct",
+    "return_6m_pct",
+    "return_ytd_pct",
+    "return_1y_pct",
+)
+
+
+def _is_bist_market_open(now: Optional[datetime] = None) -> bool:
+    """Return True during BIST equity trading + auction window (Mon-Fri 09:50-18:20 TRT)."""
+    current = (now or datetime.now(_TURKEY_TIMEZONE)).astimezone(_TURKEY_TIMEZONE)
+    if current.weekday() >= 5:
+        return False
+    minute_of_day = (current.hour * 60) + current.minute
+    return _BIST_STREAM_OPEN_MINUTE <= minute_of_day <= _BIST_STREAM_CLOSE_MINUTE
+
+
+def _effective_market_quotes_fresh_ttl(now: Optional[datetime] = None) -> int:
+    """Keep 3s quote freshness during BIST trading hours and extend to 300s off-hours."""
+    if _is_bist_market_open(now):
+        return max(1, int(_MARKET_QUOTES_FRESH_TTL))
+    return max(1, int(_MARKET_QUOTES_FRESH_TTL), int(_MARKET_QUOTES_OFFHOURS_FRESH_TTL))
+
+
+def _compute_market_stocks_delta(
+    prev_snapshot: Dict[str, tuple[Any, ...]],
+    rows: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Dict[str, tuple[Any, ...]]]:
+    """Return only stock rows whose live quote fields changed since prev_snapshot."""
+    changed: List[Dict[str, Any]] = []
+    next_snapshot: Dict[str, tuple[Any, ...]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("company") or row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        sig = tuple(row.get(k) for k in _MARKET_STOCK_DELTA_TRACKED_KEYS)
+        next_snapshot[symbol] = sig
+        if prev_snapshot and prev_snapshot.get(symbol) == sig:
+            continue
+        delta_item: Dict[str, Any] = {"company": symbol}
+        for key in _MARKET_STOCK_DELTA_PAYLOAD_KEYS:
+            if key in row and row[key] is not None:
+                delta_item[key] = row[key]
+        changed.append(delta_item)
+    return changed, next_snapshot
+
+
 def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
     normalized_index = _normalize_stock_index(index_name)
     started_at = time.perf_counter()
     local_key = f"payload:{normalized_index}"
     shared_key = f"api:market:stocks:{normalized_index}:v2"
+    effective_fresh_ttl = _effective_market_quotes_fresh_ttl()
+    effective_stale_ttl = max(effective_fresh_ttl, _MARKET_QUOTES_STALE_TTL)
 
     def revalidate_factory() -> Optional[Dict[str, Any]]:
         built = _build_market_stocks_payload(index_name=normalized_index, force_refresh=True)
@@ -7266,8 +7386,8 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
     if force_refresh:
         refresh_pending = _schedule_swr_revalidation(
             cache_key=shared_key,
-            fresh_ttl_seconds=_MARKET_QUOTES_FRESH_TTL,
-            stale_ttl_seconds=_MARKET_QUOTES_STALE_TTL,
+            fresh_ttl_seconds=effective_fresh_ttl,
+            stale_ttl_seconds=effective_stale_ttl,
             factory=revalidate_factory,
         )
         # A public refresh is a revalidation signal, never a cache bypass.
@@ -7330,14 +7450,14 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
         now = time.time()
         return {
             "payload": built,
-            "fresh_until": now + max(1, _MARKET_QUOTES_FRESH_TTL),
-            "stale_until": now + max(1, _MARKET_QUOTES_STALE_TTL),
+            "fresh_until": now + max(1, effective_fresh_ttl),
+            "stale_until": now + max(1, effective_stale_ttl),
             "cached_at": datetime.now(timezone.utc).isoformat(),
         }
 
     entry, cache_status = _get_or_set_single_flight(
         shared_key,
-        ttl_seconds=max(1, _MARKET_QUOTES_STALE_TTL),
+        ttl_seconds=max(1, effective_stale_ttl),
         factory=build_and_envelope,
         lock_key=f"api:market:stocks:{normalized_index}:lock:v2",
         lock_ttl_seconds=_MARKET_QUOTES_LOCK_TTL_SECONDS,
@@ -10423,45 +10543,19 @@ def market_watch_global(refresh: bool = Query(False)) -> Dict[str, Any]:
 
 
 def _extract_model_portfolio_admin_token(request: Request) -> str:
-    header_token = str(request.headers.get("x-admin-token") or "").strip()
-    if header_token:
-        return header_token
-    auth = str(request.headers.get("authorization") or "").strip()
-    scheme, _, bearer = auth.partition(" ")
-    if scheme.lower() == "bearer" and bearer.strip():
-        return bearer.strip()
-    return ""
+    return str(request.headers.get("x-admin-token") or "").strip()
 
 
 def _require_model_portfolio_admin(request: Request) -> None:
-    from app.model_portfolio_service import (
-        expected_admin_token,
-        is_admin_locked_out,
-        record_admin_auth_result,
-        verify_admin_token,
-    )
+    from app.model_portfolio_service import verify_admin_session_token
 
-    client_ip = (request.client.host if request.client else None) or "unknown"
-    if is_admin_locked_out(client_ip):
-        raise HTTPException(
-            status_code=429,
-            detail="Çok fazla başarısız giriş denemesi yapıldı. Lütfen 10 dakika sonra tekrar deneyin.",
-        )
-
-    if not expected_admin_token():
-        raise HTTPException(
-            status_code=503,
-            detail="Yönetici anahtarı sunucu ortamında henüz yapılandırılmamış.",
-        )
-
-    token = _extract_model_portfolio_admin_token(request)
-    if not verify_admin_token(token):
-        record_admin_auth_result(client_ip, False)
+    auth = str(request.headers.get("authorization") or "").strip()
+    scheme, _, session_token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not verify_admin_session_token(session_token):
         raise HTTPException(
             status_code=401,
-            detail="Yönetici anahtarı geçersiz veya eksik.",
+            detail="Yönetici oturumu geçersiz veya süresi dolmuş. Lütfen yeniden giriş yapın.",
         )
-    record_admin_auth_result(client_ip, True)
 
 
 def _model_portfolio_cached_quote_map(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -10642,9 +10736,53 @@ def get_model_portfolio_performance() -> Dict[str, Any]:
 
 
 @app.post("/model-portfolio/admin/verify")
-def verify_model_portfolio_admin(request: Request) -> Dict[str, Any]:
-    _require_model_portfolio_admin(request)
-    return {"ok": True}
+def verify_model_portfolio_admin(request: Request, response: Response) -> Dict[str, Any]:
+    from app.model_portfolio_service import (
+        ADMIN_SESSION_TTL_SECONDS,
+        create_admin_session_token,
+        expected_admin_token,
+        is_admin_locked_out,
+        record_admin_auth_result,
+        verify_admin_token,
+    )
+    from app.rate_limit import client_identity
+
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+
+    if not expected_admin_token():
+        raise HTTPException(
+            status_code=503,
+            detail="Yönetici anahtarı sunucu ortamında henüz yapılandırılmamış.",
+        )
+
+    client_ip = client_identity(request)
+    if is_admin_locked_out(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Çok fazla başarısız giriş denemesi yapıldı. Lütfen 10 dakika sonra tekrar deneyin.",
+            headers={"Retry-After": "600"},
+        )
+    admin_token = _extract_model_portfolio_admin_token(request)
+    if verify_admin_token(admin_token):
+        record_admin_auth_result(client_ip, True)
+        session_token = create_admin_session_token()
+        if not session_token:
+            raise HTTPException(status_code=503, detail="Yönetici oturumu oluşturulamadı.")
+        return {
+            "ok": True,
+            "session_token": session_token,
+            "expires_in_seconds": ADMIN_SESSION_TTL_SECONDS,
+        }
+
+    allowed, _retry_after = record_admin_auth_result(client_ip, False)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Çok fazla başarısız giriş denemesi yapıldı. Lütfen 10 dakika sonra tekrar deneyin.",
+            headers={"Retry-After": str(max(1, _retry_after))},
+        )
+    raise HTTPException(status_code=401, detail="Yönetici anahtarı geçersiz veya eksik.")
 
 
 @app.get("/model-portfolio/prefill")
@@ -10849,4 +10987,3 @@ def delete_model_portfolio_position_endpoint(position_id: str, request: Request)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return _build_current_model_portfolio_response()
-
