@@ -52,7 +52,11 @@ index_v2_out.txt
 # Local vector store / databases
 data/processed/chroma/
 *.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 *.db
+*.db-shm
+*.db-wal
 
 # Local planning / notes (keep local)
 agents_plan/
@@ -89,3 +93,8 @@ tavhl_sample.txt
 
 # Codex temporary browser profiles
 .tmp-codex*/
+
+# Local runtime state and temporary browser/tooling data
+.wrangler/
+.codex-remote-attachments/
+tmp/
