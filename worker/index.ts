@@ -1,3 +1,13 @@
+import { WorkerEntrypoint } from "cloudflare:workers";
+import {
+    applyListCachePolicy,
+    canonicalizeCacheRequest,
+    createUpstreamRequest,
+    getCacheableListRoute,
+    purgeMarketCacheForRefresh,
+    shouldUseCachedList,
+} from "./api-cache";
+
 const FAST_REFRESH_PATH = "/admin/kap/refresh?fast=1";
 const DEEP_REFRESH_PATH = "/admin/kap/refresh";
 const REFRESH_TIMEOUT_MS = 90_000;
@@ -29,11 +39,14 @@ function jsonResponse(body: Record<string, unknown>, status: number): Response {
 async function secretsMatch(provided: string, expected: string): Promise<boolean> {
     if (!provided || !expected) return false;
     const encoder = new TextEncoder();
+    const cloudflareSubtle = crypto.subtle as SubtleCrypto & {
+        timingSafeEqual(a: ArrayBuffer | ArrayBufferView, b: ArrayBuffer | ArrayBufferView): boolean;
+    };
     const [providedHash, expectedHash] = await Promise.all([
         crypto.subtle.digest("SHA-256", encoder.encode(provided)),
         crypto.subtle.digest("SHA-256", encoder.encode(expected)),
     ]);
-    return crypto.subtle.timingSafeEqual(providedHash, expectedHash);
+    return cloudflareSubtle.timingSafeEqual(providedHash, expectedHash);
 }
 
 function copyQueryParam(source: URL, target: URL, name: string): string | null {
@@ -197,13 +210,83 @@ async function refreshKapFlow(controller: ScheduledController, env: Env): Promis
     throw new Error(`KAP refresh returned unexpected status: ${status || "missing"}`);
 }
 
+async function proxyApiRequest(request: Request, env: Env): Promise<Response> {
+    try {
+        return await fetch(createUpstreamRequest(request, env.FIN_API_BASE_URL));
+    } catch (error) {
+        const url = new URL(request.url);
+        console.error(JSON.stringify({
+            message: "API proxy upstream request failed",
+            path: url.pathname,
+            error: asErrorMessage(error),
+        }));
+        return jsonResponse({ error: "api_upstream_unavailable" }, 502);
+    }
+}
+
+export class ApiProxy extends WorkerEntrypoint<Env> {
+    async fetch(request: Request): Promise<Response> {
+        return proxyApiRequest(request, this.env);
+    }
+}
+
+export class CachedListApi extends WorkerEntrypoint<Env> {
+    async fetch(request: Request): Promise<Response> {
+        if (this.env.EDGE_CACHE_ENABLED !== "true") {
+            return proxyApiRequest(request, this.env);
+        }
+
+        const url = new URL(request.url);
+        const route = getCacheableListRoute(url);
+        if (!route || !shouldUseCachedList(request)) {
+            await purgeMarketCacheForRefresh(request, (tag) => this.purgeMarketStocks(tag));
+            return proxyApiRequest(request, this.env);
+        }
+
+        try {
+            const upstream = await fetch(createUpstreamRequest(request, this.env.FIN_API_BASE_URL));
+            return await applyListCachePolicy(upstream, request, route);
+        } catch (error) {
+            console.error(JSON.stringify({
+                message: "Cached API list upstream request failed",
+                path: url.pathname,
+                error: asErrorMessage(error),
+            }));
+            return jsonResponse({ error: "api_upstream_unavailable" }, 502);
+        }
+    }
+
+    async purgeMarketStocks(tag: string): Promise<void> {
+        const cache = this.ctx.cache;
+        if (!cache) return;
+
+        const result = await cache.purge({ tags: [tag] });
+        if (!result.success) {
+            console.warn(JSON.stringify({
+                message: "Market stocks edge cache purge failed",
+                tag,
+                errors: result.errors,
+            }));
+        }
+    }
+}
+
 export default {
-    async fetch(request: Request, env: Env): Promise<Response> {
+    async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const url = new URL(request.url);
         const fintablesResponse = await handleFintablesProxy(request, env);
         if (fintablesResponse) return fintablesResponse;
         if (url.pathname === "/__scheduled") {
             return new Response("Not Found", { status: 404 });
+        }
+        if (url.pathname.startsWith("/api/")) {
+            if (env.EDGE_CACHE_ENABLED === "true" && shouldUseCachedList(request)) {
+                return ctx.exports.CachedListApi.fetch(canonicalizeCacheRequest(request));
+            }
+            if (env.EDGE_CACHE_ENABLED === "true") {
+                await purgeMarketCacheForRefresh(request, (tag) => ctx.exports.CachedListApi.purgeMarketStocks(tag));
+            }
+            return ctx.exports.ApiProxy.fetch(request);
         }
         return env.ASSETS.fetch(request);
     },
