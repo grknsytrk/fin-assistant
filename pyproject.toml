@@ -10,6 +10,8 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "pypdf>=4.2.0",
+  "pypdfium2>=4.30,<5",
+  "rapidocr-onnxruntime>=1.4,<2",
   "pandas>=2.2.0",
   "PyYAML>=6.0.1",
   "fastapi>=0.111.0",

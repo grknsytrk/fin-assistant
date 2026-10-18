@@ -12,7 +12,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app import api as api_module
+from api_module_facade import api_module
 from app import cache as cache_module
 from app import database as database_module
 from app import fund_service as fund_service_module
@@ -100,7 +100,16 @@ def test_market_universe_is_metadata_only_and_batch_resolved(monkeypatch: pytest
             }
         },
     )
-    monkeypatch.setattr(api_module, "_load_cached_kap_market_metadata", lambda *_args: {})
+    monkeypatch.setattr(
+        api_module,
+        "get_financial_snapshots_map",
+        lambda _processed_dir, _symbols: {},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_load_cached_kap_market_metadata",
+        lambda *_args: pytest.fail("market universe should use the SQL snapshot map"),
+    )
     monkeypatch.setattr(api_module, "_fetch_market_price_map", lambda *_args, **_kwargs: pytest.fail("universe must not fetch quotes"))
     monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: pytest.fail("universe must not fetch summaries"))
 
@@ -335,7 +344,7 @@ def test_complete_tefas_history_schedules_one_fintables_probe() -> None:
     assert api_module._history_job_should_schedule(payload, last_job=completed_probe, target=target) is False
 
 
-def test_head_limited_fintables_history_does_not_schedule_repeated_backfill() -> None:
+def test_head_limited_fintables_history_schedules_recovery_backfill() -> None:
     payload = {
         "points": [
             {"date": "2026-04-01", "price": 1.0},
@@ -345,7 +354,6 @@ def test_head_limited_fintables_history_does_not_schedule_repeated_backfill() ->
             "history_source_used": "fintables_udf_history",
             "resolution": "daily",
             "coverage_state": "range_incomplete",
-            "coverage_boundary": "head",
             "available_start_date": "2026-04-01",
             "available_end_date": "2026-09-10",
             "internal_gap_count": 0,
@@ -353,7 +361,7 @@ def test_head_limited_fintables_history_does_not_schedule_repeated_backfill() ->
     }
     target = api_module._history_request_range(date(2026, 3, 10), date(2026, 9, 10))
 
-    assert api_module._history_job_should_schedule(payload, last_job=None, target=target) is False
+    assert api_module._history_job_should_schedule(payload, last_job=None, target=target) is True
 
 
 def test_fund_performance_returns_local_points_and_queues_background_history_job(
@@ -450,7 +458,7 @@ def test_market_stocks_serves_stale_quote_when_upstream_fails(monkeypatch: pytes
         "stale_until": time.time() + 120,
     }
     backend = cache_module.get_cache()
-    backend.set("api:market:stocks:XUTUM:v2", stale_entry, ttl_seconds=120)
+    backend.set("api:market:stocks:XUTUM:v3", stale_entry, ttl_seconds=120)
     monkeypatch.setattr(api_module, "_build_market_stocks_payload", lambda **_kwargs: {
         "index": "XUTUM",
         "rows": [{"company": "YKBNK", "price": None}],
@@ -4909,10 +4917,18 @@ def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.M
     monkeypatch.setattr(
         api_module,
         "_load_cached_kap_market_metadata",
-        lambda _cache_dir, symbol: {
-            "latest_quarter": "2026Q1",
-            "has_kap_cache": symbol == "A1CAP",
-            "shares_outstanding": 100_000_000.0 if symbol == "A1CAP" else None,
+        lambda *_args: pytest.fail("market stock rows should use the SQL snapshot map"),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "get_financial_snapshots_map",
+        lambda _processed_dir, _symbols: {
+            "A1CAP": {
+                "latest_quarter": "2026Q1",
+                "has_kap_cache": True,
+                "shares_outstanding": 100_000_000.0,
+            },
+            "AEFES": {"latest_quarter": None, "has_kap_cache": False, "shares_outstanding": None},
         },
     )
 

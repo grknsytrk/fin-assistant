@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 import pytest
 from fastapi.testclient import TestClient
 
-import app.api as api_mod
+from api_module_facade import api_module as api_mod
 from app.model_portfolio_service import (
     compound_relative_return_pct,
     compute_target_progress_pct,

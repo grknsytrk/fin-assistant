@@ -1202,10 +1202,9 @@ def test_fund_performance_metadata_marks_material_tail_gap_incomplete(tmp_path) 
     assert metadata["coverage_state"] == "range_incomplete"
     assert metadata["coverage_gap_business_days"] > 3
     assert metadata["available_end_date"] == "2026-05-26"
-    assert metadata["coverage_boundary"] is None
 
 
-def test_fund_performance_metadata_marks_clean_fintables_head_boundary(tmp_path) -> None:
+def test_fund_performance_metadata_keeps_partial_fintables_head_incomplete(tmp_path) -> None:
     points = []
     current = date(2026, 4, 1)
     price = 1.0
@@ -1232,7 +1231,6 @@ def test_fund_performance_metadata_marks_clean_fintables_head_boundary(tmp_path)
 
     metadata = payload["source_metadata"]
     assert metadata["coverage_state"] == "range_incomplete"
-    assert metadata["coverage_boundary"] == "head"
     assert metadata["coverage_gap_business_days"] == 0
     assert metadata["internal_gap_count"] == 0
 
@@ -1572,6 +1570,78 @@ def test_refresh_funds_snapshot_does_not_downgrade_newer_snapshot(monkeypatch, t
     assert payload["as_of"] == "2026-08-21"
     assert payload["snapshot_action"] == "retained_newer"
     assert payload["resolution_status"] == "resolved_previous_date"
+
+
+def test_refresh_funds_snapshot_replaces_stale_rows_on_same_date(monkeypatch, tmp_path) -> None:
+    target = date(2026, 8, 21)
+    monkeypatch.setattr(fund_service, "_latest_fund_snapshot_target_date", lambda *_args: target)
+    monkeypatch.setattr(fund_service, "_turkey_market_today", lambda: target)
+    existing = fund_service._build_snapshot(
+        [
+            {"fund_code": "TLY", "date": target.isoformat(), "price": 8.865, "tefasDurum": True},
+            {"fund_code": "STALE", "date": target.isoformat(), "price": 4.2, "tefasDurum": True},
+        ],
+        warnings=["previous current-day refresh failed"],
+    )
+    fund_service._write_json(fund_service._snapshot_path(tmp_path), existing)
+
+    class FakeTefasFonClient:
+        def fetch_latest_fund_list_snapshot_result(self, *, as_of, lookback_days, enrich=False):
+            return fund_service.FundSnapshotFetchResult(
+                rows=[
+                    {
+                        "fund_code": "TLY",
+                        "date": target.isoformat(),
+                        "price": 9.1,
+                        "tefasDurum": True,
+                        "source": "tefasfon_funds",
+                    }
+                ],
+                resolution_status="available",
+                requested_as_of=as_of.isoformat(),
+                resolved_as_of=target.isoformat(),
+                attempted_dates=[target.isoformat()],
+                source="tefasfon_funds",
+            )
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+
+    refreshed = fund_service.refresh_funds_snapshot(
+        tmp_path,
+        lookback_days=1,
+        persist_reference_data=False,
+        backfill_daily_returns=False,
+    )
+
+    assert [row["fund_code"] for row in refreshed["rows"]] == ["TLY"]
+    assert refreshed["rows"][0]["price"] == pytest.approx(9.1)
+    assert refreshed["warnings"] == []
+    assert refreshed["source_metadata"]["warnings"] == []
+    assert refreshed["snapshot_action"] == "updated"
+
+
+def test_load_funds_snapshot_hides_warnings_after_successful_current_probe(monkeypatch, tmp_path) -> None:
+    target = date(2026, 8, 21)
+    monkeypatch.setattr(fund_service, "_latest_fund_snapshot_target_date", lambda *_args: target)
+    now = fund_service._utc_now_iso()
+    payload = fund_service._build_snapshot(
+        [{"fund_code": "TLY", "date": target.isoformat(), "price": 8.865, "tefasDurum": True}],
+        warnings=["old TEFAS list error", "old TEFAS list error"],
+    )
+    payload["source_metadata"].update(
+        {
+            "resolution_status": "available",
+            "requested_as_of": target.isoformat(),
+            "last_checked_at": now,
+            "upstream_errors": [],
+        }
+    )
+    fund_service._write_json(fund_service._snapshot_path(tmp_path), payload)
+
+    loaded = fund_service.load_funds_snapshot(tmp_path)
+
+    assert loaded["warnings"] == []
+    assert loaded["source_metadata"]["warnings"] == []
 
 
 def test_weekend_snapshot_is_not_refreshed_or_reported_stale(monkeypatch, tmp_path) -> None:
@@ -1979,7 +2049,90 @@ def test_fast_long_history_prefers_complete_daily_fintables_history(monkeypatch)
     assert fallback_reason is None
 
 
-def test_fast_long_history_keeps_partial_fintables_without_tefas_mixing(monkeypatch) -> None:
+def test_fast_long_history_adds_confirmed_tefas_tail(monkeypatch) -> None:
+    tefas_calls = []
+
+    def partial_fintables_history(fund_code, start_date, end_date):
+        rows = []
+        current = start_date
+        price = 1.0
+        while current <= date(2026, 9, 11):
+            if current.weekday() < 5:
+                rows.append(
+                    {
+                        "fund_code": fund_code,
+                        "date": current.isoformat(),
+                        "price": price,
+                        "source": "fintables_udf_history",
+                    }
+                )
+                price += 0.01
+            current += timedelta(days=1)
+        return rows
+
+    class FakeTefasClient:
+        def fetch_fund_history(self, *, fund_codes, start_date, end_date):
+            tefas_calls.append((start_date, end_date))
+            return [
+                {
+                    "fund_code": fund_codes[0],
+                    "date": "2026-09-14",
+                    "price": 9.0,
+                    "source": "tefasfon_funds",
+                }
+            ]
+
+    monkeypatch.setattr(fund_service, "TefasClient", lambda: FakeTefasClient())
+    monkeypatch.setattr(fund_service, "fetch_fintables_udf_history", partial_fintables_history)
+    monkeypatch.setattr(fund_service, "_fetch_recent_detail_rows", lambda *_args, **_kwargs: ([], []))
+    monkeypatch.setattr(fund_service, "_fetch_fund_overview_metric_rows", lambda *_args, **_kwargs: ([], [], []))
+
+    points, warnings, fallback_used, fallback_reason = fund_service._fetch_fast_long_fund_history(
+        None,
+        "TLY",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 9, 14),
+        client=object(),
+    )
+
+    assert tefas_calls == [(date(2026, 9, 12), date(2026, 9, 14))]
+    assert points[-1]["date"] == "2026-09-14"
+    assert points[-1]["source"] == "tefasfon_funds"
+    assert any(point["source"] == "fintables_udf_history" for point in points)
+    assert warnings == []
+    assert fallback_used is True
+    assert fallback_reason == "fintables_udf_history_confirmed_tail_tefas_fallback"
+
+
+def test_confirmed_tefas_tail_preserves_publication_delay(monkeypatch) -> None:
+    tefas_calls = []
+
+    class FakeTefasClient:
+        def fetch_fund_history(self, *, fund_codes, start_date, end_date):
+            tefas_calls.append((start_date, end_date))
+            return []
+
+    monkeypatch.setattr(fund_service, "TefasClient", lambda: FakeTefasClient())
+
+    tail, warnings = fund_service._fetch_confirmed_tefas_tail(
+        "TLY",
+        [
+            {
+                "fund_code": "TLY",
+                "date": "2026-09-11",
+                "price": 9805.33,
+                "source": "fintables_udf_history",
+            }
+        ],
+        end_date=date(2026, 9, 14),
+    )
+
+    assert tefas_calls == [(date(2026, 9, 12), date(2026, 9, 14))]
+    assert tail == []
+    assert warnings == []
+
+
+def test_fast_long_history_uses_tefas_when_fintables_range_is_incomplete(monkeypatch) -> None:
     calls = []
 
     def partial_fintables_history(fund_code, start_date, end_date):
@@ -1995,7 +2148,23 @@ def test_fast_long_history_keeps_partial_fintables_without_tefas_mixing(monkeypa
 
     class FakeTefasClient:
         def fetch_fund_history(self, *, fund_codes, start_date, end_date):
-            raise AssertionError("TEFAS should not fill a partial Fintables range")
+            calls.append("tefas")
+            rows = []
+            current = start_date
+            price = 1.0
+            while current <= end_date:
+                if current.weekday() < 5:
+                    rows.append(
+                        {
+                            "fund_code": fund_codes[0],
+                            "date": current.isoformat(),
+                            "price": price,
+                            "source": "tefasfon_funds",
+                        }
+                    )
+                    price += 0.01
+                current += timedelta(days=1)
+            return rows
 
     monkeypatch.setattr(fund_service, "fetch_fintables_udf_history", partial_fintables_history)
     monkeypatch.setattr(fund_service, "TefasClient", lambda: FakeTefasClient())
@@ -2010,13 +2179,15 @@ def test_fast_long_history_keeps_partial_fintables_without_tefas_mixing(monkeypa
         client=object(),
     )
 
-    assert calls == ["fintables"]
-    assert len(points) == 1
-    assert points[0]["source"] == "fintables_udf_history"
-    assert points[-1]["source"] == "fintables_udf_history"
+    assert calls == ["fintables", "tefas"]
+    assert len(points) == 98
+    assert points[0]["date"] == "2026-01-01"
+    assert points[-1]["date"] == "2026-05-18"
+    assert points[0]["source"] == "tefasfon_funds"
+    assert points[-1]["source"] == "tefasfon_funds"
     assert warnings == []
-    assert fallback_used is False
-    assert fallback_reason is None
+    assert fallback_used is True
+    assert fallback_reason == "fintables_udf_history_partial_tefas_fallback"
 
 
 def test_get_fund_performance_payload_uses_tefasfon_only_when_fintables_unavailable(monkeypatch, tmp_path) -> None:
@@ -2851,6 +3022,63 @@ def test_read_preferred_fund_price_points_keeps_fintables_prices_without_mixing(
     assert [point["price"] for point in payload["points"]] == [100.0, 102.0]
     assert payload["source_metadata"]["history_source_used"] == "fintables_udf_history"
     assert payload["source_metadata"]["primary_source"] == "fintables"
+
+
+def test_read_preferred_fund_price_points_keeps_newer_tefas_tail(tmp_path) -> None:
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "TAIL", "date": "2026-09-10", "price": 10.0, "source": "fintables_udf_history"},
+            {"fund_code": "TAIL", "date": "2026-09-11", "price": 10.1, "source": "fintables_udf_history"},
+        ],
+        source="fintables_udf_history",
+    )
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [{"fund_code": "TAIL", "date": "2026-09-14", "price": 10.2, "source": "tefasfon_funds"}],
+        source="tefasfon_funds",
+    )
+
+    points = fund_service._read_preferred_fund_price_points(
+        tmp_path,
+        "TAIL",
+        start_date=date(2026, 9, 10),
+        end_date=date(2026, 9, 14),
+    )
+
+    assert [point["date"] for point in points] == ["2026-09-10", "2026-09-11", "2026-09-14"]
+    assert points[-1]["source"] == "tefasfon_funds"
+
+
+def test_read_preferred_fund_price_points_does_not_hide_older_tefas_history(tmp_path) -> None:
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "DOH", "date": "2026-04-02", "price": 2.0, "source": "fintables_udf_history"},
+            {"fund_code": "DOH", "date": "2026-09-10", "price": 2.5, "source": "fintables_udf_history"},
+        ],
+        source="fintables_udf_history",
+    )
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "DOH", "date": "2025-04-29", "price": 1.0, "source": "tefasfon_funds"},
+            {"fund_code": "DOH", "date": "2025-05-30", "price": 1.2, "source": "tefasfon_funds"},
+        ],
+        source="tefasfon_funds",
+    )
+
+    points = fund_service._read_preferred_fund_price_points(
+        tmp_path,
+        "DOH",
+        start_date=date(2025, 4, 29),
+        end_date=date(2026, 9, 10),
+    )
+
+    assert points[0]["date"] == "2025-04-29"
+    assert points[0]["source"] == "tefasfon_funds"
+    assert points[-1]["date"] == "2026-09-10"
+    assert points[-1]["source"] == "fintables_udf_history"
 
 
 def test_fund_price_upsert_does_not_write_fintables_yield_summary(tmp_path) -> None:
