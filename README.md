@@ -40,7 +40,7 @@ Canlı adresler:
 - Frontend: <https://fin-assistant.soyturkgurkan-61.workers.dev>
 - Backend: <https://grknsytrk-fin-api.hf.space>
 
-Frontend, `VITE_API_BASE_URL` üzerinden backend adresine bağlanır. Redis yalnızca cache ve kilitleme amacıyla kullanılır; kalıcı veri kaynağı Supabase'tir. Redis kullanılamazsa backend memory cache'e düşebilir.
+Frontend, `VITE_API_BASE_URL` üzerinden API adresine bağlanır. Üretim Cloudflare build'inde bu değer `/api` olmalıdır; Worker API isteklerini Hugging Face backend'ine aktarır. Yerel Vite geliştirmesinde varsayılan adres `http://localhost:8000` olarak kalır. Redis yalnızca cache ve kilitleme amacıyla kullanılır; kalıcı veri kaynağı Supabase'tir. Redis kullanılamazsa backend memory cache'e düşebilir.
 
 Piyasa metadata'sı (`/market/universe` ve `/market/stocks/search`) referans verisinden okunur ve canlı fiyat çağırmaz. Fiyat endpoint'i (`/market/stocks`) Redis'te fresh/stale quote cache ve single-flight lock kullanır; upstream geçici olarak erişilemezse son sağlıklı fiyat boş listeyle değiştirilmez.
 
@@ -73,8 +73,10 @@ npm run build
 Frontend Cloudflare Worker'a, backend ise Hugging Face Spaces'e deploy edilir. Cloudflare build ayarı:
 
 ```text
-npm --prefix frontend ci && npm --prefix frontend run build && npx wrangler deploy
+npm --prefix frontend ci && npm --prefix frontend run build && npm --prefix frontend run worker:deploy
 ```
+
+Cloudflare build variable `VITE_API_BASE_URL` değerini `/api` olarak ayarlayın. `wrangler.toml` yerel/preview geliştirmede cache'i kapalı tutar; üretim deploy'u `wrangler.production.toml` ile yalnızca `GET /api/market/stocks` ve `GET /api/funds` için Workers Cache'i etkinleştirir. Hisse yanıtları seans içinde 3 saniye taze + 30 saniye SWR, seans dışında bir sonraki seansı aşmayan en çok 300 saniye taze; fon listesi 5 dakika taze + 1 saat SWR olarak saklanır. ETag ve `private, no-cache` tarayıcı politikası korunur.
 
 Backend Space güncellenirken yalnızca uygulama dosyaları ve bağımlılıklar yüklenir; runtime SQLite, WAL/SHM, cache ve log dosyaları deploy edilmez.
 
@@ -84,7 +86,7 @@ Canlı servislerde gizli değişkenler platformların secret/variable alanların
 - Hugging Face: performans geçmişi için Fintables birincildir; çıkış IP'si Gate tarafından engellenirse `RAGFIN_FINTABLES_PROXY_BASE_URL` ile token korumalı Cloudflare proxy kullanılabilir. Proxy token'ı boş bırakılırsa `RAGFIN_ADMIN_REFRESH_TOKEN` kullanılır.
 - Hugging Face: `RAGFIN_CACHE_BACKEND=redis` variable olarak.
 - Hugging Face: `RAGFIN_ADMIN_REFRESH_TOKEN` secret olarak.
-- Cloudflare: `VITE_API_BASE_URL` build variable olarak.
+- Cloudflare: `VITE_API_BASE_URL=/api` build variable olarak.
 - Cloudflare Worker: `FIN_API_ADMIN_TOKEN` secret'ı, HF secret'ındaki değerle aynı olmalıdır. KAP Cron Trigger bu token ile yalnızca `POST /admin/kap/refresh` çağrısını yapar; frontend'e aktarılmaz.
 - GitHub Actions: aynı token secret'ı manuel KAP refresh fallback'i ve mevcut fon snapshot workflow'u için kullanılabilir.
 
@@ -98,9 +100,11 @@ KAP akışı için yenileme ve okuma yolları ayrıdır: Cloudflare Worker Cron 
 
 Fonların KAP portföy dağılımında PDF cache'i uzun süre korunur; ancak KAP'ın hafif bildirim listesi 60 saniyede bir yeniden doğrulanır. Yeni `disclosureIndex` görüldüğünde yalnızca yeni PDF indirilip parse edilir. Fonun Genel Bakış veya Portföy Dağılımı ekranı açıkken frontend de holdings yanıtını 60 saniyede bir yeniler; bu nedenle KAP'ın yayınlama/ağ gecikmesi dışında yeni rapor normalde en geç birkaç dakika içinde görünür.
 
+Metin katmanı olmayan KAP PDF sayfaları PDFium ile görüntülenip yerel CPU OCR ile okunur. OCR tablo hücrelerini satırlarına göre birleştirir; ISIN, nominal değer, toplam değer, grup yüzdesi ve toplam yüzdesi bulunan tabloların son yüzde sütunu fon ağırlığı olarak kullanılır. Türkçe ve İngilizce sayı biçimleri desteklenir. İlk OCR okuması daha uzun sürebilir; çıkarılan metin sonraki isteklerde önbellekten kullanılır. Docker ve Hugging Face ortamları için gerekli görüntü kütüphaneleri sırasıyla `Dockerfile` ve `packages.txt` içinde tanımlıdır.
+
 Fon varlık dağılımı özet kartı ile `Fon Dağılımı` geçmişi aynı en yeni TEFAS rapor gününü kullanır. Geçmiş cache'i daha yeni bir gün içeriyorsa bu gün otomatik olarak özet snapshot'ına yükseltilir; özet snapshot'ı eskiyse API aynı 30 günlük geçmiş yenileme işini arka planda başlatır ve frontend sonucu beklemeden mevcut veriyi gösterip tamamlanınca günceller.
 
-Cloudflare Worker Cron kurulumu için önce `FIN_API_ADMIN_TOKEN` secret'ını tanımlayın (`npx wrangler secret put FIN_API_ADMIN_TOKEN`); değer Hugging Face `RAGFIN_ADMIN_REFRESH_TOKEN` ile aynı olmalıdır. Ardından `npx wrangler deploy` çalıştırın. `wrangler.toml` içindeki `* * * * *` dakikalık hızlı, `*/5 * * * *` ise derin yenileme tetikleyicisidir; ikisi de UTC'dir. Deploy sonrası Worker > Settings > Triggers ve Workers Logs ekranlarında tetiklemeleri doğrulayın.
+Cloudflare Worker Cron kurulumu için önce `FIN_API_ADMIN_TOKEN` secret'ını tanımlayın (`npm --prefix frontend run worker:secret:fin-api-admin-token`); değer Hugging Face `RAGFIN_ADMIN_REFRESH_TOKEN` ile aynı olmalıdır. Ardından `npm --prefix frontend run worker:deploy` çalıştırın. `wrangler.production.toml` içindeki `* * * * *` dakikalık hızlı, `*/5 * * * *` ise derin yenileme tetikleyicisidir; ikisi de UTC'dir. Deploy sonrası Worker > Settings > Triggers ve Workers Logs ekranlarında tetiklemeleri doğrulayın.
 
 Production'da `/health` yanıtındaki `cache_backend` değeri `redis` ve `cache_redis_fallback` değeri `false` olmalıdır. Aksi durumda uygulama yalnızca process-memory cache kullanır; çoklu worker sağlayıcı çağrılarını paylaşamaz.
 
