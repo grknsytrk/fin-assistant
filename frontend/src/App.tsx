@@ -34,6 +34,7 @@ const MarketPage = lazy(() => import('./pages/MarketPage'));
 const MarketsView = lazy(() => import('./pages/MarketsView'));
 const StockDetailPage = lazy(() => import('./pages/StockDetailPage'));
 const FundsPage = lazy(() => import('./pages/FundsPage'));
+const ModelPortfolioPage = lazy(() => import('./pages/ModelPortfolioPage'));
 
 function LandingRoute() {
   const location = useLocation();
@@ -447,7 +448,7 @@ function App() {
 
   return (
     <div className="app-layout">
-      {!isLandingPage && !isMarketsView && !isFundsView && !isStocksView && (
+      {!isLandingPage && !isMarketsView && !isFundsView && !isStocksView && !isModelPortfolioView && (
         <header className="app-header">
           <div className="header-content">
             <div

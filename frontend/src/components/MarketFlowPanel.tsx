@@ -5,11 +5,12 @@ import { apiClient } from '../api/client';
 import type { MarketFlowItem } from '../api/types';
 import { normalizeWatchlistSymbol, useWatchlist } from '../hooks/useWatchlist';
 
-type FlowFilter = 'all' | 'watchlist' | 'ozel_durum' | 'finansal_rapor' | 'kar_payi' | 'genel_kurul' | 'diger';
+export type FlowFilter = 'all' | 'watchlist' | 'model_portfolio' | 'ozel_durum' | 'finansal_rapor' | 'kar_payi' | 'genel_kurul' | 'diger';
 
 const FLOW_FILTERS: Array<{ value: FlowFilter; label: string }> = [
     { value: 'all', label: 'Tümü' },
     { value: 'watchlist', label: 'Favorilerim' },
+    { value: 'model_portfolio', label: 'Model Portföy' },
     { value: 'ozel_durum', label: 'Özel Durum' },
     { value: 'finansal_rapor', label: 'Finansal Rapor' },
     { value: 'kar_payi', label: 'Kâr Payı' },
@@ -49,11 +50,20 @@ export function getNewFlowItemIds(previousIds: Set<string> | null, items: Market
     return items.filter((item) => !previousIds.has(item.id)).map((item) => item.id);
 }
 
-function matchesFlowFilter(item: MarketFlowItem, filter: FlowFilter, favoriteSymbols: Set<string>): boolean {
+export function matchesFlowFilter(
+    item: MarketFlowItem,
+    filter: FlowFilter,
+    favoriteSymbols: Set<string>,
+    modelPortfolioSymbols?: Set<string>,
+): boolean {
     if (filter === 'all') return true;
     if (filter === 'watchlist') {
         if (favoriteSymbols.size === 0) return false;
         return getMatchingFavoriteSymbols(item, favoriteSymbols).length > 0;
+    }
+    if (filter === 'model_portfolio') {
+        if (!modelPortfolioSymbols || modelPortfolioSymbols.size === 0) return false;
+        return getMatchingFavoriteSymbols(item, modelPortfolioSymbols).length > 0;
     }
     if (filter === 'ozel_durum') return item.category === 'ozel_durum' || (!item.category && item.source === 'Özel Durum');
     if (filter === 'finansal_rapor') return item.category === 'finansal_rapor';
@@ -96,6 +106,13 @@ export default function MarketFlowPanel({
     const favoriteSymbols = useMemo(
         () => new Set(watchlist.items.map((item) => normalizeWatchlistSymbol(item.symbol))),
         [watchlist.items],
+    );
+    const [modelPortfolioSymbolList, setModelPortfolioSymbolList] = useState<string[]>(
+        () => apiClient.getCachedModelPortfolioSymbols() || [],
+    );
+    const modelPortfolioSymbols = useMemo(
+        () => new Set(modelPortfolioSymbolList.map(normalizeWatchlistSymbol)),
+        [modelPortfolioSymbolList],
     );
     const [items, setItems] = useState<MarketFlowItem[] | null>(null);
     const [loading, setLoading] = useState(false);
@@ -146,11 +163,25 @@ export default function MarketFlowPanel({
         highlightTimersRef.current.clear();
     }, []);
 
+    useEffect(() => {
+        return apiClient.subscribeModelPortfolioSymbols((symbols) => {
+            setModelPortfolioSymbolList(symbols);
+        });
+    }, []);
+
+    useEffect(() => {
+        if (filter !== 'model_portfolio') return;
+        apiClient
+            .modelPortfolioSymbols()
+            .then((res) => setModelPortfolioSymbolList(res.symbols || []))
+            .catch(() => {});
+    }, [filter]);
+
     const load = useCallback((requestedLimit?: number, requestedCategory?: string) => {
         const expectedFilter = filterRef.current;
         const serverCategory = requestedCategory ?? getServerFlowCategory(expectedFilter);
         const requestLimit = requestedLimit
-            ?? (expectedFilter === 'watchlist'
+            ?? (expectedFilter === 'watchlist' || expectedFilter === 'model_portfolio'
                 ? FLOW_FAVORITES_LOAD_SIZE
                 : serverCategory ? FLOW_CATEGORY_LOAD_SIZE : requestLimitRef.current || FLOW_INITIAL_LOAD_SIZE);
         requestLimitRef.current = requestLimit;
@@ -182,8 +213,8 @@ export default function MarketFlowPanel({
 
     const filteredItems = useMemo(
         () => (items || [])
-            .filter((item) => matchesFlowFilter(item, filter, favoriteSymbols)),
-        [favoriteSymbols, filter, items],
+            .filter((item) => matchesFlowFilter(item, filter, favoriteSymbols, modelPortfolioSymbols)),
+        [favoriteSymbols, filter, items, modelPortfolioSymbols],
     );
 
     const loadMore = useCallback((requestedPageSize = FLOW_PAGE_SIZE, revealMore = true) => {
@@ -246,7 +277,7 @@ export default function MarketFlowPanel({
     }, [filteredItems.length, hasMore]);
 
     useEffect(() => {
-        const needsBackfill = filter === 'watchlist' || filter === 'diger';
+        const needsBackfill = filter === 'watchlist' || filter === 'model_portfolio' || filter === 'diger';
         if (!needsBackfill || loading || loadingMore || !items || !hasMore) return;
         if (filteredItems.length >= FLOW_PAGE_SIZE) return;
 
@@ -311,7 +342,7 @@ export default function MarketFlowPanel({
         visibleLimitRef.current = FLOW_PAGE_SIZE;
         setVisibleLimit(FLOW_PAGE_SIZE);
         setFilter(nextFilter);
-        if (nextFilter === 'watchlist') {
+        if (nextFilter === 'watchlist' || nextFilter === 'model_portfolio') {
             load(FLOW_FAVORITES_LOAD_SIZE);
         } else if (getServerFlowCategory(nextFilter)) {
             load(FLOW_CATEGORY_LOAD_SIZE, getServerFlowCategory(nextFilter));
@@ -338,6 +369,12 @@ export default function MarketFlowPanel({
         () => filteredItems.slice(0, visibleLimit),
         [filteredItems, visibleLimit],
     );
+
+    const activeSymbolSet = filter === 'watchlist'
+        ? favoriteSymbols
+        : filter === 'model_portfolio'
+            ? modelPortfolioSymbols
+            : null;
 
     return (
         <div className="mwr-flow-panel">
@@ -367,7 +404,9 @@ export default function MarketFlowPanel({
                 <div className="mwr-flow-state">
                     {filter === 'watchlist' && favoriteSymbols.size === 0
                         ? 'Önce yıldız simgesinden favori ekle.'
-                        : 'Bu filtreye uygun bildirim yok.'}
+                        : filter === 'model_portfolio' && modelPortfolioSymbols.size === 0
+                            ? 'Model portföyde henüz aktif hisse bulunmuyor.'
+                            : 'Bu filtreye uygun bildirim yok.'}
                 </div>
             )}
 
@@ -382,14 +421,14 @@ export default function MarketFlowPanel({
                     >
                         <div className="mwr-flow-item-meta">
                             <span className="mwr-flow-source">KAP</span>
-                            {formatFlowCodes(item, filter === 'watchlist'
-                                ? getMatchingFavoriteSymbols(item, favoriteSymbols)
+                            {formatFlowCodes(item, activeSymbolSet
+                                ? getMatchingFavoriteSymbols(item, activeSymbolSet)
                                 : undefined) && (
                                 <>
                                     <span className="mwr-flow-dot" aria-hidden="true">·</span>
                                     <span className="mwr-flow-codes">
-                                        {formatFlowCodes(item, filter === 'watchlist'
-                                            ? getMatchingFavoriteSymbols(item, favoriteSymbols)
+                                        {formatFlowCodes(item, activeSymbolSet
+                                            ? getMatchingFavoriteSymbols(item, activeSymbolSet)
                                             : undefined)}
                                     </span>
                                 </>

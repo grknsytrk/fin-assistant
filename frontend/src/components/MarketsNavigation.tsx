@@ -1,21 +1,18 @@
 import { useEffect, useState } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
 import { 
     Calendar, 
     Layers, 
     Coins, 
+    BriefcaseBusiness,
     ListOrdered, 
-    Box, 
     Users, 
     Crosshair, 
-    TerminalSquare, 
-    MonitorPlay, 
-    Atom, 
-    GraduationCap, 
     ChevronRight,
-    ArrowUpRight,
     PanelLeftClose,
 } from 'lucide-react';
 import GlobalTickerSearch from './GlobalTickerSearch';
+import { ROUTE_PATHS, toModelPortfolio } from '../routing/routes';
 import './MarketsNavigation.css';
 
 export type MarketsNavigationSection = 'markets' | 'stocks' | 'funds' | 'indices';
@@ -43,6 +40,7 @@ export default function MarketsNavigation({
     onSelectFund,
 }: MarketsNavigationProps) {
     const [fundsExpanded, setFundsExpanded] = useState<boolean>(activeSection === 'funds');
+    const isModelPortfolioPage = useLocation().pathname === ROUTE_PATHS.modelPortfolio;
 
     // Auto-open the submenu whenever the user is already on the funds section
     // (e.g. arriving via a fund detail URL), but allow manual collapse afterwards.
@@ -68,7 +66,7 @@ export default function MarketsNavigation({
             <div className="mn-menu-group">
                 <button
                     type="button"
-                    className={`mn-menu-item ${activeSection === 'markets' ? 'active' : ''}`}
+                    className={`mn-menu-item ${activeSection === 'markets' && !isModelPortfolioPage ? 'active' : ''}`}
                     title="Piyasalar"
                     onClick={() => onSectionChange('markets')}
                 >
@@ -79,7 +77,7 @@ export default function MarketsNavigation({
                 </button>
                 <button
                     type="button"
-                    className={`mn-menu-item ${activeSection === 'stocks' ? 'active' : ''}`}
+                    className={`mn-menu-item ${activeSection === 'stocks' && !isModelPortfolioPage ? 'active' : ''}`}
                     title="Hisseler"
                     onClick={() => onSectionChange('stocks')}
                 >
@@ -91,7 +89,7 @@ export default function MarketsNavigation({
                 <div className={`mn-menu-subtree ${fundsExpanded ? 'is-open' : ''}`}>
                     <button
                         type="button"
-                        className={`mn-menu-item has-submenu ${activeSection === 'funds' ? 'active' : ''}`}
+                        className={`mn-menu-item has-submenu ${activeSection === 'funds' && !isModelPortfolioPage ? 'active' : ''}`}
                         title="Fonlar"
                         aria-expanded={!collapsed && fundsExpanded}
                         onClick={() => {
@@ -138,7 +136,7 @@ export default function MarketsNavigation({
                 </div>
                 <button
                     type="button"
-                    className={`mn-menu-item ${activeSection === 'indices' ? 'active' : ''}`}
+                    className={`mn-menu-item ${activeSection === 'indices' && !isModelPortfolioPage ? 'active' : ''}`}
                     title="Endeksler"
                     onClick={() => onSectionChange('indices')}
                 >
@@ -147,18 +145,16 @@ export default function MarketsNavigation({
                         {!collapsed && <span className="mn-text">Endeksler</span>}
                     </div>
                 </button>
-                <button
-                    type="button"
-                    className="mn-menu-item"
-                    title="Aracı Kurumlar (yakında)"
-                    disabled
-                    aria-disabled="true"
+                <NavLink
+                    to={toModelPortfolio()}
+                    className={({ isActive }) => `mn-menu-item ${isActive ? 'active' : ''}`}
+                    title="Model Portföy"
                 >
                     <div className="mn-item-main">
-                        <Box size={18} className="mn-icon" />
-                        {!collapsed && <span className="mn-text">Aracı Kurumlar</span>}
+                        <BriefcaseBusiness size={18} className="mn-icon" />
+                        {!collapsed && <span className="mn-text">Model Portföy</span>}
                     </div>
-                </button>
+                </NavLink>
                 <button
                     type="button"
                     className="mn-menu-item has-submenu"
@@ -184,68 +180,6 @@ export default function MarketsNavigation({
                         {!collapsed && <span className="mn-text">Analizler</span>}
                     </div>
                     {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
-                </button>
-            </div>
-
-            <div className="mn-divider"></div>
-
-            {/* Group 2 */}
-            <div className="mn-menu-group">
-                <button
-                    type="button"
-                    className="mn-menu-item"
-                    title="Trade Ekranı (yakında)"
-                    disabled
-                    aria-disabled="true"
-                >
-                    <div className="mn-item-main">
-                        <TerminalSquare size={18} className="mn-icon" />
-                        {!collapsed && <span className="mn-text">Trade Ekranı</span>}
-                    </div>
-                </button>
-                <button
-                    type="button"
-                    className="mn-menu-item"
-                    title="Terminal (yakında)"
-                    disabled
-                    aria-disabled="true"
-                >
-                    <div className="mn-item-main">
-                        <MonitorPlay size={18} className="mn-icon" />
-                        {!collapsed && <span className="mn-text">Terminal</span>}
-                    </div>
-                    {!collapsed && <ArrowUpRight size={14} className="mn-external-icon" />}
-                </button>
-            </div>
-
-            <div className="mn-divider"></div>
-
-            {/* Group 3 */}
-            <div className="mn-menu-group">
-                <button
-                    type="button"
-                    className="mn-menu-item has-submenu"
-                    title="Araştırma (yakında)"
-                    disabled
-                    aria-disabled="true"
-                >
-                    <div className="mn-item-main">
-                        <Atom size={18} className="mn-icon" />
-                        {!collapsed && <span className="mn-text">Araştırma</span>}
-                    </div>
-                    {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
-                </button>
-                <button
-                    type="button"
-                    className="mn-menu-item"
-                    title="SPL Eğitimleri (yakında)"
-                    disabled
-                    aria-disabled="true"
-                >
-                    <div className="mn-item-main">
-                        <GraduationCap size={18} className="mn-icon" />
-                        {!collapsed && <span className="mn-text">SPL Eğitimleri</span>}
-                    </div>
                 </button>
             </div>
         </>

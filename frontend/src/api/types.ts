@@ -975,3 +975,181 @@ export interface KapOverviewCommentaryResponse {
   error: string | null;
   debug_trace?: string[];
 }
+
+
+export interface ModelPortfolioMultiples {
+  fk: number | null;
+  fd_favok: number | null;
+  pd_dd: number | null;
+  net_borc_favok: number | null;
+  period: string | null;
+}
+
+export interface ModelPortfolioRevision {
+  id: string;
+  date: string;
+  created_at: string;
+  prev_target_price: number;
+  new_target_price: number;
+  prev_weight_pct: number;
+  new_weight_pct: number;
+  note: string | null;
+}
+
+export interface ModelPortfolioPosition {
+  id: string;
+  symbol: string;
+  company_name: string;
+  sector: string | null;
+  logo_url: string | null;
+  logo_source: string | null;
+  status: 'active' | 'closed';
+  entry_date: string;
+  entry_price: number;
+  entry_xu100: number | null;
+  weight_pct: number;
+  target_price: number;
+  horizon: string;
+  rating: string;
+  thesis: string;
+  catalysts: string[];
+  risk_note: string;
+  entry_multiples: ModelPortfolioMultiples;
+  current_multiples: ModelPortfolioMultiples;
+  revisions: ModelPortfolioRevision[];
+  closed_date: string | null;
+  exit_price: number | null;
+  exit_xu100: number | null;
+  close_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  current_price: number | null;
+  daily_change_pct: number | null;
+  price_as_of?: string | null;
+  market_cap?: number | null;
+  return_pct: number | null;
+  xu100_return_pct: number | null;
+  relative_return_pct: number | null;
+  target_upside_pct?: number | null;
+  target_progress_pct?: number | null;
+  target_reached?: boolean;
+  attribution_pct?: number;
+  beat_benchmark?: boolean;
+  holding_days: number;
+}
+
+export interface ModelPortfolioChangelogItem {
+  id: string;
+  date: string;
+  created_at: string;
+  action: 'added' | 'updated' | 'target_revised' | 'weight_revised' | 'closed';
+  symbol: string;
+  company_name: string;
+  summary: string;
+  details: Record<string, unknown>;
+}
+
+export interface ModelPortfolioSummary {
+  active_count: number;
+  closed_count: number;
+  total_weight_pct: number;
+  cash_weight_pct: number;
+  portfolio_return_pct: number | null;
+  invested_return_pct: number | null;
+  xu100_return_pct: number | null;
+  relative_return_pct: number | null;
+  weighted_target_upside_pct: number | null;
+  closed_hit_rate_pct: number | null;
+  closed_win_count: number;
+  closed_avg_return_pct: number | null;
+  closed_avg_relative_pct: number | null;
+  inception_date: string | null;
+}
+
+export interface ModelPortfolioResponse {
+  version: number;
+  updated_at: string;
+  as_of: string;
+  current_xu100: number | null;
+  summary: ModelPortfolioSummary;
+  active_positions: ModelPortfolioPosition[];
+  closed_positions: ModelPortfolioPosition[];
+  changelog: ModelPortfolioChangelogItem[];
+}
+
+export interface ModelPortfolioSymbolsResponse {
+  symbols: string[];
+  count: number;
+  version: number;
+  updated_at: string;
+}
+
+export interface ModelPortfolioPerformancePoint {
+  date: string;
+  portfolio_value: number;
+  xu100_value: number;
+  portfolio_return_pct: number;
+  xu100_return_pct: number;
+  relative_return_pct: number;
+}
+
+export interface ModelPortfolioPerformanceResponse {
+  version: number;
+  start_date: string;
+  end_date: string;
+  points: ModelPortfolioPerformancePoint[];
+  as_of: string;
+  cache_status?: string;
+}
+
+export interface ModelPortfolioPrefillResponse {
+  symbol: string;
+  company_name: string;
+  logo_url: string | null;
+  logo_source: string | null;
+  entry_date: string;
+  entry_price: number | null;
+  current_price: number | null;
+  entry_xu100: number | null;
+  entry_multiples: ModelPortfolioMultiples;
+}
+
+export interface ModelPortfolioPositionCreatePayload {
+  symbol: string;
+  company_name?: string;
+  sector?: string | null;
+  entry_date?: string;
+  entry_price: number;
+  entry_xu100?: number | null;
+  weight_pct: number;
+  target_price: number;
+  horizon?: string;
+  rating?: string;
+  thesis?: string;
+  catalysts?: string[];
+  risk_note?: string;
+  entry_multiples?: Partial<ModelPortfolioMultiples>;
+}
+
+export interface ModelPortfolioPositionUpdatePayload {
+  entry_date?: string;
+  entry_price?: number;
+  entry_xu100?: number | null;
+  weight_pct?: number;
+  target_price?: number;
+  sector?: string | null;
+  horizon?: string;
+  rating?: string;
+  thesis?: string;
+  catalysts?: string[];
+  risk_note?: string;
+  revision_note?: string;
+  entry_multiples?: Partial<ModelPortfolioMultiples>;
+}
+
+export interface ModelPortfolioPositionClosePayload {
+  exit_price?: number;
+  closed_date?: string;
+  exit_xu100?: number | null;
+  close_reason?: string;
+}

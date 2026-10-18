@@ -68,6 +68,7 @@ WORK_SUMMARY.md
 # KAP Cache and PDF files
 data/processed/kap_cache/
 data/processed/funds_cache/
+data/processed/model_portfolio/
 data/processed/*.pdf
 debug-kap-netlog.json
 temp*.txt

@@ -8,6 +8,7 @@ export const ROUTE_PATHS = {
     marketsStocksIndex: '/markets/stocks/:indexCode',
     marketsIndices: '/markets/indices',
     marketsIndicesDetail: '/markets/indices/:indexCode',
+    modelPortfolio: '/model-portfolio',
     funds: '/funds',
     fundComparison: '/funds/compare',
     fundDetail: '/funds/:fundCode/:tab',
@@ -193,6 +194,10 @@ export function toMarketsRoot(): string {
 
 export function toMarketsOverview(): string {
     return ROUTE_PATHS.marketsOverview;
+}
+
+export function toModelPortfolio(): string {
+    return ROUTE_PATHS.modelPortfolio;
 }
 
 export function toMarketsStocks(indexCode: string | null | undefined = DEFAULT_MARKET_INDEX): string {

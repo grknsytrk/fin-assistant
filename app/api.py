@@ -9887,3 +9887,437 @@ def market_watch(refresh: bool = Query(False)) -> Dict[str, Any]:
 @app.get("/market/watch/global")
 def market_watch_global(refresh: bool = Query(False)) -> Dict[str, Any]:
     return _market_watch_global_payload(force_refresh=refresh)
+
+# ---------------------------------------------------------------------------
+# Model Portfolio Endpoints (Zero Duplicate Fetch — Shared Cache Reuse)
+# ---------------------------------------------------------------------------
+
+
+def _extract_model_portfolio_admin_token(request: Request) -> str:
+    header_token = str(request.headers.get("x-admin-token") or "").strip()
+    if header_token:
+        return header_token
+    auth = str(request.headers.get("authorization") or "").strip()
+    scheme, _, bearer = auth.partition(" ")
+    if scheme.lower() == "bearer" and bearer.strip():
+        return bearer.strip()
+    return ""
+
+
+def _require_model_portfolio_admin(request: Request) -> None:
+    from app.model_portfolio_service import (
+        expected_admin_token,
+        is_admin_locked_out,
+        record_admin_auth_result,
+        verify_admin_token,
+    )
+
+    client_ip = (request.client.host if request.client else None) or "unknown"
+    if is_admin_locked_out(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Çok fazla başarısız giriş denemesi yapıldı. Lütfen 10 dakika sonra tekrar deneyin.",
+        )
+
+    if not expected_admin_token():
+        raise HTTPException(
+            status_code=503,
+            detail="Yönetici anahtarı sunucu ortamında henüz yapılandırılmamış.",
+        )
+
+    token = _extract_model_portfolio_admin_token(request)
+    if not verify_admin_token(token):
+        record_admin_auth_result(client_ip, False)
+        raise HTTPException(
+            status_code=401,
+            detail="Yönetici anahtarı geçersiz veya eksik.",
+        )
+    record_admin_auth_result(client_ip, True)
+
+
+def _model_portfolio_cached_quote_map(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Read live stock quotes from warm _STOCKS_CACHE / shared cache first."""
+    normalized = [str(s or "").strip().upper() for s in symbols if str(s or "").strip()]
+    if not normalized:
+        return {}
+
+    result: Dict[str, Dict[str, Any]] = {}
+    target_set = set(normalized)
+
+    for idx_name in ("XUTUM", "XU100", "XU030"):
+        local_entry = _STOCKS_CACHE.get(f"payload:{idx_name}", {}).get("entry")
+        payload = _market_quote_entry_payload(local_entry)
+        if payload is None:
+            shared_entry = _shared_cache_get_dict(f"api:market:stocks:{idx_name}:v2")
+            payload = _market_quote_entry_payload(shared_entry)
+        rows = payload.get("rows") if isinstance(payload, dict) and isinstance(payload.get("rows"), list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sym = str(row.get("symbol") or row.get("company") or "").strip().upper()
+            if sym in target_set and sym not in result and row.get("price") is not None:
+                result[sym] = {
+                    "price": row.get("price"),
+                    "change": row.get("change"),
+                    "change_pct": row.get("change_pct"),
+                    "market_cap": row.get("market_cap"),
+                    "price_as_of": row.get("price_as_of") or payload.get("as_of"),
+                }
+        if len(result) >= len(target_set):
+            return result
+
+    missing = [s for s in normalized if s not in result]
+    if missing:
+        fetched = _fetch_market_price_map(missing)
+        cache_dir = CONFIG.paths.processed_dir / "kap_cache"
+        for sym in missing:
+            quote = fetched.get(sym) or {}
+            if quote.get("price") is not None:
+                cached_meta = _load_cached_kap_market_metadata(cache_dir, sym)
+                result[sym] = {
+                    "price": quote.get("price"),
+                    "change": quote.get("change"),
+                    "change_pct": quote.get("change_pct"),
+                    "market_cap": _market_cap_from_quote_and_meta(quote, cached_meta, None),
+                    "price_as_of": quote.get("as_of"),
+                }
+    return result
+
+
+def _model_portfolio_cached_xu100() -> Optional[float]:
+    """Read current XU100 index level from already-warm caches before falling back."""
+    indices_entry = _MARKET_INDICES_CACHE.get("payload")
+    indices_payload = _swr_entry_payload(indices_entry)
+    if indices_payload is None:
+        indices_payload = _swr_entry_payload(_shared_cache_get_dict("api:market:indices:v2"))
+    if isinstance(indices_payload, dict):
+        for row in list(indices_payload.get("rows") or []):
+            if isinstance(row, dict) and str(row.get("symbol") or "").upper() == "XU100":
+                price = _positive_float(row.get("price"))
+                if price is not None:
+                    return price
+
+    watch_entry = _WATCH_CACHE.get("payload")
+    watch_payload = _swr_entry_payload(watch_entry)
+    if isinstance(watch_payload, dict):
+        sections = watch_payload.get("sections") if isinstance(watch_payload.get("sections"), dict) else {}
+        for row in list(sections.get("indices") or []):
+            if isinstance(row, dict) and str(row.get("symbol") or "").upper() == "XU100":
+                price = _positive_float(row.get("price"))
+                if price is not None:
+                    return price
+
+    base_entry = _STOCK_RETURN_BASE_CACHE.get("XU100")
+    if isinstance(base_entry, dict) and isinstance(base_entry.get("data"), dict):
+        price = _positive_float(base_entry["data"].get("latest_close"))
+        if price is not None:
+            return price
+
+    try:
+        row = _market_index_row("XU100")
+        return _positive_float(row.get("price"))
+    except Exception:
+        return None
+
+
+def _model_portfolio_comparison_series(
+    kind: str,
+    symbol: str,
+    start_date: date,
+    end_date: date,
+) -> List[Dict[str, Any]]:
+    handler = _index_comparison_history if kind == "index" else _stock_comparison_history
+    asset = MarketComparisonHistoryAsset(
+        id=f"{kind}:{symbol}",
+        kind="index" if kind == "index" else "stock",
+        symbol=symbol,
+        label=symbol,
+    )
+    res = _comparison_history_cached_asset(
+        asset,
+        start_date=start_date,
+        end_date=end_date,
+        handler=handler,
+    )
+    pts = res.get("points")
+    return list(pts) if isinstance(pts, list) else []
+
+
+def _build_current_model_portfolio_response() -> Dict[str, Any]:
+    from app.model_portfolio_service import (
+        build_model_portfolio_payload,
+        load_model_portfolio_state,
+    )
+
+    state = load_model_portfolio_state(CONFIG.paths.processed_dir)
+    symbols = sorted(
+        {
+            str(p.get("symbol") or "").strip().upper()
+            for p in state.get("positions", [])
+            if str(p.get("symbol") or "").strip()
+        }
+    )
+    quote_map = _model_portfolio_cached_quote_map(symbols)
+    try:
+        instrument_map = get_instruments(CONFIG.paths.processed_dir, "stock", symbols) if symbols else {}
+    except Exception:
+        instrument_map = {}
+
+    current_xu100 = _model_portfolio_cached_xu100()
+    return build_model_portfolio_payload(
+        CONFIG.paths.processed_dir,
+        quote_map=quote_map,
+        instrument_map=instrument_map,
+        current_xu100=current_xu100,
+        valuation_resolver=lambda sym, mcap: _resolve_market_card_valuation(sym, market_cap=mcap),
+    )
+
+
+@app.get("/model-portfolio")
+def get_model_portfolio() -> Dict[str, Any]:
+    return _build_current_model_portfolio_response()
+
+
+@app.get("/model-portfolio/symbols")
+def get_model_portfolio_symbols() -> Dict[str, Any]:
+    from app.model_portfolio_service import get_active_model_portfolio_symbols
+
+    return get_active_model_portfolio_symbols(CONFIG.paths.processed_dir)
+
+
+@app.get("/model-portfolio/performance")
+def get_model_portfolio_performance() -> Dict[str, Any]:
+    from app.model_portfolio_service import (
+        build_model_portfolio_performance_payload,
+        load_model_portfolio_state,
+    )
+
+    state = load_model_portfolio_state(CONFIG.paths.processed_dir)
+    active_symbols = sorted(
+        {
+            str(p.get("symbol") or "").strip().upper()
+            for p in state.get("positions", [])
+            if str(p.get("status") or "active") == "active" and str(p.get("symbol") or "").strip()
+        }
+    )
+    quote_map = _model_portfolio_cached_quote_map(active_symbols)
+    current_xu100 = _model_portfolio_cached_xu100()
+    return build_model_portfolio_performance_payload(
+        CONFIG.paths.processed_dir,
+        fetch_series_fn=_model_portfolio_comparison_series,
+        quote_map=quote_map,
+        current_xu100=current_xu100,
+        shared_cache_get=_shared_cache_get_dict,
+        shared_cache_set=_shared_cache_set,
+    )
+
+
+@app.post("/model-portfolio/admin/verify")
+def verify_model_portfolio_admin(request: Request) -> Dict[str, Any]:
+    _require_model_portfolio_admin(request)
+    return {"ok": True}
+
+
+@app.get("/model-portfolio/prefill")
+def prefill_model_portfolio_position(
+    symbol: str = Query(..., min_length=1, max_length=16),
+    entry_date: Optional[date] = Query(None),
+) -> Dict[str, Any]:
+    normalized_symbol = _normalize_market_stock_card_symbol(symbol)
+    target_date = entry_date or date.today()
+    today = date.today()
+
+    quote_map = _model_portfolio_cached_quote_map([normalized_symbol])
+    quote = quote_map.get(normalized_symbol) or {}
+    try:
+        instrument_map = get_instruments(CONFIG.paths.processed_dir, "stock", [normalized_symbol])
+    except Exception:
+        instrument_map = {}
+    inst = instrument_map.get(normalized_symbol) or {}
+    cache_dir = CONFIG.paths.processed_dir / "kap_cache"
+    cached_meta = _load_cached_kap_market_metadata(cache_dir, normalized_symbol)
+
+    company_name = (
+        str(inst.get("name") or "").strip()
+        or str(cached_meta.get("company_title") or "").strip()
+        or normalized_symbol
+    )
+    logo_url = str(inst.get("logo_url") or "").strip() or None
+    logo_source = str(inst.get("logo_source") or "").strip() or None
+
+    live_price = _positive_float(quote.get("price"))
+    live_xu100 = _model_portfolio_cached_xu100()
+    resolved_entry_price = live_price
+    resolved_entry_xu100 = live_xu100
+
+    if target_date < today:
+        lookback_start = target_date - timedelta(days=10)
+        stock_pts = _model_portfolio_comparison_series("stock", normalized_symbol, lookback_start, target_date)
+        if stock_pts:
+            hist_price = _positive_float(stock_pts[-1].get("value"))
+            if hist_price is not None:
+                resolved_entry_price = hist_price
+        xu_pts = _model_portfolio_comparison_series("index", "XU100", lookback_start, target_date)
+        if xu_pts:
+            hist_xu = _positive_float(xu_pts[-1].get("value"))
+            if hist_xu is not None:
+                resolved_entry_xu100 = hist_xu
+
+    market_cap = _positive_float(quote.get("market_cap"))
+    if market_cap is None and resolved_entry_price is not None:
+        shares = _positive_float(cached_meta.get("shares_outstanding"))
+        if shares is not None:
+            market_cap = resolved_entry_price * shares
+
+    valuation = _resolve_market_card_valuation(normalized_symbol, market_cap=market_cap)
+
+    return {
+        "symbol": normalized_symbol,
+        "company_name": company_name,
+        "logo_url": logo_url,
+        "logo_source": logo_source,
+        "entry_date": target_date.isoformat(),
+        "entry_price": round(resolved_entry_price, 4) if resolved_entry_price is not None else None,
+        "current_price": round(live_price, 4) if live_price is not None else None,
+        "entry_xu100": round(resolved_entry_xu100, 2) if resolved_entry_xu100 is not None else None,
+        "entry_multiples": {
+            "fk": valuation.get("fk"),
+            "fd_favok": valuation.get("fd_favok"),
+            "pd_dd": valuation.get("pd_dd"),
+            "net_borc_favok": valuation.get("net_borc_favok"),
+            "period": valuation.get("valuation_financial_period"),
+        },
+    }
+
+
+@app.post("/model-portfolio/positions")
+async def create_model_portfolio_position_endpoint(request: Request) -> Dict[str, Any]:
+    from app.model_portfolio_service import create_position
+
+    _require_model_portfolio_admin(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Geçersiz JSON gövdesi.") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Geçersiz istek formatı.")
+
+    raw_symbol = str(body.get("symbol") or "").strip().upper()
+    if not raw_symbol:
+        raise HTTPException(status_code=400, detail="Hisse kodu (symbol) zorunludur.")
+
+    normalized_symbol = _normalize_market_stock_card_symbol(raw_symbol)
+    body["symbol"] = normalized_symbol
+
+    quote_map = _model_portfolio_cached_quote_map([normalized_symbol])
+    quote = quote_map.get(normalized_symbol) or {}
+    try:
+        instrument_map = get_instruments(CONFIG.paths.processed_dir, "stock", [normalized_symbol])
+    except Exception:
+        instrument_map = {}
+    inst = instrument_map.get(normalized_symbol) or {}
+    cache_dir = CONFIG.paths.processed_dir / "kap_cache"
+    cached_meta = _load_cached_kap_market_metadata(cache_dir, normalized_symbol)
+
+    company_name = (
+        str(inst.get("name") or "").strip()
+        or str(cached_meta.get("company_title") or "").strip()
+        or normalized_symbol
+    )
+    market_cap = _positive_float(quote.get("market_cap"))
+    valuation = _resolve_market_card_valuation(normalized_symbol, market_cap=market_cap)
+    current_xu100 = _model_portfolio_cached_xu100()
+
+    if body.get("entry_price") is None and quote.get("price") is not None:
+        body["entry_price"] = quote.get("price")
+
+    try:
+        create_position(
+            CONFIG.paths.processed_dir,
+            body,
+            company_name=company_name,
+            logo_url=str(inst.get("logo_url") or "").strip() or None,
+            logo_source=str(inst.get("logo_source") or "").strip() or None,
+            entry_multiples={
+                "fk": valuation.get("fk"),
+                "fd_favok": valuation.get("fd_favok"),
+                "pd_dd": valuation.get("pd_dd"),
+                "net_borc_favok": valuation.get("net_borc_favok"),
+                "period": valuation.get("valuation_financial_period"),
+            },
+            entry_xu100=current_xu100,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _build_current_model_portfolio_response()
+
+
+@app.put("/model-portfolio/positions/{position_id}")
+async def update_model_portfolio_position_endpoint(position_id: str, request: Request) -> Dict[str, Any]:
+    from app.model_portfolio_service import update_position
+
+    _require_model_portfolio_admin(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Geçersiz JSON gövdesi.") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Geçersiz istek formatı.")
+
+    try:
+        update_position(CONFIG.paths.processed_dir, position_id, body)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _build_current_model_portfolio_response()
+
+
+@app.post("/model-portfolio/positions/{position_id}/close")
+async def close_model_portfolio_position_endpoint(position_id: str, request: Request) -> Dict[str, Any]:
+    from app.model_portfolio_service import close_position, load_model_portfolio_state
+
+    _require_model_portfolio_admin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    state = load_model_portfolio_state(CONFIG.paths.processed_dir)
+    pos = next((p for p in state.get("positions", []) if str(p.get("id")) == str(position_id)), None)
+    sym = str((pos or {}).get("symbol") or "").strip().upper()
+    quote = (_model_portfolio_cached_quote_map([sym]).get(sym) or {}) if sym else {}
+    current_xu100 = _model_portfolio_cached_xu100()
+
+    try:
+        close_position(
+            CONFIG.paths.processed_dir,
+            position_id,
+            body,
+            current_price_fallback=_positive_float(quote.get("price")),
+            current_xu100_fallback=current_xu100,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _build_current_model_portfolio_response()
+
+
+@app.delete("/model-portfolio/positions/{position_id}")
+def delete_model_portfolio_position_endpoint(position_id: str, request: Request) -> Dict[str, Any]:
+    from app.model_portfolio_service import delete_position
+
+    _require_model_portfolio_admin(request)
+    try:
+        delete_position(CONFIG.paths.processed_dir, position_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return _build_current_model_portfolio_response()
+

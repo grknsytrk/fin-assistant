@@ -1,0 +1,2922 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { FormEvent, PointerEvent as ReactPointerEvent } from 'react';
+import {
+    AlertTriangle,
+    ArrowUpRight,
+    Award,
+    BriefcaseBusiness,
+    Check,
+    CheckCircle2,
+    ChevronDown,
+    ChevronRight,
+    Clock,
+    ExternalLink,
+    History,
+    KeyRound,
+    Layers,
+    Lock,
+    LogOut,
+    Pencil,
+    Plus,
+    RefreshCw,
+    Search,
+    SlidersHorizontal,
+    Sparkles,
+    Target,
+    Trash2,
+    TrendingUp,
+    X,
+} from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { apiClient } from '../api/client';
+import type {
+    MarketStockRow,
+    MarketUniverseRow,
+    ModelPortfolioChangelogItem,
+    ModelPortfolioPerformancePoint,
+    ModelPortfolioPosition,
+    ModelPortfolioResponse,
+} from '../api/types';
+import MarketsNavigation, { type MarketsNavigationSection } from '../components/MarketsNavigation';
+import MarketWatchRail from '../components/MarketWatchRail';
+import SymbolLogo from '../components/SymbolLogo';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
+import {
+    DEFAULT_FUND_TAB,
+    DEFAULT_MARKET_INDEX,
+    DEFAULT_STOCK_TAB,
+    toFundComparison,
+    toFundDetail,
+    toFunds,
+    toMarketsIndices,
+    toMarketsOverview,
+    toMarketsStocks,
+    toStockDetail,
+} from '../routing/routes';
+import './MarketsView.css';
+import './ModelPortfolioPage.css';
+
+type PortfolioTab = 'active' | 'closed' | 'changelog';
+type PerfRange = '1m' | '3m' | '6m' | 'ytd' | '1y' | 'all';
+
+type ExplainedOption = {
+    value: string;
+    label: string;
+    badge: string;
+    tone: 'emerald' | 'blue' | 'amber' | 'purple';
+    description: string;
+};
+
+const PERF_RANGES: Array<{ id: PerfRange; label: string }> = [
+    { id: '1m', label: '1A' },
+    { id: '3m', label: '3A' },
+    { id: '6m', label: '6A' },
+    { id: 'ytd', label: 'YTD' },
+    { id: '1y', label: '1Y' },
+    { id: 'all', label: 'Tümü' },
+];
+
+const RATING_OPTIONS: ExplainedOption[] = [
+    {
+        value: 'Endeks Üstü Getiri',
+        label: 'Endeks Üstü Getiri (AL)',
+        badge: 'AL · ANA ÖNERİ',
+        tone: 'emerald',
+        description: 'BIST 100 endeksinden belirgin şekilde pozitif ayrışması beklenen standart model portföy hissesi.',
+    },
+    {
+        value: 'Güçlü AL / Model Portföy',
+        label: 'Güçlü AL / En Çok Beğenilen',
+        badge: 'GÜÇLÜ AL · FAVORİ',
+        tone: 'blue',
+        description: 'Derin çarpan iskontosu ve yakın vadeli güçlü bilanço/haber katalizörü barındıran yüksek beklentili seçim.',
+    },
+    {
+        value: 'Uzun Vadeli Biriktir',
+        label: 'Uzun Vadeli Biriktir',
+        badge: 'BİRİKTİR · DEFANSİF',
+        tone: 'amber',
+        description: 'Kademeli alıma uygun, düzenli nakit akışı, temettü verimi ve bileşik büyüme odaklı çekirdek pozisyon.',
+    },
+    {
+        value: 'Taktiksel / Kısa-Orta Vade',
+        label: 'Taktiksel / Dönemsel Fırsat',
+        badge: 'TAKTİKSEL · DÖNEMSEL',
+        tone: 'purple',
+        description: 'Çeyreklik bilanço beklentisi, mevsimsellik veya sektörel haber akışı odaklı taktiksel getiri fırsatı.',
+    },
+];
+
+const HORIZON_OPTIONS: ExplainedOption[] = [
+    {
+        value: '1-3 Ay',
+        label: '1-3 Ay (Çeyreklik / Kısa Vade)',
+        badge: 'KISA VADE',
+        tone: 'purple',
+        description: 'Yaklaşan finansal sonuçlar veya kısa vadeli katalizörlerin fiyatlanması beklenen vade.',
+    },
+    {
+        value: '3-6 Ay',
+        label: '3-6 Ay (Orta Vade)',
+        badge: 'ORTA VADE',
+        tone: 'amber',
+        description: '1-2 çeyreklik marj iyileşmesi ve hedef çarpanlara yakınsama beklenen dönem.',
+    },
+    {
+        value: '6-12 Ay',
+        label: '6-12 Ay (Standart Model Portföy)',
+        badge: '12 AY HEDEF',
+        tone: 'blue',
+        description: 'Aracı kurum araştırma raporları ve model portföyler için standart 1 yıllık hedef fiyat ufku.',
+    },
+    {
+        value: '12+ Ay',
+        label: '12+ Ay (Uzun Vadeli Yatırım)',
+        badge: 'UZUN VADE',
+        tone: 'emerald',
+        description: 'Yeni kapasite devreye girişi, ihracat pazarı genişlemesi veya çok yıllık büyüme hikayesi.',
+    },
+];
+
+const SECTOR_OPTIONS: Array<{ value: string; badge: string; description: string }> = [
+    { value: 'Havacılık & Ulaştırma', badge: ' döviz gelirli', description: 'Havayolu, yer hizmetleri ve lojistik şirketleri' },
+    { value: 'Bankacılık & Finans', badge: 'faiz duyarlı', description: 'Mevduat bankaları, katılım, sigorta ve finansal kiralama' },
+    { value: 'Holding & Yatırım', badge: 'NAD iskontosu', description: 'Çeşitlendirilmiş sanayi, enerji ve finans iştirakli holdingler' },
+    { value: 'Perakende & Gıda', badge: 'defansif nakit', description: 'Gıda perakendesi, içecek, tarım ve hızlı tüketim ürünleri' },
+    { value: 'Enerji & Rafineri', badge: 'nakit akışı', description: 'Elektrik üretimi, yenilenebilir enerji, doğalgaz ve rafineri' },
+    { value: 'Otomotiv & Yan Sanayi', badge: 'ihracat odaklı', description: 'Otomotiv ana üreticileri, ticari araç ve yedek parça' },
+    { value: 'Savunma & Teknoloji', badge: 'bakiye sipariş', description: 'Savunma sanayi, yazılım, bilişim ve elektronik sistemler' },
+    { value: 'Demir-Çelik & Madencilik', badge: 'emtia döngüsel', description: 'Yassı/uzun çelik üreticileri, altın ve endüstriyel madencilik' },
+    { value: 'GYO & İnşaat / Çimento', badge: 'varlık bazlı', description: 'Gayrimenkul yatırım ortaklıkları, taahhüt, çimento ve cam' },
+    { value: 'İletişim & Telekom', badge: 'ARPU büyümesi', description: 'Mobil operatörler, fiber altyapı ve dijital servis sağlayıcılar' },
+    { value: 'Kimya, Gübre & Petrokimya', badge: 'sanayi üretimi', description: 'Özel kimyasallar, tarımsal gübre ve plastik/kauçuk' },
+    { value: 'Sağlık, İlaç & Biyoteknoloji', badge: 'defansif büyüme', description: 'Hastane zincirleri, ilaç üretimi ve medikal ekipman' },
+];
+
+const CLOSE_REASON_OPTIONS: ExplainedOption[] = [
+    {
+        value: 'Hedef Fiyata Ulaştı / Kâr Realizasyonu',
+        label: 'Hedef Fiyata Ulaştı / Kâr Realizasyonu',
+        badge: 'HEDEF TAMAMLANDI',
+        tone: 'emerald',
+        description: 'Hisse hedef fiyatımıza ulaştığı veya iskonto potansiyelini tamamladığı için kâr realize edildi.',
+    },
+    {
+        value: 'Portföy Ağırlık Değişikliği / Yeni Fırsat',
+        label: 'Portföy Değişikliği / Daha Yüksek Potansiyelli Fırsat',
+        badge: 'ROTASYON',
+        tone: 'blue',
+        description: 'Nakit yaratmak veya daha yüksek alfa potansiyeli sunan başka bir hisseye yer açmak için kapatıldı.',
+    },
+    {
+        value: 'Bilanço & Yatırım Tezi Zayıflaması',
+        label: 'Bilanço & Yatırım Tezi Zayıflaması',
+        badge: 'TEZ REVİZYONU',
+        tone: 'amber',
+        description: 'Beklenen operasyonel marjların veya katalizörlerin gerçekleşmemesi nedeniyle portföyden çıkarıldı.',
+    },
+    {
+        value: 'Zarar Kes / Risk Yönetimi',
+        label: 'Zarar Kes (Stop-Loss) / Risk Yönetimi',
+        badge: 'RİSK KONTROLÜ',
+        tone: 'purple',
+        description: 'Piyasa/sektör koşullarındaki bozulma sonrası portföy riskini sınırlamak amacıyla kapatıldı.',
+    },
+];
+
+const CATALYST_OPTIONS: Array<{ label: string; hint: string }> = [
+    { label: 'Çarpan İskontosu', hint: 'Tarihsel veya benzer şirket F/K ve FD/FAVÖK ortalamalarına göre ucuzluk' },
+    { label: 'Güçlü Bilanço Beklentisi', hint: 'Yaklaşan çeyrekte ciro ve FAVÖK marjında güçlü büyüme öngörüsü' },
+    { label: 'İhracat & Döviz Geliri', hint: 'Yüksek döviz bazlı gelir payı ve kur riskine karşı doğal koruma' },
+    { label: 'Yüksek Nakit Akışı', hint: 'Güçlü serbest nakit üretimi ve düşük işletme sermayesi ihtiyacı' },
+    { label: 'Yeni Kapasite Yatırımı', hint: 'Devreye girecek yeni tesis/üretim hattı ile hacim ve kârlılık artışı' },
+    { label: 'Temettü Verimi', hint: 'Düzenli ve yüksek nakit temettü dağıtım potansiyeli' },
+    { label: 'Marj Genişlemesi', hint: 'Maliyet düşüşü veya ürün miksi iyileşmesiyle kâr marjı artışı' },
+    { label: 'Borçluluk Azalışı', hint: 'Net Borç / FAVÖK rasyosunda düşüş ve finansman gideri rahatlaması' },
+];
+
+const THESIS_TEMPLATES: Array<{ label: string; snippet: string }> = [
+    {
+        label: '+ Değerleme & İskonto',
+        snippet: '• Değerleme: Hisse güncel çarpanlarıyla tarihsel ortalamalarına ve sektör benzerlerine göre belirgin iskontolu işlem görmektedir.',
+    },
+    {
+        label: '+ Bilanço & Operasyonel Beklenti',
+        snippet: '• Bilanço Beklentisi: Önümüzdeki çeyreklerde güçlü satış hacmi ve FAVÖK marjındaki iyileşmeyle kârlılığın ivme kazanmasını bekliyoruz.',
+    },
+    {
+        label: '+ Katalizör & Hedef Gerekçesi',
+        snippet: '• Katalizör: Yeni yatırımların devreye girmesi ve güçlü nakit akışı üretimiyle hedef fiyatımıza doğru yeniden değerleme (re-rating) öngörüyoruz.',
+    },
+];
+
+const DONUT_PALETTE = [
+    '#3b82f6',
+    '#10b981',
+    '#f59e0b',
+    '#8b5cf6',
+    '#ec4899',
+    '#06b6d4',
+    '#eab308',
+    '#f97316',
+    '#14b8a6',
+    '#6366f1',
+];
+
+const ADMIN_TOKEN_STORAGE_KEY = 'ragfin_model_portfolio_admin_token';
+
+function formatPrice(val: number | null | undefined): string {
+    if (val == null || !Number.isFinite(val)) return '—';
+    return `${val.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₺`;
+}
+
+function formatPct(val: number | null | undefined, signed = true): string {
+    if (val == null || !Number.isFinite(val)) return '—';
+    const sign = signed && val > 0 ? '+' : '';
+    return `%${sign}${val.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatMultiple(val: number | null | undefined): string {
+    if (val == null || !Number.isFinite(val)) return '—';
+    return `${val.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}x`;
+}
+
+function formatDateTR(iso: string | null | undefined): string {
+    if (!iso) return '—';
+    const d = new Date(iso.length === 10 ? `${iso}T00:00:00` : iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleDateString('tr-TR', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+function toneClass(val: number | null | undefined): string {
+    if (val == null || !Number.isFinite(val) || val === 0) return 'mp-tone-flat';
+    return val > 0 ? 'mp-tone-up' : 'mp-tone-down';
+}
+
+function compoundAlpha(assetRet: number | null | undefined, benchRet: number | null | undefined): number | null {
+    if (assetRet == null || benchRet == null || !Number.isFinite(assetRet) || !Number.isFinite(benchRet)) {
+        return null;
+    }
+    const denom = 1 + benchRet / 100;
+    if (denom <= 0) return null;
+    return Number((((1 + assetRet / 100) / denom - 1) * 100).toFixed(2));
+}
+
+function computeProgress(entry: number, current: number | null, target: number): number {
+    if (current == null || !Number.isFinite(current)) return 0;
+    const span = target - entry;
+    if (Math.abs(span) < 1e-6) return current >= target ? 100 : 0;
+    return Math.max(-100, Math.min(150, Number((((current - entry) / span) * 100).toFixed(1))));
+}
+
+function todayIsoDate(): string {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function sliceAndNormalizePerformance(
+    points: ModelPortfolioPerformancePoint[],
+    range: PerfRange,
+    inceptionDate: string | null,
+): ModelPortfolioPerformancePoint[] {
+    if (!points.length) return [];
+    const lastDateStr = points[points.length - 1].date;
+    const lastDate = new Date(`${lastDateStr}T00:00:00Z`);
+    let cutoffIso = points[0].date;
+
+    if (range === '1m') {
+        const d = new Date(lastDate);
+        d.setUTCDate(d.getUTCDate() - 30);
+        cutoffIso = d.toISOString().slice(0, 10);
+    } else if (range === '3m') {
+        const d = new Date(lastDate);
+        d.setUTCDate(d.getUTCDate() - 91);
+        cutoffIso = d.toISOString().slice(0, 10);
+    } else if (range === '6m') {
+        const d = new Date(lastDate);
+        d.setUTCDate(d.getUTCDate() - 182);
+        cutoffIso = d.toISOString().slice(0, 10);
+    } else if (range === 'ytd') {
+        cutoffIso = `${lastDate.getUTCFullYear()}-01-01`;
+    } else if (range === '1y') {
+        const d = new Date(lastDate);
+        d.setUTCDate(d.getUTCDate() - 365);
+        cutoffIso = d.toISOString().slice(0, 10);
+    } else if (range === 'all' && inceptionDate) {
+        cutoffIso = inceptionDate;
+    }
+
+    const filtered = points.filter((p) => p.date >= cutoffIso);
+    const working = filtered.length >= 2 ? filtered : points;
+    const basePort = working[0].portfolio_value || 100;
+    const baseXu = working[0].xu100_value || 100;
+
+    return working.map((pt) => {
+        const normPort = Number(((pt.portfolio_value / basePort) * 100).toFixed(2));
+        const normXu = Number(((pt.xu100_value / baseXu) * 100).toFixed(2));
+        const portRet = Number((normPort - 100).toFixed(2));
+        const xuRet = Number((normXu - 100).toFixed(2));
+        const relRet = compoundAlpha(portRet, xuRet) ?? 0;
+        return {
+            date: pt.date,
+            portfolio_value: normPort,
+            xu100_value: normXu,
+            portfolio_return_pct: portRet,
+            xu100_return_pct: xuRet,
+            relative_return_pct: relRet,
+        };
+    });
+}
+
+export default function ModelPortfolioPage() {
+    useDocumentTitle('Model Portföy | Fin-Rag');
+    const navigate = useNavigate();
+    const [navCollapsed, setNavCollapsed] = useState(false);
+
+    // Shared rail universe & live quote state (reuses existing caches, 0 extra calls)
+    const [xu100UniverseRows, setXu100UniverseRows] = useState<MarketUniverseRow[]>(
+        () => apiClient.getCachedMarketUniverse('XUTUM')?.rows || [],
+    );
+    const [liveStockMap, setLiveStockMap] = useState<Map<string, MarketStockRow>>(() => {
+        const cached = apiClient.getCachedMarketStocks('XUTUM')?.rows || [];
+        return new Map(cached.map((r) => [String(r.symbol || r.company).toUpperCase(), r]));
+    });
+
+    // Model Portfolio state
+    const [portfolioData, setPortfolioData] = useState<ModelPortfolioResponse | null>(
+        () => apiClient.getCachedModelPortfolio(),
+    );
+    const [loading, setLoading] = useState<boolean>(() => !apiClient.getCachedModelPortfolio());
+    const [error, setError] = useState<string | null>(null);
+
+    // Performance chart state (loaded separately for instant table first-paint)
+    const [perfPoints, setPerfPoints] = useState<ModelPortfolioPerformancePoint[]>([]);
+    const [perfLoading, setPerfLoading] = useState(false);
+    const [selectedRange, setSelectedRange] = useState<PerfRange>('all');
+    const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+    const [activeDonutIndex, setActiveDonutIndex] = useState<number | null>(null);
+
+    // Tabs & Drawer state
+    const [activeTab, setActiveTab] = useState<PortfolioTab>('active');
+    const [selectedPositionId, setSelectedPositionId] = useState<string | null>(null);
+
+    // Founder / Admin state (stored in sessionStorage so it clears when browser closes)
+    const [adminToken, setAdminToken] = useState<string>(
+        () => window.sessionStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || '',
+    );
+    const [isAdminVerified, setIsAdminVerified] = useState(false);
+    const [adminModalOpen, setAdminModalOpen] = useState(false);
+    const [adminTokenInput, setAdminTokenInput] = useState('');
+    const [adminAuthError, setAdminAuthError] = useState<string | null>(null);
+    const [adminAuthLoading, setAdminAuthLoading] = useState(false);
+
+    // Position Add / Edit / Close modal state
+    const [editorModalOpen, setEditorModalOpen] = useState(false);
+    const [editingPosition, setEditingPosition] = useState<ModelPortfolioPosition | null>(null);
+    const [closingPosition, setClosingPosition] = useState<ModelPortfolioPosition | null>(null);
+
+    // Subscribe to MarketWatchRail's 3-second XUTUM quote updates (zero extra polling!)
+    useEffect(() => {
+        if (!xu100UniverseRows.length) {
+            apiClient
+                .marketUniverse({ index: 'XUTUM' })
+                .then((res) => setXu100UniverseRows(res.rows || []))
+                .catch(() => {});
+        }
+        return apiClient.subscribeMarketStocks((index, payload) => {
+            if (index !== 'XUTUM' && index !== 'XU100') return;
+            setLiveStockMap((prev) => {
+                const next = new Map(prev);
+                for (const row of payload.rows || []) {
+                    const sym = String(row.symbol || row.company || '').toUpperCase();
+                    if (sym) next.set(sym, row);
+                }
+                return next;
+            });
+        });
+    }, [xu100UniverseRows.length]);
+
+    // Verify stored admin token on mount if present
+    useEffect(() => {
+        window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+        if (!adminToken) {
+            setIsAdminVerified(false);
+            return;
+        }
+        apiClient
+            .modelPortfolioVerifyAdmin(adminToken)
+            .then((res) => {
+                if (res.ok) setIsAdminVerified(true);
+            })
+            .catch(() => {
+                setIsAdminVerified(false);
+                window.sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+                setAdminToken('');
+            });
+    }, [adminToken]);
+
+    const loadPortfolio = useCallback((refresh = false) => {
+        if (!portfolioData) setLoading(true);
+        setError(null);
+        apiClient
+            .modelPortfolio({ refresh })
+            .then((data) => {
+                setPortfolioData(data);
+                setPerfLoading(true);
+                return apiClient.modelPortfolioPerformance({ version: data.version, refresh });
+            })
+            .then((perf) => {
+                setPerfPoints(perf.points || []);
+            })
+            .catch((err: unknown) => {
+                setError(err instanceof Error ? err.message : 'Model portföy verisi alınamadı.');
+            })
+            .finally(() => {
+                setLoading(false);
+                setPerfLoading(false);
+            });
+    }, [portfolioData]);
+
+    useEffect(() => {
+        loadPortfolio(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Live-enriched active positions using `liveStockMap` from MarketWatchRail
+    const liveActivePositions = useMemo<ModelPortfolioPosition[]>(() => {
+        const rawList = portfolioData?.active_positions || [];
+        const currentXu100 = portfolioData?.current_xu100 ?? null;
+        return rawList.map((pos) => {
+            const liveRow = liveStockMap.get(pos.symbol);
+            const livePrice = liveRow?.price != null && liveRow.price > 0 ? liveRow.price : pos.current_price;
+            const liveChangePct = liveRow?.change_pct != null ? liveRow.change_pct : pos.daily_change_pct;
+            if (livePrice == null || livePrice === pos.current_price) {
+                return pos;
+            }
+            const retPct = pos.entry_price > 0
+                ? Number((((livePrice - pos.entry_price) / pos.entry_price) * 100).toFixed(2))
+                : pos.return_pct;
+            const xuRetPct = pos.entry_xu100 && currentXu100
+                ? Number((((currentXu100 - pos.entry_xu100) / pos.entry_xu100) * 100).toFixed(2))
+                : pos.xu100_return_pct;
+            const relRetPct = compoundAlpha(retPct, xuRetPct);
+            const upsidePct = livePrice > 0
+                ? Number((((pos.target_price - livePrice) / livePrice) * 100).toFixed(2))
+                : pos.target_upside_pct;
+            const progressPct = computeProgress(pos.entry_price, livePrice, pos.target_price);
+            const attrPct = retPct != null ? Number(((pos.weight_pct * retPct) / 100).toFixed(2)) : 0;
+
+            return {
+                ...pos,
+                current_price: livePrice,
+                daily_change_pct: liveChangePct,
+                return_pct: retPct,
+                xu100_return_pct: xuRetPct,
+                relative_return_pct: relRetPct,
+                target_upside_pct: upsidePct,
+                target_progress_pct: progressPct,
+                target_reached: livePrice >= pos.target_price,
+                attribution_pct: attrPct,
+            };
+        });
+    }, [liveStockMap, portfolioData]);
+
+    const liveSummary = useMemo(() => {
+        const base = portfolioData?.summary;
+        if (!base) {
+            return {
+                active_count: 0,
+                closed_count: 0,
+                total_weight_pct: 0,
+                cash_weight_pct: 100,
+                portfolio_return_pct: null,
+                invested_return_pct: null,
+                xu100_return_pct: null,
+                relative_return_pct: null,
+                weighted_target_upside_pct: null,
+                closed_hit_rate_pct: null,
+                closed_win_count: 0,
+                closed_avg_return_pct: null,
+                closed_avg_relative_pct: null,
+                inception_date: null,
+            };
+        }
+        if (!liveActivePositions.length) return base;
+        const totalW = Number(liveActivePositions.reduce((acc, r) => acc + (r.weight_pct || 0), 0).toFixed(2));
+        const cashW = Number(Math.max(0, 100 - totalW).toFixed(2));
+        const weightedRetSum = liveActivePositions.reduce(
+            (acc, r) => acc + (r.return_pct != null ? r.weight_pct * r.return_pct : 0),
+            0,
+        );
+        const portRet = Number((weightedRetSum / 100).toFixed(2));
+        const invRet = totalW > 0 ? Number((weightedRetSum / totalW).toFixed(2)) : null;
+        const upsideSum = liveActivePositions.reduce(
+            (acc, r) => acc + (r.target_upside_pct != null ? r.weight_pct * r.target_upside_pct : 0),
+            0,
+        );
+        const avgUpside = totalW > 0 ? Number((upsideSum / totalW).toFixed(2)) : base.weighted_target_upside_pct;
+        const relRet = compoundAlpha(invRet, base.xu100_return_pct);
+
+        return {
+            ...base,
+            total_weight_pct: totalW,
+            cash_weight_pct: cashW,
+            portfolio_return_pct: portRet,
+            invested_return_pct: invRet,
+            relative_return_pct: relRet,
+            weighted_target_upside_pct: avgUpside,
+        };
+    }, [liveActivePositions, portfolioData?.summary]);
+
+    const selectedPosition = useMemo(() => {
+        if (!selectedPositionId) return null;
+        return (
+            liveActivePositions.find((p) => p.id === selectedPositionId)
+            || (portfolioData?.closed_positions || []).find((p) => p.id === selectedPositionId)
+            || null
+        );
+    }, [liveActivePositions, portfolioData?.closed_positions, selectedPositionId]);
+
+    const slicedPerfPoints = useMemo(
+        () => sliceAndNormalizePerformance(perfPoints, selectedRange, liveSummary.inception_date),
+        [perfPoints, selectedRange, liveSummary.inception_date],
+    );
+
+    const handleSectionChange = (section: MarketsNavigationSection) => {
+        if (section === 'markets') {
+            navigate(toMarketsOverview());
+        } else if (section === 'funds') {
+            navigate(toFunds());
+        } else if (section === 'indices') {
+            navigate(toMarketsIndices());
+        } else {
+            navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
+        }
+    };
+
+    const handleAdminVerifySubmit = async (e: FormEvent) => {
+        e.preventDefault();
+        let cleaned = adminTokenInput.trim();
+        if (cleaned.toUpperCase().startsWith('RAGFIN_ADMIN_TOKEN=')) {
+            cleaned = cleaned.slice('RAGFIN_ADMIN_TOKEN='.length).trim();
+        }
+        cleaned = cleaned.replace(/^['"]|['"]$/g, '').trim();
+        if (!cleaned) return;
+        setAdminAuthLoading(true);
+        setAdminAuthError(null);
+        try {
+            const res = await apiClient.modelPortfolioVerifyAdmin(cleaned);
+            if (res.ok) {
+                window.sessionStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, cleaned);
+                setAdminToken(cleaned);
+                setIsAdminVerified(true);
+                setAdminModalOpen(false);
+                setAdminTokenInput('');
+            }
+        } catch (err: unknown) {
+            setAdminAuthError(err instanceof Error ? err.message : 'Yönetici anahtarı doğrulanamadı.');
+        } finally {
+            setAdminAuthLoading(false);
+        }
+    };
+
+    const handleAdminLogout = () => {
+        window.sessionStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+        window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+        setAdminToken('');
+        setIsAdminVerified(false);
+    };
+
+    const handlePortfolioMutated = (nextData: ModelPortfolioResponse) => {
+        setPortfolioData(nextData);
+        setPerfLoading(true);
+        apiClient
+            .modelPortfolioPerformance({ version: nextData.version, refresh: true })
+            .then((perf) => setPerfPoints(perf.points || []))
+            .catch(() => {})
+            .finally(() => setPerfLoading(false));
+    };
+
+    const handleDeletePosition = async (position: ModelPortfolioPosition) => {
+        if (!adminToken) return;
+        if (!window.confirm(`${position.symbol} pozisyonunu tamamen silmek istediğinize emin misiniz?`)) return;
+        try {
+            const next = await apiClient.modelPortfolioDeletePosition(position.id, adminToken);
+            if (selectedPositionId === position.id) setSelectedPositionId(null);
+            handlePortfolioMutated(next);
+        } catch (err: unknown) {
+            window.alert(err instanceof Error ? err.message : 'Silme işlemi başarısız oldu.');
+        }
+    };
+
+    // Donut segments (Active stocks + Cash)
+    const donutItems = useMemo(() => {
+        const items = liveActivePositions.map((pos, idx) => ({
+            symbol: pos.symbol,
+            label: pos.company_name,
+            weight: pos.weight_pct,
+            returnPct: pos.return_pct,
+            attributionPct: pos.attribution_pct ?? 0,
+            color: DONUT_PALETTE[idx % DONUT_PALETTE.length],
+            isCash: false,
+        }));
+        if (liveSummary.cash_weight_pct > 0.05) {
+            items.push({
+                symbol: 'NAKİT',
+                label: 'Nakit / Boşta Pay',
+                weight: liveSummary.cash_weight_pct,
+                returnPct: 0,
+                attributionPct: 0,
+                color: '#334155',
+                isCash: true,
+            });
+        }
+        return items;
+    }, [liveActivePositions, liveSummary.cash_weight_pct]);
+
+    return (
+        <div className={`mn-layout${navCollapsed ? ' mn-nav-collapsed' : ''}`}>
+            <MarketsNavigation
+                collapsed={navCollapsed}
+                activeSection="markets"
+                onCollapsedChange={setNavCollapsed}
+                onSectionChange={handleSectionChange}
+                onFundSectionChange={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
+                onSelectTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+                onSelectFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
+            />
+            <div className="markets-workspace markets-workspace-with-rail">
+                <main className="market-page model-portfolio-page">
+                    {/* Header */}
+                    <header className="market-header mp-header">
+                        <div className="market-title">
+                            <span className="model-portfolio-kicker">ARAŞTIRMA & YATIRIM STRATEJİLERİ</span>
+                            <h1>Model Portföy</h1>
+                            <p>
+                                Temel analiz, çarpan iskontosu ve bilanço katalizörleriyle seçilen hisselerin BIST 100
+                                (XU100) endeksine karşı canlı performans ve yatırım tezi takibi.
+                            </p>
+                        </div>
+                    </header>
+
+                    {error && (
+                        <div className="mp-alert mp-alert-error" role="alert">
+                            <AlertTriangle size={16} />
+                            <span>{error}</span>
+                            <button type="button" className="mp-btn mp-btn-subtle" onClick={() => loadPortfolio(true)}>
+                                <RefreshCw size={13} /> Tekrar Dene
+                            </button>
+                        </div>
+                    )}
+
+                    {/* 5 KPI Summary Strip */}
+                    <section className="market-quick-stats mp-kpi-strip" aria-label="Model portföy özet göstergeleri">
+                        <div className="quick-stat mp-kpi-card">
+                            <span className="qs-label">MODEL PORTFÖY GETİRİSİ</span>
+                            <strong className={`qs-value ${toneClass(liveSummary.invested_return_pct)}`}>
+                                {formatPct(liveSummary.invested_return_pct)}
+                            </strong>
+                            <span className="mp-kpi-sub">
+                                Nakit dahil toplam: <b>{formatPct(liveSummary.portfolio_return_pct)}</b>
+                            </span>
+                        </div>
+
+                        <div className="quick-stat mp-kpi-card">
+                            <span className="qs-label">BIST 100 RÖLATİF (ALFA)</span>
+                            <strong className={`qs-value ${toneClass(liveSummary.relative_return_pct)}`}>
+                                {formatPct(liveSummary.relative_return_pct)}
+                            </strong>
+                            <span className="mp-kpi-sub">
+                                XU100 karşılaştırma: <b>{formatPct(liveSummary.xu100_return_pct)}</b>
+                            </span>
+                        </div>
+
+                        <div className="quick-stat mp-kpi-card">
+                            <span className="qs-label">ORT. HEDEF POTANSİYELİ</span>
+                            <strong className={`qs-value ${toneClass(liveSummary.weighted_target_upside_pct)}`}>
+                                {formatPct(liveSummary.weighted_target_upside_pct)}
+                            </strong>
+                            <span className="mp-kpi-sub">
+                                Ağırlıklı hedef fiyat beklentisi
+                            </span>
+                        </div>
+
+                        <div className="quick-stat mp-kpi-card">
+                            <span className="qs-label">PORTFÖY & NAKİT DAĞILIMI</span>
+                            <strong className="qs-value">
+                                {liveSummary.active_count} Hisse · %{liveSummary.total_weight_pct.toFixed(0)}
+                            </strong>
+                            <span className="mp-kpi-sub">
+                                Nakit / Boşta Pay: <b>%{liveSummary.cash_weight_pct.toFixed(1)}</b>
+                            </span>
+                        </div>
+
+                        <div className="quick-stat mp-kpi-card">
+                            <span className="qs-label">KAPALI İŞLEM KARNESİ (HIT RATE)</span>
+                            <strong className="qs-value mp-tone-accent">
+                                {liveSummary.closed_hit_rate_pct != null
+                                    ? `%${liveSummary.closed_hit_rate_pct.toFixed(0)}`
+                                    : '—'}
+                            </strong>
+                            <span className="mp-kpi-sub">
+                                {liveSummary.closed_count > 0
+                                    ? `${liveSummary.closed_win_count}/${liveSummary.closed_count} işlemde XU100 geçildi`
+                                    : 'Henüz kapatılan pozisyon yok'}
+                            </span>
+                        </div>
+                    </section>
+
+                    {/* Analytics Grid: Left = Cumulative Performance Chart, Right = Allocation Donut & Attribution */}
+                    {liveActivePositions.length > 0 && (
+                        <section className="mp-analytics-grid">
+                            {/* Left: Cumulative Return vs XU100 SVG Chart */}
+                            <div className="mp-panel mp-chart-panel">
+                                <div className="mp-panel-header">
+                                    <div>
+                                        <span className="mp-panel-kicker">KÜMÜLATİF PERFORMANS & ALFA EĞRİSİ</span>
+                                        <h2 className="mp-panel-title">Model Portföy vs. BIST 100 (100 ₺ Bazlı)</h2>
+                                    </div>
+                                    <div className="mp-range-tabs" role="tablist" aria-label="Grafik periyodu">
+                                        {PERF_RANGES.map((r) => (
+                                            <button
+                                                key={r.id}
+                                                type="button"
+                                                role="tab"
+                                                aria-selected={selectedRange === r.id}
+                                                className={`mp-range-btn${selectedRange === r.id ? ' active' : ''}`}
+                                                onClick={() => {
+                                                    setSelectedRange(r.id);
+                                                    setHoverIndex(null);
+                                                }}
+                                            >
+                                                {r.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <ModelPortfolioPerformanceChart
+                                    points={slicedPerfPoints}
+                                    loading={perfLoading}
+                                    hoverIndex={hoverIndex}
+                                    onHoverIndexChange={setHoverIndex}
+                                />
+                            </div>
+
+                            {/* Right: Allocation Donut & Return Attribution */}
+                            <div className="mp-panel mp-allocation-panel">
+                                <div className="mp-panel-header">
+                                    <div>
+                                        <span className="mp-panel-kicker">VARLIK DAĞILIMI & KATKI ANALİZİ</span>
+                                        <h2 className="mp-panel-title">Ağırlık & Getiri Katkısı</h2>
+                                    </div>
+                                </div>
+
+                                <div className="mp-allocation-body">
+                                    <ModelPortfolioDonut
+                                        items={donutItems}
+                                        activeIndex={activeDonutIndex}
+                                        onActiveIndexChange={setActiveDonutIndex}
+                                    />
+
+                                    <div className="mp-attribution-list">
+                                        <div className="mp-attribution-head">
+                                            <span>Hisse / Ağırlık</span>
+                                            <span>Portföye Katkı (Puan)</span>
+                                        </div>
+                                        {donutItems.map((item, idx) => (
+                                            <div
+                                                key={item.symbol}
+                                                className={`mp-attribution-row${activeDonutIndex === idx ? ' is-highlighted' : ''}`}
+                                                onMouseEnter={() => setActiveDonutIndex(idx)}
+                                                onMouseLeave={() => setActiveDonutIndex(null)}
+                                            >
+                                                <div className="mp-attribution-left">
+                                                    <span
+                                                        className="mp-color-dot"
+                                                        style={{ backgroundColor: item.color }}
+                                                    />
+                                                    <span className="mp-attr-symbol">{item.symbol}</span>
+                                                    <span className="mp-attr-weight">%{item.weight.toFixed(1)}</span>
+                                                </div>
+                                                <div className="mp-attribution-right">
+                                                    {item.isCash ? (
+                                                        <span className="mp-tone-flat">0,00 puan</span>
+                                                    ) : (
+                                                        <span className={toneClass(item.attributionPct)}>
+                                                            {item.attributionPct > 0 ? '+' : ''}
+                                                            {item.attributionPct.toFixed(2)} puan
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+                    )}
+
+                    {/* Main Content Section with 3 Tabs */}
+                    <section className="mp-panel mp-main-section">
+                        <div className="mp-tabs-header">
+                            <div className="mp-tabs-nav" role="tablist">
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={activeTab === 'active'}
+                                    className={`mp-tab-btn${activeTab === 'active' ? ' active' : ''}`}
+                                    onClick={() => setActiveTab('active')}
+                                >
+                                    <BriefcaseBusiness size={15} />
+                                    <span>Aktif Pozisyonlar</span>
+                                    <span className="mp-tab-count">{liveActivePositions.length}</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={activeTab === 'closed'}
+                                    className={`mp-tab-btn${activeTab === 'closed' ? ' active' : ''}`}
+                                    onClick={() => setActiveTab('closed')}
+                                >
+                                    <Award size={15} />
+                                    <span>Kapatılan Pozisyonlar (Geçmiş)</span>
+                                    <span className="mp-tab-count">{portfolioData?.closed_positions.length || 0}</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={activeTab === 'changelog'}
+                                    className={`mp-tab-btn${activeTab === 'changelog' ? ' active' : ''}`}
+                                    onClick={() => setActiveTab('changelog')}
+                                >
+                                    <History size={15} />
+                                    <span>Değişiklik Günlüğü</span>
+                                    <span className="mp-tab-count">{portfolioData?.changelog.length || 0}</span>
+                                </button>
+                            </div>
+                            <div className="mp-tabs-meta">
+                                {portfolioData?.current_xu100 && (
+                                    <span className="mp-xu100-pill">
+                                        XU100: <b>{portfolioData.current_xu100.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}</b>
+                                    </span>
+                                )}
+                                <div className="mp-toolbar-actions">
+                                    {isAdminVerified ? (
+                                        <>
+                                            <span className="mp-admin-badge" title="Kurucu düzenleme modu açık">
+                                                <Sparkles size={12} />
+                                                Kurucu Modu
+                                            </span>
+                                            <button
+                                                type="button"
+                                                className="mp-btn mp-btn-primary mp-btn-sm"
+                                                onClick={() => {
+                                                    setEditingPosition(null);
+                                                    setEditorModalOpen(true);
+                                                }}
+                                            >
+                                                <Plus size={14} />
+                                                Hisse Ekle
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="mp-btn mp-btn-subtle mp-btn-sm"
+                                                onClick={handleAdminLogout}
+                                                title="Kurucu modundan çık"
+                                            >
+                                                <LogOut size={13} />
+                                                <span>Çıkış</span>
+                                            </button>
+                                        </>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            className="mp-founder-trigger"
+                                            onClick={() => setAdminModalOpen(true)}
+                                            title="Model portföyü yönetmek için kurucu girişi yapın"
+                                        >
+                                            <Lock size={12} />
+                                            <span>Kurucu Girişi</span>
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* TAB 1: Active Positions */}
+                        {activeTab === 'active' && (
+                            loading && !portfolioData ? (
+                                <div className="mp-empty-box">Model portföy verileri yükleniyor...</div>
+                            ) : liveActivePositions.length === 0 ? (
+                                <div className="mp-empty-box">
+                                    <BriefcaseBusiness size={26} className="mp-empty-icon" />
+                                    <h3>Model Portföyde Henüz Aktif Hisse Bulunmuyor</h3>
+                                    <p>
+                                        {isAdminVerified
+                                            ? 'Kurucu modu açık. Sağ üstteki "+ Hisse Ekle" butonuna tıklayarak ilk hisseyi, hedef fiyatını ve yatırım tezini ekleyebilirsiniz.'
+                                            : 'Kurucu tarafından model portföye hisse eklendiğinde canlı getiri, hedef fiyat ilerlemesi ve yatırım tezleri bu tabloda listelenecektir.'}
+                                    </p>
+                                    {isAdminVerified && (
+                                        <button
+                                            type="button"
+                                            className="mp-btn mp-btn-primary"
+                                            onClick={() => {
+                                                setEditingPosition(null);
+                                                setEditorModalOpen(true);
+                                            }}
+                                        >
+                                            <Plus size={15} /> İlk Hisseyi Ekle
+                                        </button>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="mp-table-wrap">
+                                    <table className="mp-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Hisse / Strateji</th>
+                                                <th className="num">Giriş Tarihi</th>
+                                                <th className="num">Giriş Fiyatı</th>
+                                                <th className="num">Güncel Fiyat</th>
+                                                <th className="mp-col-target">Hedef Fiyat & İlerleme</th>
+                                                <th className="num">Potansiyel</th>
+                                                <th className="num">Ağırlık</th>
+                                                <th className="num">Net Getiri</th>
+                                                <th className="num">XU100 Rölatif</th>
+                                                <th className="act">Yatırım Tezi</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {liveActivePositions.map((pos) => {
+                                                const progress = pos.target_progress_pct ?? 0;
+                                                const clampedBar = Math.max(0, Math.min(100, progress));
+                                                const isSelected = selectedPositionId === pos.id;
+                                                return (
+                                                    <tr
+                                                        key={pos.id}
+                                                        className={`mp-row${isSelected ? ' is-selected' : ''}`}
+                                                        onClick={() => setSelectedPositionId(pos.id)}
+                                                    >
+                                                        <td>
+                                                            <div className="mp-stock-cell">
+                                                                <SymbolLogo
+                                                                    symbol={pos.symbol}
+                                                                    name={pos.company_name}
+                                                                    kind="stock"
+                                                                    logoUrl={pos.logo_url}
+                                                                    size="sm"
+                                                                />
+                                                                <div className="mp-stock-meta">
+                                                                    <div className="mp-stock-line">
+                                                                        <span className="mp-ticker">{pos.symbol}</span>
+                                                                        {pos.sector && (
+                                                                            <span className="mp-sector-tag">{pos.sector}</span>
+                                                                        )}
+                                                                    </div>
+                                                                    <span className="mp-company-name" title={pos.company_name}>
+                                                                        {pos.company_name}
+                                                                    </span>
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                        <td className="num mp-mono">
+                                                            <div>{formatDateTR(pos.entry_date)}</div>
+                                                            <span className="mp-sub-cell">{pos.holding_days} gün</span>
+                                                        </td>
+                                                        <td className="num mp-mono">{formatPrice(pos.entry_price)}</td>
+                                                        <td className="num mp-mono">
+                                                            <div className="mp-price-main">{formatPrice(pos.current_price)}</div>
+                                                            {pos.daily_change_pct != null && (
+                                                                <span className={`mp-sub-cell ${toneClass(pos.daily_change_pct)}`}>
+                                                                    Günlük {formatPct(pos.daily_change_pct)}
+                                                                </span>
+                                                            )}
+                                                        </td>
+                                                        <td className="mp-col-target">
+                                                            <div className="mp-target-cell">
+                                                                <div className="mp-target-top">
+                                                                    <span className="mp-mono mp-target-price">
+                                                                        {formatPrice(pos.target_price)}
+                                                                    </span>
+                                                                    {pos.target_reached ? (
+                                                                        <span className="mp-reached-badge">
+                                                                            <CheckCircle2 size={11} /> Hedefe Ulaştı
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="mp-progress-label mp-mono">
+                                                                            %{progress.toFixed(0)}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="mp-progress-track">
+                                                                    <div
+                                                                        className={`mp-progress-fill${pos.target_reached ? ' is-reached' : progress < 0 ? ' is-negative' : ''}`}
+                                                                        style={{ width: `${clampedBar}%` }}
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                        <td className={`num mp-mono ${toneClass(pos.target_upside_pct)}`}>
+                                                            {formatPct(pos.target_upside_pct)}
+                                                        </td>
+                                                        <td className="num mp-mono">
+                                                            <span className="mp-weight-pill">%{pos.weight_pct.toFixed(1)}</span>
+                                                        </td>
+                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.return_pct)}`}>
+                                                            {formatPct(pos.return_pct)}
+                                                        </td>
+                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.relative_return_pct)}`}>
+                                                            {formatPct(pos.relative_return_pct)}
+                                                        </td>
+                                                        <td className="act" onClick={(e) => e.stopPropagation()}>
+                                                            <div className="mp-row-actions">
+                                                                <button
+                                                                    type="button"
+                                                                    className="mp-thesis-btn"
+                                                                    onClick={() => setSelectedPositionId(pos.id)}
+                                                                >
+                                                                    <span>Tezi İncele</span>
+                                                                    <ChevronRight size={14} />
+                                                                </button>
+                                                                {isAdminVerified && (
+                                                                    <>
+                                                                        <button
+                                                                            type="button"
+                                                                            className="mp-icon-btn"
+                                                                            title="Pozisyonu Düzenle / Hedef Revize Et"
+                                                                            onClick={() => {
+                                                                                setEditingPosition(pos);
+                                                                                setEditorModalOpen(true);
+                                                                            }}
+                                                                        >
+                                                                            <Pencil size={13} />
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            className="mp-icon-btn mp-icon-btn-warn"
+                                                                            title="Pozisyonu Kapat"
+                                                                            onClick={() => setClosingPosition(pos)}
+                                                                        >
+                                                                            <CheckCircle2 size={13} />
+                                                                        </button>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )
+                        )}
+
+                        {/* TAB 2: Closed Positions */}
+                        {activeTab === 'closed' && (
+                            (portfolioData?.closed_positions.length || 0) === 0 ? (
+                                <div className="mp-empty-box">
+                                    <Award size={26} className="mp-empty-icon" />
+                                    <h3>Henüz Kapatılan Pozisyon Bulunmuyor</h3>
+                                    <p>
+                                        Hedef fiyatına ulaşan veya portföyden çıkarılan hisseler gerçekleşen getiri ve
+                                        BIST 100 rölatif performans karnesiyle bu sekmede arşivlenir.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="mp-closed-section">
+                                    <div className="mp-closed-scorecard">
+                                        <div className="mp-score-item">
+                                            <span>Kapatılan Öneri Sayısı</span>
+                                            <strong>{liveSummary.closed_count} İşlem</strong>
+                                        </div>
+                                        <div className="mp-score-item">
+                                            <span>BIST 100 Üzeri Başarı (Hit Rate)</span>
+                                            <strong className="mp-tone-up">
+                                                %{liveSummary.closed_hit_rate_pct?.toFixed(1) ?? '0.0'} ({liveSummary.closed_win_count}/{liveSummary.closed_count})
+                                            </strong>
+                                        </div>
+                                        <div className="mp-score-item">
+                                            <span>Ortalama Gerçekleşen Getiri</span>
+                                            <strong className={toneClass(liveSummary.closed_avg_return_pct)}>
+                                                {formatPct(liveSummary.closed_avg_return_pct)}
+                                            </strong>
+                                        </div>
+                                        <div className="mp-score-item">
+                                            <span>Ortalama Rölatif Alfa</span>
+                                            <strong className={toneClass(liveSummary.closed_avg_relative_pct)}>
+                                                {formatPct(liveSummary.closed_avg_relative_pct)}
+                                            </strong>
+                                        </div>
+                                    </div>
+
+                                    <div className="mp-table-wrap">
+                                        <table className="mp-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Hisse</th>
+                                                    <th className="num">Giriş → Çıkış Tarihi</th>
+                                                    <th className="num">Giriş Fiyatı</th>
+                                                    <th className="num">Çıkış Fiyatı</th>
+                                                    <th className="num">Gerçekleşen Getiri</th>
+                                                    <th className="num">XU100 Rölatif (Alfa)</th>
+                                                    <th>Kapanış Gerekçesi</th>
+                                                    <th className="act">Detay</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {(portfolioData?.closed_positions || []).map((pos) => (
+                                                    <tr
+                                                        key={pos.id}
+                                                        className="mp-row"
+                                                        onClick={() => setSelectedPositionId(pos.id)}
+                                                    >
+                                                        <td>
+                                                            <div className="mp-stock-cell">
+                                                                <SymbolLogo
+                                                                    symbol={pos.symbol}
+                                                                    name={pos.company_name}
+                                                                    kind="stock"
+                                                                    logoUrl={pos.logo_url}
+                                                                    size="sm"
+                                                                />
+                                                                <div className="mp-stock-meta">
+                                                                    <span className="mp-ticker">{pos.symbol}</span>
+                                                                    <span className="mp-company-name">{pos.company_name}</span>
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                        <td className="num mp-mono">
+                                                            <div>
+                                                                {formatDateTR(pos.entry_date)} → {formatDateTR(pos.closed_date)}
+                                                            </div>
+                                                            <span className="mp-sub-cell">{pos.holding_days} gün tutuldu</span>
+                                                        </td>
+                                                        <td className="num mp-mono">{formatPrice(pos.entry_price)}</td>
+                                                        <td className="num mp-mono">{formatPrice(pos.exit_price)}</td>
+                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.return_pct)}`}>
+                                                            {formatPct(pos.return_pct)}
+                                                        </td>
+                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.relative_return_pct)}`}>
+                                                            {formatPct(pos.relative_return_pct)}
+                                                        </td>
+                                                        <td>
+                                                            <span className="mp-close-reason">
+                                                                {pos.close_reason || 'Portföy Değişikliği'}
+                                                            </span>
+                                                        </td>
+                                                        <td className="act" onClick={(e) => e.stopPropagation()}>
+                                                            <div className="mp-row-actions">
+                                                                <button
+                                                                    type="button"
+                                                                    className="mp-thesis-btn"
+                                                                    onClick={() => setSelectedPositionId(pos.id)}
+                                                                >
+                                                                    <span>Tezi Gör</span>
+                                                                    <ChevronRight size={14} />
+                                                                </button>
+                                                                {isAdminVerified && (
+                                                                    <button
+                                                                        type="button"
+                                                                        className="mp-icon-btn mp-icon-btn-danger"
+                                                                        title="Kaydı Sil"
+                                                                        onClick={() => handleDeletePosition(pos)}
+                                                                    >
+                                                                        <Trash2 size={13} />
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )
+                        )}
+
+                        {/* TAB 3: Changelog Timeline */}
+                        {activeTab === 'changelog' && (
+                            (portfolioData?.changelog.length || 0) === 0 ? (
+                                <div className="mp-empty-box">
+                                    <History size={26} className="mp-empty-icon" />
+                                    <h3>Henüz Portföy Hareketi Kaydedilmedi</h3>
+                                    <p>
+                                        Model portföye hisse eklendiğinde, hedef fiyat/ağırlık revizyonu yapıldığında veya
+                                        pozisyon kapatıldığında tüm değişiklikler tarih sırasıyla burada listelenir.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="mp-changelog-list">
+                                    {(portfolioData?.changelog || []).map((entry: ModelPortfolioChangelogItem) => (
+                                        <div key={entry.id} className="mp-changelog-item">
+                                            <div className={`mp-changelog-badge is-${entry.action}`}>
+                                                {entry.action === 'added' && 'YENİ GİRİŞ'}
+                                                {entry.action === 'target_revised' && 'HEDEF REVİZYONU'}
+                                                {entry.action === 'weight_revised' && 'AĞIRLIK REVİZYONU'}
+                                                {entry.action === 'updated' && 'GÜNCELLEME'}
+                                                {entry.action === 'closed' && 'POZİSYON KAPANIŞI'}
+                                            </div>
+                                            <div className="mp-changelog-content">
+                                                <div className="mp-changelog-top">
+                                                    <button
+                                                        type="button"
+                                                        className="mp-changelog-ticker"
+                                                        onClick={() => navigate(toStockDetail(entry.symbol, DEFAULT_STOCK_TAB))}
+                                                    >
+                                                        {entry.symbol}
+                                                    </button>
+                                                    <span className="mp-changelog-company">{entry.company_name}</span>
+                                                    <time className="mp-changelog-date mp-mono">
+                                                        {formatDateTR(entry.date)}
+                                                    </time>
+                                                </div>
+                                                <p className="mp-changelog-summary">{entry.summary}</p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )
+                        )}
+                    </section>
+                </main>
+
+                {/* Right Rail (Includes MarketFlowPanel with the new 'Model Portföy' KAP Filter!) */}
+                <MarketWatchRail
+                    xu100Rows={xu100UniverseRows}
+                    onSelectTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+                    onSelectFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
+                />
+            </div>
+
+            {/* Right-Side Investment Thesis & Multiples Comparison Drawer */}
+            {selectedPosition && (
+                <ModelPortfolioThesisDrawer
+                    position={selectedPosition}
+                    isAdmin={isAdminVerified}
+                    onClose={() => setSelectedPositionId(null)}
+                    onOpenStockDetail={(sym) => navigate(toStockDetail(sym, DEFAULT_STOCK_TAB))}
+                    onEdit={(pos) => {
+                        setEditingPosition(pos);
+                        setEditorModalOpen(true);
+                    }}
+                    onClosePosition={(pos) => setClosingPosition(pos)}
+                    onDeletePosition={handleDeletePosition}
+                />
+            )}
+
+            {/* Founder Login Modal */}
+            {adminModalOpen && (
+                <div className="mp-modal-backdrop" onClick={() => setAdminModalOpen(false)}>
+                    <div className="mp-modal mp-modal-sm" onClick={(e) => e.stopPropagation()}>
+                        <div className="mp-modal-header">
+                            <div className="mp-modal-title-row">
+                                <KeyRound size={17} className="mp-accent-icon" />
+                                <h3>Kurucu / Yönetici Girişi</h3>
+                            </div>
+                            <button type="button" className="mp-icon-btn" onClick={() => setAdminModalOpen(false)}>
+                                <X size={16} />
+                            </button>
+                        </div>
+                        <form onSubmit={handleAdminVerifySubmit} className="mp-modal-body">
+                            <p className="mp-modal-desc">
+                                Model portföye hisse eklemek, hedef fiyat revize etmek ve yatırım tezi yazmak için
+                                yönetici anahtarınızı girin.
+                            </p>
+                            <label className="mp-field">
+                                <span>Yönetici Anahtarı</span>
+                                <input
+                                    type="password"
+                                    value={adminTokenInput}
+                                    onChange={(e) => setAdminTokenInput(e.target.value)}
+                                    placeholder="••••••••••••••••"
+                                    autoComplete="off"
+                                    autoFocus
+                                />
+                            </label>
+                            {adminAuthError && <div className="mp-form-error">{adminAuthError}</div>}
+                            <div className="mp-modal-footer">
+                                <button
+                                    type="button"
+                                    className="mp-btn mp-btn-ghost"
+                                    onClick={() => setAdminModalOpen(false)}
+                                >
+                                    İptal
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="mp-btn mp-btn-primary"
+                                    disabled={adminAuthLoading || !adminTokenInput.trim()}
+                                >
+                                    {adminAuthLoading ? 'Doğrulanıyor...' : 'Giriş Yap'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Add / Edit Position Modal */}
+            {editorModalOpen && (
+                <ModelPortfolioEditorModal
+                    adminToken={adminToken}
+                    editingPosition={editingPosition}
+                    availableWeightPct={
+                        editingPosition
+                            ? Math.max(0, 100 - liveSummary.total_weight_pct + editingPosition.weight_pct)
+                            : Math.max(0, 100 - liveSummary.total_weight_pct)
+                    }
+                    universeRows={xu100UniverseRows}
+                    onClose={() => {
+                        setEditorModalOpen(false);
+                        setEditingPosition(null);
+                    }}
+                    onSaved={(nextData) => {
+                        setEditorModalOpen(false);
+                        setEditingPosition(null);
+                        handlePortfolioMutated(nextData);
+                    }}
+                />
+            )}
+
+            {/* Close Position Modal */}
+            {closingPosition && (
+                <ModelPortfolioCloseModal
+                    adminToken={adminToken}
+                    position={closingPosition}
+                    currentXu100={portfolioData?.current_xu100 ?? null}
+                    onClose={() => setClosingPosition(null)}
+                    onClosed={(nextData) => {
+                        setClosingPosition(null);
+                        setSelectedPositionId(null);
+                        handlePortfolioMutated(nextData);
+                    }}
+                />
+            )}
+        </div>
+    );
+}
+
+/* ==========================================================================
+   Subcomponent 1: Cumulative Performance vs XU100 SVG Chart
+   ========================================================================== */
+
+function ModelPortfolioPerformanceChart({
+    points,
+    loading,
+    hoverIndex,
+    onHoverIndexChange,
+}: {
+    points: ModelPortfolioPerformancePoint[];
+    loading: boolean;
+    hoverIndex: number | null;
+    onHoverIndexChange: (idx: number | null) => void;
+}) {
+    const width = 760;
+    const height = 270;
+    const padLeft = 52;
+    const padRight = 18;
+    const padTop = 20;
+    const padBottom = 32;
+    const plotW = width - padLeft - padRight;
+    const plotH = height - padTop - padBottom;
+
+    if (loading && points.length === 0) {
+        return <div className="mp-chart-empty">Kümülatif performans serisi hazırlanıyor...</div>;
+    }
+    if (points.length < 2) {
+        return (
+            <div className="mp-chart-empty">
+                Seçili dönem için karşılaştırmalı grafik verisi bekleniyor (en az 2 işlem günü gereklidir).
+            </div>
+        );
+    }
+
+    const allVals = points.flatMap((p) => [p.portfolio_value, p.xu100_value]);
+    const rawMin = Math.min(...allVals, 100);
+    const rawMax = Math.max(...allVals, 100);
+    const span = Math.max(4, rawMax - rawMin);
+    const minVal = rawMin - span * 0.08;
+    const maxVal = rawMax + span * 0.08;
+
+    const toX = (i: number) => padLeft + (i / Math.max(1, points.length - 1)) * plotW;
+    const toY = (v: number) => padTop + ((maxVal - v) / Math.max(1e-6, maxVal - minVal)) * plotH;
+
+    const portPath = points
+        .map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(p.portfolio_value).toFixed(1)}`)
+        .join(' ');
+    const portArea = `${portPath} L${toX(points.length - 1).toFixed(1)},${(padTop + plotH).toFixed(1)} L${padLeft.toFixed(1)},${(padTop + plotH).toFixed(1)} Z`;
+
+    const xuPath = points
+        .map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(p.xu100_value).toFixed(1)}`)
+        .join(' ');
+
+    const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => {
+        const val = maxVal - t * (maxVal - minVal);
+        return { y: padTop + t * plotH, val };
+    });
+
+    const activeIdx = hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length
+        ? hoverIndex
+        : points.length - 1;
+    const activePt = points[activeIdx];
+
+    const handlePointerMove = (e: ReactPointerEvent<SVGSVGElement>) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0) return;
+        const relX = ((e.clientX - rect.left) / rect.width) * width;
+        const ratio = Math.max(0, Math.min(1, (relX - padLeft) / plotW));
+        const idx = Math.round(ratio * (points.length - 1));
+        onHoverIndexChange(idx);
+    };
+
+    return (
+        <div className="mp-chart-container">
+            <div className="mp-chart-legend">
+                <div className="mp-legend-item">
+                    <span className="mp-legend-swatch is-portfolio" />
+                    <span className="mp-legend-label">Model Portföy:</span>
+                    <strong className="mp-mono">{activePt.portfolio_value.toFixed(2)} ₺</strong>
+                    <span className={`mp-mono ${toneClass(activePt.portfolio_return_pct)}`}>
+                        ({formatPct(activePt.portfolio_return_pct)})
+                    </span>
+                </div>
+                <div className="mp-legend-item">
+                    <span className="mp-legend-swatch is-xu100" />
+                    <span className="mp-legend-label">BIST 100 (XU100):</span>
+                    <strong className="mp-mono">{activePt.xu100_value.toFixed(2)} ₺</strong>
+                    <span className={`mp-mono ${toneClass(activePt.xu100_return_pct)}`}>
+                        ({formatPct(activePt.xu100_return_pct)})
+                    </span>
+                </div>
+                <div className="mp-legend-item mp-legend-alpha">
+                    <span className="mp-legend-label">Rölatif Alfa:</span>
+                    <strong className={`mp-mono ${toneClass(activePt.relative_return_pct)}`}>
+                        {formatPct(activePt.relative_return_pct)}
+                    </strong>
+                    <span className="mp-legend-date mp-mono">{formatDateTR(activePt.date)}</span>
+                </div>
+            </div>
+
+            <svg
+                className="mp-perf-svg"
+                viewBox={`0 0 ${width} ${height}`}
+                onPointerMove={handlePointerMove}
+                onPointerLeave={() => onHoverIndexChange(null)}
+            >
+                <defs>
+                    <linearGradient id="mpPortFill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.26" />
+                        <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.0" />
+                    </linearGradient>
+                </defs>
+
+                {ticks.map((t, i) => (
+                    <g key={i}>
+                        <line
+                            x1={padLeft}
+                            y1={t.y}
+                            x2={width - padRight}
+                            y2={t.y}
+                            className="mp-chart-grid"
+                        />
+                        <text x={padLeft - 8} y={t.y + 4} textAnchor="end" className="mp-chart-axis-text">
+                            {t.val.toFixed(0)}₺
+                        </text>
+                    </g>
+                ))}
+
+                {/* 100 TL baseline */}
+                {minVal < 100 && maxVal > 100 && (
+                    <line
+                        x1={padLeft}
+                        y1={toY(100)}
+                        x2={width - padRight}
+                        y2={toY(100)}
+                        className="mp-chart-baseline"
+                    />
+                )}
+
+                <path d={portArea} fill="url(#mpPortFill)" />
+                <path d={xuPath} fill="none" className="mp-line-xu100" />
+                <path d={portPath} fill="none" className="mp-line-portfolio" />
+
+                {/* Active crosshair & dots */}
+                <line
+                    x1={toX(activeIdx)}
+                    y1={padTop}
+                    x2={toX(activeIdx)}
+                    y2={padTop + plotH}
+                    className="mp-chart-crosshair"
+                />
+                <circle
+                    cx={toX(activeIdx)}
+                    cy={toY(activePt.xu100_value)}
+                    r="4"
+                    className="mp-dot-xu100"
+                />
+                <circle
+                    cx={toX(activeIdx)}
+                    cy={toY(activePt.portfolio_value)}
+                    r="4.5"
+                    className="mp-dot-portfolio"
+                />
+
+                {/* Start / Middle / End X labels */}
+                <text x={padLeft} y={height - 8} textAnchor="start" className="mp-chart-axis-text">
+                    {formatDateTR(points[0].date)}
+                </text>
+                <text x={padLeft + plotW / 2} y={height - 8} textAnchor="middle" className="mp-chart-axis-text">
+                    {formatDateTR(points[Math.floor(points.length / 2)].date)}
+                </text>
+                <text x={width - padRight} y={height - 8} textAnchor="end" className="mp-chart-axis-text">
+                    {formatDateTR(points[points.length - 1].date)}
+                </text>
+            </svg>
+        </div>
+    );
+}
+
+/* ==========================================================================
+   Subcomponent 2: Portfolio Weight Donut Chart
+   ========================================================================== */
+
+function ModelPortfolioDonut({
+    items,
+    activeIndex,
+    onActiveIndexChange,
+}: {
+    items: Array<{ symbol: string; label: string; weight: number; color: string; isCash: boolean }>;
+    activeIndex: number | null;
+    onActiveIndexChange: (idx: number | null) => void;
+}) {
+    const radius = 64;
+    const circumference = 2 * Math.PI * radius;
+    const total = Math.max(1e-6, items.reduce((acc, item) => acc + Math.max(0, item.weight), 0));
+
+    let accumulated = 0;
+    const segments = items.map((item, idx) => {
+        const fraction = Math.max(0, item.weight) / total;
+        const length = fraction * circumference;
+        const offset = circumference - accumulated;
+        accumulated += length;
+        return { item, idx, length, offset };
+    });
+
+    const activeItem = activeIndex != null ? items[activeIndex] : null;
+
+    return (
+        <div className="mp-donut-wrap">
+            <svg viewBox="0 0 160 160" className="mp-donut-svg">
+                <circle cx="80" cy="80" r={radius} className="mp-donut-track" />
+                {segments.map((seg) => (
+                    <circle
+                        key={seg.item.symbol}
+                        cx="80"
+                        cy="80"
+                        r={radius}
+                        fill="none"
+                        stroke={seg.item.color}
+                        strokeWidth={activeIndex === seg.idx ? 18 : 14}
+                        strokeDasharray={`${seg.length} ${circumference}`}
+                        strokeDashoffset={seg.offset}
+                        transform="rotate(-90 80 80)"
+                        className="mp-donut-segment"
+                        style={{
+                            opacity: activeIndex != null && activeIndex !== seg.idx ? 0.38 : 1,
+                        }}
+                        onMouseEnter={() => onActiveIndexChange(seg.idx)}
+                        onMouseLeave={() => onActiveIndexChange(null)}
+                    />
+                ))}
+            </svg>
+            <div className="mp-donut-center">
+                <span>{activeItem ? activeItem.symbol : 'HİSSE PAYI'}</span>
+                <strong className="mp-mono">
+                    %{activeItem ? activeItem.weight.toFixed(1) : items.filter((i) => !i.isCash).reduce((a, b) => a + b.weight, 0).toFixed(0)}
+                </strong>
+            </div>
+        </div>
+    );
+}
+
+/* ==========================================================================
+   Subcomponent 3: Right-Side Investment Thesis & Multiples Drawer
+   ========================================================================== */
+
+function ModelPortfolioThesisDrawer({
+    position,
+    isAdmin,
+    onClose,
+    onOpenStockDetail,
+    onEdit,
+    onClosePosition,
+    onDeletePosition,
+}: {
+    position: ModelPortfolioPosition;
+    isAdmin: boolean;
+    onClose: () => void;
+    onOpenStockDetail: (symbol: string) => void;
+    onEdit: (pos: ModelPortfolioPosition) => void;
+    onClosePosition: (pos: ModelPortfolioPosition) => void;
+    onDeletePosition: (pos: ModelPortfolioPosition) => void;
+}) {
+    const progress = position.target_progress_pct ?? 0;
+    const clampedBar = Math.max(0, Math.min(100, progress));
+
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') onClose();
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [onClose]);
+
+    const multipleRows = [
+        {
+            label: 'F/K (Fiyat / Kazanç)',
+            entry: position.entry_multiples?.fk,
+            current: position.current_multiples?.fk,
+        },
+        {
+            label: 'FD/FAVÖK',
+            entry: position.entry_multiples?.fd_favok,
+            current: position.current_multiples?.fd_favok,
+        },
+        {
+            label: 'PD/DD (Piyasa Değeri / Defter Değeri)',
+            entry: position.entry_multiples?.pd_dd,
+            current: position.current_multiples?.pd_dd,
+        },
+        {
+            label: 'Net Borç / FAVÖK',
+            entry: position.entry_multiples?.net_borc_favok,
+            current: position.current_multiples?.net_borc_favok,
+        },
+    ];
+
+    return (
+        <div className="mp-drawer-backdrop" onClick={onClose}>
+            <aside
+                className="mp-drawer"
+                onClick={(e) => e.stopPropagation()}
+                aria-label={`${position.symbol} yatırım tezi detayı`}
+            >
+                {/* Drawer Header */}
+                <div className="mp-drawer-header">
+                    <div className="mp-drawer-identity">
+                        <SymbolLogo
+                            symbol={position.symbol}
+                            name={position.company_name}
+                            kind="stock"
+                            logoUrl={position.logo_url}
+                            size="md"
+                        />
+                        <div>
+                            <div className="mp-drawer-title-row">
+                                <h2>{position.symbol}</h2>
+                                <span className="mp-rating-badge">{position.rating || 'Endeks Üstü Getiri'}</span>
+                                {position.status === 'closed' && (
+                                    <span className="mp-closed-badge">KAPATILDI</span>
+                                )}
+                            </div>
+                            <p className="mp-drawer-company">{position.company_name}</p>
+                        </div>
+                    </div>
+                    <div className="mp-drawer-header-btns">
+                        <button
+                            type="button"
+                            className="mp-btn mp-btn-subtle"
+                            onClick={() => onOpenStockDetail(position.symbol)}
+                        >
+                            <span>Hisse Detayı</span>
+                            <ExternalLink size={13} />
+                        </button>
+                        <button type="button" className="mp-icon-btn" onClick={onClose} aria-label="Kapat">
+                            <X size={18} />
+                        </button>
+                    </div>
+                </div>
+
+                {/* Drawer Body */}
+                <div className="mp-drawer-body">
+                    {/* Price & Target Progress Summary */}
+                    <div className="mp-drawer-card mp-drawer-price-card">
+                        <div className="mp-drawer-metrics-grid">
+                            <div>
+                                <span>Giriş Fiyatı ({formatDateTR(position.entry_date)})</span>
+                                <strong className="mp-mono">{formatPrice(position.entry_price)}</strong>
+                            </div>
+                            <div>
+                                <span>{position.status === 'closed' ? 'Çıkış Fiyatı' : 'Güncel Fiyat'}</span>
+                                <strong className="mp-mono">{formatPrice(position.current_price)}</strong>
+                            </div>
+                            <div>
+                                <span>Hedef Fiyat ({position.horizon})</span>
+                                <strong className="mp-mono mp-tone-accent">{formatPrice(position.target_price)}</strong>
+                            </div>
+                            <div>
+                                <span>Net Getiri / XU100 Alfa</span>
+                                <strong className={`mp-mono ${toneClass(position.return_pct)}`}>
+                                    {formatPct(position.return_pct)} / {formatPct(position.relative_return_pct)}
+                                </strong>
+                            </div>
+                        </div>
+
+                        {position.status === 'active' && (
+                            <div className="mp-drawer-progress-box">
+                                <div className="mp-drawer-progress-labels">
+                                    <span>
+                                        Hedef Fiyat İlerlemesi: <b>%{progress.toFixed(1)}</b>
+                                    </span>
+                                    <span className={toneClass(position.target_upside_pct)}>
+                                        Kalan Potansiyel: <b>{formatPct(position.target_upside_pct)}</b>
+                                    </span>
+                                </div>
+                                <div className="mp-progress-track mp-progress-track-lg">
+                                    <div
+                                        className={`mp-progress-fill${position.target_reached ? ' is-reached' : ''}`}
+                                        style={{ width: `${clampedBar}%` }}
+                                    />
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Investment Thesis Section */}
+                    <div className="mp-drawer-section">
+                        <div className="mp-section-heading">
+                            <TrendingUp size={15} className="mp-accent-icon" />
+                            <h3>Model Portföye Giriş Gerekçesi & Yatırım Tezi</h3>
+                        </div>
+                        <div className="mp-thesis-box">
+                            {position.thesis ? (
+                                position.thesis.split('\n').map((para, i) => (
+                                    <p key={i}>{para}</p>
+                                ))
+                            ) : (
+                                <p className="mp-muted">Bu pozisyon için henüz detaylı yatırım tezi metni girilmemiş.</p>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Catalysts / Expectations */}
+                    {position.catalysts && position.catalysts.length > 0 && (
+                        <div className="mp-drawer-section">
+                            <div className="mp-section-heading">
+                                <Target size={15} className="mp-accent-icon" />
+                                <h3>Beklentiler & Katalizörler</h3>
+                            </div>
+                            <div className="mp-catalyst-tags">
+                                {position.catalysts.map((cat) => (
+                                    <span key={cat} className="mp-catalyst-chip">
+                                        <ArrowUpRight size={13} />
+                                        {cat}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Entry Day vs Current Valuation Multiples */}
+                    <div className="mp-drawer-section">
+                        <div className="mp-section-heading">
+                            <Layers size={15} className="mp-accent-icon" />
+                            <h3>Giriş Günü vs. Güncel Çarpan Kıyaslaması</h3>
+                        </div>
+                        <div className="mp-multiples-compare-table-wrap">
+                            <table className="mp-multiples-table">
+                                <thead>
+                                    <tr>
+                                        <th>Çarpan</th>
+                                        <th className="num">Portföye Girişte</th>
+                                        <th className="num">Güncel</th>
+                                        <th className="num">Değişim</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {multipleRows.map((row) => {
+                                        const diff =
+                                            row.entry != null && row.current != null
+                                                ? row.current - row.entry
+                                                : null;
+                                        return (
+                                            <tr key={row.label}>
+                                                <td>{row.label}</td>
+                                                <td className="num mp-mono">{formatMultiple(row.entry)}</td>
+                                                <td className="num mp-mono mp-bold">{formatMultiple(row.current)}</td>
+                                                <td className="num mp-mono">
+                                                    {diff != null ? (
+                                                        <span className={diff <= 0 ? 'mp-tone-up' : 'mp-tone-flat'}>
+                                                            {diff > 0 ? '+' : ''}
+                                                            {diff.toFixed(2)}x
+                                                        </span>
+                                                    ) : (
+                                                        '—'
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    {/* Risk Note */}
+                    {position.risk_note && (
+                        <div className="mp-drawer-section">
+                            <div className="mp-section-heading">
+                                <AlertTriangle size={15} className="mp-warn-icon" />
+                                <h3>Riskler & İzlenecek Metrikler</h3>
+                            </div>
+                            <div className="mp-risk-box">
+                                <p>{position.risk_note}</p>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Target Price & Weight Revision History */}
+                    {position.revisions && position.revisions.length > 0 && (
+                        <div className="mp-drawer-section">
+                            <div className="mp-section-heading">
+                                <Clock size={15} className="mp-accent-icon" />
+                                <h3>Hedef Fiyat & Ağırlık Revizyon Geçmişi</h3>
+                            </div>
+                            <div className="mp-revisions-list">
+                                {position.revisions.map((rev) => (
+                                    <div key={rev.id} className="mp-revision-item">
+                                        <div className="mp-revision-top">
+                                            <span className="mp-mono mp-revision-date">{formatDateTR(rev.date)}</span>
+                                            <span className="mp-mono">
+                                                Hedef: <s>{formatPrice(rev.prev_target_price)}</s> →{' '}
+                                                <b>{formatPrice(rev.new_target_price)}</b>
+                                            </span>
+                                            {rev.prev_weight_pct !== rev.new_weight_pct && (
+                                                <span className="mp-mono">
+                                                    Ağırlık: %{rev.prev_weight_pct} → <b>%{rev.new_weight_pct}</b>
+                                                </span>
+                                            )}
+                                        </div>
+                                        {rev.note && <p className="mp-revision-note">{rev.note}</p>}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* Drawer Admin Footer */}
+                {isAdmin && (
+                    <div className="mp-drawer-footer">
+                        {position.status === 'active' && (
+                            <>
+                                <button
+                                    type="button"
+                                    className="mp-btn mp-btn-subtle"
+                                    onClick={() => onEdit(position)}
+                                >
+                                    <Pencil size={14} /> Düzenle / Revize Et
+                                </button>
+                                <button
+                                    type="button"
+                                    className="mp-btn mp-btn-primary"
+                                    onClick={() => onClosePosition(position)}
+                                >
+                                    <CheckCircle2 size={14} /> Pozisyonu Kapat
+                                </button>
+                            </>
+                        )}
+                        <button
+                            type="button"
+                            className="mp-btn mp-btn-danger"
+                            onClick={() => onDeletePosition(position)}
+                        >
+                            <Trash2 size={14} /> Sil
+                        </button>
+                    </div>
+                )}
+            </aside>
+        </div>
+    );
+}
+
+/* ==========================================================================
+   Helper Subcomponents: Custom Explained Dropdowns (No Native <select>)
+   ========================================================================== */
+
+function MpExplainedDropdown({
+    label,
+    value,
+    options,
+    onChange,
+}: {
+    label: string;
+    value: string;
+    options: ExplainedOption[];
+    onChange: (nextVal: string) => void;
+}) {
+    const [open, setOpen] = useState(false);
+    const wrapRef = useRef<HTMLDivElement | null>(null);
+
+    const selected = useMemo(
+        () => options.find((o) => o.value === value) || options[0],
+        [options, value],
+    );
+
+    useEffect(() => {
+        if (!open) return;
+        const onDocClick = (e: MouseEvent) => {
+            if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+                setOpen(false);
+            }
+        };
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setOpen(false);
+        };
+        document.addEventListener('mousedown', onDocClick);
+        window.addEventListener('keydown', onKey);
+        return () => {
+            document.removeEventListener('mousedown', onDocClick);
+            window.removeEventListener('keydown', onKey);
+        };
+    }, [open]);
+
+    return (
+        <div className="mp-field mp-explained-select-wrap" ref={wrapRef}>
+            <span className="mp-field-label">{label}</span>
+            <button
+                type="button"
+                className={`mp-explained-trigger${open ? ' is-open' : ''}`}
+                aria-expanded={open}
+                onClick={() => setOpen((p) => !p)}
+            >
+                <div className="mp-explained-trigger-main">
+                    <div className="mp-explained-trigger-top">
+                        <span className="mp-explained-trigger-title">{selected.label}</span>
+                        <span className={`mp-explained-badge is-${selected.tone}`}>{selected.badge}</span>
+                    </div>
+                    <span className="mp-explained-trigger-desc">{selected.description}</span>
+                </div>
+                <ChevronDown size={15} className={`mp-explained-chevron${open ? ' is-open' : ''}`} />
+            </button>
+
+            {open && (
+                <div className="mp-explained-menu" role="listbox">
+                    {options.map((opt) => {
+                        const isSelected = opt.value === selected.value;
+                        return (
+                            <button
+                                key={opt.value}
+                                type="button"
+                                role="option"
+                                aria-selected={isSelected}
+                                className={`mp-explained-option${isSelected ? ' is-selected' : ''}`}
+                                onClick={() => {
+                                    onChange(opt.value);
+                                    setOpen(false);
+                                }}
+                            >
+                                <div className="mp-explained-option-body">
+                                    <div className="mp-explained-option-top">
+                                        <strong>{opt.label}</strong>
+                                        <span className={`mp-explained-badge is-${opt.tone}`}>{opt.badge}</span>
+                                    </div>
+                                    <p>{opt.description}</p>
+                                </div>
+                                <span className="mp-explained-check">
+                                    {isSelected && <Check size={14} />}
+                                </span>
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function MpSectorDropdown({
+    value,
+    onChange,
+}: {
+    value: string;
+    onChange: (nextSector: string) => void;
+}) {
+    const [open, setOpen] = useState(false);
+    const wrapRef = useRef<HTMLDivElement | null>(null);
+
+    const matchedPreset = useMemo(
+        () => SECTOR_OPTIONS.find((s) => s.value.toLowerCase() === value.trim().toLowerCase()),
+        [value],
+    );
+
+    useEffect(() => {
+        if (!open) return;
+        const onDocClick = (e: MouseEvent) => {
+            if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+                setOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onDocClick);
+        return () => document.removeEventListener('mousedown', onDocClick);
+    }, [open]);
+
+    return (
+        <div className="mp-field mp-explained-select-wrap" ref={wrapRef}>
+            <span className="mp-field-label">Sektör & Tema Etiketi</span>
+            <div className="mp-sector-input-box">
+                <input
+                    type="text"
+                    value={value}
+                    onFocus={() => setOpen(true)}
+                    onChange={(e) => {
+                        onChange(e.target.value);
+                        setOpen(true);
+                    }}
+                    placeholder="Sektör seçin veya yazın..."
+                />
+                <button
+                    type="button"
+                    className="mp-sector-toggle-btn"
+                    onClick={() => setOpen((p) => !p)}
+                    aria-label="Sektör listesini aç"
+                >
+                    <ChevronDown size={14} className={`mp-explained-chevron${open ? ' is-open' : ''}`} />
+                </button>
+            </div>
+            {matchedPreset && (
+                <span className="mp-field-micro-hint">{matchedPreset.description}</span>
+            )}
+
+            {open && (
+                <div className="mp-explained-menu mp-sector-menu" role="listbox">
+                    {SECTOR_OPTIONS.map((sec) => {
+                        const isSelected = sec.value === value;
+                        return (
+                            <button
+                                key={sec.value}
+                                type="button"
+                                className={`mp-explained-option${isSelected ? ' is-selected' : ''}`}
+                                onClick={() => {
+                                    onChange(sec.value);
+                                    setOpen(false);
+                                }}
+                            >
+                                <div className="mp-explained-option-body">
+                                    <div className="mp-explained-option-top">
+                                        <strong>{sec.value}</strong>
+                                        <span className="mp-explained-badge is-blue">{sec.badge}</span>
+                                    </div>
+                                    <p>{sec.description}</p>
+                                </div>
+                                <span className="mp-explained-check">
+                                    {isSelected && <Check size={14} />}
+                                </span>
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
+        </div>
+    );
+}
+
+/* ==========================================================================
+   Subcomponent 4: Founder Add / Edit Position Modal with Guided UX
+   ========================================================================== */
+
+function ModelPortfolioEditorModal({
+    adminToken,
+    editingPosition,
+    availableWeightPct,
+    universeRows,
+    onClose,
+    onSaved,
+}: {
+    adminToken: string;
+    editingPosition: ModelPortfolioPosition | null;
+    availableWeightPct: number;
+    universeRows: MarketUniverseRow[];
+    onClose: () => void;
+    onSaved: (nextData: ModelPortfolioResponse) => void;
+}) {
+    const isEdit = Boolean(editingPosition);
+    const [symbol, setSymbol] = useState(editingPosition?.symbol || '');
+    const [symbolQuery, setSymbolQuery] = useState(editingPosition?.symbol || '');
+    const [companyName, setCompanyName] = useState(editingPosition?.company_name || '');
+    const [sector, setSector] = useState(editingPosition?.sector || '');
+    const [entryDate, setEntryDate] = useState(editingPosition?.entry_date || todayIsoDate());
+    const [entryPrice, setEntryPrice] = useState(
+        editingPosition ? String(editingPosition.entry_price) : '',
+    );
+    const [entryXu100, setEntryXu100] = useState(
+        editingPosition?.entry_xu100 != null ? String(editingPosition.entry_xu100) : '',
+    );
+    const [weightPct, setWeightPct] = useState(
+        editingPosition ? String(editingPosition.weight_pct) : String(Math.min(15, availableWeightPct)),
+    );
+    const [targetPrice, setTargetPrice] = useState(
+        editingPosition ? String(editingPosition.target_price) : '',
+    );
+    const [horizon, setHorizon] = useState(editingPosition?.horizon || '6-12 Ay');
+    const [rating, setRating] = useState(editingPosition?.rating || 'Endeks Üstü Getiri');
+    const [thesis, setThesis] = useState(editingPosition?.thesis || '');
+    const [catalysts, setCatalysts] = useState<string[]>(editingPosition?.catalysts || []);
+    const [customCatalyst, setCustomCatalyst] = useState('');
+    const [riskNote, setRiskNote] = useState(editingPosition?.risk_note || '');
+    const [revisionNote, setRevisionNote] = useState('');
+
+    // Entry multiples (auto-filled on symbol selection, collapsible manual override)
+    const [fk, setFk] = useState(
+        editingPosition?.entry_multiples?.fk != null ? String(editingPosition.entry_multiples.fk) : '',
+    );
+    const [fdFavok, setFdFavok] = useState(
+        editingPosition?.entry_multiples?.fd_favok != null ? String(editingPosition.entry_multiples.fd_favok) : '',
+    );
+    const [pdDd, setPdDd] = useState(
+        editingPosition?.entry_multiples?.pd_dd != null ? String(editingPosition.entry_multiples.pd_dd) : '',
+    );
+    const [showMultiplesOverride, setShowMultiplesOverride] = useState(false);
+
+    const [prefillLoading, setPrefillLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [formError, setFormError] = useState<string | null>(null);
+    const [dropdownOpen, setDropdownOpen] = useState(false);
+    const prefillAbortRef = useRef<AbortController | null>(null);
+
+    const matchingUniverse = useMemo(() => {
+        const q = symbolQuery.trim().toUpperCase();
+        if (!q) return universeRows.slice(0, 10);
+        return universeRows
+            .filter(
+                (r) =>
+                    String(r.symbol || r.company).toUpperCase().includes(q)
+                    || String(r.name || '').toUpperCase().includes(q),
+            )
+            .slice(0, 10);
+    }, [symbolQuery, universeRows]);
+
+    const triggerPrefill = useCallback((targetSym: string, targetDate: string) => {
+        const cleanSym = targetSym.trim().toUpperCase();
+        if (!cleanSym) return;
+        prefillAbortRef.current?.abort();
+        const controller = new AbortController();
+        prefillAbortRef.current = controller;
+        setPrefillLoading(true);
+        apiClient
+            .modelPortfolioPrefill(cleanSym, targetDate, controller.signal)
+            .then((res) => {
+                setCompanyName(res.company_name || cleanSym);
+                if (res.entry_price != null) {
+                    setEntryPrice(String(res.entry_price));
+                    setTargetPrice((prev) => {
+                        if (prev && Number(prev) > 0) return prev;
+                        return String(Number((res.entry_price! * 1.35).toFixed(2)));
+                    });
+                }
+                if (res.entry_xu100 != null) setEntryXu100(String(res.entry_xu100));
+                if (res.entry_multiples) {
+                    setFk(res.entry_multiples.fk != null ? String(res.entry_multiples.fk) : '');
+                    setFdFavok(res.entry_multiples.fd_favok != null ? String(res.entry_multiples.fd_favok) : '');
+                    setPdDd(res.entry_multiples.pd_dd != null ? String(res.entry_multiples.pd_dd) : '');
+                }
+            })
+            .catch(() => {})
+            .finally(() => setPrefillLoading(false));
+    }, []);
+
+    const impliedUpsidePct = useMemo(() => {
+        const ep = Number(entryPrice);
+        const tp = Number(targetPrice);
+        if (!Number.isFinite(ep) || !Number.isFinite(tp) || ep <= 0 || tp <= 0) return null;
+        return Number((((tp - ep) / ep) * 100).toFixed(1));
+    }, [entryPrice, targetPrice]);
+
+    const applyTargetUpsidePreset = (pct: number) => {
+        const ep = Number(entryPrice);
+        if (!Number.isFinite(ep) || ep <= 0) return;
+        const computed = Number((ep * (1 + pct / 100)).toFixed(2));
+        setTargetPrice(String(computed));
+    };
+
+    const remainingCashAfterWeight = useMemo(() => {
+        const wp = Number(weightPct);
+        if (!Number.isFinite(wp)) return availableWeightPct;
+        return Math.max(0, Number((availableWeightPct - wp).toFixed(1)));
+    }, [availableWeightPct, weightPct]);
+
+    const toggleCatalyst = (label: string) => {
+        setCatalysts((prev) =>
+            prev.includes(label) ? prev.filter((c) => c !== label) : [...prev, label],
+        );
+    };
+
+    const addCustomCatalyst = () => {
+        const clean = customCatalyst.trim();
+        if (!clean) return;
+        if (!catalysts.includes(clean)) {
+            setCatalysts((prev) => [...prev, clean]);
+        }
+        setCustomCatalyst('');
+    };
+
+    const appendThesisTemplate = (snippet: string) => {
+        setThesis((prev) => {
+            const trimmed = prev.trim();
+            return trimmed ? `${trimmed}\n${snippet}` : snippet;
+        });
+    };
+
+    const handleSubmit = async (e: FormEvent) => {
+        e.preventDefault();
+        setFormError(null);
+        const ep = Number(entryPrice);
+        const tp = Number(targetPrice);
+        const wp = Number(weightPct);
+        if (!symbol.trim()) {
+            setFormError('Lütfen bir hisse kodu seçin.');
+            return;
+        }
+        if (!Number.isFinite(ep) || ep <= 0) {
+            setFormError('Geçerli bir giriş fiyatı girin.');
+            return;
+        }
+        if (!Number.isFinite(tp) || tp <= 0) {
+            setFormError('Geçerli bir hedef fiyat girin.');
+            return;
+        }
+        if (!Number.isFinite(wp) || wp <= 0 || wp > 100) {
+            setFormError('Ağırlık %0 ile %100 arasında olmalıdır.');
+            return;
+        }
+
+        const multiplesPayload = {
+            fk: fk.trim() ? Number(fk) : null,
+            fd_favok: fdFavok.trim() ? Number(fdFavok) : null,
+            pd_dd: pdDd.trim() ? Number(pdDd) : null,
+        };
+
+        setSaving(true);
+        try {
+            if (isEdit && editingPosition) {
+                const updated = await apiClient.modelPortfolioUpdatePosition(
+                    editingPosition.id,
+                    {
+                        entry_date: entryDate,
+                        entry_price: ep,
+                        entry_xu100: entryXu100.trim() ? Number(entryXu100) : null,
+                        weight_pct: wp,
+                        target_price: tp,
+                        sector: sector.trim() || null,
+                        horizon,
+                        rating,
+                        thesis,
+                        catalysts,
+                        risk_note: riskNote,
+                        revision_note: revisionNote.trim() || undefined,
+                        entry_multiples: multiplesPayload,
+                    },
+                    adminToken,
+                );
+                onSaved(updated);
+            } else {
+                const created = await apiClient.modelPortfolioCreatePosition(
+                    {
+                        symbol: symbol.trim().toUpperCase(),
+                        company_name: companyName.trim() || symbol.trim().toUpperCase(),
+                        sector: sector.trim() || null,
+                        entry_date: entryDate,
+                        entry_price: ep,
+                        entry_xu100: entryXu100.trim() ? Number(entryXu100) : null,
+                        weight_pct: wp,
+                        target_price: tp,
+                        horizon,
+                        rating,
+                        thesis,
+                        catalysts,
+                        risk_note: riskNote,
+                        entry_multiples: multiplesPayload,
+                    },
+                    adminToken,
+                );
+                onSaved(created);
+            }
+        } catch (err: unknown) {
+            setFormError(err instanceof Error ? err.message : 'Kayıt sırasında hata oluştu.');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="mp-modal-backdrop" onClick={onClose}>
+            <div className="mp-modal mp-modal-lg" onClick={(e) => e.stopPropagation()}>
+                {/* Sticky Header */}
+                <div className="mp-modal-header">
+                    <div className="mp-modal-title-row">
+                        <BriefcaseBusiness size={18} className="mp-accent-icon" />
+                        <div>
+                            <h3>
+                                {isEdit
+                                    ? `${editingPosition?.symbol} Pozisyonunu Düzenle / Revize Et`
+                                    : 'Model Portföye Yeni Hisse Ekle'}
+                            </h3>
+                            <span className="mp-modal-subtitle">
+                                Hisse ve tarih seçtiğinizde giriş fiyatı, BIST 100 seviyesi ve çarpanlar otomatik doldurulur.
+                            </span>
+                        </div>
+                    </div>
+                    <button type="button" className="mp-icon-btn" onClick={onClose}>
+                        <X size={17} />
+                    </button>
+                </div>
+
+                <form onSubmit={handleSubmit} className="mp-editor-shell">
+                    <div className="mp-modal-body mp-editor-form">
+                        {/* SECTION 1: Stock Selection, Date & Sector */}
+                        <div className="mp-editor-section-card">
+                            <div className="mp-editor-step-header">
+                                <span className="mp-step-pill">1</span>
+                                <div>
+                                    <h4>Hisse, Giriş Tarihi ve Sektör</h4>
+                                    <p>BIST hissesini aratıp seçin; veriler mevcut önbellekten anında çekilir.</p>
+                                </div>
+                            </div>
+
+                            <div className="mp-form-grid-3">
+                                <div className="mp-field mp-symbol-picker">
+                                    <span className="mp-field-label">Hisse Kodu *</span>
+                                    <div className="mp-search-input-wrap">
+                                        <Search size={14} className="mp-search-icon" />
+                                        <input
+                                            type="text"
+                                            value={symbolQuery}
+                                            disabled={isEdit}
+                                            onFocus={() => setDropdownOpen(true)}
+                                            onChange={(e) => {
+                                                const val = e.target.value.toUpperCase();
+                                                setSymbolQuery(val);
+                                                setSymbol(val);
+                                                setDropdownOpen(true);
+                                            }}
+                                            onBlur={() => {
+                                                window.setTimeout(() => setDropdownOpen(false), 180);
+                                                if (!isEdit && symbol.trim()) {
+                                                    triggerPrefill(symbol, entryDate);
+                                                }
+                                            }}
+                                            placeholder="THYAO, BIMAS, TUPRS..."
+                                        />
+                                    </div>
+                                    {!isEdit && dropdownOpen && matchingUniverse.length > 0 && (
+                                        <div className="mp-symbol-dropdown">
+                                            {matchingUniverse.map((row) => {
+                                                const sym = String(row.symbol || row.company).toUpperCase();
+                                                return (
+                                                    <button
+                                                        key={sym}
+                                                        type="button"
+                                                        className="mp-symbol-option"
+                                                        onMouseDown={(e) => {
+                                                            e.preventDefault();
+                                                            setSymbol(sym);
+                                                            setSymbolQuery(sym);
+                                                            setCompanyName(row.name || sym);
+                                                            setDropdownOpen(false);
+                                                            triggerPrefill(sym, entryDate);
+                                                        }}
+                                                    >
+                                                        <div className="mp-symbol-option-left">
+                                                            <SymbolLogo
+                                                                symbol={sym}
+                                                                name={row.name || sym}
+                                                                kind="stock"
+                                                                size="xs"
+                                                            />
+                                                            <strong>{sym}</strong>
+                                                        </div>
+                                                        <span>{row.name}</span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="mp-field">
+                                    <div className="mp-field-label-row">
+                                        <span className="mp-field-label">Portföye Giriş Tarihi *</span>
+                                        <div className="mp-mini-presets">
+                                            <button
+                                                type="button"
+                                                className="mp-mini-preset-btn"
+                                                onClick={() => {
+                                                    const d = todayIsoDate();
+                                                    setEntryDate(d);
+                                                    if (symbol.trim()) triggerPrefill(symbol, d);
+                                                }}
+                                            >
+                                                Bugün
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <input
+                                        type="date"
+                                        value={entryDate}
+                                        onChange={(e) => {
+                                            const nextDate = e.target.value;
+                                            setEntryDate(nextDate);
+                                            if (symbol.trim()) triggerPrefill(symbol, nextDate);
+                                        }}
+                                    />
+                                </div>
+
+                                <MpSectorDropdown value={sector} onChange={setSector} />
+                            </div>
+
+                            {/* Selected Stock & Auto-Prefilled Reference Strip */}
+                            {symbol.trim() && (
+                                <div className="mp-selected-stock-banner">
+                                    <div className="mp-selected-stock-left">
+                                        <SymbolLogo
+                                            symbol={symbol.trim().toUpperCase()}
+                                            name={companyName || symbol}
+                                            kind="stock"
+                                            size="sm"
+                                        />
+                                        <div>
+                                            <div className="mp-selected-stock-title">
+                                                <strong className="mp-mono">{symbol.trim().toUpperCase()}</strong>
+                                                <span>{companyName || 'Şirket seçildi'}</span>
+                                            </div>
+                                            <div className="mp-selected-stock-multiples mp-mono">
+                                                <span>
+                                                    XU100: <b>{entryXu100 ? Number(entryXu100).toLocaleString('tr-TR') : '—'}</b>
+                                                </span>
+                                                <span>
+                                                    F/K: <b>{fk ? `${Number(fk).toFixed(2)}x` : '—'}</b>
+                                                </span>
+                                                <span>
+                                                    FD/FAVÖK: <b>{fdFavok ? `${Number(fdFavok).toFixed(2)}x` : '—'}</b>
+                                                </span>
+                                                <span>
+                                                    PD/DD: <b>{pdDd ? `${Number(pdDd).toFixed(2)}x` : '—'}</b>
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        className="mp-btn mp-btn-subtle mp-btn-sm"
+                                        onClick={() => setShowMultiplesOverride((p) => !p)}
+                                    >
+                                        <SlidersHorizontal size={12} />
+                                        <span>{showMultiplesOverride ? 'Çarpanları Gizle' : 'Çarpanları Düzenle'}</span>
+                                    </button>
+                                </div>
+                            )}
+
+                            {showMultiplesOverride && (
+                                <div className="mp-form-grid-4 mp-override-grid">
+                                    <label className="mp-field">
+                                        <span className="mp-field-label">Giriş Günü XU100</span>
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            value={entryXu100}
+                                            onChange={(e) => setEntryXu100(e.target.value)}
+                                            placeholder="Otomatik"
+                                        />
+                                    </label>
+                                    <label className="mp-field">
+                                        <span className="mp-field-label">Giriş F/K</span>
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            value={fk}
+                                            onChange={(e) => setFk(e.target.value)}
+                                            placeholder="Otomatik"
+                                        />
+                                    </label>
+                                    <label className="mp-field">
+                                        <span className="mp-field-label">Giriş FD/FAVÖK</span>
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            value={fdFavok}
+                                            onChange={(e) => setFdFavok(e.target.value)}
+                                            placeholder="Otomatik"
+                                        />
+                                    </label>
+                                    <label className="mp-field">
+                                        <span className="mp-field-label">Giriş PD/DD</span>
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            value={pdDd}
+                                            onChange={(e) => setPdDd(e.target.value)}
+                                            placeholder="Otomatik"
+                                        />
+                                    </label>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* SECTION 2: Price, Target Price & Weight with Quick Presets */}
+                        <div className="mp-editor-section-card">
+                            <div className="mp-editor-step-header">
+                                <span className="mp-step-pill">2</span>
+                                <div>
+                                    <h4>Giriş Fiyatı, Hedef Fiyat & Portföy Ağırlığı</h4>
+                                    <p>Hızlı yüzde butonlarıyla hedef fiyatınızı ve portföy ağırlığını tek tıkla belirleyin.</p>
+                                </div>
+                            </div>
+
+                            <div className="mp-form-grid-3">
+                                <div className="mp-field">
+                                    <div className="mp-field-label-row">
+                                        <span className="mp-field-label">Giriş Fiyatı (₺) *</span>
+                                        {prefillLoading && <em className="mp-prefill-tag">Çekiliyor...</em>}
+                                    </div>
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        value={entryPrice}
+                                        onChange={(e) => setEntryPrice(e.target.value)}
+                                        placeholder="0.00"
+                                    />
+                                    <span className="mp-field-micro-hint">
+                                        Seçilen tarihteki kapanış/canlı fiyat otomatik gelir.
+                                    </span>
+                                </div>
+
+                                <div className="mp-field">
+                                    <div className="mp-field-label-row">
+                                        <span className="mp-field-label">Hedef Fiyat (₺) *</span>
+                                        {impliedUpsidePct != null && (
+                                            <span className={`mp-upside-live-pill ${toneClass(impliedUpsidePct)}`}>
+                                                Potansiyel: {formatPct(impliedUpsidePct)}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        value={targetPrice}
+                                        onChange={(e) => setTargetPrice(e.target.value)}
+                                        placeholder="0.00"
+                                    />
+                                    <div className="mp-quick-pills-row">
+                                        {[25, 35, 50, 75].map((pct) => (
+                                            <button
+                                                key={pct}
+                                                type="button"
+                                                className="mp-quick-pill"
+                                                disabled={!Number(entryPrice)}
+                                                onClick={() => applyTargetUpsidePreset(pct)}
+                                                title={`Giriş fiyatının %${pct} üzerini hesapla`}
+                                            >
+                                                +%{pct}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="mp-field">
+                                    <div className="mp-field-label-row">
+                                        <span className="mp-field-label">Portföy Ağırlığı (%) *</span>
+                                        <span className="mp-field-micro-hint mp-mono">
+                                            Kalan Nakit: %{remainingCashAfterWeight.toFixed(1)}
+                                        </span>
+                                    </div>
+                                    <input
+                                        type="number"
+                                        step="0.5"
+                                        min="0.5"
+                                        max="100"
+                                        value={weightPct}
+                                        onChange={(e) => setWeightPct(e.target.value)}
+                                    />
+                                    <div className="mp-quick-pills-row">
+                                        {[5, 10, 15, 20].map((w) => (
+                                            <button
+                                                key={w}
+                                                type="button"
+                                                className={`mp-quick-pill${Number(weightPct) === w ? ' active' : ''}`}
+                                                onClick={() => setWeightPct(String(Math.min(w, availableWeightPct)))}
+                                            >
+                                                %{w}
+                                            </button>
+                                        ))}
+                                        <button
+                                            type="button"
+                                            className="mp-quick-pill"
+                                            onClick={() => setWeightPct(String(availableWeightPct))}
+                                        >
+                                            Maks (%{availableWeightPct.toFixed(0)})
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* SECTION 3: Custom Explained Dropdowns for Rating & Horizon */}
+                        <div className="mp-editor-section-card">
+                            <div className="mp-editor-step-header">
+                                <span className="mp-step-pill">3</span>
+                                <div>
+                                    <h4>Tavsiye Derecesi ve Beklenen Vade Ufku</h4>
+                                    <p>Önerinizin stratejik sınıfını ve hedef fiyat vadesini açıklamalı menüden seçin.</p>
+                                </div>
+                            </div>
+
+                            <div className="mp-form-grid-2">
+                                <MpExplainedDropdown
+                                    label="Tavsiye Etiketi"
+                                    value={rating}
+                                    options={RATING_OPTIONS}
+                                    onChange={setRating}
+                                />
+                                <MpExplainedDropdown
+                                    label="Beklenen Vade Ufku"
+                                    value={horizon}
+                                    options={HORIZON_OPTIONS}
+                                    onChange={setHorizon}
+                                />
+                            </div>
+                        </div>
+
+                        {/* SECTION 4: Investment Thesis, Catalysts & Risk */}
+                        <div className="mp-editor-section-card">
+                            <div className="mp-editor-step-header">
+                                <span className="mp-step-pill">4</span>
+                                <div>
+                                    <h4>Katalizörler, Yatırım Tezi ve Risk Notu</h4>
+                                    <p>Bu hisseyi model portföye neden aldığınızı ve beklentilerinizi yatırımcılara açıklayın.</p>
+                                </div>
+                            </div>
+
+                            <div className="mp-field">
+                                <span className="mp-field-label">Beklentiler & Katalizör Etiketleri (Çoklu Seçim)</span>
+                                <div className="mp-catalyst-grid">
+                                    {CATALYST_OPTIONS.map((item) => {
+                                        const active = catalysts.includes(item.label);
+                                        return (
+                                            <button
+                                                key={item.label}
+                                                type="button"
+                                                className={`mp-catalyst-card${active ? ' active' : ''}`}
+                                                onClick={() => toggleCatalyst(item.label)}
+                                            >
+                                                <div className="mp-catalyst-card-top">
+                                                    <strong>{item.label}</strong>
+                                                    {active && <Check size={13} />}
+                                                </div>
+                                                <span>{item.hint}</span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                <div className="mp-custom-catalyst-row">
+                                    <input
+                                        type="text"
+                                        value={customCatalyst}
+                                        onChange={(e) => setCustomCatalyst(e.target.value)}
+                                        placeholder="Özel beklenti etiketi yazıp ekleyin (Örn: Bedelsiz Potansiyeli, Eurobond Geliri)..."
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                                e.preventDefault();
+                                                addCustomCatalyst();
+                                            }
+                                        }}
+                                    />
+                                    <button type="button" className="mp-btn mp-btn-subtle" onClick={addCustomCatalyst}>
+                                        + Etiket Ekle
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="mp-field">
+                                <div className="mp-field-label-row">
+                                    <span className="mp-field-label">
+                                        Neden Model Portföyde? (Yatırım Tezi & Beklentilerimiz)
+                                    </span>
+                                    <div className="mp-thesis-templates-bar">
+                                        {THESIS_TEMPLATES.map((tpl) => (
+                                            <button
+                                                key={tpl.label}
+                                                type="button"
+                                                className="mp-mini-preset-btn"
+                                                onClick={() => appendThesisTemplate(tpl.snippet)}
+                                                title="Hazır şablon maddesi ekle"
+                                            >
+                                                {tpl.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <textarea
+                                    rows={4}
+                                    value={thesis}
+                                    onChange={(e) => setThesis(e.target.value)}
+                                    placeholder="Bu hisseyi alırken ne düşündüğümüzü, temel analiz ve bilanço beklentilerimizi, hedef fiyat gerekçemizi buraya yazın..."
+                                />
+                            </div>
+
+                            <label className="mp-field">
+                                <span className="mp-field-label">Riskler & Takip Edilecek Metrikler (Opsiyonel)</span>
+                                <textarea
+                                    rows={2}
+                                    value={riskNote}
+                                    onChange={(e) => setRiskNote(e.target.value)}
+                                    placeholder="Örn: Marj daralması, enerji maliyetleri veya kur duyarlılığı..."
+                                />
+                            </label>
+
+                            {isEdit && (
+                                <label className="mp-field">
+                                    <span className="mp-field-label">Revizyon Notu (Değişiklik Günlüğünde Görünür)</span>
+                                    <input
+                                        type="text"
+                                        value={revisionNote}
+                                        onChange={(e) => setRevisionNote(e.target.value)}
+                                        placeholder="Örn: Güçlü 3Ç bilançosu sonrası hedef fiyat yukarı revize edildi."
+                                    />
+                                </label>
+                            )}
+                        </div>
+
+                        {formError && <div className="mp-form-error">{formError}</div>}
+                    </div>
+
+                    {/* Sticky Footer */}
+                    <div className="mp-modal-footer mp-modal-footer-sticky">
+                        <div className="mp-footer-summary">
+                            {symbol.trim() ? (
+                                <span>
+                                    <b>{symbol.trim().toUpperCase()}</b> · Ağırlık: <b>%{weightPct || 0}</b>
+                                    {impliedUpsidePct != null && (
+                                        <>
+                                            {' '}
+                                            · Hedef Potansiyel: <b>{formatPct(impliedUpsidePct)}</b>
+                                        </>
+                                    )}
+                                </span>
+                            ) : (
+                                <span>Başlamak için bir BIST hisse kodu seçin.</span>
+                            )}
+                        </div>
+                        <div className="mp-footer-btns">
+                            <button type="button" className="mp-btn mp-btn-ghost" onClick={onClose}>
+                                İptal
+                            </button>
+                            <button type="submit" className="mp-btn mp-btn-primary" disabled={saving}>
+                                {saving ? 'Kaydediliyor...' : isEdit ? 'Değişiklikleri Kaydet' : 'Model Portföye Ekle'}
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+}
+
+/* ==========================================================================
+   Subcomponent 5: Close Position Modal with Explained Reason Dropdown
+   ========================================================================== */
+
+function ModelPortfolioCloseModal({
+    adminToken,
+    position,
+    currentXu100,
+    onClose,
+    onClosed,
+}: {
+    adminToken: string;
+    position: ModelPortfolioPosition;
+    currentXu100: number | null;
+    onClose: () => void;
+    onClosed: (nextData: ModelPortfolioResponse) => void;
+}) {
+    const [exitPrice, setExitPrice] = useState(
+        String(position.current_price ?? position.entry_price),
+    );
+    const [closedDate, setClosedDate] = useState(todayIsoDate());
+    const [closeReason, setCloseReason] = useState(CLOSE_REASON_OPTIONS[0].value);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const previewReturnPct = useMemo(() => {
+        const ep = Number(exitPrice);
+        if (!Number.isFinite(ep) || ep <= 0 || position.entry_price <= 0) return null;
+        return Number((((ep - position.entry_price) / position.entry_price) * 100).toFixed(2));
+    }, [exitPrice, position.entry_price]);
+
+    const handleSubmit = async (e: FormEvent) => {
+        e.preventDefault();
+        const ep = Number(exitPrice);
+        if (!Number.isFinite(ep) || ep <= 0) {
+            setError('Geçerli bir çıkış fiyatı girin.');
+            return;
+        }
+        setSaving(true);
+        setError(null);
+        try {
+            const res = await apiClient.modelPortfolioClosePosition(
+                position.id,
+                {
+                    exit_price: ep,
+                    closed_date: closedDate,
+                    exit_xu100: currentXu100,
+                    close_reason: closeReason,
+                },
+                adminToken,
+            );
+            onClosed(res);
+        } catch (err: unknown) {
+            setError(err instanceof Error ? err.message : 'Pozisyon kapatılamadı.');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="mp-modal-backdrop" onClick={onClose}>
+            <div className="mp-modal mp-modal-md" onClick={(e) => e.stopPropagation()}>
+                <div className="mp-modal-header">
+                    <div className="mp-modal-title-row">
+                        <CheckCircle2 size={18} className="mp-accent-icon" />
+                        <div>
+                            <h3>{position.symbol} Pozisyonunu Kapat</h3>
+                            <span className="mp-modal-subtitle">
+                                Gerçekleşen getiri ve BIST 100 rölatif alfa karnesiyle geçmiş işlemlere arşivlenir.
+                            </span>
+                        </div>
+                    </div>
+                    <button type="button" className="mp-icon-btn" onClick={onClose}>
+                        <X size={16} />
+                    </button>
+                </div>
+                <form onSubmit={handleSubmit} className="mp-editor-shell">
+                    <div className="mp-modal-body">
+                        <div className="mp-form-grid-2">
+                            <label className="mp-field">
+                                <div className="mp-field-label-row">
+                                    <span className="mp-field-label">Çıkış Fiyatı (₺) *</span>
+                                    {previewReturnPct != null && (
+                                        <span className={`mp-upside-live-pill ${toneClass(previewReturnPct)}`}>
+                                            Net Getiri: {formatPct(previewReturnPct)}
+                                        </span>
+                                    )}
+                                </div>
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    value={exitPrice}
+                                    onChange={(e) => setExitPrice(e.target.value)}
+                                />
+                            </label>
+                            <label className="mp-field">
+                                <span className="mp-field-label">Kapanış Tarihi *</span>
+                                <input
+                                    type="date"
+                                    value={closedDate}
+                                    onChange={(e) => setClosedDate(e.target.value)}
+                                />
+                            </label>
+                        </div>
+
+                        <MpExplainedDropdown
+                            label="Kapanış Gerekçesi"
+                            value={closeReason}
+                            options={CLOSE_REASON_OPTIONS}
+                            onChange={setCloseReason}
+                        />
+
+                        {error && <div className="mp-form-error">{error}</div>}
+                    </div>
+                    <div className="mp-modal-footer mp-modal-footer-sticky">
+                        <div className="mp-footer-summary">
+                            <span>Giriş: <b>{formatPrice(position.entry_price)}</b></span>
+                        </div>
+                        <div className="mp-footer-btns">
+                            <button type="button" className="mp-btn mp-btn-ghost" onClick={onClose}>
+                                İptal
+                            </button>
+                            <button type="submit" className="mp-btn mp-btn-primary" disabled={saving}>
+                                {saving ? 'Kapatılıyor...' : 'Pozisyonu Kapat'}
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+}
+

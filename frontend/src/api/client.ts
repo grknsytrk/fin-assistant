@@ -10,6 +10,13 @@ import type {
     MarketIndexDetailResponse,
     MarketFlowResponse,
     MarketFlowHeadResponse,
+    ModelPortfolioPerformanceResponse,
+    ModelPortfolioPositionClosePayload,
+    ModelPortfolioPositionCreatePayload,
+    ModelPortfolioPositionUpdatePayload,
+    ModelPortfolioPrefillResponse,
+    ModelPortfolioResponse,
+    ModelPortfolioSymbolsResponse,
     MarketStockCardsResponse,
     MarketStockCardChartRange,
     MarketStockCardChartResponse,
@@ -57,6 +64,19 @@ const marketUniverseInFlight = new Map<string, Promise<MarketUniverseResponse>>(
 const MARKET_STOCKS_MEMORY_CACHE_TTL_MS = 3_000;
 const marketStocksMemoryCache = new Map<string, { payload: MarketStocksResponse; fetchedAt: number }>();
 const marketStocksInFlight = new Map<string, Promise<MarketStocksResponse>>();
+const marketStocksListeners = new Set<(index: MarketStockIndex, payload: MarketStocksResponse) => void>();
+let latestFundsCatalog: { payload: FundsResponse; fetchedAt: number } | null = null;
+let fundsCatalogInFlight: Promise<FundsResponse> | null = null;
+const fundsCatalogListeners = new Set<(payload: FundsResponse) => void>();
+
+const MODEL_PORTFOLIO_MEMORY_CACHE_TTL_MS = 15_000;
+let modelPortfolioMemoryCache: { payload: ModelPortfolioResponse; fetchedAt: number } | null = null;
+let modelPortfolioInFlight: Promise<ModelPortfolioResponse> | null = null;
+let modelPortfolioPerformanceMemoryCache: { version: number; payload: ModelPortfolioPerformanceResponse; fetchedAt: number } | null = null;
+let modelPortfolioPerformanceInFlight: Promise<ModelPortfolioPerformanceResponse> | null = null;
+let modelPortfolioSymbolsMemoryCache: { symbols: string[]; version: number; fetchedAt: number } | null = null;
+let modelPortfolioSymbolsInFlight: Promise<ModelPortfolioSymbolsResponse> | null = null;
+const modelPortfolioSymbolsListeners = new Set<(symbols: string[]) => void>();
 
 const kapSnapshotMemoryCache = new Map<string, { payload: KapSnapshotResponse; at: number }>();
 export function cachedKapSnapshot(company: string): KapSnapshotResponse | null {
@@ -113,7 +133,10 @@ async function fetchApi<T>(endpoint: string, options: FetchApiOptions = {}): Pro
     const { timeoutMs, debugLabel, exposeErrorDetail, ...requestOptions } = options;
     const effectiveTimeoutMs = timeoutMs ?? REQUEST_TIMEOUT_MS;
 
-    const deadline = Date.now() + (allowRetry ? Math.min(effectiveTimeoutMs, 20000) : effectiveTimeoutMs);
+    // Keep the timeout per attempt so a timed-out idempotent request still has
+    // enough time to use its retry instead of expiring at the overall deadline.
+    const retryWindowMs = effectiveTimeoutMs * maxAttempts + 1800;
+    const deadline = Date.now() + (allowRetry ? retryWindowMs : effectiveTimeoutMs);
     const waitForRetry = async (delay: number) => {
         if (Date.now() + delay >= deadline) throw new Error(TIMEOUT_MESSAGE);
         await new Promise<void>((resolve, reject) => {
@@ -293,6 +316,7 @@ export const apiClient = {
         marketUniverseInFlight.set(cacheKey, request);
         return request;
     },
+    getCachedMarketUniverse: (index: MarketStockIndex = 'XUTUM') => marketUniverseMemoryCache.get(index)?.payload || null,
     marketStocks: (options?: { index?: MarketStockIndex; refresh?: boolean }) => {
         const cacheKey = options?.index || 'XUTUM';
         const cached = marketStocksMemoryCache.get(cacheKey);
@@ -310,6 +334,7 @@ export const apiClient = {
         const request = fetchApi<MarketStocksResponse>(query ? `/market/stocks?${query}` : '/market/stocks')
             .then((payload) => {
                 marketStocksMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
+                for (const listener of marketStocksListeners) listener(cacheKey, payload);
                 return payload;
             })
             .finally(() => {
@@ -319,6 +344,13 @@ export const apiClient = {
         return request;
     },
     getCachedMarketStocks: (index: MarketStockIndex) => marketStocksMemoryCache.get(index)?.payload || null,
+    getCachedMarketStocksEntry: (index: MarketStockIndex) => marketStocksMemoryCache.get(index) || null,
+    subscribeMarketStocks: (listener: (index: MarketStockIndex, payload: MarketStocksResponse) => void) => {
+        marketStocksListeners.add(listener);
+        return () => {
+            marketStocksListeners.delete(listener);
+        };
+    },
     marketStockSearch: (options: {
         q: string;
         index?: MarketStockIndex;
@@ -457,8 +489,208 @@ export const apiClient = {
         if (options?.sort) params.append('sort', options.sort);
         if (options?.order) params.append('order', options.order);
         const query = params.toString();
-        return fetchFundResponse<FundsResponse>(query ? `/funds?${query}` : '/funds', { signal: options?.signal });
+        const isUnfilteredCatalog = !options?.q
+            && !options?.fundType
+            && !options?.founder
+            && !options?.manager
+            && !options?.risk
+            && !options?.sort
+            && !options?.order;
+        const canShareCatalogRequest = isUnfilteredCatalog && !options?.signal;
+        if (canShareCatalogRequest && fundsCatalogInFlight) return fundsCatalogInFlight;
+
+        const request = fetchFundResponse<FundsResponse>(query ? `/funds?${query}` : '/funds', { signal: options?.signal })
+            .then((payload) => {
+                if (isUnfilteredCatalog) {
+                    latestFundsCatalog = { payload, fetchedAt: Date.now() };
+                    for (const listener of fundsCatalogListeners) listener(payload);
+                }
+                return payload;
+            })
+            .finally(() => {
+                if (canShareCatalogRequest && fundsCatalogInFlight === request) fundsCatalogInFlight = null;
+            });
+        if (canShareCatalogRequest) fundsCatalogInFlight = request;
+        return request;
     },
+    getCachedFundsCatalog: () => latestFundsCatalog,
+    subscribeFundsCatalog: (listener: (payload: FundsResponse) => void) => {
+        fundsCatalogListeners.add(listener);
+        return () => {
+            fundsCatalogListeners.delete(listener);
+        };
+    },
+    modelPortfolio: (options?: { refresh?: boolean; signal?: AbortSignal }) => {
+        if (
+            !options?.refresh
+            && modelPortfolioMemoryCache
+            && Date.now() - modelPortfolioMemoryCache.fetchedAt < MODEL_PORTFOLIO_MEMORY_CACHE_TTL_MS
+        ) {
+            return Promise.resolve(modelPortfolioMemoryCache.payload);
+        }
+        if (!options?.refresh && modelPortfolioInFlight) {
+            return modelPortfolioInFlight;
+        }
+        const request = fetchApi<ModelPortfolioResponse>('/model-portfolio', { signal: options?.signal })
+            .then((payload) => {
+                modelPortfolioMemoryCache = { payload, fetchedAt: Date.now() };
+                const activeSyms = (payload.active_positions || []).map((p) => p.symbol);
+                modelPortfolioSymbolsMemoryCache = {
+                    symbols: activeSyms,
+                    version: payload.version,
+                    fetchedAt: Date.now(),
+                };
+                for (const listener of modelPortfolioSymbolsListeners) listener(activeSyms);
+                return payload;
+            })
+            .finally(() => {
+                if (modelPortfolioInFlight === request) modelPortfolioInFlight = null;
+            });
+        modelPortfolioInFlight = request;
+        return request;
+    },
+    getCachedModelPortfolio: () => modelPortfolioMemoryCache?.payload || null,
+    modelPortfolioPerformance: (options?: { version?: number; refresh?: boolean; signal?: AbortSignal }) => {
+        if (
+            !options?.refresh
+            && modelPortfolioPerformanceMemoryCache
+            && (options?.version == null || modelPortfolioPerformanceMemoryCache.version === options.version)
+            && Date.now() - modelPortfolioPerformanceMemoryCache.fetchedAt < 5 * 60_000
+        ) {
+            return Promise.resolve(modelPortfolioPerformanceMemoryCache.payload);
+        }
+        if (!options?.refresh && modelPortfolioPerformanceInFlight) {
+            return modelPortfolioPerformanceInFlight;
+        }
+        const request = fetchApi<ModelPortfolioPerformanceResponse>('/model-portfolio/performance', {
+            signal: options?.signal,
+            timeoutMs: 30000,
+        })
+            .then((payload) => {
+                modelPortfolioPerformanceMemoryCache = {
+                    version: payload.version,
+                    payload,
+                    fetchedAt: Date.now(),
+                };
+                return payload;
+            })
+            .finally(() => {
+                if (modelPortfolioPerformanceInFlight === request) modelPortfolioPerformanceInFlight = null;
+            });
+        modelPortfolioPerformanceInFlight = request;
+        return request;
+    },
+    modelPortfolioSymbols: (options?: { refresh?: boolean; signal?: AbortSignal }) => {
+        if (
+            !options?.refresh
+            && modelPortfolioSymbolsMemoryCache
+            && Date.now() - modelPortfolioSymbolsMemoryCache.fetchedAt < 60_000
+        ) {
+            return Promise.resolve({
+                symbols: modelPortfolioSymbolsMemoryCache.symbols,
+                count: modelPortfolioSymbolsMemoryCache.symbols.length,
+                version: modelPortfolioSymbolsMemoryCache.version,
+                updated_at: new Date(modelPortfolioSymbolsMemoryCache.fetchedAt).toISOString(),
+            });
+        }
+        if (!options?.refresh && modelPortfolioSymbolsInFlight) {
+            return modelPortfolioSymbolsInFlight;
+        }
+        const request = fetchApi<ModelPortfolioSymbolsResponse>('/model-portfolio/symbols', { signal: options?.signal })
+            .then((payload) => {
+                const normalized = Array.from(
+                    new Set((payload.symbols || []).map((s) => String(s || '').trim().toUpperCase()).filter(Boolean)),
+                );
+                modelPortfolioSymbolsMemoryCache = {
+                    symbols: normalized,
+                    version: payload.version,
+                    fetchedAt: Date.now(),
+                };
+                for (const listener of modelPortfolioSymbolsListeners) listener(normalized);
+                return { ...payload, symbols: normalized };
+            })
+            .finally(() => {
+                if (modelPortfolioSymbolsInFlight === request) modelPortfolioSymbolsInFlight = null;
+            });
+        modelPortfolioSymbolsInFlight = request;
+        return request;
+    },
+    getCachedModelPortfolioSymbols: () => modelPortfolioSymbolsMemoryCache?.symbols || null,
+    subscribeModelPortfolioSymbols: (listener: (symbols: string[]) => void) => {
+        modelPortfolioSymbolsListeners.add(listener);
+        return () => {
+            modelPortfolioSymbolsListeners.delete(listener);
+        };
+    },
+    modelPortfolioVerifyAdmin: (token: string) =>
+        fetchApi<{ ok: boolean }>('/model-portfolio/admin/verify', {
+            method: 'POST',
+            headers: { 'X-Admin-Token': encodeURIComponent(token.trim()) },
+            exposeErrorDetail: true,
+        }),
+    modelPortfolioPrefill: (symbol: string, entryDate?: string, signal?: AbortSignal) => {
+        const params = new URLSearchParams({ symbol: symbol.trim().toUpperCase() });
+        if (entryDate) params.append('entry_date', entryDate);
+        return fetchApi<ModelPortfolioPrefillResponse>(`/model-portfolio/prefill?${params.toString()}`, {
+            signal,
+            exposeErrorDetail: true,
+        });
+    },
+    modelPortfolioCreatePosition: (payload: ModelPortfolioPositionCreatePayload, token: string) =>
+        fetchApi<ModelPortfolioResponse>('/model-portfolio/positions', {
+            method: 'POST',
+            headers: { 'X-Admin-Token': encodeURIComponent(token.trim()) },
+            body: JSON.stringify(payload),
+            exposeErrorDetail: true,
+        }).then((res) => {
+            modelPortfolioMemoryCache = { payload: res, fetchedAt: Date.now() };
+            modelPortfolioPerformanceMemoryCache = null;
+            const syms = (res.active_positions || []).map((p) => p.symbol);
+            modelPortfolioSymbolsMemoryCache = { symbols: syms, version: res.version, fetchedAt: Date.now() };
+            for (const listener of modelPortfolioSymbolsListeners) listener(syms);
+            return res;
+        }),
+    modelPortfolioUpdatePosition: (positionId: string, payload: ModelPortfolioPositionUpdatePayload, token: string) =>
+        fetchApi<ModelPortfolioResponse>(`/model-portfolio/positions/${encodeURIComponent(positionId)}`, {
+            method: 'PUT',
+            headers: { 'X-Admin-Token': encodeURIComponent(token.trim()) },
+            body: JSON.stringify(payload),
+            exposeErrorDetail: true,
+        }).then((res) => {
+            modelPortfolioMemoryCache = { payload: res, fetchedAt: Date.now() };
+            modelPortfolioPerformanceMemoryCache = null;
+            const syms = (res.active_positions || []).map((p) => p.symbol);
+            modelPortfolioSymbolsMemoryCache = { symbols: syms, version: res.version, fetchedAt: Date.now() };
+            for (const listener of modelPortfolioSymbolsListeners) listener(syms);
+            return res;
+        }),
+    modelPortfolioClosePosition: (positionId: string, payload: ModelPortfolioPositionClosePayload, token: string) =>
+        fetchApi<ModelPortfolioResponse>(`/model-portfolio/positions/${encodeURIComponent(positionId)}/close`, {
+            method: 'POST',
+            headers: { 'X-Admin-Token': encodeURIComponent(token.trim()) },
+            body: JSON.stringify(payload),
+            exposeErrorDetail: true,
+        }).then((res) => {
+            modelPortfolioMemoryCache = { payload: res, fetchedAt: Date.now() };
+            modelPortfolioPerformanceMemoryCache = null;
+            const syms = (res.active_positions || []).map((p) => p.symbol);
+            modelPortfolioSymbolsMemoryCache = { symbols: syms, version: res.version, fetchedAt: Date.now() };
+            for (const listener of modelPortfolioSymbolsListeners) listener(syms);
+            return res;
+        }),
+    modelPortfolioDeletePosition: (positionId: string, token: string) =>
+        fetchApi<ModelPortfolioResponse>(`/model-portfolio/positions/${encodeURIComponent(positionId)}`, {
+            method: 'DELETE',
+            headers: { 'X-Admin-Token': encodeURIComponent(token.trim()) },
+            exposeErrorDetail: true,
+        }).then((res) => {
+            modelPortfolioMemoryCache = { payload: res, fetchedAt: Date.now() };
+            modelPortfolioPerformanceMemoryCache = null;
+            const syms = (res.active_positions || []).map((p) => p.symbol);
+            modelPortfolioSymbolsMemoryCache = { symbols: syms, version: res.version, fetchedAt: Date.now() };
+            for (const listener of modelPortfolioSymbolsListeners) listener(syms);
+            return res;
+        }),
     fundSearch: (q: string, limit = 50, options?: { signal?: AbortSignal }) => {
         const params = new URLSearchParams({ q, limit: String(limit) });
         return fetchApi<FundsResponse>(`/funds/search?${params.toString()}`, {
@@ -547,8 +779,13 @@ export const apiClient = {
         const payload = await fetchApi<KapSnapshotResponse>(`/kap/snapshot?${params.toString()}`, { signal });
         if (payload.ok && payload.quarters.length) {
             const key = company.trim().toUpperCase();
-            if (kapSnapshotMemoryCache.size >= 30) kapSnapshotMemoryCache.delete(kapSnapshotMemoryCache.keys().next().value!);
-            kapSnapshotMemoryCache.set(key, { payload, at: Date.now() });
+            const cached = kapSnapshotMemoryCache.get(key);
+            if (!cached || payload.quarters.length >= cached.payload.quarters.length) {
+                if (!cached && kapSnapshotMemoryCache.size >= 30) {
+                    kapSnapshotMemoryCache.delete(kapSnapshotMemoryCache.keys().next().value!);
+                }
+                kapSnapshotMemoryCache.set(key, { payload, at: Date.now() });
+            }
         }
         return payload;
     },
