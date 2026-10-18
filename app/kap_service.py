@@ -715,14 +715,18 @@ def _sanitize_comparative_against_filed(
     keys: Iterable[str],
     max_ratio: float = 8.0,
 ) -> Dict[str, Any]:
-    """Filter out comparative values whose magnitude diverges suspiciously from
-    the originally filed point-in-time metric. Bilanço (balance sheet) kalemleri
-    iki ardışık çeyrek arasında 8 katından fazla değişmez; öyle bir farkı
-    gördüğümüzde HTML parse hatası kabul edip override'ı düşürüyoruz. Diğer
-    anahtarlar olduğu gibi korunur."""
+    """Keep only comparable point-in-time fields with plausible magnitudes.
+
+    A KAP comparative column can also contain income-statement flows for the
+    previous quarter. Those must not overwrite the prior fiscal year's annual
+    flows when the comparison is used to restate balance-sheet fields.
+    """
 
     cleaned: Dict[str, Any] = {}
+    allowed_keys = set(keys)
     for key, value in comparative_metrics.items():
+        if key not in allowed_keys:
+            continue
         try:
             comparative_value = float(value) if value is not None else None
         except (TypeError, ValueError):

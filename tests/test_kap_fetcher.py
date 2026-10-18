@@ -11,6 +11,7 @@ from src.kap_fetcher import (
     KAP_BROWSER_USER_AGENT,
     KAP_CACHE_SCHEMA_VERSION,
     _extract_disclosure_metrics,
+    _extract_rows_from_disclosure_body,
     _http_get_json,
     _list_company_disclosures,
     _pick_metric_value,
@@ -1201,3 +1202,61 @@ def test_extract_disclosure_metrics_gates_insurance_rows_for_generic_issuers() -
 
     assert generic_metrics["teknik_karsiliklar"] is None
     assert insurance_metrics["teknik_karsiliklar"] == 2_600_783_003.0
+
+
+def test_extract_disclosure_metrics_reads_legacy_kap_taxonomy_tables() -> None:
+    unit_header = (
+        '<table class="financial-header-table"><tr>'
+        '<td class="financial-header-title">Sunum Para Birimi</td><td>1.000 TL</td>'
+        "</tr></table>"
+    )
+    equity_row = (
+        '<tr class="general_role_210000-row-1 data-input-row">'
+        '<td class="taxonomy-field-title"><div class="gwt-Label multi-language-content content-tr">'
+        "TOPLAM ÖZKAYNAKLAR</div></td>"
+        '<td class="taxonomy-context-value"><div><div title="500000">500</div></div></td>'
+        '<td class="taxonomy-context-value"><div><div title="420000">420</div></div></td>'
+        "</tr>"
+    )
+    income_row = (
+        '<tr class="general_role_310000-row-1 data-input-row">'
+        '<td class="taxonomy-field-title"><div class="gwt-Label multi-language-content content-tr">'
+        "DÖNEM KARI (ZARARI)</div></td>"
+        '<td class="taxonomy-context-value"><div><div title="100000">100</div></div></td>'
+        '<td class="taxonomy-context-value"><div><div title="80000">80</div></div></td>'
+        '<td class="taxonomy-context-value"><div><div title="30000">30</div></div></td>'
+        '<td class="taxonomy-context-value"><div><div title="20000">20</div></div></td>'
+        "</tr>"
+    )
+    detail = {
+        "disclosureBody": [
+            unit_header + '<table><tbody>' + equity_row + "</tbody></table>",
+            unit_header + '<table><tbody>' + income_row + "</tbody></table>",
+        ]
+    }
+
+    ytd, _ = _extract_disclosure_metrics(detail, period=3, prefer_income_statement_ytd=True)
+
+    assert ytd["net_kar"] == 100_000_000.0
+    assert ytd["ozkaynaklar"] == 500_000_000.0
+
+
+def test_extract_rows_from_legacy_kap_table_keeps_report_labels_and_columns() -> None:
+    body = (
+        '<tr class="general_role_310000-row-1 data-input-row">'
+        '<td class="taxonomy-field-title"><div class="gwt-Label multi-language-content content-tr">Hasılat</div></td>'
+        '<td class="taxonomy-context-value"><div><div title="120000">120</div></div></td>'
+        '<td class="taxonomy-context-value"><div><div title="100000">100</div></div></td>'
+        '<td class="taxonomy-context-value"><div><div title="40000">40</div></div></td>'
+        '<td class="taxonomy-context-value"><div><div title="35000">35</div></div></td>'
+        "</tr>"
+    )
+
+    rows = _extract_rows_from_disclosure_body(body, body_index=1, unit_multiplier=1_000.0)
+
+    assert [(row["label"], row["col_order"], row["value"]) for row in rows] == [
+        ("Hasılat", 4, 120_000_000.0),
+        ("Hasılat", 5, 100_000_000.0),
+        ("Hasılat", 6, 40_000_000.0),
+        ("Hasılat", 7, 35_000_000.0),
+    ]

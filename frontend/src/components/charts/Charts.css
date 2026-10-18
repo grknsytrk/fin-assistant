@@ -71,6 +71,27 @@
     stroke-width: 2;
 }
 
+.kap-average-line {
+    fill: none;
+    stroke: var(--warn-color, #f59e0b);
+    stroke-width: 2;
+    stroke-dasharray: 5 4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.95;
+}
+
+.kap-average-label {
+    fill: var(--warn-color, #f59e0b);
+    font-size: 10px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    paint-order: stroke;
+    stroke: var(--surface-color);
+    stroke-width: 3px;
+    stroke-linejoin: round;
+}
+
 .kap-bar-positive {
     fill: var(--success-color);
     transition: all 0.2s;
@@ -116,6 +137,48 @@
     stroke-width: 2;
     transition: all 0.2s;
     cursor: pointer;
+}
+
+.kap-chart-legend {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.75rem 1rem;
+    margin-top: 0.35rem;
+}
+
+.kap-chart-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+}
+
+.kap-chart-legend-swatch {
+    position: relative;
+    display: inline-block;
+    width: 1rem;
+    border-top: 2px solid var(--accent-color);
+}
+
+.kap-chart-legend-swatch::after {
+    position: absolute;
+    top: -3px;
+    left: calc(50% - 2px);
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--accent-color);
+    content: '';
+}
+
+.kap-chart-legend-swatch-average {
+    border-top-color: var(--warn-color, #f59e0b);
+}
+
+.kap-chart-legend-swatch-average::after {
+    background: var(--warn-color, #f59e0b);
 }
 
 .kap-point-highlighted {

@@ -9,6 +9,7 @@ import type { KapOverviewCommentaryResponse } from '../../../api/types';
 import { apiClient } from '../../../api/client';
 import { BarChartCard } from '../../../components/charts/BarChartCard';
 import { MultiplesRow } from '../../../components/stock/MultiplesRow';
+import HistoricalMultiplesChart from '../../../components/stock/HistoricalMultiplesChart';
 import {
     _resolveMetricValue, _resolveMetricDisplay, _resolveMetricYtdValue, _resolveMetricYtdDisplay,
     _calcPctChange, _pctClass, _pctText, intSafe, _periodLabel, _formatMetric,
@@ -780,6 +781,7 @@ export default function StockOverview({
     return (
         <div className="section-overview fade-in">
             <MultiplesRow snapshot={snapshot} quarters={quarters} marketCard={marketCard} />
+            <HistoricalMultiplesChart snapshot={snapshot} historyLoading={historyLoading} />
 
             {latestQuarter && (
                 <div className="kap-summary-panel panel">

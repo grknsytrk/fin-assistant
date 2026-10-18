@@ -1,6 +1,8 @@
 import type {
     KapCompaniesResponse,
     KapSnapshotResponse,
+    KapValuationHistoryRequest,
+    KapValuationHistoryResponse,
     MarketUniverseResponse,
     MarketStocksResponse,
     MarketStockSearchResponse,
@@ -789,6 +791,14 @@ export const apiClient = {
         }
         return payload;
     },
+
+    kapValuationHistory: (request: KapValuationHistoryRequest, signal?: AbortSignal) =>
+        fetchApi<KapValuationHistoryResponse>('/kap/valuation-history', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            signal,
+            timeoutMs: 30000,
+        }),
 
     kapOverviewCommentary: (request: KapOverviewCommentaryRequest, options?: { signal?: AbortSignal }) =>
         fetchApi<KapOverviewCommentaryResponse>('/kap/overview-commentary', {

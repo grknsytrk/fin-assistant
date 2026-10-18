@@ -163,6 +163,7 @@ export function BarChartCard({
                         </g>
                     );
                 })}
+
             </svg>
             {tooltip && (
                 <div className="kap-chart-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>
@@ -177,6 +178,8 @@ export function BarChartCard({
 export function LineChartCard({
     title,
     series,
+    averageSeries,
+    averageLabel,
     highlightedIndex,
     onHighlight,
     onOpen,
@@ -184,6 +187,8 @@ export function LineChartCard({
 }: {
     title: string;
     series: SeriesPoint[];
+    averageSeries?: SeriesPoint[];
+    averageLabel?: string;
     highlightedIndex?: number | null;
     onHighlight?: (idx: number | null) => void;
     onOpen?: () => void;
@@ -205,7 +210,8 @@ export function LineChartCard({
     const plotWidth = width - padLeft - padRight;
     const plotHeight = height - padTop - padBottom;
 
-    const values = series.map((s) => s.value);
+    const values = series.map((point) => point.value);
+    if (averageSeries?.length) values.push(...averageSeries.map((point) => point.value));
     const minRaw = Math.min(...values);
     const maxRaw = Math.max(...values);
     const span = Math.max(maxRaw - minRaw, Math.abs(maxRaw) * 0.1, 1);
@@ -220,8 +226,15 @@ export function LineChartCard({
         y: y(point.value),
         ...point,
     }));
-
+    const averagePoints = (averageSeries || []).map((point, idx) => ({
+        x: padLeft + idx * stepX,
+        y: y(point.value),
+        ...point,
+    }));
     const path = points
+        .map((point, idx) => `${idx === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+        .join(' ');
+    const averagePath = averagePoints
         .map((point, idx) => `${idx === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
         .join(' ');
 
@@ -291,6 +304,22 @@ export function LineChartCard({
 
                 <path d={path} className="kap-line-path" />
 
+                {averagePoints.length ? (
+                    <>
+                        <path d={averagePath} className="kap-average-line" />
+                        {averageLabel ? (
+                            <text
+                                x={averagePoints[averagePoints.length - 1].x}
+                                y={Math.max(padTop + 11, averagePoints[averagePoints.length - 1].y - 5)}
+                                textAnchor="end"
+                                className="kap-average-label"
+                            >
+                                {averageLabel}
+                            </text>
+                        ) : null}
+                    </>
+                ) : null}
+
                 {points.map((point, idx) => {
                     const isFocus = highlightedIndex === idx;
                     const isFaded = highlightedIndex !== null && highlightedIndex !== undefined && !isFocus;
@@ -313,6 +342,18 @@ export function LineChartCard({
                     );
                 })}
             </svg>
+            {averagePoints.length ? (
+                <div className="kap-chart-legend" aria-label="Grafik göstergesi">
+                    <span className="kap-chart-legend-item">
+                        <span className="kap-chart-legend-swatch" />
+                        Hisse çarpanı
+                    </span>
+                    <span className="kap-chart-legend-item">
+                        <span className="kap-chart-legend-swatch kap-chart-legend-swatch-average" />
+                        Döneme kadar ortalama
+                    </span>
+                </div>
+            ) : null}
             {tooltip && (
                 <div className="kap-chart-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>
                     <div className="kap-chart-tooltip-label">{tooltip.label}</div>

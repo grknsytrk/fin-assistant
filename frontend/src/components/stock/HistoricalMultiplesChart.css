@@ -1,0 +1,110 @@
+.historical-multiples-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    min-width: 0;
+}
+
+.historical-multiples-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.historical-multiples-head h3 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 1.05rem;
+    font-weight: 600;
+}
+
+.historical-multiples-head p {
+    max-width: 86ch;
+    margin: 0.35rem 0 0;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+
+.historical-multiples-ranges {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.historical-multiples-ranges button {
+    border: 1px solid var(--surface-border);
+    border-radius: 0.6rem;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.76rem;
+    font-weight: 650;
+    padding: 0.36rem 0.62rem;
+    transition: color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.historical-multiples-ranges button:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--accent-color) 50%, var(--surface-border));
+    color: var(--text-primary);
+}
+
+.historical-multiples-ranges button.is-active {
+    border-color: var(--accent-color);
+    background: var(--accent-color);
+    color: #fff;
+}
+
+.historical-multiples-ranges button:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+}
+
+.historical-multiples-status,
+.historical-multiples-footnote {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    line-height: 1.45;
+}
+
+.historical-multiples-grid {
+    margin-top: 0.15rem;
+}
+
+.historical-multiples-empty {
+    display: flex;
+    min-height: 10rem;
+    flex-direction: column;
+    justify-content: center;
+    padding: 1.25rem;
+    border: 1px dashed var(--surface-border);
+    border-radius: var(--border-radius);
+    background: color-mix(in srgb, var(--surface-color) 82%, transparent);
+}
+
+.historical-multiples-empty h4 {
+    margin: 0 0 0.4rem;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+}
+
+.historical-multiples-empty p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
+.historical-multiples-footnote {
+    font-size: 0.7rem;
+}
+
+@media (max-width: 900px) {
+    .historical-multiples-head {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}

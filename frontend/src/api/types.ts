@@ -922,6 +922,51 @@ export interface KapSnapshotResponse {
   insurance_premium_disclosures?: KapInsurancePremiumDisclosure[];
 }
 
+export interface KapHistoricalMultiplePoint {
+  quarter: string;
+  year: number;
+  period: number;
+  publish_date: string;
+  price_date: string | null;
+  price: number | null;
+  shares_outstanding: number | null;
+  share_source: string | null;
+  split_adjustment: number;
+  market_cap: number | null;
+  ttm_net_kar: number | null;
+  ttm_satis: number | null;
+  equity: number | null;
+  ttm_favok: number | null;
+  net_debt: number | null;
+  fk: number | null;
+  pd_satis: number | null;
+  pd_dd: number | null;
+  fd_favok: number | null;
+}
+
+export interface KapValuationHistoryRequest {
+  company: string;
+  company_kind?: 'generic' | 'bank' | 'insurance';
+  quarters: KapQuarter[];
+}
+
+export interface KapValuationHistoryResponse {
+  ok: boolean;
+  pending?: boolean;
+  refresh_pending?: boolean;
+  company: string;
+  available_quarters: number;
+  calculated_counts?: Record<'fk' | 'pd_satis' | 'pd_dd' | 'fd_favok', number>;
+  averages?: Record<'fk' | 'pd_satis' | 'pd_dd' | 'fd_favok', number | null>;
+  periods: KapHistoricalMultiplePoint[];
+  price_source?: string;
+  price_as_of?: string | null;
+  price_cache_status?: string;
+  price_cache_stale?: boolean;
+  method_note?: string;
+  error?: string;
+}
+
 export interface KapOverviewCommentaryRequest {
   company: string;
   company_title: string;

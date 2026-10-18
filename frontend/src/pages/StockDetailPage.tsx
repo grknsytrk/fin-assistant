@@ -52,7 +52,8 @@ const STOCK_DETAIL_TABS: Array<{ key: StockTab; label: string; icon: typeof Info
     { key: 'financials', label: 'Finansal Tablolar', icon: FileText },
     { key: 'kap', label: 'KAP Bildirimleri', icon: BookOpen },
 ];
-const FULL_KAP_QUARTER_COUNT = 20;
+const FIVE_YEAR_KAP_QUARTER_COUNT = 20;
+const FULL_KAP_QUARTER_COUNT = 44;
 
 function formatAsOf(value?: string | null): string {
     if (!value) return 'Veri güncelleniyor';
@@ -639,9 +640,10 @@ export default function StockDetailPage({
         setQuarters(cached ? prepareOrderedQuarters(cached) : []);
         setError(null);
         setLoading(!cached);
-        setHistoryLoading(false);
+        setHistoryLoading(Boolean(cached && cached.quarters.length < FULL_KAP_QUARTER_COUNT));
         const started = performance.now();
         let displayed = Boolean(cached);
+        let displayedQuarterCount = cached?.quarters.length || 0;
         let attempts = 0;
         const load = async (depth: number) => {
             if (controller.signal.aborted) return;
@@ -653,12 +655,17 @@ export default function StockDetailPage({
                 const data = await apiClient.kapSnapshot(ticker, false, depth, controller.signal);
                 if (controller.signal.aborted) return;
                 if (data.ok && data.quarters.length) {
-                    setSnapshot(data);
-                    setQuarters(prepareOrderedQuarters(data));
-                    setLoading(false);
-                    setError(null);
-                    if (!displayed) {
-                        performance.measure('stock-detail-first-data', { start: started, end: performance.now() });
+                    if (data.quarters.length >= displayedQuarterCount) {
+                        setSnapshot(data);
+                        setQuarters(prepareOrderedQuarters(data));
+                        displayedQuarterCount = data.quarters.length;
+                        setLoading(false);
+                        setError(null);
+                        if (!displayed) {
+                            performance.measure('stock-detail-first-data', { start: started, end: performance.now() });
+                            displayed = true;
+                        }
+                    } else if (!displayed) {
                         displayed = true;
                     }
                 }
@@ -666,12 +673,24 @@ export default function StockDetailPage({
                     setLoading(!displayed);
                     setError(null);
                 }
-                // Keep the summary visible while the deeper history is prepared.
-                if (depth < FULL_KAP_QUARTER_COUNT && displayed) {
+                const hasRequestedDepth = data.quarters.length >= depth;
+                const refreshPending = Boolean(data.pending || data.refresh_pending);
+                // Stage the request so the five-year chart appears before the
+                // oldest available KAP reports are fetched.
+                if (depth < FIVE_YEAR_KAP_QUARTER_COUNT && displayed) {
+                    attempts = 0;
+                    setHistoryLoading(true);
+                    timer = window.setTimeout(() => void load(FIVE_YEAR_KAP_QUARTER_COUNT), 300);
+                } else if (
+                    depth < FULL_KAP_QUARTER_COUNT &&
+                    displayed &&
+                    depth >= FIVE_YEAR_KAP_QUARTER_COUNT &&
+                    (hasRequestedDepth || !refreshPending)
+                ) {
                     attempts = 0;
                     setHistoryLoading(true);
                     timer = window.setTimeout(() => void load(FULL_KAP_QUARTER_COUNT), 300);
-                } else if (data.pending || data.refresh_pending) {
+                } else if (refreshPending || (depth >= FIVE_YEAR_KAP_QUARTER_COUNT && !hasRequestedDepth)) {
                     attempts += 1;
                     setHistoryLoading(displayed);
                     timer = window.setTimeout(() => void load(depth), Math.min(30000, 1000 + attempts * 1000));

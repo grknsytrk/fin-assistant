@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import concurrent.futures
 import html
 from html.parser import HTMLParser
@@ -1224,6 +1225,12 @@ class MarketComparisonHistoryRequest(BaseModel):
     assets: List[MarketComparisonHistoryAsset] = Field(..., min_length=1, max_length=8)
     start_date: date
     end_date: date
+
+
+class KapValuationHistoryRequest(BaseModel):
+    company: str = Field(..., min_length=1, max_length=16)
+    quarters: List[Dict[str, Any]] = Field(..., max_length=44)
+    company_kind: Optional[Literal["generic", "bank", "insurance"]] = None
 
 
 def _quarter_label_sort_key(label: str) -> tuple[int, int, str]:
@@ -5685,7 +5692,7 @@ def _cached_kap_snapshot_response(company: str) -> Optional[Dict[str, Any]]:
 def kap_snapshot(
     company: str = Query(..., min_length=1),
     refresh: bool = Query(False),
-    max_quarters: int = Query(10, ge=1, le=20),
+    max_quarters: int = Query(10, ge=1, le=44),
 ) -> Dict[str, Any]:
     if not getattr(CONFIG, "kap", None) or not getattr(CONFIG.kap, "enabled", False):
         raise HTTPException(status_code=503, detail="KAP modülü devre dışı.")
@@ -5728,6 +5735,29 @@ def kap_snapshot(
     response["response_cache_stale"] = stale
     response["refresh_pending"] = refresh_pending
     return response
+
+
+@app.post("/kap/valuation-history")
+def kap_valuation_history(request: KapValuationHistoryRequest) -> Dict[str, Any]:
+    from app.kap_service import normalize_kap_symbol
+
+    company = normalize_kap_symbol(request.company)
+    if not company or not request.quarters:
+        return {
+            "ok": False,
+            "pending": False,
+            "company": company or request.company,
+            "periods": [],
+            "error": "Çarpan geçmişi için finansal dönem bulunamadı.",
+        }
+    return _build_kap_historical_multiples(
+        snapshot={
+            "company": company,
+            "stock_code": company,
+            "company_kind": request.company_kind,
+            "quarters": request.quarters,
+        },
+    )
 
 
 def _quarter_sort_key(quarter: Dict[str, Any]) -> tuple[int, int]:
@@ -5780,6 +5810,62 @@ def _build_ttm_sum(quarters_asc: List[Dict[str, Any]], metric_key: str) -> Optio
     return float(sum(values))
 
 
+def _build_ttm_from_reports(quarters: List[Dict[str, Any]], metric_key: str) -> Optional[float]:
+    """Build TTM from KAP YTD values, keeping the reporting period's price basis.
+
+    KAP's Q4 income statement is annual YTD, not a standalone quarter. For Q1-Q3,
+    prior-year annual flow values must first be normalized to the latest report's
+    price basis; ``normalize_snapshot_for_frontend`` does that. The current and
+    comparative YTD values come from the latest report and share its basis.
+    """
+    ordered = sorted(
+        (quarter for quarter in quarters if isinstance(quarter, dict)),
+        key=_quarter_sort_key,
+    )
+    if not ordered:
+        return None
+
+    latest = ordered[-1]
+    try:
+        year = int(latest.get("year") or 0)
+        period = int(latest.get("period") or 0)
+    except (TypeError, ValueError):
+        return None
+    if year <= 0 or period not in (1, 2, 3, 4):
+        return None
+
+    if period == 4:
+        annual = _extract_quarter_metric(latest, metric_key, priority=["metrics_ytd", "metrics"])
+        return annual if annual is not None and math.isfinite(annual) else None
+
+    prior_year_end = next(
+        (
+            quarter
+            for quarter in reversed(ordered[:-1])
+            if int(quarter.get("year") or 0) == year - 1
+            and int(quarter.get("period") or 0) == 4
+        ),
+        None,
+    )
+    if prior_year_end is None:
+        return None
+
+    prior_fy = _extract_quarter_metric(
+        prior_year_end,
+        metric_key,
+        priority=["metrics_ytd", "metrics"],
+    )
+    current_ytd = _extract_quarter_metric(latest, metric_key, priority=["metrics_ytd"])
+    comparative_ytd = _extract_quarter_metric(
+        latest,
+        metric_key,
+        priority=["metrics_ytd_comparative"],
+    )
+    if any(value is None or not math.isfinite(value) for value in (prior_fy, current_ytd, comparative_ytd)):
+        return None
+    return float(prior_fy + current_ytd - comparative_ytd)
+
+
 def _build_kap_valuation_payload(
     *,
     snapshot: Dict[str, Any],
@@ -5792,8 +5878,8 @@ def _build_kap_valuation_payload(
     quarters_sorted = sorted(quarters, key=_quarter_sort_key)
     latest = quarters_sorted[-1] if quarters_sorted else None
 
-    ttm_net_kar = _build_ttm_sum(quarters_sorted, "net_kar")
-    ttm_favok = _build_ttm_sum(quarters_sorted, "favok")
+    ttm_net_kar = _build_ttm_from_reports(quarters_sorted, "net_kar")
+    ttm_favok = _build_ttm_from_reports(quarters_sorted, "favok")
 
     ozkaynaklar = (
         _extract_quarter_metric(latest, "ozkaynaklar", priority=["metrics", "metrics_ytd"])
@@ -5880,6 +5966,431 @@ def _build_kap_valuation_payload(
         "multiples_as_of": isyatirim_payload.get("fetched_at") if isyatirim_payload.get("ok") else None,
         "multiples_error": isyatirim_payload.get("error") if not isyatirim_payload.get("ok") else None,
         "assumptions": assumptions,
+    }
+
+
+_KAP_VALUATION_HISTORY_PRICE_CACHE: Dict[str, Any] = {}
+_KAP_VALUATION_HISTORY_PRICE_TTL = 24 * 60 * 60
+_KAP_VALUATION_HISTORY_PRICE_STALE_TTL = 7 * 24 * 60 * 60
+
+
+def _kap_quarter_end_date(quarter: Dict[str, Any]) -> Optional[date]:
+    try:
+        year = int(quarter.get("year") or 0)
+        period = int(quarter.get("period") or 0)
+    except (TypeError, ValueError):
+        return None
+    if year <= 0 or period not in (1, 2, 3, 4):
+        return None
+    return date(year, period * 3, (31, 30, 30, 31)[period - 1])
+
+
+def _kap_history_price_start_date(quarters: List[Dict[str, Any]]) -> Optional[date]:
+    dates = [
+        quarter_end
+        for quarter in quarters
+        if (quarter_end := _kap_quarter_end_date(quarter)) is not None
+    ]
+    return min(dates) if dates else None
+
+
+def _kap_history_trading_date(publish_date: Any) -> Optional[date]:
+    value = str(publish_date or "").strip()
+    if not value:
+        return None
+    parsed: Optional[datetime] = None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        for pattern in (
+            "%d.%m.%Y %H:%M:%S",
+            "%d.%m.%Y",
+            "%Y.%m.%d %H:%M:%S",
+            "%Y.%m.%d",
+            "%Y/%m/%d",
+        ):
+            try:
+                parsed = datetime.strptime(value, pattern)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_TURKEY_TIMEZONE)
+    else:
+        parsed = parsed.astimezone(_TURKEY_TIMEZONE)
+    trading_date = parsed.date()
+    if parsed.hour * 60 + parsed.minute > 18 * 60 + 10:
+        trading_date += timedelta(days=1)
+    return trading_date
+
+
+def _kap_history_price_date(value: Any) -> Optional[date]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(_TURKEY_TIMEZONE)
+    return parsed.date()
+
+
+def _build_kap_historical_ttm(
+    quarters: List[Dict[str, Any]],
+    index: int,
+    metric_key: str,
+) -> Optional[float]:
+    latest = quarters[index]
+    try:
+        year = int(latest.get("year") or 0)
+        period = int(latest.get("period") or 0)
+    except (TypeError, ValueError):
+        return None
+    if period == 4:
+        annual = _extract_quarter_metric(latest, metric_key, priority=["metrics_ytd", "metrics"])
+        return annual if annual is not None and math.isfinite(annual) else None
+    if period not in (1, 2, 3):
+        return None
+
+    def is_prior_year_end(quarter: Dict[str, Any]) -> bool:
+        try:
+            return int(quarter.get("year") or 0) == year - 1 and int(quarter.get("period") or 0) == 4
+        except (TypeError, ValueError):
+            return False
+
+    prior_year_end = next(
+        (
+            quarter
+            for quarter in reversed(quarters[:index])
+            if is_prior_year_end(quarter)
+        ),
+        None,
+    )
+    if prior_year_end is None:
+        return None
+
+    prior_fy = _extract_quarter_metric(
+        prior_year_end,
+        metric_key,
+        priority=["metrics_ytd", "metrics"],
+    )
+    current_ytd = _extract_quarter_metric(latest, metric_key, priority=["metrics_ytd"])
+    comparative_ytd = _extract_quarter_metric(
+        latest,
+        metric_key,
+        priority=["metrics_ytd_comparative"],
+    )
+    if any(
+        value is None or not math.isfinite(value)
+        for value in (prior_fy, current_ytd, comparative_ytd)
+    ):
+        return None
+
+    # KAP's prior-year annual flow and the current report's comparative YTD
+    # can be in different TMS 29 price bases. Rebase the annual figure to the
+    # current report period before replacing the comparable YTD amount.
+    current_factor = _as_finite_float(latest.get("analysis_multiplier")) or 1.0
+    prior_factor = _as_finite_float(prior_year_end.get("analysis_multiplier")) or 1.0
+    if current_factor <= 0 or prior_factor <= 0:
+        scale = 1.0
+    else:
+        scale = current_factor / prior_factor
+    return float(prior_fy * scale + current_ytd - comparative_ytd)
+
+
+def _fetch_kap_valuation_history_prices(
+    symbol: str,
+    *,
+    start_date: date,
+) -> tuple[Optional[Dict[str, Any]], str, bool, bool]:
+    normalized = str(symbol or "").strip().upper()
+    end_date = date.today() - timedelta(days=1)
+    if not normalized or start_date > end_date:
+        return None, "unavailable", False, False
+
+    # Key by calendar year so quarter-to-quarter requests for the same stock
+    # reuse the daily series. The latest complete trading day is included.
+    start_of_year = date(start_date.year, 1, 1)
+    cache_key = (
+        f"api:kap:valuation-history-prices:v1:{normalized}:"
+        f"from={start_of_year.isoformat()}:to={end_date.isoformat()}"
+    )
+    failure_cache_key = f"{cache_key}:failure"
+    local_key = f"{normalized}:{start_of_year.isoformat()}:{end_date.isoformat()}"
+
+    def build() -> Optional[Dict[str, Any]]:
+        chart = _fetch_yahoo_chart_period_raw(
+            f"{normalized}.IS",
+            interval="1d",
+            start_date=start_of_year,
+            end_date=end_date,
+        )
+        if not chart.get("ok"):
+            _shared_cache_set(
+                failure_cache_key,
+                {"error": "historical_price_unavailable"},
+                ttl_seconds=60,
+            )
+            return None
+        points = []
+        for point in chart.get("points") or []:
+            point_date = _kap_history_price_date(point.get("time"))
+            close = _as_finite_float(point.get("close"))
+            if point_date is None or close is None or close <= 0:
+                continue
+            points.append({"date": point_date.isoformat(), "close": close})
+        if not points:
+            _shared_cache_set(
+                failure_cache_key,
+                {"error": "historical_price_unavailable"},
+                ttl_seconds=60,
+            )
+            return None
+        try:
+            _get_cache().delete(failure_cache_key)
+        except Exception:
+            pass
+        splits = []
+        for event in chart.get("splits") or []:
+            event_date = _kap_history_price_date(event.get("date"))
+            ratio = _as_finite_float(event.get("ratio"))
+            if event_date is not None and ratio is not None and ratio > 0:
+                splits.append({"date": event_date.isoformat(), "ratio": ratio})
+        return {
+            "points": sorted(points, key=lambda point: point["date"]),
+            "splits": sorted(splits, key=lambda split: split["date"]),
+            "source": "yahoo_finance_chart",
+            "as_of": end_date.isoformat(),
+        }
+
+    local_entry = _KAP_VALUATION_HISTORY_PRICE_CACHE.get(local_key)
+    shared_entry = _shared_cache_get_dict(cache_key)
+    if _swr_entry_is_fresh(local_entry):
+        return _swr_entry_payload(local_entry), "local_hit", False, False
+    if _swr_entry_is_fresh(shared_entry):
+        _KAP_VALUATION_HISTORY_PRICE_CACHE[local_key] = shared_entry
+        return _swr_entry_payload(shared_entry), "shared_hit", False, False
+
+    stale_entry = shared_entry if _swr_entry_is_stale(shared_entry) else local_entry
+    if _swr_entry_is_stale(stale_entry):
+        _KAP_VALUATION_HISTORY_PRICE_CACHE[local_key] = stale_entry
+        pending = False
+        if not _shared_cache_get_dict(failure_cache_key):
+            pending = _schedule_swr_revalidation(
+                cache_key=cache_key,
+                factory=build,
+                fresh_ttl_seconds=_KAP_VALUATION_HISTORY_PRICE_TTL,
+                stale_ttl_seconds=_KAP_VALUATION_HISTORY_PRICE_STALE_TTL,
+            )
+        return _swr_entry_payload(stale_entry), "stale", True, pending
+
+    if _shared_cache_get_dict(failure_cache_key):
+        return None, "unavailable", False, False
+
+    _schedule_swr_revalidation(
+        cache_key=cache_key,
+        factory=build,
+        fresh_ttl_seconds=_KAP_VALUATION_HISTORY_PRICE_TTL,
+        stale_ttl_seconds=_KAP_VALUATION_HISTORY_PRICE_STALE_TTL,
+    )
+    return None, "pending", False, True
+
+
+def _build_kap_historical_multiples(*, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    company = str(snapshot.get("stock_code") or snapshot.get("company") or "").strip().upper()
+    quarters_raw = snapshot.get("quarters")
+    quarters = sorted(
+        [quarter for quarter in quarters_raw if isinstance(quarter, dict)]
+        if isinstance(quarters_raw, list)
+        else [],
+        key=_quarter_sort_key,
+    )
+    start_date = _kap_history_price_start_date(quarters)
+    if not company or not quarters or start_date is None:
+        return {
+            "ok": False,
+            "pending": False,
+            "company": company,
+            "periods": [],
+            "available_quarters": len(quarters),
+            "error": "Tarihsel çarpanlar için rapor dönemi bulunamadı.",
+        }
+
+    prices_payload, price_cache_status, price_cache_stale, price_refresh_pending = (
+        _fetch_kap_valuation_history_prices(company, start_date=start_date)
+    )
+    if not prices_payload:
+        return {
+            "ok": False,
+            "pending": price_refresh_pending or price_cache_status == "pending",
+            "refresh_pending": price_refresh_pending,
+            "company": company,
+            "periods": [],
+            "available_quarters": len(quarters),
+            "price_cache_status": price_cache_status,
+            "error": (
+                "Tarihsel fiyat verisi şu an alınamıyor."
+                if price_cache_status == "unavailable"
+                else "Tarihsel fiyat verisi hazırlanıyor."
+            ),
+        }
+
+    price_points = prices_payload.get("points") or []
+    split_events = prices_payload.get("splits") or []
+    price_dates = [str(point.get("date") or "") for point in price_points]
+    reporting_quarters = []
+    for quarter in quarters:
+        # The original KAP values keep each filing's own nominal basis. Using
+        # today's TMS 29 restatement with that period's price would distort
+        # historical multiples.
+        reporting_quarters.append({
+            **quarter,
+            "metrics": quarter.get("metrics_original") or quarter.get("metrics") or {},
+            "metrics_ytd": quarter.get("metrics_ytd_original") or quarter.get("metrics_ytd") or {},
+            "metrics_quarterly": quarter.get("metrics_quarterly_original")
+            or quarter.get("metrics_quarterly")
+            or {},
+            "metrics_comparative": quarter.get("metrics_comparative") or {},
+            "metrics_ytd_comparative": quarter.get("metrics_ytd_comparative") or {},
+        })
+
+    periods = []
+    for index, quarter in enumerate(reporting_quarters):
+        report_date = _kap_history_trading_date(quarter.get("publish_date"))
+        price_index = None
+        if report_date is not None:
+            target = report_date.isoformat()
+            candidate = bisect.bisect_left(price_dates, target)
+            if candidate < len(price_dates):
+                candidate_date = _kap_history_price_date(price_dates[candidate])
+                if candidate_date and (candidate_date - report_date).days <= 7:
+                    price_index = candidate
+
+        ttm_net_kar = _build_kap_historical_ttm(reporting_quarters, index, "net_kar")
+        ttm_satis = _build_kap_historical_ttm(reporting_quarters, index, "satis_gelirleri")
+        ttm_favok = _build_kap_historical_ttm(reporting_quarters, index, "favok")
+        equity = _extract_quarter_metric(quarter, "ozkaynaklar", priority=["metrics", "metrics_ytd"])
+        net_debt = _extract_quarter_metric(quarter, "net_borc", priority=["metrics", "metrics_ytd"])
+        shares = _extract_quarter_metric(
+            quarter,
+            "odenmis_sermaye",
+            priority=["metrics", "metrics_ytd"],
+        )
+        share_source = "odenmis_sermaye" if shares is not None else None
+        if shares is None:
+            shares = _extract_quarter_metric(
+                quarter,
+                "cikarilmis_sermaye",
+                priority=["metrics", "metrics_ytd"],
+            )
+            if shares is not None:
+                share_source = "cikarilmis_sermaye"
+        if shares is not None and shares <= 0:
+            shares = None
+
+        price_date = price_dates[price_index] if price_index is not None else None
+        price = (
+            _as_finite_float(price_points[price_index].get("close"))
+            if price_index is not None
+            else None
+        )
+        quarter_end = _kap_quarter_end_date(quarter)
+        split_factor = 1.0
+        if quarter_end is not None:
+            for event in split_events:
+                event_date = _kap_history_price_date(event.get("date"))
+                ratio = _as_finite_float(event.get("ratio"))
+                if event_date and event_date > quarter_end and ratio and ratio > 0:
+                    split_factor *= ratio
+        adjusted_shares = shares * split_factor if shares is not None else None
+        market_cap = (
+            price * adjusted_shares
+            if price is not None and adjusted_shares is not None
+            else None
+        )
+        financial_company = snapshot.get("company_kind") in {"bank", "insurance"}
+        enterprise_value = (
+            market_cap + net_debt
+            if market_cap is not None and net_debt is not None and not financial_company
+            else None
+        )
+        period_key = str(quarter.get("quarter") or "")
+        periods.append({
+            "quarter": period_key,
+            "year": int(quarter.get("year") or 0),
+            "period": int(quarter.get("period") or 0),
+            "publish_date": str(quarter.get("publish_date") or ""),
+            "price_date": price_date,
+            "price": round(price, 4) if price is not None else None,
+            "shares_outstanding": round(adjusted_shares, 4) if adjusted_shares is not None else None,
+            "share_source": share_source,
+            "split_adjustment": round(split_factor, 8),
+            "market_cap": round(market_cap, 2) if market_cap is not None else None,
+            "ttm_net_kar": round(ttm_net_kar, 2) if ttm_net_kar is not None else None,
+            "ttm_satis": round(ttm_satis, 2) if ttm_satis is not None else None,
+            "equity": round(equity, 2) if equity is not None else None,
+            "ttm_favok": round(ttm_favok, 2) if ttm_favok is not None else None,
+            "net_debt": round(net_debt, 2) if net_debt is not None else None,
+            "fk": _round_market_ratio(market_cap, ttm_net_kar)
+            if ttm_net_kar is not None and ttm_net_kar > 0
+            else None,
+            "pd_satis": _round_market_ratio(market_cap, ttm_satis)
+            if ttm_satis is not None and ttm_satis > 0
+            else None,
+            "pd_dd": _round_market_ratio(market_cap, equity)
+            if equity is not None and equity > 0
+            else None,
+            "fd_favok": _round_market_ratio(enterprise_value, ttm_favok)
+            if ttm_favok is not None and ttm_favok > 0
+            else None,
+        })
+
+    def average(metric: str) -> Optional[float]:
+        values = [
+            float(period[metric])
+            for period in periods
+            if isinstance(period.get(metric), (int, float))
+            and not isinstance(period.get(metric), bool)
+            and math.isfinite(float(period[metric]))
+            and float(period[metric]) > 0
+        ]
+        return round(sum(values) / len(values), 2) if values else None
+
+    return {
+        "ok": True,
+        "pending": False,
+        "refresh_pending": price_refresh_pending,
+        "company": company,
+        "available_quarters": len(quarters),
+        "calculated_counts": {
+            metric: sum(1 for period in periods if period.get(metric) is not None)
+            for metric in ("fk", "pd_satis", "pd_dd", "fd_favok")
+        },
+        "averages": {
+            "fk": average("fk"),
+            "pd_satis": average("pd_satis"),
+            "pd_dd": average("pd_dd"),
+            "fd_favok": average("fd_favok"),
+        },
+        "periods": periods,
+        "price_source": prices_payload.get("source") or "yahoo_finance_chart",
+        "price_as_of": prices_payload.get("as_of"),
+        "price_cache_status": price_cache_status,
+        "price_cache_stale": price_cache_stale,
+        "method_note": (
+            "Çarpanlar, KAP raporunun yayımlandığı tarihten sonraki ilk kapanış fiyatı ve "
+            "o raporda bildirilen finansallarla hesaplanır. TTM kâr/FAVÖK rapor döneminin "
+            "enflasyon bazına uyarlanır; "
+            "hisse bölünmeleri fiyat ve pay adedinde aynı temele getirilir. Ödenmiş sermaye "
+            "nominal pay değeri 1 TL kabul edilerek pay adedi hesabında kullanılır."
+        ),
     }
 
 
@@ -8375,11 +8886,28 @@ def _parse_yahoo_chart_payload(data: Dict[str, Any], yahoo_symbol: str) -> Dict[
             }
         )
 
+    splits: List[Dict[str, Any]] = []
+    raw_events = result.get("events")
+    raw_splits = (raw_events.get("splits") or {}) if isinstance(raw_events, dict) else {}
+    for event in raw_splits.values():
+        if not isinstance(event, dict):
+            continue
+        try:
+            event_date = datetime.fromtimestamp(float(event.get("date")), tz=timezone.utc).date()
+            numerator = float(event.get("numerator"))
+            denominator = float(event.get("denominator"))
+            ratio = numerator / denominator if denominator else None
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+            continue
+        if ratio is not None and math.isfinite(ratio) and ratio > 0:
+            splits.append({"date": event_date.isoformat(), "ratio": ratio})
+
     return {
         "ok": True,
         "yahoo_symbol": yahoo_symbol,
         "meta": meta,
         "points": points,
+        "splits": sorted(splits, key=lambda split: split["date"]),
     }
 
 
@@ -8416,7 +8944,7 @@ def _fetch_yahoo_chart_period_raw(
     period2 = int(datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp())
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
-        f"?interval={interval}&period1={period1}&period2={period2}"
+        f"?interval={interval}&period1={period1}&period2={period2}&events=splits"
     )
     return _fetch_yahoo_chart_url(url, yahoo_symbol)
 
@@ -9887,6 +10415,7 @@ def market_watch(refresh: bool = Query(False)) -> Dict[str, Any]:
 @app.get("/market/watch/global")
 def market_watch_global(refresh: bool = Query(False)) -> Dict[str, Any]:
     return _market_watch_global_payload(force_refresh=refresh)
+
 
 # ---------------------------------------------------------------------------
 # Model Portfolio Endpoints (Zero Duplicate Fetch — Shared Cache Reuse)
