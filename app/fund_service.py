@@ -623,7 +623,7 @@ def _init_fund_prices_schema(conn: Any) -> None:
             id, catalog_generation, price_generation, metadata_json, updated_at
         )
         SELECT 1, COALESCE(MAX(generation), 0), 0, '{}', CURRENT_TIMESTAMP
-        FROM fund_snapshots WHERE 1
+        FROM fund_snapshots
         ON CONFLICT (id) DO NOTHING
         """
     )
