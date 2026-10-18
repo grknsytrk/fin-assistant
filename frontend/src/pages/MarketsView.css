@@ -1757,6 +1757,93 @@
     border-color: var(--accent-color);
 }
 
+.stock-screener-filter-layout {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    align-items: start;
+    gap: 0.65rem;
+}
+
+.stock-screener-sector,
+.stock-screener-group {
+    min-width: 0;
+    padding: 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 70%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-color) 56%, transparent);
+}
+
+.stock-screener-sector {
+    display: flex;
+    flex-direction: column;
+    gap: 0.32rem;
+    color: var(--text-secondary);
+    font-size: 0.66rem;
+    font-weight: 700;
+}
+
+.stock-screener-sector select,
+.stock-screener-range input {
+    min-width: 0;
+    height: 34px;
+    padding: 0 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 84%, transparent);
+    border-radius: 7px;
+    outline: none;
+    background: var(--bg-color);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.stock-screener-sector select:focus,
+.stock-screener-range input:focus {
+    border-color: var(--accent-color);
+}
+
+.stock-screener-group > strong {
+    display: block;
+    margin-bottom: 0.55rem;
+    color: var(--text-primary);
+    font-size: 0.7rem;
+}
+
+.stock-screener-range-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+    gap: 0.5rem;
+}
+
+.stock-screener-range-grid-single {
+    grid-template-columns: minmax(165px, 1fr);
+}
+
+.stock-screener-range {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(54px, 0.7fr) minmax(54px, 0.7fr);
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.stock-screener-range > span {
+    grid-column: 1 / -1;
+    color: var(--text-secondary);
+    font-size: 0.63rem;
+    font-weight: 700;
+}
+
+.stock-screener-range input {
+    width: 100%;
+}
+
+.stock-screener-toggles {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+}
+
 .stock-screener-filters .stock-screener-check {
     min-height: 36px;
     flex-direction: row;
@@ -1884,6 +1971,10 @@
     border-collapse: separate;
     border-spacing: 0;
     font-family: var(--font-mono);
+}
+
+.stocks-fundamental-table {
+    min-width: 1900px;
 }
 
 .stocks-table th,
@@ -2718,7 +2809,11 @@
         flex: 0 0 auto;
     }
 
-    .stock-screener-filters {
+    .stock-screener-filter-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .stock-screener-range-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 

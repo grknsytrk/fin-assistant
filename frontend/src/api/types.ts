@@ -55,6 +55,10 @@ export interface MarketStockRow extends MarketUniverseRow {
   net_margin_pct?: number | null;
   free_float_pct?: number | null;
   ttm_net_kar?: number | null;
+  ttm_satis_gelirleri?: number | null;
+  ttm_favok?: number | null;
+  ttm_fcf?: number | null;
+  ozkaynaklar?: number | null;
   net_borc?: number | null;
 }
 

@@ -17,8 +17,6 @@ import type {
     MarketStockIndex,
     MarketStockRow,
     MarketStocksResponse,
-    MarketScreenerParams,
-    MarketScreenerResponse,
     MarketUniverseResponse,
     MarketUniverseRow,
     FundSummary,
@@ -64,7 +62,13 @@ type StockSortKey =
     | 'return_3m_pct'
     | 'return_6m_pct'
     | 'return_ytd_pct'
-    | 'return_1y_pct';
+    | 'return_1y_pct'
+    | 'ttm_net_kar'
+    | 'ttm_fcf'
+    | 'ttm_satis_gelirleri'
+    | 'ttm_favok'
+    | 'net_borc'
+    | 'ozkaynaklar';
 type IndexSortKey = keyof MarketIndexListRow;
 
 type StockReturnKey = Extract<
@@ -72,13 +76,7 @@ type StockReturnKey = Extract<
     'return_1w_pct' | 'return_1m_pct' | 'return_3m_pct' | 'return_6m_pct' | 'return_ytd_pct' | 'return_1y_pct'
 >;
 type StockTableMode = 'performance' | 'fundamentals';
-type StockScreenerPresetId = 'discount' | 'low_debt' | 'net_cash' | 'roe_value' | 'below_book';
-type StockScreenerNumericFilterKey =
-    | 'max_fk'
-    | 'max_pd_dd'
-    | 'max_fd_favok'
-    | 'max_net_borc_favok'
-    | 'min_roe_pct';
+type StockScreenerPresetId = 'discount' | 'low_debt' | 'net_cash' | 'roe_value' | 'below_book' | 'positive_cash_flow';
 type StockScreenerFilterState = {
     sector: string;
     min_fk: string;
@@ -87,9 +85,26 @@ type StockScreenerFilterState = {
     max_pd_dd: string;
     min_fd_favok: string;
     max_fd_favok: string;
+    min_fd_satis: string;
+    max_fd_satis: string;
+    min_net_borc_favok: string;
     max_net_borc_favok: string;
     min_roe_pct: string;
+    max_roe_pct: string;
+    min_ttm_net_kar: string;
+    max_ttm_net_kar: string;
+    min_ttm_fcf: string;
+    max_ttm_fcf: string;
+    min_ttm_satis: string;
+    max_ttm_satis: string;
+    min_ttm_favok: string;
+    max_ttm_favok: string;
+    min_net_borc: string;
+    max_net_borc: string;
+    min_ozkaynaklar: string;
+    max_ozkaynaklar: string;
     positive_net_profit: boolean;
+    positive_free_cash_flow: boolean;
     net_cash_only: boolean;
 };
 type StockTableColumn = { key: StockSortKey; label: string; sublabel?: string; align?: 'left' | 'right' };
@@ -102,9 +117,26 @@ const EMPTY_STOCK_SCREENER_FILTERS: StockScreenerFilterState = {
     max_pd_dd: '',
     min_fd_favok: '',
     max_fd_favok: '',
+    min_fd_satis: '',
+    max_fd_satis: '',
+    min_net_borc_favok: '',
     max_net_borc_favok: '',
     min_roe_pct: '',
+    max_roe_pct: '',
+    min_ttm_net_kar: '',
+    max_ttm_net_kar: '',
+    min_ttm_fcf: '',
+    max_ttm_fcf: '',
+    min_ttm_satis: '',
+    max_ttm_satis: '',
+    min_ttm_favok: '',
+    max_ttm_favok: '',
+    min_net_borc: '',
+    max_net_borc: '',
+    min_ozkaynaklar: '',
+    max_ozkaynaklar: '',
     positive_net_profit: false,
+    positive_free_cash_flow: false,
     net_cash_only: false,
 };
 
@@ -125,11 +157,19 @@ const STOCK_FUNDAMENTAL_COLUMNS: StockTableColumn[] = [
     { key: 'company', label: 'Hisse', align: 'left' },
     { key: 'sector', label: 'Sektör', align: 'left' },
     { key: 'fundamental_period', label: 'Dönem', align: 'left' },
+    { key: 'price', label: 'Fiyat', align: 'right' },
+    { key: 'market_cap', label: 'Piyasa Değeri', align: 'right' },
     { key: 'fk', label: 'F/K', align: 'right' },
     { key: 'pd_dd', label: 'PD/DD', align: 'right' },
     { key: 'fd_favok', label: 'FD/FAVÖK', align: 'right' },
     { key: 'fd_satis', label: 'FD/Satış', align: 'right' },
     { key: 'net_borc_favok', label: 'Net Borç/FAVÖK', align: 'right' },
+    { key: 'ttm_net_kar', label: 'TTM Net Kâr', align: 'right' },
+    { key: 'ttm_fcf', label: 'TTM Serbest Nakit Akışı', align: 'right' },
+    { key: 'ttm_satis_gelirleri', label: 'TTM Satışlar', align: 'right' },
+    { key: 'ttm_favok', label: 'TTM FAVÖK', align: 'right' },
+    { key: 'net_borc', label: 'Net Borç', align: 'right' },
+    { key: 'ozkaynaklar', label: 'Özkaynaklar', align: 'right' },
     { key: 'roe_pct', label: 'ROE %', align: 'right' },
     { key: 'free_float_pct', label: 'Halka Açıklık %', align: 'right' },
 ];
@@ -143,6 +183,7 @@ const STOCK_SCREENER_PRESETS: Array<{
     { id: 'net_cash', label: 'Net Nakit Şirketler', filters: { net_cash_only: true } },
     { id: 'roe_value', label: 'Yüksek ROE & Makul PD/DD', filters: { min_roe_pct: '25', min_pd_dd: '0.01', max_pd_dd: '4' } },
     { id: 'below_book', label: 'Defter Değerinin Altında', filters: { min_pd_dd: '0.01', max_pd_dd: '1' } },
+    { id: 'positive_cash_flow', label: 'Pozitif Serbest Nakit Akışı', filters: { positive_free_cash_flow: true } },
 ];
 const STOCK_INDEX_OPTIONS: MarketStockIndex[] = ['XUTUM', 'XU100', 'XU030'];
 const PRIMARY_MARKET_INDEX_RANK = new Map<string, number>(
@@ -2781,9 +2822,6 @@ export default function MarketsView({
     const [stockTableMode, setStockTableMode] = useState<StockTableMode>('performance');
     const [screenerFilters, setScreenerFilters] = useState<StockScreenerFilterState>({ ...EMPTY_STOCK_SCREENER_FILTERS });
     const [activeScreenerPreset, setActiveScreenerPreset] = useState<StockScreenerPresetId | null>(null);
-    const [screenerResults, setScreenerResults] = useState<MarketScreenerResponse | null>(null);
-    const [screenerLoading, setScreenerLoading] = useState(false);
-    const [screenerError, setScreenerError] = useState<string | null>(null);
     const [terminalNow, setTerminalNow] = useState(() => new Date());
     const [stockCardSymbols, setStockCardSymbols] = useState<string[]>(readStoredStockCards);
     const [stockCards, setStockCards] = useState<MarketStockCardsResponse | null>(() => {
@@ -3362,61 +3400,76 @@ export default function MarketsView({
         [market?.rows, normalizedStockCardSearch, stockCardSymbols],
     );
 
-    const screenerParams = useMemo<MarketScreenerParams>(() => ({
-        index: stockIndex,
-        sector: screenerFilters.sector || undefined,
-        min_fk: parseScreenerNumber(screenerFilters.min_fk),
-        max_fk: parseScreenerNumber(screenerFilters.max_fk),
-        min_pd_dd: parseScreenerNumber(screenerFilters.min_pd_dd),
-        max_pd_dd: parseScreenerNumber(screenerFilters.max_pd_dd),
-        min_fd_favok: parseScreenerNumber(screenerFilters.min_fd_favok),
-        max_fd_favok: parseScreenerNumber(screenerFilters.max_fd_favok),
-        max_net_borc_favok: parseScreenerNumber(screenerFilters.max_net_borc_favok),
-        min_roe_pct: parseScreenerNumber(screenerFilters.min_roe_pct),
-        positive_net_profit: screenerFilters.positive_net_profit || undefined,
-        net_cash_only: screenerFilters.net_cash_only || undefined,
-        sort_by: STOCK_FUNDAMENTAL_COLUMNS.some((column) => column.key === stockSort.key)
-            ? stockSort.key
-            : 'company',
-        sort_dir: stockSort.direction,
-    }), [stockIndex, screenerFilters, stockSort]);
-
-    useEffect(() => {
-        if (activeSection !== 'stocks' || stockTableMode !== 'fundamentals') return;
-        const controller = new AbortController();
-        const timer = window.setTimeout(() => {
-            setScreenerLoading(true);
-            setScreenerError(null);
-            apiClient.marketScreener(screenerParams, { signal: controller.signal })
-                .then((payload) => {
-                    if (!controller.signal.aborted) setScreenerResults(payload);
-                })
-                .catch((error: any) => {
-                    if (!controller.signal.aborted) {
-                        setScreenerError(error?.message || 'Temel analiz taraması yüklenemedi.');
-                    }
-                })
-                .finally(() => {
-                    if (!controller.signal.aborted) setScreenerLoading(false);
-                });
-        }, 250);
-        return () => {
-            window.clearTimeout(timer);
-            controller.abort();
+    const screenerData = useMemo(() => {
+        const allRows = stocks?.rows || [];
+        const sectors = [...new Set(allRows
+            .map((row) => String(row.sector || '').trim())
+            .filter(Boolean))].sort((a, b) => a.localeCompare(b, 'tr'));
+        const ranges: Array<{
+            field: 'fk' | 'pd_dd' | 'fd_favok' | 'fd_satis' | 'net_borc_favok' | 'roe_pct' | 'ttm_net_kar' | 'ttm_fcf' | 'ttm_satis_gelirleri' | 'ttm_favok' | 'net_borc' | 'ozkaynaklar';
+            min: string;
+            max: string;
+            scale?: number;
+        }> = [
+            { field: 'fk', min: screenerFilters.min_fk, max: screenerFilters.max_fk },
+            { field: 'pd_dd', min: screenerFilters.min_pd_dd, max: screenerFilters.max_pd_dd },
+            { field: 'fd_favok', min: screenerFilters.min_fd_favok, max: screenerFilters.max_fd_favok },
+            { field: 'fd_satis', min: screenerFilters.min_fd_satis, max: screenerFilters.max_fd_satis },
+            { field: 'net_borc_favok', min: screenerFilters.min_net_borc_favok, max: screenerFilters.max_net_borc_favok },
+            { field: 'roe_pct', min: screenerFilters.min_roe_pct, max: screenerFilters.max_roe_pct },
+            { field: 'ttm_net_kar', min: screenerFilters.min_ttm_net_kar, max: screenerFilters.max_ttm_net_kar, scale: 1_000_000 },
+            { field: 'ttm_fcf', min: screenerFilters.min_ttm_fcf, max: screenerFilters.max_ttm_fcf, scale: 1_000_000 },
+            { field: 'ttm_satis_gelirleri', min: screenerFilters.min_ttm_satis, max: screenerFilters.max_ttm_satis, scale: 1_000_000 },
+            { field: 'ttm_favok', min: screenerFilters.min_ttm_favok, max: screenerFilters.max_ttm_favok, scale: 1_000_000 },
+            { field: 'net_borc', min: screenerFilters.min_net_borc, max: screenerFilters.max_net_borc, scale: 1_000_000 },
+            { field: 'ozkaynaklar', min: screenerFilters.min_ozkaynaklar, max: screenerFilters.max_ozkaynaklar, scale: 1_000_000 },
+        ];
+        const sectorFilter = screenerFilters.sector.trim().toLocaleLowerCase('tr-TR');
+        const rows = allRows.filter((row) => {
+            if (sectorFilter && String(row.sector || '').trim().toLocaleLowerCase('tr-TR') !== sectorFilter) return false;
+            for (const range of ranges) {
+                const scale = range.scale || 1;
+                const minimumInput = parseScreenerNumber(range.min);
+                const maximumInput = parseScreenerNumber(range.max);
+                if (minimumInput === undefined && maximumInput === undefined) continue;
+                const value = row[range.field];
+                if (value == null || !Number.isFinite(value)) return false;
+                if (minimumInput !== undefined && value < minimumInput * scale) return false;
+                if (maximumInput !== undefined && value > maximumInput * scale) return false;
+            }
+            if (screenerFilters.positive_net_profit && !(row.ttm_net_kar != null && row.ttm_net_kar > 0)) return false;
+            if (screenerFilters.positive_free_cash_flow && !(row.ttm_fcf != null && row.ttm_fcf > 0)) return false;
+            if (screenerFilters.net_cash_only && !(row.net_borc != null && row.net_borc < 0)) return false;
+            return true;
+        });
+        const hasFinancialData = (row: MarketStockRow) => Boolean(
+            row.has_kap_cache
+            || row.fundamental_period
+            || row.fk != null
+            || row.pd_dd != null
+            || row.fd_favok != null
+            || row.fd_satis != null
+            || row.net_borc_favok != null
+            || row.roe_pct != null
+            || row.ttm_net_kar != null
+            || row.ttm_satis_gelirleri != null
+            || row.ttm_favok != null
+            || row.ttm_fcf != null
+            || row.net_borc != null
+            || row.ozkaynaklar != null,
+        );
+        return {
+            rows,
+            sectors,
+            totalCount: allRows.length,
+            financialCount: allRows.filter(hasFinancialData).length,
         };
-    // Re-run the lightweight filter against the latest quote snapshot while
-    // the fundamentals table is open so price-sensitive multiples stay live.
-    }, [activeSection, stockTableMode, screenerParams, stocks?.as_of]);
+    }, [stocks?.rows, screenerFilters]);
 
     const stockRowsForMode = useMemo(() => {
         if (stockTableMode === 'performance') return stocks?.rows || [];
-        if (!screenerResults || screenerResults.index !== stockIndex) return [];
-        const latestBySymbol = new Map((stocks?.rows || []).map((row) => [row.company, row]));
-        return screenerResults.rows.map((row) => ({
-            ...row,
-            ...(latestBySymbol.get(row.company) || {}),
-        }));
-    }, [stockTableMode, screenerResults, stockIndex, stocks?.rows]);
+        return screenerData.rows;
+    }, [stockTableMode, screenerData.rows, stocks?.rows]);
 
     const filteredStocks = useMemo(
         () =>
@@ -4111,7 +4164,7 @@ export default function MarketsView({
                                         '--active-index': stockTableMode === 'performance' ? 0 : 1,
                                     } as React.CSSProperties}
                                 >
-                                    {([['performance', 'Getiri %'], ['fundamentals', 'Temel Analiz']] as const).map(([mode, label]) => (
+                                    {([['performance', 'Getiri %'], ['fundamentals', 'Hisse Tarayıcı']] as const).map(([mode, label]) => (
                                         <button
                                             key={mode}
                                             type="button"
@@ -4161,8 +4214,8 @@ export default function MarketsView({
                             <section className="stock-screener" aria-label="Temel analiz tarayıcı filtreleri">
                                 <div className="stock-screener-topline">
                                     <div>
-                                        <strong>Temel Analiz Tarayıcısı</strong>
-                                        <span>Güncel piyasa fiyatı ve son açıklanan KAP finansallarıyla hesaplanır.</span>
+                                        <strong>Hisse Tarayıcısı</strong>
+                                        <span>Filtreler seçili hisse evreninde çalışır. Fiyatlar güncel, finansallar son açıklanan dönemdendir.</span>
                                     </div>
                                     <button type="button" className="stock-screener-clear" onClick={clearScreenerFilters}>
                                         Filtreleri temizle
@@ -4181,52 +4234,93 @@ export default function MarketsView({
                                         </button>
                                     ))}
                                 </div>
-                                <div className="stock-screener-filters">
-                                    <label>
+                                <div className="stock-screener-filter-layout">
+                                    <label className="stock-screener-sector">
                                         <span>Sektör</span>
                                         <select
                                             value={screenerFilters.sector}
                                             onChange={(event) => handleScreenerFilterChange('sector', event.currentTarget.value)}
                                         >
                                             <option value="">Tüm sektörler</option>
-                                            {(screenerResults?.sectors || []).map((sector) => (
+                                            {screenerData.sectors.map((sector) => (
                                                 <option key={sector} value={sector}>{sector}</option>
                                             ))}
                                         </select>
                                     </label>
-                                    {([
-                                        ['max_fk', 'Maks F/K'],
-                                        ['max_pd_dd', 'Maks PD/DD'],
-                                        ['max_fd_favok', 'Maks FD/FAVÖK'],
-                                        ['max_net_borc_favok', 'Maks Net Borç/FAVÖK'],
-                                        ['min_roe_pct', 'Min ROE %'],
-                                    ] as Array<[StockScreenerNumericFilterKey, string]>).map(([key, label]) => (
-                                        <label key={key}>
-                                            <span>{label}</span>
-                                            <input
-                                                type="number"
-                                                step="any"
-                                                inputMode="decimal"
-                                                value={screenerFilters[key] as string}
-                                                onChange={(event) => handleScreenerFilterChange(key, event.currentTarget.value)}
-                                            />
-                                        </label>
-                                    ))}
-                                    <label className="stock-screener-check">
-                                        <input
-                                            type="checkbox"
-                                            checked={screenerFilters.positive_net_profit}
-                                            onChange={(event) => handleScreenerFilterChange('positive_net_profit', event.currentTarget.checked)}
-                                        />
-                                        <span>Pozitif net kâr</span>
-                                    </label>
+                                    <div className="stock-screener-group">
+                                        <strong>Değerleme çarpanları</strong>
+                                        <div className="stock-screener-range-grid">
+                                            {([
+                                                { min: 'min_fk', max: 'max_fk', label: 'F/K' },
+                                                { min: 'min_pd_dd', max: 'max_pd_dd', label: 'PD/DD' },
+                                                { min: 'min_fd_favok', max: 'max_fd_favok', label: 'FD/FAVÖK' },
+                                                { min: 'min_fd_satis', max: 'max_fd_satis', label: 'FD/Satış' },
+                                            ] as const).map(({ min, max, label }) => (
+                                                <div className="stock-screener-range" key={min}>
+                                                    <span>{label}</span>
+                                                    <input aria-label={`${label} minimum`} type="number" step="any" inputMode="decimal" placeholder="Min" value={screenerFilters[min]} onChange={(event) => handleScreenerFilterChange(min, event.currentTarget.value)} />
+                                                    <input aria-label={`${label} maksimum`} type="number" step="any" inputMode="decimal" placeholder="Maks" value={screenerFilters[max]} onChange={(event) => handleScreenerFilterChange(max, event.currentTarget.value)} />
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className="stock-screener-group">
+                                        <strong>Kârlılık ve nakit akışı</strong>
+                                        <div className="stock-screener-range-grid">
+                                            {([
+                                                { min: 'min_ttm_net_kar', max: 'max_ttm_net_kar', label: 'TTM net kâr (mn TL)' },
+                                                { min: 'min_ttm_fcf', max: 'max_ttm_fcf', label: 'TTM serbest nakit akışı (mn TL)' },
+                                                { min: 'min_ttm_satis', max: 'max_ttm_satis', label: 'TTM satışlar (mn TL)' },
+                                                { min: 'min_ttm_favok', max: 'max_ttm_favok', label: 'TTM FAVÖK (mn TL)' },
+                                                { min: 'min_roe_pct', max: 'max_roe_pct', label: 'ROE %' },
+                                            ] as const).map(({ min, max, label }) => (
+                                                <div className="stock-screener-range" key={min}>
+                                                    <span>{label}</span>
+                                                    <input aria-label={`${label} minimum`} type="number" step="any" inputMode="decimal" placeholder="Min" value={screenerFilters[min]} onChange={(event) => handleScreenerFilterChange(min, event.currentTarget.value)} />
+                                                    <input aria-label={`${label} maksimum`} type="number" step="any" inputMode="decimal" placeholder="Maks" value={screenerFilters[max]} onChange={(event) => handleScreenerFilterChange(max, event.currentTarget.value)} />
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className="stock-screener-group">
+                                        <strong>Bilanço</strong>
+                                        <div className="stock-screener-range-grid">
+                                            {([
+                                                { min: 'min_net_borc_favok', max: 'max_net_borc_favok', label: 'Net Borç/FAVÖK' },
+                                                { min: 'min_net_borc', max: 'max_net_borc', label: 'Net borç (mn TL)' },
+                                                { min: 'min_ozkaynaklar', max: 'max_ozkaynaklar', label: 'Özkaynaklar (mn TL)' },
+                                            ] as const).map(({ min, max, label }) => (
+                                                <div className="stock-screener-range" key={min}>
+                                                    <span>{label}</span>
+                                                    <input aria-label={`${label} minimum`} type="number" step="any" inputMode="decimal" placeholder="Min" value={screenerFilters[min]} onChange={(event) => handleScreenerFilterChange(min, event.currentTarget.value)} />
+                                                    <input aria-label={`${label} maksimum`} type="number" step="any" inputMode="decimal" placeholder="Maks" value={screenerFilters[max]} onChange={(event) => handleScreenerFilterChange(max, event.currentTarget.value)} />
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className="stock-screener-toggles">
+                                        {([
+                                            ['positive_net_profit', 'Pozitif net kâr'],
+                                            ['positive_free_cash_flow', 'Pozitif serbest nakit akışı'],
+                                            ['net_cash_only', 'Net nakit şirketler'],
+                                        ] as const).map(([key, label]) => (
+                                            <label className="stock-screener-check" key={key}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={screenerFilters[key]}
+                                                    onChange={(event) => handleScreenerFilterChange(key, event.currentTarget.checked)}
+                                                />
+                                                <span>{label}</span>
+                                            </label>
+                                        ))}
+                                    </div>
                                 </div>
                                 <div className="stock-screener-status" aria-live="polite">
-                                    {screenerLoading && <span>Tarama güncelleniyor…</span>}
-                                    {screenerError && <span className="is-error">{screenerError}</span>}
-                                    {!screenerLoading && !screenerError && screenerResults && (
-                                        <span>{screenerResults.count} hisse bulundu · {screenerResults.sectors.length} sektör</span>
-                                    )}
+                                    <span>
+                                        {screenerData.rows.length} sonuç · {screenerData.totalCount} hisselik evren · {screenerData.financialCount} hissede finansal veri mevcut
+                                        {screenerData.financialCount < screenerData.totalCount && ` · ${screenerData.totalCount - screenerData.financialCount} hissede finansal veri eksik`}
+                                        {' · Filtreler cihazınızda uygulanıyor'}
+                                    </span>
                                 </div>
                             </section>
                         )}
@@ -4272,16 +4366,11 @@ export default function MarketsView({
                                     )}
                                 </div>
 
-                                {stockTableMode === 'fundamentals'
-                                    && (screenerLoading && (!screenerResults || screenerResults.index !== stockIndex)) ? (
-                                    <div className="loading-state"><div className="spinner" /> Temel analiz verileri yükleniyor...</div>
-                                ) : screenerError && !screenerResults ? (
-                                    <div className="error-message">{screenerError}</div>
-                                ) : sortedStocks.length === 0 ? (
+                                {sortedStocks.length === 0 ? (
                                     <div className="no-results">Aranan kritere uyan hisse bulunamadı.</div>
                                 ) : (
                                     <div className="stocks-table-wrap">
-                                        <table className="stocks-table">
+                                        <table className={`stocks-table${stockTableMode === 'fundamentals' ? ' stocks-fundamental-table' : ''}`}>
                                             <thead>
                                                 <tr>
                                                     <th className="stocks-rank">#</th>
@@ -4350,11 +4439,19 @@ export default function MarketsView({
                                                             <>
                                                                 <td>{row.sector || '—'}</td>
                                                                 <td>{row.fundamental_period || row.latest_quarter || '—'}</td>
+                                                                <td className="stocks-cell-right stocks-price-cell">{formatStockPrice(row)}</td>
+                                                                <td className="stocks-cell-right">{formatMarketCap(row.market_cap)}</td>
                                                                 <td className="stocks-cell-right">{formatFundamentalRatio(row.fk)}</td>
                                                                 <td className="stocks-cell-right">{formatFundamentalRatio(row.pd_dd)}</td>
                                                                 <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_favok)}</td>
                                                                 <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_satis)}</td>
                                                                 <td className="stocks-cell-right">{formatFundamentalRatio(row.net_borc_favok)}</td>
+                                                                <td className="stocks-cell-right">{formatMarketCap(row.ttm_net_kar ?? null)}</td>
+                                                                <td className="stocks-cell-right">{formatMarketCap(row.ttm_fcf ?? null)}</td>
+                                                                <td className="stocks-cell-right">{formatMarketCap(row.ttm_satis_gelirleri ?? null)}</td>
+                                                                <td className="stocks-cell-right">{formatMarketCap(row.ttm_favok ?? null)}</td>
+                                                                <td className="stocks-cell-right">{formatMarketCap(row.net_borc ?? null)}</td>
+                                                                <td className="stocks-cell-right">{formatMarketCap(row.ozkaynaklar ?? null)}</td>
                                                                 <td className="stocks-cell-right">{formatFundamentalPercent(row.roe_pct)}</td>
                                                                 <td className="stocks-cell-right">{formatFundamentalPercent(row.free_float_pct)}</td>
                                                             </>

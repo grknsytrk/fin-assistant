@@ -31,11 +31,14 @@ def _model_portfolio_cached_quote_map(symbols: List[str]) -> Dict[str, Dict[str,
         local_entry = _STOCKS_CACHE.get(f"payload:{idx_name}", {}).get("entry")
         payload = _market_quote_entry_payload(local_entry)
         if payload is None:
+            shared_entry = _shared_cache_get_dict(f"api:market:stocks:{idx_name}:v4")
+            payload = _market_quote_entry_payload(shared_entry)
+        if payload is None:
+            # Keep a prior cache generation useful during rolling deploys;
+            # it still contains current quotes while the v4 snapshot warms.
             shared_entry = _shared_cache_get_dict(f"api:market:stocks:{idx_name}:v3")
             payload = _market_quote_entry_payload(shared_entry)
         if payload is None:
-            # Keep old cached quotes useful during rolling deploys; they do
-            # not contain fundamentals but still have live market fields.
             shared_entry = _shared_cache_get_dict(f"api:market:stocks:{idx_name}:v2")
             payload = _market_quote_entry_payload(shared_entry)
         rows = payload.get("rows") if isinstance(payload, dict) and isinstance(payload.get("rows"), list) else []

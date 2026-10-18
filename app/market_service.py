@@ -1178,6 +1178,10 @@ def _market_stock_row(
         "net_margin_pct": _as_finite_float(cached_meta.get("net_margin_pct")),
         "free_float_pct": free_float_pct,
         "ttm_net_kar": _as_finite_float(cached_meta.get("ttm_net_kar")),
+        "ttm_satis_gelirleri": _as_finite_float(cached_meta.get("ttm_satis_gelirleri")),
+        "ttm_favok": ttm_favok,
+        "ttm_fcf": _as_finite_float(cached_meta.get("serbest_nakit_akisi")),
+        "ozkaynaklar": _as_finite_float(cached_meta.get("ozkaynaklar")),
         "net_borc": _as_finite_float(cached_meta.get("net_borc")),
         **_empty_logo_payload(),
         **_returns_from_bases(current_for_returns, return_bases),
@@ -1308,7 +1312,13 @@ _MARKET_QUOTES_OFFHOURS_FRESH_TTL = int(
     os.getenv("RAGFIN_MARKET_QUOTES_OFFHOURS_FRESH_TTL_SECONDS", "300")
 )
 
-_MARKET_STOCK_DELTA_TRACKED_KEYS = ("price", "change", "change_pct", "volume", "market_cap")
+_MARKET_STOCK_DELTA_TRACKED_KEYS = (
+    "price", "change", "change_pct", "volume", "market_cap",
+    "latest_quarter", "fundamental_period", "sector", "has_kap_cache",
+    "fk", "pd_dd", "fd_favok", "fd_satis", "net_borc_favok", "roe_pct",
+    "favok_margin_pct", "net_margin_pct", "free_float_pct", "ttm_net_kar",
+    "ttm_satis_gelirleri", "ttm_favok", "ttm_fcf", "ozkaynaklar", "net_borc",
+)
 
 _MARKET_STOCK_DELTA_PAYLOAD_KEYS = (
     "company",
@@ -1328,6 +1338,7 @@ _MARKET_STOCK_DELTA_PAYLOAD_KEYS = (
     "return_1y_pct",
     "latest_quarter",
     "fundamental_period",
+    "has_kap_cache",
     "sector",
     "fk",
     "pd_dd",
@@ -1339,6 +1350,10 @@ _MARKET_STOCK_DELTA_PAYLOAD_KEYS = (
     "net_margin_pct",
     "free_float_pct",
     "ttm_net_kar",
+    "ttm_satis_gelirleri",
+    "ttm_favok",
+    "ttm_fcf",
+    "ozkaynaklar",
     "net_borc",
 )
 
@@ -1360,7 +1375,7 @@ def _compute_market_stocks_delta(
     prev_snapshot: Dict[str, tuple[Any, ...]],
     rows: List[Dict[str, Any]],
 ) -> tuple[List[Dict[str, Any]], Dict[str, tuple[Any, ...]]]:
-    """Return only stock rows whose live quote fields changed since prev_snapshot."""
+    """Return stock rows whose quote or screener fundamentals changed."""
     changed: List[Dict[str, Any]] = []
     next_snapshot: Dict[str, tuple[Any, ...]] = {}
     for row in rows:
@@ -1376,9 +1391,10 @@ def _compute_market_stocks_delta(
         delta_item: Dict[str, Any] = {"company": symbol}
         for key in _MARKET_STOCK_DELTA_PAYLOAD_KEYS:
             fundamental_key = key in {
-                "latest_quarter", "fundamental_period", "sector", "fk", "pd_dd", "fd_favok",
+                "latest_quarter", "fundamental_period", "has_kap_cache", "sector", "fk", "pd_dd", "fd_favok",
                 "fd_satis", "net_borc_favok", "roe_pct", "favok_margin_pct", "net_margin_pct",
-                "free_float_pct", "ttm_net_kar", "net_borc",
+                "free_float_pct", "ttm_net_kar", "ttm_satis_gelirleri", "ttm_favok",
+                "ttm_fcf", "ozkaynaklar", "net_borc",
             }
             if key in row and (row[key] is not None or fundamental_key):
                 delta_item[key] = row[key]
@@ -1389,7 +1405,7 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
     normalized_index = _normalize_stock_index(index_name)
     started_at = time.perf_counter()
     local_key = f"payload:{normalized_index}"
-    shared_key = f"api:market:stocks:{normalized_index}:v3"
+    shared_key = f"api:market:stocks:{normalized_index}:v4"
     effective_fresh_ttl = _effective_market_quotes_fresh_ttl()
     effective_stale_ttl = max(effective_fresh_ttl, _MARKET_QUOTES_STALE_TTL)
 
@@ -1476,7 +1492,7 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
         shared_key,
         ttl_seconds=max(1, effective_stale_ttl),
         factory=build_and_envelope,
-        lock_key=f"api:market:stocks:{normalized_index}:lock:v3",
+        lock_key=f"api:market:stocks:{normalized_index}:lock:v4",
         lock_ttl_seconds=_MARKET_QUOTES_LOCK_TTL_SECONDS,
         wait_timeout_seconds=_MARKET_QUOTES_WAIT_TIMEOUT_SECONDS,
         poll_interval_seconds=_MARKET_QUOTES_POLL_INTERVAL_SECONDS,
@@ -1547,7 +1563,7 @@ def market_stocks_etag_revision(*, index_name: str, payload: Dict[str, Any]) -> 
 
     normalized_index = _normalize_stock_index(index_name)
     local_key = f"payload:{normalized_index}"
-    shared_key = f"api:market:stocks:{normalized_index}:v3"
+    shared_key = f"api:market:stocks:{normalized_index}:v4"
     local_entry = _STOCKS_CACHE.get(local_key, {}).get("entry")
     shared_entry = _shared_cache_get_dict(shared_key)
     source_revision = None
@@ -1569,7 +1585,7 @@ def market_stocks_etag_revision(*, index_name: str, payload: Dict[str, Any]) -> 
     # include them in the validator without hashing the large row array.
     visible_state = {key: value for key, value in payload.items() if key != "rows"}
     return {
-        "representation": "market-stocks-v1",
+        "representation": "market-stocks-v2",
         "index": normalized_index,
         "source_revision": source_revision,
         "visible_state": visible_state,
@@ -4581,22 +4597,5 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
         stale=stale,
         refresh_pending=refresh_pending,
     )
-
-_MARKET_STOCK_DELTA_TRACKED_KEYS += (
-    "latest_quarter",
-    "fundamental_period",
-    "sector",
-    "fk",
-    "pd_dd",
-    "fd_favok",
-    "fd_satis",
-    "net_borc_favok",
-    "roe_pct",
-    "favok_margin_pct",
-    "net_margin_pct",
-    "free_float_pct",
-    "ttm_net_kar",
-    "net_borc",
-)
 
 __all__ = [name for name in globals() if not name.startswith("__")]

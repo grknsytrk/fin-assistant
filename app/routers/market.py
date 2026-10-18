@@ -67,7 +67,7 @@ def market_stocks(request: Request, index: str = Query("XUTUM"), refresh: bool =
     revision = None
     if source_revision is not None:
         revision = {
-            "representation": "market-stocks-v1",
+            "representation": "market-stocks-v2",
             "index": _normalize_stock_index(index),
             "source": source_revision,
         }
