@@ -781,7 +781,6 @@ export default function StockOverview({
     return (
         <div className="section-overview fade-in">
             <MultiplesRow snapshot={snapshot} quarters={quarters} marketCard={marketCard} />
-            <HistoricalMultiplesChart snapshot={snapshot} historyLoading={historyLoading} />
 
             {latestQuarter && (
                 <div className="kap-summary-panel panel">
@@ -898,6 +897,8 @@ export default function StockOverview({
                     </div>
                 </div>
             )}
+
+            <HistoricalMultiplesChart snapshot={snapshot} historyLoading={historyLoading} />
 
             {latestPremium && (
                 <section className="kap-premium-panel panel">

@@ -7,9 +7,33 @@ type TooltipState = {
     y: number;
     label: string;
     value: string;
+    average?: string;
 };
 
 const MAX_VISIBLE_X_LABELS = 8;
+
+function formatYAxisTick(value: number, series: SeriesPoint[]): string {
+    const sample = series.find((point) => point.display)?.display.trim() || '';
+    const unit = sample.endsWith('%') ? '%' : /x$/i.test(sample) ? 'x' : '';
+    const absolute = Math.abs(value);
+    let divisor = 1;
+    let scale = '';
+    if (absolute >= 1_000_000_000) {
+        divisor = 1_000_000_000;
+        scale = ' mr.';
+    } else if (absolute >= 1_000_000) {
+        divisor = 1_000_000;
+        scale = ' mio.';
+    } else if (absolute >= 1_000) {
+        divisor = 1_000;
+        scale = ' bin';
+    }
+    const scaled = value / divisor;
+    const formatted = scaled.toLocaleString('tr-TR', {
+        maximumFractionDigits: Math.abs(scaled) >= 100 ? 0 : 1,
+    });
+    return `${formatted}${scale}${unit}`;
+}
 
 function shouldShowXAxisLabel(index: number, total: number): boolean {
     if (total <= 10) {
@@ -47,8 +71,8 @@ export function BarChartCard({
 
     const width = 420;
     const height = 250;
-    const padLeft = 34;
-    const padRight = 28;
+    const padLeft = 62;
+    const padRight = 20;
     const padTop = 14;
     const padBottom = 44;
     const plotWidth = width - padLeft - padRight;
@@ -117,8 +141,18 @@ export function BarChartCard({
             >
                 {[0, 1, 2, 3, 4].map((i) => {
                     const yy = padTop + (plotHeight / 4) * i;
-                    return <line key={`h-${i}`} x1={padLeft} y1={yy} x2={width - padRight} y2={yy} className="kap-grid-line" />;
+                    const tickValue = maxVal - (range / 4) * i;
+                    return (
+                        <g key={`h-${i}`}>
+                            <line x1={padLeft} y1={yy} x2={width - padRight} y2={yy} className="kap-grid-line" />
+                            <text x={padLeft - 7} y={yy + 3} textAnchor="end" className="kap-y-label">
+                                {formatYAxisTick(tickValue, series)}
+                            </text>
+                        </g>
+                    );
                 })}
+
+                <line x1={padLeft} y1={padTop} x2={padLeft} y2={padTop + plotHeight} className="kap-axis-line" />
 
                 {series.map((point, idx) => {
                     const xCenter = padLeft + slot * idx + slot / 2;
@@ -181,7 +215,9 @@ export function LineChartCard({
     averageSeries,
     averageLabel,
     highlightedIndex,
+    highlightedKey,
     onHighlight,
+    onHighlightKey,
     onOpen,
     className,
 }: {
@@ -190,7 +226,9 @@ export function LineChartCard({
     averageSeries?: SeriesPoint[];
     averageLabel?: string;
     highlightedIndex?: number | null;
+    highlightedKey?: string | null;
     onHighlight?: (idx: number | null) => void;
+    onHighlightKey?: (key: string | null) => void;
     onOpen?: () => void;
     className?: string;
 }) {
@@ -203,8 +241,8 @@ export function LineChartCard({
 
     const width = 420;
     const height = 250;
-    const padLeft = 34;
-    const padRight = 28;
+    const padLeft = 62;
+    const padRight = 20;
     const padTop = 14;
     const padBottom = 44;
     const plotWidth = width - padLeft - padRight;
@@ -237,6 +275,16 @@ export function LineChartCard({
     const averagePath = averagePoints
         .map((point, idx) => `${idx === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
         .join(' ');
+    const highlightedPoint = highlightedKey != null
+        ? points.find((point) => point.key === highlightedKey)
+        : highlightedIndex != null
+            ? points[highlightedIndex]
+            : null;
+    const highlightedAveragePoint = highlightedKey != null
+        ? averagePoints.find((point) => point.key === highlightedKey)
+        : highlightedIndex != null
+            ? averagePoints[highlightedIndex]
+            : null;
 
     const onHover = (event: MouseEvent<SVGElement>, point: SeriesPoint, idx: number) => {
         const cardRect = cardRef.current?.getBoundingClientRect();
@@ -248,13 +296,20 @@ export function LineChartCard({
             y: event.clientY - cardRect.top,
             label: point.label,
             value: point.display,
+            average: averageSeries?.find((averagePoint) => averagePoint.key === point.key)?.display,
         });
         if (onHighlight) onHighlight(idx);
+        if (onHighlightKey) onHighlightKey(point.key);
     };
 
     const onLeave = () => {
         setTooltip(null);
+    };
+
+    const onChartLeave = () => {
+        onLeave();
         if (onHighlight) onHighlight(null);
+        if (onHighlightKey) onHighlightKey(null);
     };
 
     const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -276,7 +331,7 @@ export function LineChartCard({
             aria-label={onOpen ? `${title} grafiğini büyüt` : undefined}
             onClick={onOpen}
             onKeyDown={onKeyDown}
-            onMouseLeave={onLeave}
+            onMouseLeave={onChartLeave}
         >
             <h4>{title}</h4>
             <svg
@@ -284,12 +339,23 @@ export function LineChartCard({
                 viewBox={`0 0 ${width} ${height}`}
                 role="img"
                 aria-label={title}
-                onMouseLeave={onLeave}
+                onMouseLeave={onChartLeave}
             >
                 {[0, 1, 2, 3, 4].map((i) => {
                     const yy = padTop + (plotHeight / 4) * i;
-                    return <line key={`h-${i}`} x1={padLeft} y1={yy} x2={width - padRight} y2={yy} className="kap-grid-line" />;
+                    const tickValue = maxVal - (range / 4) * i;
+                    return (
+                        <g key={`h-${i}`}>
+                            <line x1={padLeft} y1={yy} x2={width - padRight} y2={yy} className="kap-grid-line" />
+                            <text x={padLeft - 7} y={yy + 3} textAnchor="end" className="kap-y-label">
+                                {formatYAxisTick(tickValue, series)}
+                            </text>
+                        </g>
+                    );
                 })}
+
+                <line x1={padLeft} y1={padTop} x2={padLeft} y2={padTop + plotHeight} className="kap-axis-line" />
+                <line x1={padLeft} y1={padTop + plotHeight} x2={width - padRight} y2={padTop + plotHeight} className="kap-axis-line" />
 
                 {points.map((point) => (
                     <line
@@ -301,6 +367,16 @@ export function LineChartCard({
                         className="kap-grid-line kap-grid-line-v"
                     />
                 ))}
+
+                {highlightedPoint ? (
+                    <line
+                        x1={highlightedPoint.x}
+                        y1={padTop}
+                        x2={highlightedPoint.x}
+                        y2={padTop + plotHeight}
+                        className="kap-chart-highlight-line"
+                    />
+                ) : null}
 
                 <path d={path} className="kap-line-path" />
 
@@ -321,8 +397,11 @@ export function LineChartCard({
                 ) : null}
 
                 {points.map((point, idx) => {
-                    const isFocus = highlightedIndex === idx;
-                    const isFaded = highlightedIndex !== null && highlightedIndex !== undefined && !isFocus;
+                    const isFocus = highlightedKey != null
+                        ? point.key === highlightedKey
+                        : highlightedIndex === idx;
+                    const hasHighlight = highlightedKey != null || (highlightedIndex !== null && highlightedIndex !== undefined);
+                    const isFaded = hasHighlight && !isFocus;
                     return (
                         <g key={point.key}>
                             <circle
@@ -341,6 +420,14 @@ export function LineChartCard({
                         </g>
                     );
                 })}
+                {highlightedAveragePoint ? (
+                    <circle
+                        cx={highlightedAveragePoint.x}
+                        cy={highlightedAveragePoint.y}
+                        r="4"
+                        className="kap-average-point-highlighted"
+                    />
+                ) : null}
             </svg>
             {averagePoints.length ? (
                 <div className="kap-chart-legend" aria-label="Grafik göstergesi">
@@ -358,6 +445,7 @@ export function LineChartCard({
                 <div className="kap-chart-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>
                     <div className="kap-chart-tooltip-label">{tooltip.label}</div>
                     <div className="kap-chart-tooltip-value">{tooltip.value}</div>
+                    {tooltip.average ? <div className="kap-chart-tooltip-average">Ort. {tooltip.average}</div> : null}
                 </div>
             )}
         </div>

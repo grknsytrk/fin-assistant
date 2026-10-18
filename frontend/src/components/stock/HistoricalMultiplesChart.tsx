@@ -93,8 +93,12 @@ export default function HistoricalMultiplesChart({
     const [requestError, setRequestError] = useState('');
     const [selectedWindow, setSelectedWindow] = useState<HistoryWindow>('5y');
     const [expandedMultiple, setExpandedMultiple] = useState<MultipleKey | null>(null);
+    const [highlightedQuarterKey, setHighlightedQuarterKey] = useState<string | null>(null);
     const currentCompany = useRef(company);
-    const closeExpandedChart = useCallback(() => setExpandedMultiple(null), []);
+    const closeExpandedChart = useCallback(() => {
+        setExpandedMultiple(null);
+        setHighlightedQuarterKey(null);
+    }, []);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -105,6 +109,7 @@ export default function HistoricalMultiplesChart({
             setHistory(null);
             setSelectedWindow('5y');
             setExpandedMultiple(null);
+            setHighlightedQuarterKey(null);
         }
         setRequestError('');
         setLoading(shouldRequestHistory);
@@ -174,7 +179,7 @@ export default function HistoricalMultiplesChart({
                 const value = point[key];
                 if (value == null || !Number.isFinite(value) || value <= 0) return [];
                 return [{
-                    key: point.quarter + '-' + key,
+                    key: String(point.year) + '-Q' + String(point.period),
                     label: String(point.year) + 'Ç' + String(point.period),
                     value,
                     display: formatMultiple(value),
@@ -192,7 +197,6 @@ export default function HistoricalMultiplesChart({
                 const value = sum / (index + 1);
                 return {
                     ...point,
-                    key: point.key + '-average',
                     value,
                     display: formatMultiple(value),
                 };
@@ -247,6 +251,8 @@ export default function HistoricalMultiplesChart({
                     series={expandedSeries}
                     averageSeries={expandedAverageSeries}
                     averageLabel={expandedAverage == null ? undefined : 'Ort. ' + formatMultiple(expandedAverage)}
+                    highlightedKey={highlightedQuarterKey}
+                    onHighlightKey={setHighlightedQuarterKey}
                     className="kap-chart-card-expanded historical-multiples-chart"
                 />
             </div>
@@ -294,6 +300,8 @@ export default function HistoricalMultiplesChart({
                                 series={series}
                                 averageSeries={averageSeries}
                                 averageLabel={average == null ? undefined : 'Ort. ' + formatMultiple(average)}
+                                highlightedKey={highlightedQuarterKey}
+                                onHighlightKey={setHighlightedQuarterKey}
                                 onOpen={() => setExpandedMultiple(option.key)}
                                 className="historical-multiples-chart"
                             />

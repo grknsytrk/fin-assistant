@@ -71,6 +71,21 @@
     stroke-width: 2;
 }
 
+.kap-y-label {
+    fill: var(--text-secondary);
+    font-size: 9px;
+    font-family: var(--font-mono);
+    pointer-events: none;
+}
+
+.kap-chart-highlight-line {
+    stroke: color-mix(in srgb, var(--accent-color) 78%, white);
+    stroke-width: 1.5;
+    stroke-dasharray: 3 3;
+    opacity: 0.7;
+    pointer-events: none;
+}
+
 .kap-average-line {
     fill: none;
     stroke: var(--warn-color, #f59e0b);
@@ -90,6 +105,13 @@
     stroke: var(--surface-color);
     stroke-width: 3px;
     stroke-linejoin: round;
+}
+
+.kap-average-point-highlighted {
+    fill: var(--warn-color, #f59e0b);
+    stroke: var(--surface-color);
+    stroke-width: 1.5;
+    pointer-events: none;
 }
 
 .kap-bar-positive {
@@ -216,6 +238,14 @@
     color: var(--text-primary);
     font-weight: 700;
     font-family: var(--font-mono);
+}
+
+.kap-chart-tooltip-average {
+    margin-top: 0.2rem;
+    color: var(--warn-color, #f59e0b);
+    font-size: 0.72rem;
+    font-family: var(--font-mono);
+    font-weight: 650;
 }
 
 .kap-chart-modal-backdrop {
