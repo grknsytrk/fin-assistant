@@ -14,6 +14,43 @@ def test_fintables_defaults_match_current_history_contract() -> None:
     assert fund_service.FINTABLES_YIELD_SUMMARY_ENDPOINT.endswith("/barbar/server/yield")
 
 
+def test_fund_snapshot_search_pushes_limit_into_sql_and_keeps_unknown_fields(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("RAGFIN_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert fund_service.commit_funds_snapshot(
+        tmp_path,
+        {
+            "status": "ok",
+            "as_of": "2026-10-16",
+            "rows": [
+                {"fund_code": "AAA", "name": "Tefas Alpha", "as_of": "2026-10-16", "custom_tefas_field": "keep-a"},
+                {"fund_code": "AAB", "name": "Tefas Beta", "as_of": "2026-10-16", "custom_tefas_field": "keep-b"},
+            ],
+            "source_metadata": {"source": "test"},
+        },
+        job_id="local-test",
+        owner_token="local-test",
+        generation=1,
+    )
+
+    rows, total_count = fund_service._query_fund_snapshot_rows(
+        tmp_path,
+        q="tefas",
+        fund_type=None,
+        founder=None,
+        manager=None,
+        risk=None,
+        sort="fund_code",
+        order="asc",
+        min_aum=None,
+        limit=1,
+    )
+
+    assert total_count == 2
+    assert len(rows) == 1
+    assert rows[0]["custom_tefas_field"] == "keep-a"
+
+
 def test_tefas_client_fetch_fund_range_retries_rate_limit(monkeypatch) -> None:
     calls = []
 

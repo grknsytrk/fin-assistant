@@ -98,3 +98,36 @@ def test_sync_kap_cache_skips_unchanged_and_preserves_provider_fallback(tmp_path
 def test_finite_number_accepts_postgres_decimal_values() -> None:
     assert store._finite_number(Decimal("12.75")) == 12.75
     assert store._finite_number(Decimal("NaN")) is None
+
+
+def test_financial_snapshot_memory_cache_lives_60_seconds_and_expires(tmp_path: Path, monkeypatch) -> None:
+    assert store._SNAPSHOT_MEMORY_CACHE_TTL_SECONDS == 60.0
+    store.reset_financial_snapshot_store_for_tests()
+    processed_dir = tmp_path / "processed"
+    store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Enerji"}})
+
+    class FakeTime:
+        now = 100.0
+
+        @classmethod
+        def monotonic(cls) -> float:
+            return cls.now
+
+    monkeypatch.setattr(store, "time", FakeTime)
+    original_connection = store._connection
+    reads = {"count": 0}
+
+    def counted_connection(path: Path):
+        reads["count"] += 1
+        return original_connection(path)
+
+    monkeypatch.setattr(store, "_connection", counted_connection)
+    assert "AAA" in store.get_financial_snapshots_map(processed_dir)
+    FakeTime.now = 159.0
+    assert "AAA" in store.get_financial_snapshots_map(processed_dir)
+    assert reads["count"] == 1
+
+    FakeTime.now = 161.0
+    assert "AAA" in store.get_financial_snapshots_map(processed_dir)
+    assert reads["count"] == 2
+    store.reset_financial_snapshot_store_for_tests()

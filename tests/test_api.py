@@ -18,6 +18,7 @@ from app import database as database_module
 from app import fund_service as fund_service_module
 from app import kap_service as kap_service_module
 from app.api import app
+from app.routers import funds as funds_router
 from src import kap_vyk_client
 from src.nvidia_commentary import NvidiaCommentaryError
 
@@ -891,8 +892,10 @@ def _get_ready_fund(client, path):
 
 def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_kwargs: Dict[str, Any] = {}
+    payload_calls = {"count": 0}
 
     def fake_get_funds_payload(processed_dir: Any, **kwargs: Any) -> Dict[str, Any]:
+        payload_calls["count"] += 1
         seen_kwargs.update(kwargs)
         return {
             "status": "ok",
@@ -922,11 +925,33 @@ def test_api_funds_list_schema(monkeypatch: pytest.MonkeyPatch) -> None:
         }
 
     monkeypatch.setattr(fund_service_module, "get_funds_payload", fake_get_funds_payload)
+    monkeypatch.setattr(
+        funds_router,
+        "_funds_listing_preflight",
+        lambda: (
+            {
+                "status": "ok",
+                "total_count": 1,
+                "stale": False,
+                "degraded": False,
+                "source_metadata": {
+                    "source": "tefasfon_funds",
+                    "snapshot_as_of": "2026-04-28",
+                    "snapshot_as_of_lag_days": 0,
+                },
+            },
+            {"catalog_generation": 1, "price_generation": 0},
+        ),
+    )
     client = TestClient(app)
 
     response = _get_ready_fund(client, "/funds")
+    repeated = client.get("/funds")
 
     assert response.status_code == 200
+    assert repeated.status_code == 200
+    assert repeated.json() == response.json()
+    assert payload_calls["count"] == 1
     payload = response.json()
     assert payload["rows"][0]["fund_code"] == "YAC"
     assert payload["source"] == "tefasfon_funds"
@@ -1106,7 +1131,9 @@ def test_api_funds_search_keeps_full_universe(monkeypatch: pytest.MonkeyPatch) -
     assert response.status_code == 200
     payload = response.json()
     assert payload["count"] == 1
+    assert payload["total_count"] == 2
     assert seen_kwargs["min_aum"] is None
+    assert seen_kwargs["limit"] == 1
 
 
 def test_api_fund_yield_summary_uses_response_cache(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -333,6 +333,57 @@ def reset_fund_caches_for_tests() -> None:
         _AUTO_FETCH_NEGATIVE_CACHE.clear()
 
 
+def fund_listing_revision(processed_dir: Path) -> Dict[str, int]:
+    """Read the compact, transactionally maintained list revision counters."""
+
+    if database_enabled():
+        ensure_fund_prices_schema(processed_dir)
+    with _connect_fund_prices_db(processed_dir) as conn:
+        row = conn.execute(
+            "SELECT catalog_generation, price_generation FROM fund_listing_state WHERE id = 1"
+        ).fetchone()
+    if isinstance(row, dict):
+        return {
+            "catalog_generation": int(row.get("catalog_generation") or 0),
+            "price_generation": int(row.get("price_generation") or 0),
+        }
+    if row is not None:
+        return {
+            "catalog_generation": int(row["catalog_generation"] or 0),
+            "price_generation": int(row["price_generation"] or 0),
+        }
+    return {"catalog_generation": 0, "price_generation": 0}
+
+
+def _set_fund_listing_catalog_revision(conn: Any, generation: int, metadata: Dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO fund_listing_state (
+            id, catalog_generation, price_generation, metadata_json, updated_at
+        ) VALUES (1, ?, 0, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET
+            catalog_generation = excluded.catalog_generation,
+            metadata_json = excluded.metadata_json,
+            updated_at = excluded.updated_at
+        """,
+        (int(generation), _stable_json_dumps(metadata), _utc_now_iso()),
+    )
+
+
+def _bump_fund_listing_price_revision(conn: Any) -> None:
+    conn.execute(
+        """
+        INSERT INTO fund_listing_state (
+            id, catalog_generation, price_generation, metadata_json, updated_at
+        ) VALUES (1, 0, 1, '{}', ?)
+        ON CONFLICT (id) DO UPDATE SET
+            price_generation = fund_listing_state.price_generation + 1,
+            updated_at = excluded.updated_at
+        """,
+        (_utc_now_iso(),),
+    )
+
+
 def normalize_fund_code(raw: str | None) -> str:
     return "".join(str(raw or "").strip().upper().split())
 
@@ -555,6 +606,29 @@ def _init_fund_prices_schema(conn: Any) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_fund_snapshots_manager ON fund_snapshots (manager_key)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fund_listing_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            catalog_generation BIGINT NOT NULL DEFAULT 0,
+            price_generation BIGINT NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO fund_listing_state (
+            id, catalog_generation, price_generation, metadata_json, updated_at
+        )
+        SELECT 1, COALESCE(MAX(generation), 0), 0, '{}', CURRENT_TIMESTAMP
+        FROM fund_snapshots WHERE 1
+        ON CONFLICT (id) DO NOTHING
+        """
+    )
+    if getattr(conn, "is_postgres", False):
+        conn.execute("ALTER TABLE fund_listing_state ENABLE ROW LEVEL SECURITY")
     if not getattr(conn, "is_postgres", False):
         conn.execute(
             """
@@ -814,9 +888,28 @@ def _copy_legacy_snapshot(processed_dir: Path, payload: Dict[str, Any]) -> None:
 
 def _snapshot_metadata_from_store(processed_dir: Path) -> Optional[Dict[str, Any]]:
     if database_enabled():
+        with connect_postgres() as conn:
+            state = conn.execute(
+                "SELECT metadata_json FROM fund_listing_state WHERE id = 1"
+            ).fetchone()
+        if isinstance(state, dict):
+            summary = _safe_json_loads(state.get("metadata_json"), None)
+            metadata = summary.get("source_metadata") if isinstance(summary, dict) else None
+            if isinstance(metadata, dict) and metadata.get("catalog_storage") == "fund_snapshots":
+                return summary
+
+        # One-time backfill for databases that already have row snapshots but
+        # predate fund_listing_state. The existing JSON summary is compact after
+        # the catalogue migration and becomes unnecessary on later requests.
         summary = _read_json(_snapshot_path(processed_dir))
         metadata = summary.get("source_metadata") if isinstance(summary, dict) else None
         if summary is not None and isinstance(metadata, dict) and metadata.get("catalog_storage") == "fund_snapshots":
+            with connect_postgres() as conn:
+                conn.execute(
+                    "UPDATE fund_listing_state SET metadata_json = ?, catalog_generation = GREATEST(catalog_generation, ?), updated_at = NOW() WHERE id = 1 AND metadata_json = '{}'",
+                    (_stable_json_dumps(summary), int(summary.get("snapshot_generation") or 0)),
+                )
+                conn.commit()
             return summary
         return None
     with _connect_fund_prices_db(processed_dir) as conn:
@@ -917,6 +1010,7 @@ def ensure_fund_snapshot_store(processed_dir: Path) -> Dict[str, Any]:
                     """,
                     (cache_key, json.dumps(summary_payload, ensure_ascii=False, default=str), generation),
                 )
+                _set_fund_listing_catalog_revision(conn, generation, summary_payload)
                 conn.commit()
             _copy_legacy_snapshot(processed_dir, legacy)
             _write_local_json(path, summary_payload)
@@ -949,6 +1043,7 @@ def ensure_fund_snapshot_store(processed_dir: Path) -> Dict[str, Any]:
                         _utc_now_iso(),
                     ),
                 )
+                _set_fund_listing_catalog_revision(conn, generation, summary_payload)
             _write_local_json(_snapshot_path(processed_dir), summary_payload)
         _MEMORY_CACHE.clear()
         logging.getLogger("uvicorn.error").info(
@@ -1074,6 +1169,7 @@ def _commit_local_fund_snapshot_rows(
                 """,
                 (generation, len(records), _stable_json_dumps(summary), _utc_now_iso()),
             )
+            _set_fund_listing_catalog_revision(conn, generation, summary)
         _write_local_json(_snapshot_path(processed_dir), summary)
         return summary
 
@@ -1164,6 +1260,7 @@ def commit_funds_snapshot(
                 if not isinstance(meta_row, dict):
                     conn.rollback()
                     return False
+                _set_fund_listing_catalog_revision(conn, generation, summary)
                 conn.commit()
         except Exception:
             LOGGER.warning("fund snapshot row commit failed", exc_info=True)
@@ -2427,7 +2524,11 @@ def upsert_fund_price_points(
                         warning_sql.format(values=", ".join(value_group for _ in chunk)),
                         [value for row in chunk for value in row],
                     )
+            if upserted_count:
+                _bump_fund_listing_price_revision(conn)
             conn.commit()
+        if upserted_count:
+            _MEMORY_CACHE.clear()
         return {
             "db_path": str(_fund_prices_db_path(processed_dir)),
             "source": normalized_source,
@@ -2515,7 +2616,11 @@ def upsert_fund_price_points(
             )
             upserted_count += 1
             source_counts[point["source"]] = source_counts.get(point["source"], 0) + 1
+        if upserted_count:
+            _bump_fund_listing_price_revision(conn)
         conn.commit()
+    if upserted_count:
+        _MEMORY_CACHE.clear()
     return {
         "db_path": str(_fund_prices_db_path(processed_dir)),
         "source": normalized_source,
@@ -2853,7 +2958,9 @@ def _persist_daily_return_overrides(
                 query,
                 [value, now, code, point_date, *_DAILY_PRICE_SOURCES],
             )
+        _bump_fund_listing_price_revision(conn)
         conn.commit()
+    _MEMORY_CACHE.clear()
 
 
 def _read_fintables_udf_price_points(
@@ -6886,6 +6993,7 @@ def _query_fund_snapshot_rows(
     sort: str,
     order: str,
     min_aum: Optional[float],
+    limit: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Filter and sort the current catalogue in SQL, returning only matches."""
 
@@ -6949,9 +7057,16 @@ def _query_fund_snapshot_rows(
             if isinstance(matching_row, dict)
             else matching_row["row_count"]
         )
+        projection = (
+            "fund_code, name, fund_type, founder_company, manager_company, price, daily_return, "
+            "aum, investor_count, share_count, risk_value, risk_value_json, currency, as_of, source, "
+            "period_returns_json, attributes_json, present_fields_json, row_order"
+        )
+        limit_sql = " LIMIT ?" if limit is not None else ""
+        record_params = (*params, max(0, int(limit))) if limit is not None else tuple(params)
         records = conn.execute(
-            f"SELECT * FROM fund_snapshots{where_sql} ORDER BY {order_by}",
-            tuple(params),
+            f"SELECT {projection} FROM fund_snapshots{where_sql} ORDER BY {order_by}{limit_sql}",
+            record_params,
         ).fetchall()
     return [_snapshot_row_from_record(record) for record in records], matching_count
 
@@ -7013,6 +7128,7 @@ def get_funds_payload(
     min_aum: Optional[float] = FUNDS_LIST_MIN_AUM,
     auto_refresh: bool = False,
     include_revision: bool = False,
+    limit: Optional[int] = None,
 ) -> Dict[str, Any] | Tuple[Dict[str, Any], Dict[str, Any]]:
     started = time.perf_counter()
     snapshot = load_funds_snapshot(processed_dir, include_rows=False)
@@ -7023,6 +7139,7 @@ def get_funds_payload(
         snapshot = _mark_snapshot_current_for_market_closure(snapshot)
     if auto_refresh:
         snapshot = _refresh_funds_snapshot_if_stale(processed_dir, snapshot)
+    database_rows = 0
     row_store_active = bool(
         isinstance(snapshot.get("source_metadata"), dict)
         and snapshot["source_metadata"].get("catalog_storage") == "fund_snapshots"
@@ -7038,7 +7155,9 @@ def get_funds_payload(
             sort=sort,
             order=order,
             min_aum=min_aum,
+            limit=limit,
         )
+        database_rows = len(rows)
         rows = _overlay_latest_price_history(processed_dir, {"rows": rows}).get("rows") or []
     else:
         rows = [
@@ -7050,17 +7169,9 @@ def get_funds_payload(
             and _row_matches(row, q=q, fund_type=fund_type, founder=founder, manager=manager, risk=risk)
         ]
         filtered_count = len(rows)
+        database_rows = len(rows)
     filtered = time.perf_counter()
-    if include_revision:
-        rows, daily_price_revision = _apply_daily_return_overrides(
-            processed_dir,
-            rows,
-            include_missing=True,
-            include_revision=True,
-        )
-    else:
-        rows = _apply_daily_return_overrides(processed_dir, rows, include_missing=True)
-        daily_price_revision = None
+    rows = _apply_daily_return_overrides(processed_dir, rows, include_missing=True)
     # These fields can be replaced by newer fund_prices rows after the SQL
     # query, so restore the legacy order using the values the API returns.
     if row_store_active and sort in {"price", "daily_return", "as_of"}:
@@ -7068,10 +7179,12 @@ def get_funds_payload(
     reconciled = time.perf_counter()
     if not row_store_active:
         rows = _sort_rows(rows, sort, order)
+    if limit is not None:
+        rows = rows[: max(0, int(limit))]
     finished = time.perf_counter()
     logging.getLogger("uvicorn.error").info(
-        "fund_catalog rows=%d snapshot_ms=%.1f filter_ms=%.1f returns_ms=%.1f sort_ms=%.1f total_ms=%.1f",
-        len(rows), (snapshot_loaded - started) * 1000, (filtered - snapshot_loaded) * 1000,
+        "fund_catalog rows=%d db_rows=%d matched_rows=%d query_limit=%s snapshot_ms=%.1f filter_ms=%.1f returns_ms=%.1f sort_ms=%.1f total_ms=%.1f",
+        len(rows), database_rows, filtered_count, limit, (snapshot_loaded - started) * 1000, (filtered - snapshot_loaded) * 1000,
         (reconciled - filtered) * 1000, (finished - reconciled) * 1000, (finished - started) * 1000,
     )
     meta = dict(snapshot.get("source_metadata") or {})
@@ -7093,13 +7206,7 @@ def get_funds_payload(
     if not include_revision:
         return payload
 
-    source_revision = {
-        "snapshot_generation": snapshot.get("snapshot_generation")
-        or (snapshot.get("source_metadata") or {}).get("snapshot_generation"),
-        "snapshot_fetched_at": snapshot.get("fetched_at"),
-        "snapshot_as_of": snapshot.get("as_of"),
-        "daily_price_history": daily_price_revision,
-    }
+    source_revision = fund_listing_revision(processed_dir)
     return payload, source_revision
 
 

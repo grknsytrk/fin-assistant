@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
+import threading
+import time
+from collections import OrderedDict
+from typing import Callable, Dict, Optional
+
 from app.api_runtime import *
 from app.market_service import *
 
@@ -100,6 +108,14 @@ _FUND_HISTORY_MAX_PHASES = int(os.getenv("RAGFIN_FUND_HISTORY_MAX_PHASES", "2"))
 
 _FUND_HISTORY_KEY_VERSION = 7
 
+_FUND_LISTING_CACHE_TTL_SECONDS = 30.0
+_FUND_LISTING_CACHE_MAX_ENTRIES = 8
+_FUND_LISTING_CACHE_MAX_BYTES = 8 * 1024 * 1024
+_FUND_LISTING_CACHE_LOCK = threading.RLock()
+_FUND_LISTING_CACHE: OrderedDict[str, tuple[float, int, Dict[str, Any]]] = OrderedDict()
+_FUND_LISTING_CACHE_BYTES = 0
+_FUND_LISTING_IN_FLIGHT: Dict[str, threading.Event] = {}
+
 _ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS = int(
     os.getenv("RAGFIN_ADMIN_FUND_PERFORMANCE_MAX_LOOKBACK_DAYS", "370")
 )
@@ -126,6 +142,134 @@ def _fund_listing_cache_key(
         f"|risk={_normalized_cache_text(risk, max_length=32)}|sort={_normalized_cache_text(sort, max_length=32)}"
         f"|order={_normalized_cache_text(order, max_length=8)}"
     )
+
+
+def _fund_listing_cache_get_locked(key: str) -> Optional[Dict[str, Any]]:
+    global _FUND_LISTING_CACHE_BYTES
+    entry = _FUND_LISTING_CACHE.get(key)
+    if entry is None:
+        return None
+    expires_at, weight, payload = entry
+    if expires_at <= time.monotonic():
+        _FUND_LISTING_CACHE.pop(key, None)
+        _FUND_LISTING_CACHE_BYTES = max(0, _FUND_LISTING_CACHE_BYTES - weight)
+        return None
+    _FUND_LISTING_CACHE.move_to_end(key)
+    return copy.deepcopy(payload)
+
+
+def _fund_listing_cache_store(key: str, payload: Dict[str, Any]) -> int:
+    global _FUND_LISTING_CACHE_BYTES
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    weight = len(encoded)
+    if weight > _FUND_LISTING_CACHE_MAX_BYTES:
+        return weight
+    with _FUND_LISTING_CACHE_LOCK:
+        previous = _FUND_LISTING_CACHE.pop(key, None)
+        if previous:
+            _FUND_LISTING_CACHE_BYTES = max(0, _FUND_LISTING_CACHE_BYTES - previous[1])
+        _FUND_LISTING_CACHE[key] = (
+            time.monotonic() + _FUND_LISTING_CACHE_TTL_SECONDS,
+            weight,
+            copy.deepcopy(payload),
+        )
+        _FUND_LISTING_CACHE_BYTES += weight
+        while (
+            len(_FUND_LISTING_CACHE) > _FUND_LISTING_CACHE_MAX_ENTRIES
+            or _FUND_LISTING_CACHE_BYTES > _FUND_LISTING_CACHE_MAX_BYTES
+        ):
+            _old_key, (_expiry, old_weight, _payload) = _FUND_LISTING_CACHE.popitem(last=False)
+            _FUND_LISTING_CACHE_BYTES = max(0, _FUND_LISTING_CACHE_BYTES - old_weight)
+    return weight
+
+
+def _fund_listing_cacheable(payload: Dict[str, Any]) -> bool:
+    metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+    return (
+        str(payload.get("status") or "").strip().lower() == "ok"
+        and not payload.get("stale")
+        and not payload.get("degraded")
+        and not payload.get("refresh_pending")
+        and not metadata.get("refresh_pending")
+        and not list(payload.get("warnings") or [])
+    )
+
+
+def _fund_listing_cache_get_or_build(
+    key: str,
+    factory: Callable[[], Dict[str, Any]],
+    *,
+    enabled: bool,
+) -> Dict[str, Any]:
+    if not enabled:
+        logging.getLogger("uvicorn.error").info(
+            "fund_listing_cache outcome=bypass key=%s",
+            hashlib.sha256(key.encode()).hexdigest()[:12],
+        )
+        return factory()
+
+    owner = False
+    with _FUND_LISTING_CACHE_LOCK:
+        cached = _fund_listing_cache_get_locked(key)
+        if cached is not None:
+            logging.getLogger("uvicorn.error").info("fund_listing_cache outcome=hit key=%s", hashlib.sha256(key.encode()).hexdigest()[:12])
+            return cached
+        event = _FUND_LISTING_IN_FLIGHT.get(key)
+        if event is None:
+            event = threading.Event()
+            _FUND_LISTING_IN_FLIGHT[key] = event
+            owner = True
+
+    if not owner:
+        event.wait(timeout=10.0)
+        with _FUND_LISTING_CACHE_LOCK:
+            cached = _fund_listing_cache_get_locked(key)
+        if cached is not None:
+            logging.getLogger("uvicorn.error").info("fund_listing_cache outcome=coalesced_hit key=%s", hashlib.sha256(key.encode()).hexdigest()[:12])
+            return cached
+
+    logging.getLogger("uvicorn.error").info("fund_listing_cache outcome=miss key=%s", hashlib.sha256(key.encode()).hexdigest()[:12])
+    try:
+        payload = factory()
+        if _fund_listing_cacheable(payload):
+            weight = _fund_listing_cache_store(key, payload)
+            logging.getLogger("uvicorn.error").info(
+                "fund_listing_cache outcome=%s key=%s bytes=%d entries=%d total_bytes=%d",
+                "store" if weight <= _FUND_LISTING_CACHE_MAX_BYTES else "oversize",
+                hashlib.sha256(key.encode()).hexdigest()[:12],
+                weight,
+                len(_FUND_LISTING_CACHE),
+                _FUND_LISTING_CACHE_BYTES,
+            )
+        return payload
+    finally:
+        if owner:
+            with _FUND_LISTING_CACHE_LOCK:
+                _FUND_LISTING_IN_FLIGHT.pop(key, None)
+                event.set()
+
+
+def _funds_listing_preflight() -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Load only compact catalogue status and revision counters before ETag validation."""
+
+    from app.fund_service import (
+        _mark_snapshot_current_for_market_closure,
+        _snapshot_is_current_on_market_closure,
+        FUNDS_LIST_MIN_AUM,
+        fund_listing_revision,
+        load_funds_snapshot,
+    )
+
+    snapshot = load_funds_snapshot(
+        CONFIG.paths.processed_dir,
+        include_rows=False,
+        include_price_metadata=False,
+    )
+    if _snapshot_is_current_on_market_closure(snapshot):
+        snapshot = _mark_snapshot_current_for_market_closure(snapshot)
+    revision = fund_listing_revision(CONFIG.paths.processed_dir)
+    revision["list_min_aum"] = FUNDS_LIST_MIN_AUM
+    return snapshot, revision
 
 def _fund_refresh_job_key(job_id: str) -> str:
     return f"api:funds-refresh:job:{job_id}"
@@ -612,11 +756,13 @@ def _funds_listing_payload(
     sort: str,
     order: str,
     include_revision: bool = False,
+    source_revision: Optional[Dict[str, Any]] = None,
+    cacheable: bool = True,
 ) -> Dict[str, Any] | tuple[Dict[str, Any], Dict[str, Any]]:
-    from app.fund_service import get_funds_payload
+    from app.fund_service import fund_listing_revision, get_funds_payload
 
-    return get_funds_payload(
-        CONFIG.paths.processed_dir,
+    revision = source_revision or fund_listing_revision(CONFIG.paths.processed_dir)
+    base_key = _fund_listing_cache_key(
         q=q,
         fund_type=fund_type,
         founder=founder,
@@ -624,14 +770,35 @@ def _funds_listing_payload(
         risk=risk,
         sort=sort,
         order=order,
-        include_revision=include_revision,
-        # Keep the catalog read fast.  A cold/empty snapshot is recovered by
-        # the explicit refresh flow so the ordinary list request cannot spend
-        # its whole frontend timeout inside TEFAS.
-        auto_refresh=False,
     )
+    revision_key = hashlib.sha256(
+        json.dumps(revision, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    key = f"{base_key}|revision={revision_key}"
 
-def _funds_search_payload(*, q: str) -> Dict[str, Any]:
+    def build() -> Dict[str, Any]:
+        return get_funds_payload(
+            CONFIG.paths.processed_dir,
+            q=q,
+            fund_type=fund_type,
+            founder=founder,
+            manager=manager,
+            risk=risk,
+            sort=sort,
+            order=order,
+            # Keep the catalog read fast. A cold/empty snapshot is recovered by
+            # the explicit refresh flow so the ordinary list request cannot
+            # spend its whole frontend timeout inside TEFAS.
+            auto_refresh=False,
+        )
+
+    payload = _fund_listing_cache_get_or_build(key, build, enabled=cacheable)
+    if include_revision:
+        return payload, revision
+    return payload
+
+
+def _funds_search_payload(*, q: str, limit: int = 50) -> Dict[str, Any]:
     from app.fund_service import get_funds_payload
 
     return get_funds_payload(
@@ -640,6 +807,7 @@ def _funds_search_payload(*, q: str) -> Dict[str, Any]:
         sort="fund_code",
         order="asc",
         min_aum=None,
+        limit=limit,
         # Search must stay cache/snapshot-only as well; refresh is an explicit
         # background job started by the list page.
         auto_refresh=False,

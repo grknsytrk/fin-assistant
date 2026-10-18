@@ -28,7 +28,7 @@ _POSTGRES_SCHEMA_READY = False
 _LOCAL_SCHEMA_READY: set[str] = set()
 _CACHE_LOCK = threading.RLock()
 _SNAPSHOT_MEMORY_CACHE: Dict[str, tuple[float, Dict[str, Dict[str, Any]]]] = {}
-_SNAPSHOT_MEMORY_CACHE_TTL_SECONDS = 10.0
+_SNAPSHOT_MEMORY_CACHE_TTL_SECONDS = 60.0
 
 _SNAPSHOT_COLUMNS = (
     "symbol",

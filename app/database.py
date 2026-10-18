@@ -643,6 +643,7 @@ def hydrate_json_cache(processed_dir: Path) -> int:
                 "SELECT cache_key, payload FROM ragfin_json_cache ORDER BY cache_key"
             ).fetchall()
         hydrated = 0
+        measured_bytes = 0
         root = Path(processed_dir).resolve()
         for row in rows:
             if not isinstance(row, dict):
@@ -651,6 +652,9 @@ def hydrate_json_cache(processed_dir: Path) -> int:
             payload = row.get("payload")
             if not key or not isinstance(payload, dict) or ".." in Path(key).parts:
                 continue
+            measured_bytes += len(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+            )
             target = (root / key).resolve()
             if root != target and root not in target.parents:
                 continue
@@ -662,6 +666,13 @@ def hydrate_json_cache(processed_dir: Path) -> int:
             )
             temporary.replace(target)
             hydrated += 1
+        LOGGER.info(
+            "json_cache_hydrate rows=%d hydrated=%d approximate_payload_bytes=%d over_1mib=%s",
+            len(rows),
+            hydrated,
+            measured_bytes,
+            measured_bytes > 1024 * 1024,
+        )
         return hydrated
     except Exception:
         LOGGER.warning("remote JSON cache hydration failed", exc_info=True)

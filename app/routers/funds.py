@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, Response
 
 from app.api_runtime import *
-from app.etag import conditional_json_response
+from app.etag import conditional_json_response, if_none_match_matches, weak_etag
 from app.fund_api_service import *
 
 router = APIRouter()
@@ -19,7 +19,56 @@ def funds(
     sort: str = Query("fund_code", max_length=32),
     order: str = Query("asc", max_length=8),
 ) -> Response:
-    result = _funds_listing_payload(
+    snapshot, source_revision = _funds_listing_preflight()
+    snapshot = _maybe_schedule_fund_snapshot_refresh(snapshot)
+    visible_state = {key: value for key, value in snapshot.items() if key != "rows"}
+    allowed_sort_values = {
+        "fund_code",
+        "name",
+        "fund_type",
+        "founder_company",
+        "manager_company",
+        "price",
+        "daily_return",
+        "risk_value",
+        "aum",
+        "investor_count",
+        "as_of",
+    }
+
+    def normalize_filter(value: Optional[str], *, empty_is_unfiltered: bool = False) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        normalized = value.strip().lower()
+        return None if empty_is_unfiltered and not normalized else normalized
+
+    revision = {
+        "representation": "funds-list-v2",
+        "query": {
+            "q": normalize_filter(q, empty_is_unfiltered=True),
+            "fund_type": normalize_filter(fund_type),
+            "founder": normalize_filter(founder),
+            "manager": normalize_filter(manager),
+            "risk": normalize_filter(risk),
+            "sort": sort if sort in allowed_sort_values else "fund_code",
+            "order": "desc" if order.lower() == "desc" else "asc",
+        },
+        "source": source_revision,
+        "visible_state": visible_state,
+    }
+    etag = weak_etag(revision)
+    if if_none_match_matches(request.headers.get("if-none-match"), etag):
+        logging.getLogger("uvicorn.error").info(
+            "fund_listing_etag outcome=not_modified catalog_generation=%s price_generation=%s",
+            source_revision.get("catalog_generation"),
+            source_revision.get("price_generation"),
+        )
+        return Response(
+            status_code=304,
+            headers={"Cache-Control": "private, no-cache", "ETag": etag},
+        )
+
+    payload = _funds_listing_payload(
         q=q,
         fund_type=fund_type,
         founder=founder,
@@ -27,57 +76,23 @@ def funds(
         risk=risk,
         sort=sort,
         order=order,
-        include_revision=True,
+        source_revision=source_revision,
+        cacheable=(
+            not bool(snapshot.get("refresh_pending"))
+            and not bool(snapshot.get("stale"))
+            and not bool(snapshot.get("degraded"))
+            and str(snapshot.get("status") or "") != "pending"
+        ),
     )
-    if isinstance(result, tuple) and len(result) == 2:
-        payload, source_revision = result
-    else:
-        # Preserve compatibility with service substitutes used by callers and
-        # tests that provide only the established public payload shape.
-        payload, source_revision = result, None
-    payload = _maybe_schedule_fund_snapshot_refresh(payload)
-    revision = None
-    if source_revision is not None:
-        visible_state = {key: value for key, value in payload.items() if key != "rows"}
-        allowed_sort_values = {
-            "fund_code",
-            "name",
-            "fund_type",
-            "founder_company",
-            "manager_company",
-            "price",
-            "daily_return",
-            "risk_value",
-            "aum",
-            "investor_count",
-            "as_of",
-        }
-
-        def normalize_filter(value: Optional[str], *, empty_is_unfiltered: bool = False) -> Optional[str]:
-            if value is None or value == "":
-                return None
-            normalized = value.strip().lower()
-            return None if empty_is_unfiltered and not normalized else normalized
-
-        revision = {
-            "representation": "funds-list-v1",
-            "query": {
-                "q": normalize_filter(q, empty_is_unfiltered=True),
-                "fund_type": normalize_filter(fund_type),
-                "founder": normalize_filter(founder),
-                "manager": normalize_filter(manager),
-                "risk": normalize_filter(risk),
-                "sort": sort if sort in allowed_sort_values else "fund_code",
-                "order": "desc" if order.lower() == "desc" else "asc",
-            },
-            "source": source_revision,
-            "visible_state": visible_state,
-        }
+    # Refresh state is re-evaluated per request and never frozen in the LRU.
+    for field in ("refresh_pending", "refresh_job"):
+        if field in snapshot:
+            payload[field] = snapshot[field]
     return conditional_json_response(request, payload, revision)
 
 @router.get("/funds/search")
 def funds_search(q: str = Query("", min_length=0, max_length=80), limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
-    payload = _funds_search_payload(q=q)
+    payload = _funds_search_payload(q=q, limit=limit)
     rows = list(payload.get("rows") or [])[:limit]
     # Trim and clone so each caller gets the right slice without mutating the
     # cached payload referenced by other concurrent requests.
