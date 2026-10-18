@@ -651,6 +651,296 @@ def test_funds_payload_reads_stale_first_snapshot(tmp_path) -> None:
     assert payload["source_metadata"]["cache_hit"] is True
 
 
+def test_fund_snapshot_json_migrates_to_rows_and_keeps_unknown_fields(tmp_path) -> None:
+    source_snapshot = {
+        "status": "ok",
+        "rows": [
+            {
+                "fund_code": "TLY",
+                "name": "TERA PORTFOY TEST FONU",
+                "fund_type": "Hisse Senedi",
+                "founder_company": "TERA PORTFOY",
+                "manager_company": "TERA PORTFOY",
+                "price": 12.345,
+                "daily_return": 0.25,
+                "period_returns": {"1m": 4.5, "1y": 38.2},
+                "risk_value": 5,
+                "aum": 1_250_000_000,
+                "investor_count": 1200,
+                "share_count": 100_000,
+                "as_of": "2026-04-28",
+                "source": "tefasfon_funds",
+                "tefas_open": True,
+                "future_tefas_field": {"new_key": "preserved"},
+            }
+        ],
+        "count": 1,
+        "total_count": 1,
+        "source": "tefasfon_funds",
+        "as_of": "2026-04-28",
+        "fetched_at": "2026-04-28T09:00:00+00:00",
+        "source_metadata": {"parse_status": "ok", "provider_revision": "v1"},
+    }
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    snapshot_path = cache_dir / "funds_latest.json"
+    snapshot_path.write_text(json.dumps(source_snapshot), encoding="utf-8")
+
+    migrated = fund_service.load_funds_snapshot(tmp_path)
+    migrated_again = fund_service.load_funds_snapshot(tmp_path)
+
+    assert migrated["rows"][0]["fund_code"] == "TLY"
+    assert migrated_again["snapshot_generation"] == migrated["snapshot_generation"]
+    assert migrated["rows"][0]["future_tefas_field"] == {"new_key": "preserved"}
+    assert migrated["rows"][0]["period_returns"] == {"1m": 4.5, "1y": 38.2}
+    assert migrated["source_metadata"]["provider_revision"] == "v1"
+    assert migrated["source_metadata"]["catalog_storage"] == "fund_snapshots"
+    assert "rows" not in json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert len(json.loads((cache_dir / "funds_latest.legacy.json").read_text(encoding="utf-8"))["rows"]) == 1
+
+    with fund_service._connect_fund_prices_db(tmp_path) as conn:
+        row = conn.execute(
+            "SELECT price, aum, investor_count, generation FROM fund_snapshots WHERE fund_code = ?",
+            ("TLY",),
+        ).fetchone()
+        count = conn.execute("SELECT COUNT(*) AS row_count FROM fund_snapshots").fetchone()["row_count"]
+    assert row["price"] == pytest.approx(12.345)
+    assert row["aum"] == pytest.approx(1_250_000_000)
+    assert row["investor_count"] == 1200
+    assert row["generation"] == migrated["snapshot_generation"]
+    assert count == 1
+
+
+def test_fund_snapshot_rollback_copy_is_compacted_after_retention(monkeypatch, tmp_path) -> None:
+    import os
+    import time
+
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(
+        json.dumps({"rows": [{"fund_code": "TLY", "price": 1.0}], "source_metadata": {}}),
+        encoding="utf-8",
+    )
+    fund_service.load_funds_snapshot(tmp_path)
+    legacy_path = cache_dir / "funds_latest.legacy.json"
+    expired_time = time.time() - 10
+    os.utime(legacy_path, (expired_time, expired_time))
+    monkeypatch.setattr(fund_service, "FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS", 5)
+
+    assert fund_service.prune_fund_snapshot_rollback_copy(tmp_path) is True
+    compact_copy = json.loads(legacy_path.read_text(encoding="utf-8"))
+    assert compact_copy["rollback_copy_expired"] is True
+    assert compact_copy["row_count"] == 1
+    assert "rows" not in compact_copy
+
+
+def test_fund_snapshot_sql_list_filter_sort_and_detail_preserve_api_values(tmp_path) -> None:
+    rows = [
+        {
+            "fund_code": "AAA",
+            "name": "PUSULA PORTFOY HISSE FONU",
+            "fund_type": "Hisse Senedi",
+            "founder_company": "PUSULA PORTFOY",
+            "manager_company": "PUSULA PORTFOY",
+            "risk_value": 5,
+            "price": 2.0,
+            "aum": 100_000_000,
+            "period_returns": {"1m": 10.0, "ytd": 18.0, "1y": 34.0, "6m": 20.0},
+            "as_of": "2026-04-28",
+            "tefas_open": True,
+            "extended_label": "preserve this",
+        },
+        {
+            "fund_code": "BBB",
+            "name": "TERA PORTFOY HISSE FONU",
+            "fund_type": "Hisse Senedi",
+            "founder_company": "TERA PORTFOY",
+            "manager_company": "TERA PORTFOY",
+            "risk_value": 4,
+            "price": 3.0,
+            "aum": 500_000_000,
+            "period_returns": {"1m": 5.0, "ytd": 9.0, "1y": 22.0, "6m": 11.0},
+            "as_of": "2026-04-28",
+            "tefas_open": True,
+        },
+        {
+            "fund_code": "CCC",
+            "name": "KAPALI FON",
+            "fund_type": "Hisse Senedi",
+            "risk_value": 3,
+            "price": 9.0,
+            "aum": 900_000_000,
+            "tefas_open": False,
+        },
+    ]
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(
+        json.dumps({"status": "ok", "rows": rows, "as_of": "2026-04-28", "source_metadata": {}}),
+        encoding="utf-8",
+    )
+
+    filtered = fund_service.get_funds_payload(
+        tmp_path,
+        q="pusula",
+        fund_type="Hisse Senedi",
+        risk="5",
+        min_aum=50_000_000,
+        sort="price",
+        order="desc",
+    )
+    ordered = fund_service.get_funds_payload(tmp_path, sort="price", order="desc")
+    detail = fund_service.get_fund_detail_payload(tmp_path, "AAA")
+
+    assert [row["fund_code"] for row in filtered["rows"]] == ["AAA"]
+    assert [row["fund_code"] for row in ordered["rows"]] == ["BBB", "AAA"]
+    assert ordered["total_count"] == 3
+    assert detail["extended_label"] == "preserve this"
+    assert detail["category_rankings"]["category_total"] == 2
+
+
+def test_fund_snapshot_commit_replaces_all_rows_atomically_and_serializes_local_writers(tmp_path) -> None:
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    initial = {
+        "status": "ok",
+        "rows": [{"fund_code": "OLD", "name": "Old fund", "price": 1.0, "as_of": "2026-04-28"}],
+        "as_of": "2026-04-28",
+        "source_metadata": {},
+    }
+    (cache_dir / "funds_latest.json").write_text(json.dumps(initial), encoding="utf-8")
+    fund_service.load_funds_snapshot(tmp_path)
+
+    replacement_rows = [
+        {"fund_code": "NEW", "name": "New fund", "price": 5.0, "as_of": "2026-04-29"},
+        {"fund_code": "KEEP", "name": "Keep fund", "price": 7.0, "as_of": "2026-04-29"},
+    ]
+    replacement = {"status": "ok", "rows": replacement_rows, "as_of": "2026-04-29", "source_metadata": {}}
+    assert fund_service.commit_funds_snapshot(
+        tmp_path, replacement, job_id="local", owner_token="local", generation=0
+    ) is True
+    assert fund_service.commit_funds_snapshot(
+        tmp_path, {"status": "ok", "rows": [], "source_metadata": {}},
+        job_id="local", owner_token="local", generation=0,
+    ) is False
+    current_codes = {row["fund_code"] for row in fund_service.load_funds_snapshot(tmp_path)["rows"]}
+    assert current_codes == {"NEW", "KEEP"}
+    with fund_service._connect_fund_prices_db(tmp_path) as conn:
+        before_unchanged_commit = {
+            row["fund_code"]: row["generation"]
+            for row in conn.execute("SELECT fund_code, generation FROM fund_snapshots").fetchall()
+        }
+    assert fund_service.commit_funds_snapshot(
+        tmp_path, replacement, job_id="local", owner_token="local", generation=0
+    ) is True
+    with fund_service._connect_fund_prices_db(tmp_path) as conn:
+        after_unchanged_commit = {
+            row["fund_code"]: row["generation"]
+            for row in conn.execute("SELECT fund_code, generation FROM fund_snapshots").fetchall()
+        }
+    assert after_unchanged_commit == before_unchanged_commit
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def write_price(price: float) -> bool:
+        concurrent_payload = {
+            "status": "ok",
+            "rows": [{"fund_code": "NEW", "name": "New fund", "price": price, "as_of": "2026-04-29"}],
+            "as_of": "2026-04-29",
+            "source_metadata": {},
+        }
+        return fund_service.commit_funds_snapshot(
+            tmp_path, concurrent_payload, job_id="local", owner_token="local", generation=0
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        assert all(executor.map(write_price, (6.0, 7.0, 8.0, 9.0)))
+    with fund_service._connect_fund_prices_db(tmp_path) as conn:
+        records = conn.execute("SELECT fund_code, price, generation FROM fund_snapshots").fetchall()
+    assert len(records) == 1
+    assert records[0]["fund_code"] == "NEW"
+    assert records[0]["price"] in {6.0, 7.0, 8.0, 9.0}
+    assert records[0]["generation"] == json.loads(
+        (cache_dir / "funds_latest.json").read_text(encoding="utf-8")
+    )["snapshot_generation"]
+
+
+def test_fund_snapshot_commit_keeps_latest_duplicate_code(tmp_path) -> None:
+    payload = {
+        "status": "ok",
+        "rows": [
+            {"fund_code": "TLY", "name": "Old name", "price": 1.0},
+            {"fund_code": "TLY", "name": "Current name", "price": 2.0},
+        ],
+        "source_metadata": {},
+    }
+
+    assert fund_service.commit_funds_snapshot(
+        tmp_path, payload, job_id="local", owner_token="local", generation=0
+    ) is True
+    detail = fund_service.get_fund_detail_payload(tmp_path, "TLY")
+
+    assert detail["name"] == "Current name"
+    assert detail["price"] == pytest.approx(2.0)
+
+
+def test_fund_snapshot_sort_uses_overlaid_prices_and_daily_returns(monkeypatch, tmp_path) -> None:
+    from datetime import date
+
+    monkeypatch.setattr(
+        fund_service,
+        "_latest_fund_snapshot_target_date",
+        lambda today=None: date(2026, 10, 16),
+    )
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "AAA", "date": "2026-10-15", "price": 100.0, "source": "tefasfon_funds"},
+            {
+                "fund_code": "AAA", "date": "2026-10-16", "price": 110.0,
+                "daily_return": 10.0, "source": "tefasfon_funds",
+            },
+            {"fund_code": "BBB", "date": "2026-10-15", "price": 100.0, "source": "tefasfon_funds"},
+            {
+                "fund_code": "BBB", "date": "2026-10-16", "price": 105.0,
+                "daily_return": 5.0, "source": "tefasfon_funds",
+            },
+        ],
+        source="tefasfon_funds",
+    )
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    (cache_dir / "funds_latest.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "rows": [
+                    {
+                        "fund_code": "AAA", "name": "Fund A", "price": 1.0,
+                        "daily_return": 1.0, "as_of": "2026-10-15",
+                        "source": "tefas_list_snapshot", "tefas_open": True,
+                    },
+                    {
+                        "fund_code": "BBB", "name": "Fund B", "price": 200.0,
+                        "daily_return": 20.0, "as_of": "2026-10-15",
+                        "source": "tefas_list_snapshot", "tefas_open": True,
+                    },
+                ],
+                "as_of": "2026-10-15",
+                "source_metadata": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    by_price = fund_service.get_funds_payload(tmp_path, min_aum=None, sort="price", order="desc")
+    by_return = fund_service.get_funds_payload(tmp_path, min_aum=None, sort="daily_return", order="desc")
+
+    assert [row["fund_code"] for row in by_price["rows"]] == ["AAA", "BBB"]
+    assert [row["fund_code"] for row in by_return["rows"]] == ["AAA", "BBB"]
+    assert by_return["rows"][0]["daily_return"] == pytest.approx(10.0)
+
+
 def test_funds_payload_lists_all_open_funds_without_aum_threshold(tmp_path) -> None:
     snapshot = {
         "status": "ok",

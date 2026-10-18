@@ -106,6 +106,7 @@ def test_reference_data_deduplicates_batch_keys(tmp_path) -> None:
 
     result = sync_reference_data_from_caches(tmp_path)
 
-    assert result["record_count"] == 2
+    # The normalized catalogue has one current row per fund code.
+    assert result["record_count"] == 1
     assert result["upserted_count"] == 1
     assert get_instrument(tmp_path, "fund", "TLY")["name"] == "TLY updated"
