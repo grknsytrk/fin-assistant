@@ -228,7 +228,9 @@ export async function isCacheableListResponse(
 
     const status = String(payload.status || "").trim().toLowerCase();
     if (["pending", "unavailable", "error", "empty", "failed"].includes(status)) return false;
-    if (payload.pending === true || payload.refresh_pending === true || payload.degraded === true || payload.stale === true) {
+    // A queued background refresh does not make the current published snapshot
+    // partial: keep serving/cache the last complete rows while it runs.
+    if (payload.pending === true || payload.degraded === true || payload.stale === true) {
         return false;
     }
     if (route === "funds" && status && status !== "ok") return false;

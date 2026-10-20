@@ -109,7 +109,11 @@ describe('Worker edge cache policies', () => {
 
     it('keeps origin ETags and browser cache headers while adding edge policy', async () => {
         const request = makeRequest('/api/funds');
-        const originResponse = new Response(JSON.stringify({ status: 'ok', rows: [{ fund_code: 'AAL' }] }), {
+        const originResponse = new Response(JSON.stringify({
+            status: 'ok',
+            refresh_pending: true,
+            rows: [{ fund_code: 'AAL' }],
+        }), {
             headers: {
                 'Content-Type': 'application/json',
                 'Cache-Control': 'private, no-cache',
@@ -125,7 +129,7 @@ describe('Worker edge cache policies', () => {
         expect(response.headers.get('Cache-Tag')).toBe('funds-list');
     });
 
-    it('does not cache pending, degraded, empty market, or error responses', async () => {
+    it('does not cache unavailable, degraded, empty market, or error responses', async () => {
         const request = makeRequest('/api/funds');
         const pending = await applyListCachePolicy(
             new Response(JSON.stringify({ status: 'pending', rows: [] }), {
