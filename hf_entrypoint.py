@@ -7,6 +7,7 @@ are registered on the same server.
 
 from __future__ import annotations
 
+import logging
 import os
 
 import uvicorn
@@ -42,6 +43,11 @@ else:
 
 def main() -> None:
     port = int(os.getenv("PORT", "7860"))
+    # Storage bootstrap runs before Gradio/Uvicorn configures logging. Enable
+    # its concise cache-hydration metric so startup egress can be inspected in
+    # Hugging Face Space logs without turning on verbose application logging.
+    logging.basicConfig(level=logging.WARNING, force=True)
+    logging.getLogger("app.database").setLevel(logging.INFO)
     # ``include_router`` does not run api_app's FastAPI lifespan on Gradio
     # Spaces. Run the same schema/cache bootstrap before serving routes.
     bootstrap_application_storage()
