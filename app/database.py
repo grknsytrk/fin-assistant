@@ -605,6 +605,40 @@ def read_json_cache(path: Path) -> Optional[dict[str, Any]]:
         return None
 
 
+def read_json_cache_history_metadata(path: Path) -> Optional[dict[str, Any]]:
+    """Read only the small coverage fields needed for a fund-history cache check.
+
+    Historical points are also stored row-by-row in ``fund_prices``. Returning
+    the legacy JSON document here would transfer the entire history just to
+    inspect a handful of metadata values.
+    """
+
+    if not database_enabled():
+        return None
+    try:
+        ensure_json_cache_schema()
+        with connect_postgres() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    payload #>> '{source_metadata,parse_status}' AS parse_status,
+                    payload #>> '{source_metadata,requested_start_date}' AS requested_start_date,
+                    payload #>> '{source_metadata,date_max}' AS date_max,
+                    COALESCE(
+                        payload #>> '{source_metadata,as_of}',
+                        payload #>> '{as_of}'
+                    ) AS as_of
+                FROM ragfin_json_cache
+                WHERE cache_key = ?
+                """,
+                (_cache_key(path),),
+            ).fetchone()
+        return dict(row) if isinstance(row, dict) else None
+    except Exception:
+        LOGGER.warning("remote JSON cache metadata read failed for %s", path, exc_info=True)
+        return None
+
+
 def write_json_cache(path: Path, payload: dict[str, Any]) -> None:
     """Upsert one JSON cache document in Supabase."""
 
@@ -631,16 +665,51 @@ def write_json_cache(path: Path, payload: dict[str, Any]) -> None:
         LOGGER.warning("remote JSON cache write failed for %s", path, exc_info=True)
 
 
-def hydrate_json_cache(processed_dir: Path) -> int:
-    """Download remote JSON cache documents into the local ephemeral folder."""
+def hydrate_json_cache(
+    processed_dir: Path,
+    *,
+    exclude_key_prefixes: tuple[str, ...] = (),
+) -> int:
+    """Download selected remote JSON cache documents into the local folder.
+
+    Large daily fund snapshots are fetched on demand by the fund service. They
+    do not need to be copied into every fresh API container during bootstrap.
+    """
 
     if not database_enabled():
         return 0
     try:
         ensure_json_cache_schema()
+        normalized_prefixes: list[str] = []
+        for raw_prefix in exclude_key_prefixes:
+            prefix = str(raw_prefix or "").replace("\\", "/").strip("/")
+            if prefix:
+                normalized_prefixes.append(f"{prefix}/")
+        prefixes = tuple(dict.fromkeys(normalized_prefixes))
+        where_clause = ""
+        query_params: tuple[Any, ...] = ()
+        if prefixes:
+            where_clause = "WHERE " + " AND ".join(
+                "SUBSTR(cache_key, 1, ?) <> ?" for _ in prefixes
+            )
+            query_params = tuple(value for prefix in prefixes for value in (len(prefix), prefix))
+
         with connect_postgres() as conn:
+            excluded_rows = 0
+            if prefixes:
+                excluded_rows = sum(
+                    int((count_row or {}).get("row_count") or 0)
+                    for count_row in (
+                        conn.execute(
+                            "SELECT COUNT(*) AS row_count FROM ragfin_json_cache WHERE SUBSTR(cache_key, 1, ?) = ?",
+                            (len(prefix), prefix),
+                        ).fetchone()
+                        for prefix in prefixes
+                    )
+                )
             rows = conn.execute(
-                "SELECT cache_key, payload FROM ragfin_json_cache ORDER BY cache_key"
+                f"SELECT cache_key, payload FROM ragfin_json_cache {where_clause} ORDER BY cache_key",
+                query_params,
             ).fetchall()
         hydrated = 0
         measured_bytes = 0
@@ -667,9 +736,11 @@ def hydrate_json_cache(processed_dir: Path) -> int:
             temporary.replace(target)
             hydrated += 1
         LOGGER.info(
-            "json_cache_hydrate rows=%d hydrated=%d approximate_payload_bytes=%d over_1mib=%s",
+            "json_cache_hydrate rows=%d hydrated=%d excluded_rows=%d excluded_prefixes=%s approximate_payload_bytes=%d over_1mib=%s",
             len(rows),
             hydrated,
+            excluded_rows,
+            ",".join(prefixes),
             measured_bytes,
             measured_bytes > 1024 * 1024,
         )

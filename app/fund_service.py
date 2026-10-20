@@ -29,6 +29,7 @@ from app.database import (
     connect_postgres,
     database_enabled,
     read_json_cache,
+    read_json_cache_history_metadata,
     write_json_cache,
 )
 from app.reference_data import (
@@ -624,6 +625,7 @@ def _init_fund_prices_schema(conn: Any) -> None:
         )
         SELECT 1, COALESCE(MAX(generation), 0), 0, '{}', CURRENT_TIMESTAMP
         FROM fund_snapshots
+        WHERE TRUE
         ON CONFLICT (id) DO NOTHING
         """
     )
@@ -675,6 +677,29 @@ _FUND_SNAPSHOT_FIELDS = (
     "as_of",
     "source",
     "period_returns",
+)
+
+# Keep the SQL result limited to values needed to reconstruct the public
+# catalogue rows. Internal sort/search/generation columns remain in Postgres
+# for filtering and ordering, but do not need to cross Supavisor on full reads.
+_FUND_SNAPSHOT_READ_COLUMNS = (
+    "fund_code",
+    "name",
+    "fund_type",
+    "founder_company",
+    "manager_company",
+    "price",
+    "daily_return",
+    "aum",
+    "investor_count",
+    "share_count",
+    "risk_value_json",
+    "currency",
+    "as_of",
+    "source",
+    "period_returns_json",
+    "attributes_json",
+    "present_fields_json",
 )
 
 
@@ -845,7 +870,8 @@ def _read_fund_snapshot_rows(
     params: Iterable[Any] = (),
     order_by: str = "row_order ASC",
 ) -> List[Dict[str, Any]]:
-    query = f"SELECT * FROM fund_snapshots{(' WHERE ' + where) if where else ''} ORDER BY {order_by}"
+    columns = ", ".join(_FUND_SNAPSHOT_READ_COLUMNS)
+    query = f"SELECT {columns} FROM fund_snapshots{(' WHERE ' + where) if where else ''} ORDER BY {order_by}"
     with _connect_fund_prices_db(processed_dir) as conn:
         records = conn.execute(query, tuple(params)).fetchall()
     return [_snapshot_row_from_record(record) for record in records]
@@ -1111,7 +1137,19 @@ def prune_fund_snapshot_rollback_copy(processed_dir: Path) -> bool:
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     remote_payload = read_json_cache(path)
     if remote_payload is not None:
+        # Daily snapshots are loaded from Supabase on demand rather than during
+        # every container bootstrap. Keep a local copy after the first read so
+        # later requests can still fall back if the remote cache is unavailable.
+        if not path.exists():
+            try:
+                _write_local_json(path, remote_payload)
+            except OSError:
+                LOGGER.debug("Could not mirror remote JSON cache locally: %s", path, exc_info=True)
         return remote_payload
+    return _read_local_json(path)
+
+
+def _read_local_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
         with path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
@@ -2662,7 +2700,10 @@ def read_fund_price_points(
         conditions.append("date <= ?")
         params.append(end_date.isoformat())
     query = (
-        "SELECT * FROM fund_prices WHERE "
+        # Keep raw_json in storage for provenance, but do not transfer it to
+        # this reader: chart/API points only use the normalized columns below.
+        "SELECT fund_code, date, source, price, daily_return, aum, investor_count, "
+        "share_count, metadata_json, fetched_at, updated_at FROM fund_prices WHERE "
         + " AND ".join(conditions)
         + " ORDER BY date ASC, updated_at DESC"
     )
@@ -2731,7 +2772,11 @@ def read_latest_fund_price_points(
         inner_conditions.append("date <= ?")
         inner_params.append(end_date.isoformat())
     query = f"""
-        SELECT fp.*
+        -- raw_json and created_at are intentionally omitted; the public point
+        -- mapper does not use them, and raw_json can dominate these result rows.
+        SELECT fp.fund_code, fp.date, fp.source, fp.price, fp.daily_return,
+               fp.aum, fp.investor_count, fp.share_count, fp.metadata_json,
+               fp.fetched_at, fp.updated_at
         FROM fund_prices fp
         INNER JOIN (
             SELECT fund_code, MAX(date) AS latest_date
@@ -7795,8 +7840,13 @@ def _history_cache_covers_requested_span(
     start_date: date,
     end_date: date,
 ) -> bool:
-    payload = _read_json(_history_path(processed_dir, normalized_code)) or {}
-    metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+    history_path = _history_path(processed_dir, normalized_code)
+    metadata = read_json_cache_history_metadata(history_path)
+    if metadata is None:
+        payload = _read_local_json(history_path) or {}
+        metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+        if not metadata.get("as_of") and payload.get("as_of"):
+            metadata = {**metadata, "as_of": payload["as_of"]}
     if str(metadata.get("parse_status") or "").startswith("unavailable"):
         return False
     requested_start = _fund_date(metadata.get("requested_start_date"))
@@ -7807,7 +7857,7 @@ def _history_cache_covers_requested_span(
             return False
     except ValueError:
         return False
-    latest_point_date = _fund_date(metadata.get("date_max") or metadata.get("as_of") or payload.get("as_of"))
+    latest_point_date = _fund_date(metadata.get("date_max") or metadata.get("as_of"))
     if not latest_point_date:
         return False
     try:

@@ -108,7 +108,11 @@ _FUND_HISTORY_MAX_PHASES = int(os.getenv("RAGFIN_FUND_HISTORY_MAX_PHASES", "2"))
 
 _FUND_HISTORY_KEY_VERSION = 7
 
-_FUND_LISTING_CACHE_TTL_SECONDS = 30.0
+# This cache is keyed by catalog and price revisions, which are updated in the
+# same transaction as their source data. Keeping popular list payloads around
+# longer lets the 5-minute edge revalidation reuse memory instead of rereading
+# the full catalog from Supabase on every refresh.
+_FUND_LISTING_CACHE_TTL_SECONDS = 600.0
 _FUND_LISTING_CACHE_MAX_ENTRIES = 8
 _FUND_LISTING_CACHE_MAX_BYTES = 8 * 1024 * 1024
 _FUND_LISTING_CACHE_LOCK = threading.RLock()
