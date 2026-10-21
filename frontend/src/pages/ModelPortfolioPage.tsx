@@ -184,30 +184,15 @@ const CLOSE_REASON_OPTIONS: ExplainedOption[] = [
     },
 ];
 
-const CATALYST_OPTIONS: Array<{ label: string; hint: string }> = [
-    { label: 'Çarpan İskontosu', hint: 'Tarihsel veya benzer şirket F/K ve FD/FAVÖK ortalamalarına göre ucuzluk' },
-    { label: 'Güçlü Bilanço Beklentisi', hint: 'Yaklaşan çeyrekte ciro ve FAVÖK marjında güçlü büyüme öngörüsü' },
-    { label: 'İhracat & Döviz Geliri', hint: 'Yüksek döviz bazlı gelir payı ve kur riskine karşı doğal koruma' },
-    { label: 'Yüksek Nakit Akışı', hint: 'Güçlü serbest nakit üretimi ve düşük işletme sermayesi ihtiyacı' },
-    { label: 'Yeni Kapasite Yatırımı', hint: 'Devreye girecek yeni tesis/üretim hattı ile hacim ve kârlılık artışı' },
-    { label: 'Temettü Verimi', hint: 'Düzenli ve yüksek nakit temettü dağıtım potansiyeli' },
-    { label: 'Marj Genişlemesi', hint: 'Maliyet düşüşü veya ürün miksi iyileşmesiyle kâr marjı artışı' },
-    { label: 'Borçluluk Azalışı', hint: 'Net Borç / FAVÖK rasyosunda düşüş ve finansman gideri rahatlaması' },
-];
-
-const THESIS_TEMPLATES: Array<{ label: string; snippet: string }> = [
-    {
-        label: '+ Değerleme & İskonto',
-        snippet: '• Değerleme: Hisse güncel çarpanlarıyla tarihsel ortalamalarına ve sektör benzerlerine göre belirgin iskontolu işlem görmektedir.',
-    },
-    {
-        label: '+ Bilanço & Operasyonel Beklenti',
-        snippet: '• Bilanço Beklentisi: Önümüzdeki çeyreklerde güçlü satış hacmi ve FAVÖK marjındaki iyileşmeyle kârlılığın ivme kazanmasını bekliyoruz.',
-    },
-    {
-        label: '+ Katalizör & Hedef Gerekçesi',
-        snippet: '• Katalizör: Yeni yatırımların devreye girmesi ve güçlü nakit akışı üretimiyle hedef fiyatımıza doğru yeniden değerleme (re-rating) öngörüyoruz.',
-    },
+const CATALYST_OPTIONS = [
+    { value: 'Çarpan İskontosu', label: 'Çarpan iskontosu' },
+    { value: 'Güçlü Bilanço Beklentisi', label: 'Güçlü bilanço' },
+    { value: 'İhracat & Döviz Geliri', label: 'İhracat geliri' },
+    { value: 'Yüksek Nakit Akışı', label: 'Nakit akışı' },
+    { value: 'Yeni Kapasite Yatırımı', label: 'Yeni yatırım' },
+    { value: 'Temettü Verimi', label: 'Temettü' },
+    { value: 'Marj Genişlemesi', label: 'Marj artışı' },
+    { value: 'Borçluluk Azalışı', label: 'Borç azalması' },
 ];
 
 const DONUT_PALETTE = [
@@ -2299,6 +2284,8 @@ function ModelPortfolioEditorModal({
     const [formError, setFormError] = useState<string | null>(null);
     const [dropdownOpen, setDropdownOpen] = useState(false);
     const prefillAbortRef = useRef<AbortController | null>(null);
+    const selectedSymbolRef = useRef((editingPosition?.symbol || '').toUpperCase());
+    const sectorEditVersionRef = useRef(0);
     const dialogRef = useAccessibleDialog<HTMLDivElement>(true, onClose);
 
     const matchingUniverse = useMemo(() => {
@@ -2338,6 +2325,46 @@ function ModelPortfolioEditorModal({
             .finally(() => setPrefillLoading(false));
     }, []);
 
+    const autoSelectSector = useCallback(async (targetSym: string) => {
+        const normalizedSymbol = targetSym.trim().toUpperCase();
+        if (!normalizedSymbol) return;
+        const editVersion = sectorEditVersionRef.current;
+        const findSector = (rows: MarketStockRow[]) => rows.find(
+            (row) => String(row.symbol || row.company || '').toUpperCase() === normalizedSymbol,
+        )?.sector?.trim();
+
+        let resolvedSector = findSector(apiClient.getCachedMarketStocks('XUTUM')?.rows || []);
+        if (!resolvedSector) {
+            try {
+                const payload = await apiClient.marketStocks({ index: 'XUTUM' });
+                resolvedSector = findSector(payload.rows || []);
+            } catch {
+                return;
+            }
+        }
+
+        if (
+            resolvedSector
+            && selectedSymbolRef.current === normalizedSymbol
+            && sectorEditVersionRef.current === editVersion
+        ) {
+            setSector(resolvedSector);
+        }
+    }, []);
+
+    const selectStock = useCallback((targetSym: string, targetName: string) => {
+        const normalizedSymbol = targetSym.trim().toUpperCase();
+        selectedSymbolRef.current = normalizedSymbol;
+        sectorEditVersionRef.current += 1;
+        setSymbol(normalizedSymbol);
+        setSymbolQuery(normalizedSymbol);
+        setCompanyName(targetName || normalizedSymbol);
+        setSector('');
+        setDropdownOpen(false);
+        void autoSelectSector(normalizedSymbol);
+        triggerPrefill(normalizedSymbol, entryDate);
+    }, [autoSelectSector, entryDate, triggerPrefill]);
+
     const impliedUpsidePct = useMemo(() => {
         const ep = Number(entryPrice);
         const tp = Number(targetPrice);
@@ -2371,13 +2398,6 @@ function ModelPortfolioEditorModal({
             setCatalysts((prev) => [...prev, clean]);
         }
         setCustomCatalyst('');
-    };
-
-    const appendThesisTemplate = (snippet: string) => {
-        setThesis((prev) => {
-            const trimmed = prev.trim();
-            return trimmed ? `${trimmed}\n${snippet}` : snippet;
-        });
     };
 
     const handleSubmit = async (e: FormEvent) => {
@@ -2522,14 +2542,22 @@ function ModelPortfolioEditorModal({
                                             onFocus={() => setDropdownOpen(true)}
                                             onChange={(e) => {
                                                 const val = e.target.value.toUpperCase();
+                                                const normalizedSymbol = val.trim();
+                                                if (normalizedSymbol !== selectedSymbolRef.current) {
+                                                    selectedSymbolRef.current = normalizedSymbol;
+                                                    sectorEditVersionRef.current += 1;
+                                                    setSector('');
+                                                }
                                                 setSymbolQuery(val);
                                                 setSymbol(val);
                                                 setDropdownOpen(true);
                                             }}
                                             onBlur={() => {
                                                 window.setTimeout(() => setDropdownOpen(false), 180);
-                                                if (!isEdit && symbol.trim()) {
-                                                    triggerPrefill(symbol, entryDate);
+                                                const normalizedSymbol = selectedSymbolRef.current;
+                                                if (!isEdit && normalizedSymbol) {
+                                                    void autoSelectSector(normalizedSymbol);
+                                                    triggerPrefill(normalizedSymbol, entryDate);
                                                 }
                                             }}
                                             placeholder="THYAO, BIMAS, TUPRS..."
@@ -2548,11 +2576,7 @@ function ModelPortfolioEditorModal({
                                                         aria-selected={symbol === sym}
                                                         onMouseDown={(e) => {
                                                             e.preventDefault();
-                                                            setSymbol(sym);
-                                                            setSymbolQuery(sym);
-                                                            setCompanyName(row.name || sym);
-                                                            setDropdownOpen(false);
-                                                            triggerPrefill(sym, entryDate);
+                                                            selectStock(sym, row.name || sym);
                                                         }}
                                                     >
                                                         <div className="mp-symbol-option-left">
@@ -2601,7 +2625,13 @@ function ModelPortfolioEditorModal({
                                     />
                                 </div>
 
-                                <MpSectorDropdown value={sector} onChange={setSector} />
+                                <MpSectorDropdown
+                                    value={sector}
+                                    onChange={(nextSector) => {
+                                        sectorEditVersionRef.current += 1;
+                                        setSector(nextSector);
+                                    }}
+                                />
                             </div>
 
                             {/* Selected Stock & Auto-Prefilled Reference Strip */}
@@ -2827,39 +2857,52 @@ function ModelPortfolioEditorModal({
                             <div className="mp-editor-step-header">
                                 <span className="mp-step-pill">4</span>
                                 <div>
-                                    <h4>Katalizörler, Yatırım Tezi ve Risk Notu</h4>
-                                    <p>Bu hisseyi model portföye neden aldığınızı ve beklentilerinizi yatırımcılara açıklayın.</p>
+                                    <h4>Yatırım gerekçesi ve beklenti</h4>
+                                    <p>Bu alanlar isteğe bağlı. Kısa bir not ve varsa beklentilerinizi ekleyin.</p>
                                 </div>
                             </div>
 
                             <div className="mp-field">
-                                <span className="mp-field-label">Beklentiler & Katalizör Etiketleri (Çoklu Seçim)</span>
-                                <div className="mp-catalyst-grid">
+                                <span className="mp-field-label">Beklenti etiketleri</span>
+                                <small className="mp-field-micro-hint">Uygun olanları seçin; birden fazla seçebilirsiniz.</small>
+                                <div className="mp-catalyst-choices" role="group" aria-label="Beklenti etiketleri">
                                     {CATALYST_OPTIONS.map((item) => {
-                                        const active = catalysts.includes(item.label);
+                                        const active = catalysts.includes(item.value);
                                         return (
                                             <button
-                                                key={item.label}
+                                                key={item.value}
                                                 type="button"
-                                                className={`mp-catalyst-card${active ? ' active' : ''}`}
-                                                onClick={() => toggleCatalyst(item.label)}
+                                                className={`mp-catalyst-choice${active ? ' active' : ''}`}
+                                                aria-pressed={active}
+                                                onClick={() => toggleCatalyst(item.value)}
                                             >
-                                                <div className="mp-catalyst-card-top">
-                                                    <strong>{item.label}</strong>
-                                                    {active && <Check size={13} />}
-                                                </div>
-                                                <span>{item.hint}</span>
+                                                {active && <Check size={13} />}
+                                                {item.label}
                                             </button>
                                         );
                                     })}
+                                    {catalysts
+                                        .filter((item) => !CATALYST_OPTIONS.some((option) => option.value === item))
+                                        .map((item) => (
+                                            <button
+                                                key={item}
+                                                type="button"
+                                                className="mp-catalyst-choice active"
+                                                aria-pressed="true"
+                                                onClick={() => toggleCatalyst(item)}
+                                            >
+                                                <Check size={13} />
+                                                {item}
+                                            </button>
+                                        ))}
                                 </div>
                                 <div className="mp-custom-catalyst-row">
                                     <input
                                         type="text"
-                                        aria-label="Özel katalizör etiketi"
+                                        aria-label="Başka bir beklenti etiketi ekle"
                                         value={customCatalyst}
                                         onChange={(e) => setCustomCatalyst(e.target.value)}
-                                        placeholder="Özel beklenti etiketi yazıp ekleyin (Örn: Bedelsiz Potansiyeli, Eurobond Geliri)..."
+                                        placeholder="Başka bir beklenti ekleyin (isteğe bağlı)"
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter') {
                                                 e.preventDefault();
@@ -2867,48 +2910,37 @@ function ModelPortfolioEditorModal({
                                             }
                                         }}
                                     />
-                                    <button type="button" className="mp-btn mp-btn-subtle" onClick={addCustomCatalyst}>
-                                        + Etiket Ekle
+                                    <button
+                                        type="button"
+                                        className="mp-btn mp-btn-subtle"
+                                        onClick={addCustomCatalyst}
+                                        disabled={!customCatalyst.trim()}
+                                    >
+                                        Ekle
                                     </button>
                                 </div>
                             </div>
 
                             <div className="mp-field">
-                                <div className="mp-field-label-row">
-                                    <span className="mp-field-label">
-                                        Neden Model Portföyde? (Yatırım Tezi & Beklentilerimiz)
-                                    </span>
-                                    <div className="mp-thesis-templates-bar">
-                                        {THESIS_TEMPLATES.map((tpl) => (
-                                            <button
-                                                key={tpl.label}
-                                                type="button"
-                                                className="mp-mini-preset-btn"
-                                                onClick={() => appendThesisTemplate(tpl.snippet)}
-                                                title="Hazır şablon maddesi ekle"
-                                            >
-                                                {tpl.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
+                                <span className="mp-field-label">Yatırım gerekçesi</span>
+                                <small className="mp-field-micro-hint">Bir iki cümleyle ana beklentinizi yazmanız yeterli.</small>
                                 <textarea
-                                    rows={4}
-                                    aria-label="Yatırım tezi ve hedef gerekçesi"
+                                    rows={3}
+                                    aria-label="Yatırım gerekçesi"
                                     value={thesis}
                                     onChange={(e) => setThesis(e.target.value)}
-                                    placeholder="Bu hisseyi alırken ne düşündüğümüzü, temel analiz ve bilanço beklentilerimizi, hedef fiyat gerekçemizi buraya yazın..."
+                                    placeholder="Bu hisseyi neden seçtiniz? (isteğe bağlı)"
                                 />
                             </div>
 
                             <label className="mp-field">
-                                <span className="mp-field-label">Riskler & Takip Edilecek Metrikler (Opsiyonel)</span>
+                                <span className="mp-field-label">Takip edeceğim risk (isteğe bağlı)</span>
                                 <textarea
                                     rows={2}
-                                    aria-label="Riskler ve izlenecek metrikler"
+                                    aria-label="Takip edeceğim risk"
                                     value={riskNote}
                                     onChange={(e) => setRiskNote(e.target.value)}
-                                    placeholder="Örn: Marj daralması, enerji maliyetleri veya kur duyarlılığı..."
+                                    placeholder="Örn. maliyet artışı veya talep düşüşü"
                                 />
                             </label>
 

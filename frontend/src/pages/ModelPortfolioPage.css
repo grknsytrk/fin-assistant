@@ -1680,13 +1680,6 @@
     cursor: not-allowed;
 }
 
-.mp-thesis-templates-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.32rem;
-    flex-wrap: wrap;
-}
-
 /* Selected Stock & Auto-Filled Multiples Banner */
 .mp-selected-stock-banner {
     display: flex;
@@ -2033,65 +2026,53 @@
     font-size: 0.72rem;
 }
 
-/* Explained Catalyst Grid inside Editor */
-.mp-catalyst-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.45rem;
+.mp-catalyst-choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
 }
 
-.mp-catalyst-card {
-    display: flex;
-    flex-direction: column;
-    gap: 0.16rem;
-    padding: 0.48rem 0.65rem;
-    border-radius: var(--border-radius);
+.mp-catalyst-choice {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.32rem;
+    padding: 0.42rem 0.65rem;
+    border-radius: 999px;
     border: 1px solid var(--surface-border);
     background: var(--bg-color);
-    color: var(--text-primary);
-    text-align: left;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.73rem;
     cursor: pointer;
     transition: all 0.12s ease;
 }
 
-.mp-catalyst-card:hover {
-    border-color: #2f3848;
-    background: var(--surface-hover);
-}
-
-.mp-catalyst-card.active {
-    background: rgba(59, 130, 246, 0.12);
+.mp-catalyst-choice:hover {
     border-color: var(--accent-color);
-}
-
-.mp-catalyst-card-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.4rem;
-}
-
-.mp-catalyst-card-top strong {
-    font-size: 0.76rem;
-    font-weight: 600;
     color: var(--text-primary);
 }
 
-.mp-catalyst-card.active .mp-catalyst-card-top strong {
-    color: #93c5fd;
+.mp-catalyst-choice:focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
 }
 
-.mp-catalyst-card span {
-    font-size: 0.68rem;
-    font-weight: 400;
-    color: var(--text-muted);
-    line-height: 1.32;
+.mp-catalyst-choice.active {
+    background: rgba(59, 130, 246, 0.12);
+    border-color: var(--accent-color);
+    color: #93c5fd;
 }
 
 .mp-custom-catalyst-row {
     display: flex;
     gap: 0.45rem;
     margin-top: 0.35rem;
+}
+
+.mp-custom-catalyst-row input {
+    flex: 1;
+    width: auto;
+    min-width: 0;
 }
 
 .mp-form-error {
@@ -2190,8 +2171,7 @@
     .mp-closed-scorecard,
     .mp-form-grid-2,
     .mp-form-grid-3,
-    .mp-form-grid-4,
-    .mp-catalyst-grid {
+    .mp-form-grid-4 {
         grid-template-columns: 1fr;
     }
 }
