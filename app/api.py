@@ -23,6 +23,7 @@ from app.api_runtime import (
     RequestRateLimitMiddleware,
     _cache_status,
     close_postgres_pool,
+    configure_application_logging,
     database_enabled,
     ensure_financial_snapshot_schema,
     ensure_json_cache_schema,
@@ -53,6 +54,9 @@ def bootstrap_application_storage() -> None:
     creation or waiting on Supabase statement timeouts.
     """
 
+    # Both the ASGI lifespan and the Gradio entrypoint call this function, so
+    # this is the one place where operational logging levels are applied.
+    configure_application_logging()
     ensure_json_cache_schema()
     ensure_refresh_lease_schema()
     ensure_kap_flow_schema()

@@ -115,6 +115,13 @@ CONFIG = load_config(ROOT / "config.yaml")
 
 LOGGER = logging.getLogger("uvicorn.error")
 
+
+def configure_application_logging() -> None:
+    """Keep low-volume operational metrics visible without verbose logging."""
+
+    logging.getLogger("app.fund_service").setLevel(logging.INFO)
+
+
 _ADMIN_REFRESH_TOKEN_ENV = "RAGFIN_ADMIN_REFRESH_TOKEN"
 
 _MARKET_SWR_STALE_TTL_SECONDS = int(os.getenv("RAGFIN_MARKET_SWR_STALE_TTL_SECONDS", "120"))
