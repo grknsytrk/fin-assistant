@@ -31,6 +31,7 @@ import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api/client';
 import type {
     MarketStockRow,
+    MarketStocksResponse,
     MarketUniverseRow,
     ModelPortfolioChangelogItem,
     ModelPortfolioPerformancePoint,
@@ -75,6 +76,34 @@ const PERF_RANGES: Array<{ id: PerfRange; label: string }> = [
     { id: '1y', label: '1Y' },
     { id: 'all', label: 'Tüm Veri' },
 ];
+
+function quoteTimestampAtLeastAsRecent(candidate: string | null | undefined, current: string | null | undefined): boolean {
+    if (!candidate) return false;
+    if (!current) return true;
+    const candidateTime = Date.parse(candidate);
+    const currentTime = Date.parse(current);
+    if (Number.isFinite(candidateTime) && Number.isFinite(currentTime)) {
+        return candidateTime >= currentTime;
+    }
+    return candidate >= current;
+}
+
+function mergeLiveMarketRows(
+    current: Map<string, MarketStockRow>,
+    payload: MarketStocksResponse,
+): Map<string, MarketStockRow> {
+    const next = new Map(current);
+    for (const row of payload.rows || []) {
+        const symbol = String(row.symbol || row.company || '').trim().toUpperCase();
+        if (!symbol || row.price == null || row.price <= 0) continue;
+        const candidate = { ...row, price_as_of: row.price_as_of || payload.as_of };
+        const existing = next.get(symbol);
+        if (!existing || quoteTimestampAtLeastAsRecent(candidate.price_as_of, existing.price_as_of)) {
+            next.set(symbol, candidate);
+        }
+    }
+    return next;
+}
 
 const RATING_OPTIONS: ExplainedOption[] = [
     {
@@ -400,8 +429,11 @@ export default function ModelPortfolioPage() {
         () => apiClient.getCachedMarketUniverse('XUTUM')?.rows || [],
     );
     const [liveStockMap, setLiveStockMap] = useState<Map<string, MarketStockRow>>(() => {
-        const cached = apiClient.getCachedMarketStocks('XUTUM')?.rows || [];
-        return new Map(cached.map((r) => [String(r.symbol || r.company).toUpperCase(), r]));
+        const cached = apiClient.getCachedMarketStocks('XUTUM');
+        return new Map((cached?.rows || []).map((row) => {
+            const symbol = String(row.symbol || row.company).toUpperCase();
+            return [symbol, { ...row, price_as_of: row.price_as_of || cached?.as_of || null }];
+        }));
     });
 
     // Model Portfolio state
@@ -448,26 +480,45 @@ export default function ModelPortfolioPage() {
     const [editingPosition, setEditingPosition] = useState<ModelPortfolioPosition | null>(null);
     const [closingPosition, setClosingPosition] = useState<ModelPortfolioPosition | null>(null);
 
-    // Subscribe to MarketWatchRail's 3-second XUTUM quote updates (zero extra polling!)
     useEffect(() => {
-        if (!xu100UniverseRows.length) {
-            apiClient
-                .marketUniverse({ index: 'XUTUM' })
-                .then((res) => setXu100UniverseRows(res.rows || []))
-                .catch(() => {});
-        }
-        return apiClient.subscribeMarketStocks((index, payload) => {
-            if (index !== 'XUTUM' && index !== 'XU100') return;
-            setLiveStockMap((prev) => {
-                const next = new Map(prev);
-                for (const row of payload.rows || []) {
-                    const sym = String(row.symbol || row.company || '').toUpperCase();
-                    if (sym) next.set(sym, row);
-                }
-                return next;
-            });
-        });
+        if (xu100UniverseRows.length) return;
+        let cancelled = false;
+        apiClient
+            .marketUniverse({ index: 'XUTUM' })
+            .then((res) => {
+                if (!cancelled) setXu100UniverseRows(res.rows || []);
+            })
+            .catch(() => {});
+        return () => {
+            cancelled = true;
+        };
     }, [xu100UniverseRows.length]);
+
+    // Reuse the shared XUTUM snapshot and keep its ref-counted live stream active on this page.
+    useEffect(() => {
+        let cancelled = false;
+        const applyPayload = (payload: MarketStocksResponse) => {
+            setLiveStockMap((prev) => mergeLiveMarketRows(prev, payload));
+        };
+        const unsubscribe = apiClient.subscribeMarketStocks((index, payload) => {
+            if (index !== 'XUTUM' && index !== 'XU100') return;
+            applyPayload(payload);
+        });
+        const releaseStream = apiClient.retainMarketStocksStream('XUTUM');
+
+        apiClient
+            .marketStocks({ index: 'XUTUM' })
+            .then((payload) => {
+                if (!cancelled) applyPayload(payload);
+            })
+            .catch(() => {});
+
+        return () => {
+            cancelled = true;
+            unsubscribe();
+            releaseStream();
+        };
+    }, []);
 
     const loadPerformance = useCallback((version: number, refresh = false) => {
         setPerfLoading(true);
@@ -509,9 +560,14 @@ export default function ModelPortfolioPage() {
         const currentXu100 = portfolioData?.current_xu100 ?? null;
         return rawList.map((pos) => {
             const liveRow = liveStockMap.get(pos.symbol);
-            const livePrice = liveRow?.price != null && liveRow.price > 0 ? liveRow.price : pos.current_price;
-            const liveChangePct = liveRow?.change_pct != null ? liveRow.change_pct : pos.daily_change_pct;
-            const livePriceAsOf = liveRow?.price_as_of ?? pos.price_as_of ?? null;
+            const liveQuoteIsCurrent = Boolean(
+                liveRow?.price != null
+                && liveRow.price > 0
+                && quoteTimestampAtLeastAsRecent(liveRow.price_as_of, pos.price_as_of),
+            );
+            const livePrice = liveQuoteIsCurrent ? liveRow!.price : pos.current_price;
+            const liveChangePct = liveQuoteIsCurrent ? liveRow!.change_pct : pos.daily_change_pct;
+            const livePriceAsOf = liveQuoteIsCurrent ? liveRow!.price_as_of : pos.price_as_of;
             if (livePrice == null || livePrice === pos.current_price) {
                 if (liveChangePct === pos.daily_change_pct && livePriceAsOf === pos.price_as_of) return pos;
                 return { ...pos, daily_change_pct: liveChangePct, price_as_of: livePriceAsOf };
