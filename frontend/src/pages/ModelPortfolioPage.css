@@ -866,6 +866,14 @@
     font-weight: 600;
 }
 
+.mp-entry-date {
+    white-space: nowrap;
+}
+
+.mp-current-price .mp-sub-cell {
+    white-space: nowrap;
+}
+
 /* Target Price Progress Bar Column */
 .mp-col-target {
     min-width: 165px;
@@ -2146,6 +2154,15 @@
         grid-template-columns: 1fr;
     }
 
+    .mp-closed-scorecard,
+    .mp-form-grid-2,
+    .mp-form-grid-3,
+    .mp-form-grid-4 {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 1220px) {
     .mp-table-scroll-hint {
         display: block;
         margin: 0.65rem 0.8rem 0.25rem;
@@ -2154,7 +2171,7 @@
     }
 
     .mp-active-table {
-        min-width: 1080px;
+        min-width: 1180px;
     }
 
     .mp-closed-table {
@@ -2172,13 +2189,6 @@
     .mp-table th:first-child {
         z-index: 2;
         background: #0a0c0f;
-    }
-
-    .mp-closed-scorecard,
-    .mp-form-grid-2,
-    .mp-form-grid-3,
-    .mp-form-grid-4 {
-        grid-template-columns: 1fr;
     }
 }
 

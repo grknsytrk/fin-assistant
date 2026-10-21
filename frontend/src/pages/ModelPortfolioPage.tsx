@@ -273,6 +273,21 @@ function formatDateTimeTR(iso: string | null | undefined): string {
     });
 }
 
+function formatCompactDateTR(iso: string | null | undefined): string {
+    if (!iso) return '—';
+    const d = new Date(iso.length === 10 ? `${iso}T00:00:00` : iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleDateString('tr-TR', { day: '2-digit', month: '2-digit', year: '2-digit' });
+}
+
+function formatCompactDateTimeTR(iso: string | null | undefined): string {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const time = d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+    return `${formatCompactDateTR(iso)} ${time}`;
+}
+
 function useAccessibleDialog<T extends HTMLElement>(active: boolean, onClose: () => void) {
     const dialogRef = useRef<T | null>(null);
     const onCloseRef = useRef(onClose);
@@ -1134,12 +1149,12 @@ export default function ModelPortfolioPage() {
                                                                 </div>
                                                             </div>
                                                         </td>
-                                                        <td className="num mp-mono">
-                                                            <div>{formatDateTR(pos.entry_date)}</div>
+                                                        <td className="num mp-mono mp-entry-date">
+                                                            <div>{formatCompactDateTR(pos.entry_date)}</div>
                                                             <span className="mp-sub-cell">{pos.holding_days} gün</span>
                                                         </td>
                                                         <td className="num mp-mono">{formatPrice(pos.entry_price)}</td>
-                                                        <td className="num mp-mono">
+                                                        <td className="num mp-mono mp-current-price">
                                                             <div className="mp-price-main">{formatPrice(pos.current_price)}</div>
                                                             {pos.daily_change_pct != null && (
                                                                 <span className={`mp-sub-cell ${toneClass(pos.daily_change_pct)}`}>
@@ -1147,7 +1162,7 @@ export default function ModelPortfolioPage() {
                                                                 </span>
                                                             )}
                                                             {pos.price_as_of && (
-                                                                <span className="mp-sub-cell">Fiyat: {formatDateTimeTR(pos.price_as_of)}</span>
+                                                                <span className="mp-sub-cell">Fiyat: {formatCompactDateTimeTR(pos.price_as_of)}</span>
                                                             )}
                                                         </td>
                                                         <td className="mp-col-target">
