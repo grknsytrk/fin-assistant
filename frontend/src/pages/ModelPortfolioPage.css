@@ -497,6 +497,12 @@
     text-align: center;
 }
 
+.mp-chart-error-state {
+    flex-direction: column;
+    gap: 0.7rem;
+    color: #fca5a5;
+}
+
 /* Allocation Donut & Return Attribution */
 .mp-allocation-body {
     display: grid;

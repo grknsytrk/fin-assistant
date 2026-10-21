@@ -414,6 +414,7 @@ export default function ModelPortfolioPage() {
     // Performance chart state (loaded separately for instant table first-paint)
     const [perfPoints, setPerfPoints] = useState<ModelPortfolioPerformancePoint[]>([]);
     const [perfLoading, setPerfLoading] = useState(false);
+    const [perfError, setPerfError] = useState<string | null>(null);
     const [selectedRange, setSelectedRange] = useState<PerfRange>('all');
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const [activeDonutIndex, setActiveDonutIndex] = useState<number | null>(null);
@@ -468,6 +469,19 @@ export default function ModelPortfolioPage() {
         });
     }, [xu100UniverseRows.length]);
 
+    const loadPerformance = useCallback((version: number, refresh = false) => {
+        setPerfLoading(true);
+        setPerfError(null);
+        return apiClient
+            .modelPortfolioPerformance({ version, refresh })
+            .then((perf) => setPerfPoints(perf.points || []))
+            .catch((err: unknown) => {
+                setPerfPoints([]);
+                setPerfError(err instanceof Error ? err.message : 'Performans grafiği verisi alınamadı.');
+            })
+            .finally(() => setPerfLoading(false));
+    }, []);
+
     const loadPortfolio = useCallback((refresh = false) => {
         if (!portfolioData) setLoading(true);
         setError(null);
@@ -475,20 +489,14 @@ export default function ModelPortfolioPage() {
             .modelPortfolio({ refresh })
             .then((data) => {
                 setPortfolioData(data);
-                setPerfLoading(true);
-                return apiClient.modelPortfolioPerformance({ version: data.version, refresh });
-            })
-            .then((perf) => {
-                setPerfPoints(perf.points || []);
+                setLoading(false);
+                void loadPerformance(data.version, refresh);
             })
             .catch((err: unknown) => {
                 setError(err instanceof Error ? err.message : 'Model portföy verisi alınamadı.');
             })
-            .finally(() => {
-                setLoading(false);
-                setPerfLoading(false);
-            });
-    }, [portfolioData]);
+            .finally(() => setLoading(false));
+    }, [loadPerformance, portfolioData]);
 
     useEffect(() => {
         loadPortfolio(false);
@@ -644,12 +652,7 @@ export default function ModelPortfolioPage() {
 
     const handlePortfolioMutated = (nextData: ModelPortfolioResponse) => {
         setPortfolioData(nextData);
-        setPerfLoading(true);
-        apiClient
-            .modelPortfolioPerformance({ version: nextData.version, refresh: true })
-            .then((perf) => setPerfPoints(perf.points || []))
-            .catch(() => {})
-            .finally(() => setPerfLoading(false));
+        void loadPerformance(nextData.version, true);
     };
 
     const handleDeletePosition = async (position: ModelPortfolioPosition) => {
@@ -838,6 +841,10 @@ export default function ModelPortfolioPage() {
                                 <ModelPortfolioPerformanceChart
                                     points={slicedPerfPoints}
                                     loading={perfLoading}
+                                    error={perfError}
+                                    onRetry={() => {
+                                        if (portfolioData) void loadPerformance(portfolioData.version, true);
+                                    }}
                                     hoverIndex={hoverIndex}
                                     onHoverIndexChange={setHoverIndex}
                                 />
@@ -1487,11 +1494,15 @@ export default function ModelPortfolioPage() {
 function ModelPortfolioPerformanceChart({
     points,
     loading,
+    error,
+    onRetry,
     hoverIndex,
     onHoverIndexChange,
 }: {
     points: ModelPortfolioPerformancePoint[];
     loading: boolean;
+    error: string | null;
+    onRetry: () => void;
     hoverIndex: number | null;
     onHoverIndexChange: (idx: number | null) => void;
 }) {
@@ -1507,10 +1518,20 @@ function ModelPortfolioPerformanceChart({
     if (loading && points.length === 0) {
         return <div className="mp-chart-empty">Kümülatif performans serisi hazırlanıyor...</div>;
     }
+    if (error) {
+        return (
+            <div className="mp-chart-empty mp-chart-error-state" role="alert">
+                <span>{error}</span>
+                <button type="button" className="mp-btn mp-btn-subtle" onClick={onRetry}>
+                    <RefreshCw size={13} /> Grafiği Yenile
+                </button>
+            </div>
+        );
+    }
     if (points.length < 2) {
         return (
             <div className="mp-chart-empty">
-                Seçili dönem için karşılaştırmalı grafik verisi bekleniyor (en az 2 işlem günü gereklidir).
+                Seçili dönemde grafik için en az 2 işlem günü verisi gerekir. Bu durum portföy işlemlerini etkilemez.
             </div>
         );
     }
@@ -1699,9 +1720,10 @@ function ModelPortfolioDonut({
     const segments = items.map((item, idx) => {
         const fraction = Math.max(0, item.weight) / total;
         const length = fraction * circumference;
-        const offset = circumference - accumulated;
+        const gap = Math.max(0, circumference - length);
+        const offset = -accumulated;
         accumulated += length;
-        return { item, idx, length, offset };
+        return { item, idx, length, gap, offset };
     });
 
     const activeItem = activeIndex != null ? items[activeIndex] : null;
@@ -1719,7 +1741,7 @@ function ModelPortfolioDonut({
                         fill="none"
                         stroke={seg.item.color}
                         strokeWidth={activeIndex === seg.idx ? 18 : 14}
-                        strokeDasharray={`${seg.length} ${circumference}`}
+                        strokeDasharray={`${seg.length} ${seg.gap}`}
                         strokeDashoffset={seg.offset}
                         transform="rotate(-90 80 80)"
                         className="mp-donut-segment"
@@ -2418,8 +2440,18 @@ function ModelPortfolioEditorModal({
             setFormError('Geçerli bir hedef fiyat girin.');
             return;
         }
+        if (!isEdit && availableWeightPct <= 0) {
+            setFormError('Portföy ağırlıkları zaten %100. Yeni hisse eklemek için önce mevcut ağırlıkları azaltın.');
+            return;
+        }
         if (!Number.isFinite(wp) || wp <= 0 || wp > 100) {
             setFormError('Ağırlık %0 ile %100 arasında olmalıdır.');
+            return;
+        }
+        if (wp > availableWeightPct + 1e-6) {
+            setFormError(
+                `Kullanılabilir portföy payı %${availableWeightPct.toFixed(1)}. Yeni hisse eklemek için önce mevcut ağırlıkları azaltın.`,
+            );
             return;
         }
 
@@ -2791,7 +2823,7 @@ function ModelPortfolioEditorModal({
                                     <div className="mp-field-label-row">
                                         <span className="mp-field-label">Portföy Ağırlığı (%) *</span>
                                         <span className="mp-field-micro-hint mp-mono">
-                                            Kalan Nakit: %{remainingCashAfterWeight.toFixed(1)}
+                                            Kalan Pay: %{remainingCashAfterWeight.toFixed(1)}
                                         </span>
                                     </div>
                                     <input
@@ -2822,6 +2854,11 @@ function ModelPortfolioEditorModal({
                                             Maks (%{availableWeightPct.toFixed(0)})
                                         </button>
                                     </div>
+                                    {!isEdit && availableWeightPct <= 0 && (
+                                        <span className="mp-field-micro-hint">
+                                            Portföy %100 dolu; yeni hisse eklemek için mevcut ağırlıklardan pay açın.
+                                        </span>
+                                    )}
                                 </div>
                             </div>
                         </div>
