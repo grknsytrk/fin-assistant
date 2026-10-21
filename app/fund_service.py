@@ -144,6 +144,10 @@ JSON_CACHE_LOCAL_READ_TTL_SECONDS = max(
     0,
     int(os.getenv("RAGFIN_JSON_CACHE_LOCAL_READ_TTL_SECONDS", "60")),
 )
+JSON_CACHE_METRICS_FLUSH_SECONDS = max(
+    1.0,
+    float(os.getenv("RAGFIN_JSON_CACHE_METRICS_FLUSH_SECONDS", "300")),
+)
 FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS = int(
     os.getenv("RAGFIN_FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS", "60")
 )
@@ -199,6 +203,17 @@ _JSON_CACHE_READ_STATE: Dict[str, Tuple[float, Optional[Tuple[int, int]]]] = {}
 _JSON_CACHE_READ_STATE_LOCK = threading.RLock()
 _JSON_CACHE_READ_STATE_MAX_ENTRIES = 4096
 _JSON_CACHE_REMOTE_READ_LOCKS = tuple(threading.Lock() for _ in range(16))
+_JSON_CACHE_METRICS_LOCK = threading.Lock()
+_JSON_CACHE_METRICS_SINCE = time.monotonic()
+_JSON_CACHE_METRICS: Dict[str, int] = {
+    "local_hits": 0,
+    "coalesced_hits": 0,
+    "remote_reads": 0,
+    "remote_hits": 0,
+    "remote_misses": 0,
+    "fallback_local": 0,
+    "remote_bytes": 0,
+}
 _SNAPSHOT_REFRESH_LOCK = threading.Lock()
 _FUND_PRICES_SCHEMA_LOCK = threading.Lock()
 _FUND_PRICES_SCHEMA_READY = False
@@ -1173,9 +1188,76 @@ def _remember_json_cache_read(path: Path) -> None:
         _JSON_CACHE_READ_STATE[key] = state
 
 
+def _json_cache_metrics_snapshot_locked(now: float) -> Optional[Tuple[float, Dict[str, int]]]:
+    """Return and reset the counter window when it is due, else ``None``."""
+
+    global _JSON_CACHE_METRICS_SINCE
+    elapsed = now - _JSON_CACHE_METRICS_SINCE
+    if elapsed < JSON_CACHE_METRICS_FLUSH_SECONDS:
+        return None
+    snapshot = dict(_JSON_CACHE_METRICS) if any(_JSON_CACHE_METRICS.values()) else None
+    if snapshot is not None:
+        for key in _JSON_CACHE_METRICS:
+            _JSON_CACHE_METRICS[key] = 0
+    _JSON_CACHE_METRICS_SINCE = now
+    return (elapsed, snapshot) if snapshot is not None else None
+
+
+def _log_json_cache_metrics(pending: Optional[Tuple[float, Dict[str, int]]]) -> None:
+    if pending is None:
+        return
+    elapsed, snapshot = pending
+    LOGGER.info(
+        "json cache reads window_s=%.0f local_hits=%d coalesced_hits=%d "
+        "remote_reads=%d remote_hits=%d remote_misses=%d fallback_local=%d "
+        "approx_payload_kib=%.1f",
+        elapsed,
+        snapshot["local_hits"],
+        snapshot["coalesced_hits"],
+        snapshot["remote_reads"],
+        snapshot["remote_hits"],
+        snapshot["remote_misses"],
+        snapshot["fallback_local"],
+        snapshot["remote_bytes"] / 1024.0,
+    )
+
+
+def _record_json_cache_local_hit(*, coalesced: bool) -> None:
+    now = time.monotonic()
+    with _JSON_CACHE_METRICS_LOCK:
+        _JSON_CACHE_METRICS["local_hits"] += 1
+        if coalesced:
+            _JSON_CACHE_METRICS["coalesced_hits"] += 1
+        pending = _json_cache_metrics_snapshot_locked(now)
+    _log_json_cache_metrics(pending)
+
+
+def _record_json_cache_remote_result(
+    *,
+    hit: bool,
+    fallback_local: bool,
+    approx_bytes: int = 0,
+) -> None:
+    now = time.monotonic()
+    with _JSON_CACHE_METRICS_LOCK:
+        _JSON_CACHE_METRICS["remote_reads"] += 1
+        if hit:
+            _JSON_CACHE_METRICS["remote_hits"] += 1
+            _JSON_CACHE_METRICS["remote_bytes"] += max(0, int(approx_bytes))
+        else:
+            _JSON_CACHE_METRICS["remote_misses"] += 1
+            if fallback_local:
+                _JSON_CACHE_METRICS["fallback_local"] += 1
+        pending = _json_cache_metrics_snapshot_locked(now)
+    _log_json_cache_metrics(pending)
+
+
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
+    # Only timestamps and file signatures are kept per cache key; payloads stay
+    # on disk so a cold container does not hydrate every document into memory.
     local_payload = _read_local_json(path)
     if _json_cache_read_is_fresh(path):
+        _record_json_cache_local_hit(coalesced=False)
         return local_payload
 
     # Coalesce revalidations for the same path. A striped lock keeps this
@@ -1185,23 +1267,50 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     with read_lock:
         local_payload = _read_local_json(path)
         if _json_cache_read_is_fresh(path):
+            _record_json_cache_local_hit(coalesced=True)
             return local_payload
 
-        remote_payload = read_json_cache(path)
+        try:
+            remote_payload = read_json_cache(path)
+        except Exception:
+            # app.database.read_json_cache already returns None on failures, but
+            # keep this boundary defensive so a remote problem never hides the
+            # local copy from callers.
+            LOGGER.warning("remote JSON cache read failed; using local copy", exc_info=True)
+            remote_payload = None
         if remote_payload is None:
             # Remember misses and temporary remote failures too, so a hot key
             # cannot turn into a Supabase query on every concurrent request.
             _remember_json_cache_read(path)
+            _record_json_cache_remote_result(
+                hit=False,
+                fallback_local=local_payload is not None,
+            )
             return local_payload
 
+        mirrored = True
         if remote_payload != local_payload:
             try:
                 _write_local_json(path, remote_payload)
             except OSError:
                 LOGGER.debug("Could not mirror remote JSON cache locally: %s", path, exc_info=True)
                 _remember_json_cache_read(path)
+                mirrored = False
         else:
             _remember_json_cache_read(path)
+
+        # The mirrored file size is a cheap proxy for the payload bytes; it is
+        # never used for cache decisions and is reported only in aggregate.
+        approx_bytes = 0
+        if mirrored:
+            signature = _json_cache_file_signature(path)
+            if signature is not None:
+                approx_bytes = signature[1]
+        _record_json_cache_remote_result(
+            hit=True,
+            fallback_local=False,
+            approx_bytes=approx_bytes,
+        )
         return remote_payload
 
 

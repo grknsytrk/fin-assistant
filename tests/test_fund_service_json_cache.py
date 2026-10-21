@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
+from app import cache as cache_module
 from app import fund_service
 
 
@@ -16,13 +19,23 @@ def _isolated_read_state(monkeypatch):
     """Keep the module-level read bookkeeping from leaking between tests."""
 
     monkeypatch.setattr(fund_service, "JSON_CACHE_LOCAL_READ_TTL_SECONDS", 60)
+    monkeypatch.setattr(fund_service, "JSON_CACHE_METRICS_FLUSH_SECONDS", 3600.0)
     with fund_service._JSON_CACHE_READ_STATE_LOCK:
         fund_service._JSON_CACHE_READ_STATE.clear()
+    with fund_service._JSON_CACHE_METRICS_LOCK:
+        for key in fund_service._JSON_CACHE_METRICS:
+            fund_service._JSON_CACHE_METRICS[key] = 0
+        fund_service._JSON_CACHE_METRICS_SINCE = time.monotonic()
     try:
         yield
     finally:
         with fund_service._JSON_CACHE_READ_STATE_LOCK:
             fund_service._JSON_CACHE_READ_STATE.clear()
+
+
+def _metrics() -> dict[str, int]:
+    with fund_service._JSON_CACHE_METRICS_LOCK:
+        return dict(fund_service._JSON_CACHE_METRICS)
 
 
 class _FakeRemoteCache:
@@ -169,18 +182,23 @@ def test_write_local_json_makes_next_read_local_only(tmp_path, monkeypatch) -> N
 
 def test_read_json_coalesces_concurrent_remote_reads(tmp_path, monkeypatch) -> None:
     path = tmp_path / "cache" / "shared.json"
+    remote = _FakeRemoteCache({"status": "ok", "source": "remote"})
+    monkeypatch.setattr(fund_service, "read_json_cache", remote)
+
+    # Warm the key, then force the TTL to expire so every thread has to
+    # revalidate; only one of them may hit Supabase.
+    assert fund_service._read_json(path) == {"status": "ok", "source": "remote"}
+    _expire_read_state(path)
+
     remote_started = threading.Event()
     release_remote = threading.Event()
-    call_count = 0
-    call_count_lock = threading.Lock()
+    original_remote = remote
 
     def slow_remote(cache_path: Path):
-        nonlocal call_count
-        with call_count_lock:
-            call_count += 1
+        payload = original_remote(cache_path)
         remote_started.set()
         assert release_remote.wait(2)
-        return {"status": "ok", "source": "remote"}
+        return payload
 
     monkeypatch.setattr(fund_service, "read_json_cache", slow_remote)
 
@@ -197,7 +215,148 @@ def test_read_json_coalesces_concurrent_remote_reads(tmp_path, monkeypatch) -> N
         results = [future.result(timeout=5) for future in futures]
 
     assert results == [{"status": "ok", "source": "remote"}] * 6
-    assert call_count == 1
+    assert len(remote.calls) == 2  # one warm-up read plus one revalidation
+    assert _metrics()["local_hits"] == 5
+
+
+def test_read_json_keeps_cache_files_independent(tmp_path, monkeypatch) -> None:
+    path_a = tmp_path / "cache" / "a.json"
+    path_b = tmp_path / "cache" / "b.json"
+    payloads = {
+        str(path_a): {"fund": "AAA"},
+        str(path_b): {"fund": "BBB"},
+    }
+    calls: list[Path] = []
+
+    def remote(cache_path: Path):
+        calls.append(cache_path)
+        return copy.deepcopy(payloads[str(cache_path)])
+
+    monkeypatch.setattr(fund_service, "read_json_cache", remote)
+
+    assert fund_service._read_json(path_a) == {"fund": "AAA"}
+    assert fund_service._read_json(path_b) == {"fund": "BBB"}
+    assert fund_service._read_json(path_a) == {"fund": "AAA"}
+    assert fund_service._read_json(path_b) == {"fund": "BBB"}
+
+    assert calls == [path_a, path_b]
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "unavailable"),
+    [("redis", False), ("memory", True)],
+)
+def test_json_cache_reads_ignore_response_cache_backend_state(
+    tmp_path, monkeypatch, backend_name, unavailable
+) -> None:
+    """The JSON L1 must behave the same whether Redis works or fell back."""
+
+    class StubResponseCache:
+        name = backend_name
+        last_error = "redis unavailable" if unavailable else None
+
+    monkeypatch.setattr(cache_module, "_BACKEND", StubResponseCache())
+    monkeypatch.setattr(cache_module, "_REQUESTED_BACKEND", "redis")
+
+    path = tmp_path / "cache" / "fund.json"
+    remote = _FakeRemoteCache({"status": "ok", "rows": ["cached"]})
+    monkeypatch.setattr(fund_service, "read_json_cache", remote)
+
+    assert fund_service._read_json(path) == {"status": "ok", "rows": ["cached"]}
+    assert fund_service._read_json(path) == {"status": "ok", "rows": ["cached"]}
+
+    assert len(remote.calls) == 1
+    metrics = _metrics()
+    assert metrics["remote_reads"] == 1
+    assert metrics["local_hits"] == 1
+
+
+def test_json_cache_metrics_record_hits_and_single_remote_read(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "cache" / "fund.json"
+    remote = _FakeRemoteCache({"status": "ok", "rows": ["x"]})
+    monkeypatch.setattr(fund_service, "read_json_cache", remote)
+
+    fund_service._read_json(path)
+    fund_service._read_json(path)
+    fund_service._read_json(path)
+
+    metrics = _metrics()
+    assert metrics["remote_reads"] == 1
+    assert metrics["remote_hits"] == 1
+    assert metrics["remote_misses"] == 0
+    assert metrics["fallback_local"] == 0
+    assert metrics["local_hits"] == 2
+    assert metrics["coalesced_hits"] == 0
+    assert metrics["remote_bytes"] > 0
+
+
+def test_read_json_uses_local_copy_when_remote_raises(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "cache" / "fund.json"
+    _write_json_file(path, {"status": "ok", "rows": ["local"]})
+
+    def failing_remote(_cache_path: Path):
+        raise RuntimeError("supabase unavailable")
+
+    monkeypatch.setattr(fund_service, "read_json_cache", failing_remote)
+
+    assert fund_service._read_json(path) == {"status": "ok", "rows": ["local"]}
+    metrics = _metrics()
+    assert metrics["remote_misses"] == 1
+    assert metrics["fallback_local"] == 1
+
+
+def test_json_cache_metrics_record_remote_miss_and_local_fallback(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "cache" / "fund.json"
+    _write_json_file(path, {"status": "ok", "rows": ["local"]})
+    monkeypatch.setattr(fund_service, "read_json_cache", _FakeRemoteCache(None))
+
+    assert fund_service._read_json(path) == {"status": "ok", "rows": ["local"]}
+
+    metrics = _metrics()
+    assert metrics["remote_reads"] == 1
+    assert metrics["remote_hits"] == 0
+    assert metrics["remote_misses"] == 1
+    assert metrics["fallback_local"] == 1
+    assert metrics["local_hits"] == 0
+    assert metrics["remote_bytes"] == 0
+
+
+def test_json_cache_metrics_flush_emits_one_anonymous_aggregate(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    path = tmp_path / "cache" / "fund.json"
+    remote = _FakeRemoteCache({"status": "ok", "rows": ["x"]})
+    monkeypatch.setattr(fund_service, "read_json_cache", remote)
+
+    fund_service._read_json(path)
+    fund_service._read_json(path)
+    fund_service._read_json(path)
+
+    monkeypatch.setattr(fund_service, "JSON_CACHE_METRICS_FLUSH_SECONDS", 1.0)
+    with fund_service._JSON_CACHE_METRICS_LOCK:
+        fund_service._JSON_CACHE_METRICS_SINCE -= 2
+    with caplog.at_level(logging.INFO, logger=fund_service.LOGGER.name):
+        fund_service._read_json(path)
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "json cache reads" in record.getMessage()
+    ]
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert "local_hits=3" in message
+    assert "remote_reads=1" in message
+    assert "remote_hits=1" in message
+    assert "remote_misses=0" in message
+    assert "fallback_local=0" in message
+    assert "approx_payload_kib=" in message
+    assert str(path) not in message
+    assert "fund.json" not in message
+
+    assert _metrics()["local_hits"] == 0
+    assert _metrics()["remote_reads"] == 0
 
 
 def test_read_state_eviction_stays_bounded(tmp_path, monkeypatch) -> None:
