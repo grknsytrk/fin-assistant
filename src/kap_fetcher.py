@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from app.database import read_json_cache, write_json_cache
+from app.json_cache import read_json_cache_local_first, write_local_json
 
 if TYPE_CHECKING:  # pragma: no cover
     from src.config import KapConfig
@@ -694,20 +695,13 @@ def _mark_live_disclosure_check_failed(cache_path: Path, payload: Dict[str, Any]
 
 
 def _read_cache(path: Path) -> Optional[Dict[str, Any]]:
-    remote_payload = read_json_cache(path)
-    if remote_payload is not None:
-        return remote_payload
-    try:
-        if not path.exists():
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    return read_json_cache_local_first(path, remote_reader=read_json_cache, reader="kap")
 
 
 def _write_cache(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Update the local mirror and its L1 signature before the remote write so a
+    # reader in this process sees the new payload immediately.
+    write_local_json(path, payload)
     write_json_cache(path, payload)
 
 

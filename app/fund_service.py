@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import concurrent.futures
+import copy
 import hashlib
 import io
 import json
@@ -15,6 +16,7 @@ import subprocess
 import threading
 import time
 import unicodedata
+from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
@@ -25,6 +27,7 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
+from app import json_cache as json_cache_store
 from app.database import (
     connect_postgres,
     database_enabled,
@@ -140,14 +143,6 @@ TEFAS_OPEN_ONLY = os.getenv("RAGFIN_TEFAS_OPEN_ONLY", "1").strip().lower() not i
 FUNDS_SNAPSHOT_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_TTL_SECONDS", str(24 * 60 * 60)))
 FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS", "300"))
 FUNDS_MAX_LOOKBACK_CALENDAR_DAYS = int(os.getenv("RAGFIN_FUNDS_MAX_LOOKBACK_CALENDAR_DAYS", "14"))
-JSON_CACHE_LOCAL_READ_TTL_SECONDS = max(
-    0,
-    int(os.getenv("RAGFIN_JSON_CACHE_LOCAL_READ_TTL_SECONDS", "60")),
-)
-JSON_CACHE_METRICS_FLUSH_SECONDS = max(
-    1.0,
-    float(os.getenv("RAGFIN_JSON_CACHE_METRICS_FLUSH_SECONDS", "300")),
-)
 FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS = int(
     os.getenv("RAGFIN_FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS", "60")
 )
@@ -185,6 +180,14 @@ FUNDS_HISTORY_WARMUP_DAYS = int(os.getenv("RAGFIN_FUNDS_HISTORY_WARMUP_DAYS", "3
 FUNDS_FULL_HISTORY_START_DATE = os.getenv("RAGFIN_FUNDS_FULL_HISTORY_START_DATE", "2000-01-01").strip() or "2000-01-01"
 FUNDS_LIST_MIN_AUM = float(os.getenv("RAGFIN_FUNDS_LIST_MIN_AUM", "0"))
 FUND_PRICES_DB_FILENAME = os.getenv("RAGFIN_FUND_PRICES_DB_FILENAME", "fund_prices.sqlite3")
+FUND_PRICE_POINTS_CACHE_TTL_SECONDS = max(
+    0,
+    int(os.getenv("RAGFIN_FUND_PRICE_POINTS_CACHE_TTL_SECONDS", "60")),
+)
+FUND_PRICE_POINTS_CACHE_MAX_ENTRIES = 64
+FUND_PRICE_POINTS_CACHE_MAX_TOTAL_BYTES = 8 * 1024 * 1024
+FUND_PRICE_POINTS_CACHE_MAX_ENTRY_BYTES = 2 * 1024 * 1024
+FUND_PRICE_POINTS_CACHE_METRICS_FLUSH_SECONDS = 300.0
 FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS = max(
     0,
     int(os.getenv("RAGFIN_FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS", str(7 * 24 * 60 * 60))),
@@ -199,21 +202,6 @@ KAP_HOLDINGS_LOOKBACK_DAYS = int(os.getenv("RAGFIN_KAP_HOLDINGS_LOOKBACK_DAYS", 
 KAP_HOLDINGS_ATTACHMENT_TEXT_CACHE_VERSION = 2
 
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
-_JSON_CACHE_READ_STATE: Dict[str, Tuple[float, Optional[Tuple[int, int]]]] = {}
-_JSON_CACHE_READ_STATE_LOCK = threading.RLock()
-_JSON_CACHE_READ_STATE_MAX_ENTRIES = 4096
-_JSON_CACHE_REMOTE_READ_LOCKS = tuple(threading.Lock() for _ in range(16))
-_JSON_CACHE_METRICS_LOCK = threading.Lock()
-_JSON_CACHE_METRICS_SINCE = time.monotonic()
-_JSON_CACHE_METRICS: Dict[str, int] = {
-    "local_hits": 0,
-    "coalesced_hits": 0,
-    "remote_reads": 0,
-    "remote_hits": 0,
-    "remote_misses": 0,
-    "fallback_local": 0,
-    "remote_bytes": 0,
-}
 _SNAPSHOT_REFRESH_LOCK = threading.Lock()
 _FUND_PRICES_SCHEMA_LOCK = threading.Lock()
 _FUND_PRICES_SCHEMA_READY = False
@@ -222,6 +210,38 @@ _FUND_SNAPSHOT_COMMIT_LOCK = threading.Lock()
 _AUTO_FETCH_LOCK = threading.Lock()
 _AUTO_FETCH_IN_FLIGHT: Dict[str, threading.Event] = {}
 _AUTO_FETCH_NEGATIVE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+@dataclass
+class _FundPricePointsCacheEntry:
+    payload: List[Dict[str, Any]]
+    approx_bytes: int
+    expires_at: float
+
+
+@dataclass
+class _FundPricePointsReadInFlight:
+    event: threading.Event = field(default_factory=threading.Event)
+    payload: Optional[List[Dict[str, Any]]] = None
+    error: Optional[BaseException] = None
+
+
+_FUND_PRICE_POINTS_CACHE: "OrderedDict[Any, _FundPricePointsCacheEntry]" = OrderedDict()
+_FUND_PRICE_POINTS_CACHE_BYTES = 0
+_FUND_PRICE_POINTS_CACHE_LOCK = threading.RLock()
+_FUND_PRICE_POINTS_IN_FLIGHT: Dict[Any, _FundPricePointsReadInFlight] = {}
+_FUND_PRICE_POINTS_CACHE_GENERATION = 0
+_FUND_PRICE_POINTS_CACHE_METRICS_SINCE = time.monotonic()
+_FUND_PRICE_POINTS_CACHE_METRICS: Dict[str, int] = {
+    "hits": 0,
+    "misses": 0,
+    "coalesced_hits": 0,
+    "coalesced_errors": 0,
+    "evictions": 0,
+    "oversize_skips": 0,
+    "invalidations": 0,
+}
+
 TARGET_FUND_MANAGER_KEYWORDS = tuple(
     item.strip()
     for item in os.getenv(
@@ -1157,174 +1177,12 @@ def prune_fund_snapshot_rollback_copy(processed_dir: Path) -> bool:
     return True
 
 
-def _json_cache_file_signature(path: Path) -> Optional[Tuple[int, int]]:
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    mtime_ns = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
-    return int(mtime_ns), int(stat.st_size)
-
-
-def _json_cache_read_is_fresh(path: Path) -> bool:
-    ttl_seconds = JSON_CACHE_LOCAL_READ_TTL_SECONDS
-    if ttl_seconds <= 0:
-        return False
-    key = str(path)
-    with _JSON_CACHE_READ_STATE_LOCK:
-        state = _JSON_CACHE_READ_STATE.get(key)
-    if state is None or time.monotonic() - state[0] > ttl_seconds:
-        return False
-    return state[1] == _json_cache_file_signature(path)
-
-
-def _remember_json_cache_read(path: Path) -> None:
-    key = str(path)
-    state = (time.monotonic(), _json_cache_file_signature(path))
-    with _JSON_CACHE_READ_STATE_LOCK:
-        _JSON_CACHE_READ_STATE.pop(key, None)
-        if len(_JSON_CACHE_READ_STATE) >= _JSON_CACHE_READ_STATE_MAX_ENTRIES:
-            _JSON_CACHE_READ_STATE.pop(next(iter(_JSON_CACHE_READ_STATE)))
-        _JSON_CACHE_READ_STATE[key] = state
-
-
-def _json_cache_metrics_snapshot_locked(now: float) -> Optional[Tuple[float, Dict[str, int]]]:
-    """Return and reset the counter window when it is due, else ``None``."""
-
-    global _JSON_CACHE_METRICS_SINCE
-    elapsed = now - _JSON_CACHE_METRICS_SINCE
-    if elapsed < JSON_CACHE_METRICS_FLUSH_SECONDS:
-        return None
-    snapshot = dict(_JSON_CACHE_METRICS) if any(_JSON_CACHE_METRICS.values()) else None
-    if snapshot is not None:
-        for key in _JSON_CACHE_METRICS:
-            _JSON_CACHE_METRICS[key] = 0
-    _JSON_CACHE_METRICS_SINCE = now
-    return (elapsed, snapshot) if snapshot is not None else None
-
-
-def _log_json_cache_metrics(pending: Optional[Tuple[float, Dict[str, int]]]) -> None:
-    if pending is None:
-        return
-    elapsed, snapshot = pending
-    LOGGER.info(
-        "json cache reads window_s=%.0f local_hits=%d coalesced_hits=%d "
-        "remote_reads=%d remote_hits=%d remote_misses=%d fallback_local=%d "
-        "approx_payload_kib=%.1f",
-        elapsed,
-        snapshot["local_hits"],
-        snapshot["coalesced_hits"],
-        snapshot["remote_reads"],
-        snapshot["remote_hits"],
-        snapshot["remote_misses"],
-        snapshot["fallback_local"],
-        snapshot["remote_bytes"] / 1024.0,
-    )
-
-
-def _record_json_cache_local_hit(*, coalesced: bool) -> None:
-    now = time.monotonic()
-    with _JSON_CACHE_METRICS_LOCK:
-        _JSON_CACHE_METRICS["local_hits"] += 1
-        if coalesced:
-            _JSON_CACHE_METRICS["coalesced_hits"] += 1
-        pending = _json_cache_metrics_snapshot_locked(now)
-    _log_json_cache_metrics(pending)
-
-
-def _record_json_cache_remote_result(
-    *,
-    hit: bool,
-    fallback_local: bool,
-    approx_bytes: int = 0,
-) -> None:
-    now = time.monotonic()
-    with _JSON_CACHE_METRICS_LOCK:
-        _JSON_CACHE_METRICS["remote_reads"] += 1
-        if hit:
-            _JSON_CACHE_METRICS["remote_hits"] += 1
-            _JSON_CACHE_METRICS["remote_bytes"] += max(0, int(approx_bytes))
-        else:
-            _JSON_CACHE_METRICS["remote_misses"] += 1
-            if fallback_local:
-                _JSON_CACHE_METRICS["fallback_local"] += 1
-        pending = _json_cache_metrics_snapshot_locked(now)
-    _log_json_cache_metrics(pending)
-
-
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
-    # Only timestamps and file signatures are kept per cache key; payloads stay
-    # on disk so a cold container does not hydrate every document into memory.
-    local_payload = _read_local_json(path)
-    if _json_cache_read_is_fresh(path):
-        _record_json_cache_local_hit(coalesced=False)
-        return local_payload
-
-    # Coalesce revalidations for the same path. A striped lock keeps this
-    # bookkeeping bounded even when the cache contains one file per fund.
-    key = str(path)
-    read_lock = _JSON_CACHE_REMOTE_READ_LOCKS[hash(key) % len(_JSON_CACHE_REMOTE_READ_LOCKS)]
-    with read_lock:
-        local_payload = _read_local_json(path)
-        if _json_cache_read_is_fresh(path):
-            _record_json_cache_local_hit(coalesced=True)
-            return local_payload
-
-        try:
-            remote_payload = read_json_cache(path)
-        except Exception:
-            # app.database.read_json_cache already returns None on failures, but
-            # keep this boundary defensive so a remote problem never hides the
-            # local copy from callers.
-            LOGGER.warning("remote JSON cache read failed; using local copy", exc_info=True)
-            remote_payload = None
-        if remote_payload is None:
-            # Remember misses and temporary remote failures too, so a hot key
-            # cannot turn into a Supabase query on every concurrent request.
-            _remember_json_cache_read(path)
-            _record_json_cache_remote_result(
-                hit=False,
-                fallback_local=local_payload is not None,
-            )
-            return local_payload
-
-        mirrored = True
-        if remote_payload != local_payload:
-            try:
-                _write_local_json(path, remote_payload)
-            except OSError:
-                LOGGER.debug("Could not mirror remote JSON cache locally: %s", path, exc_info=True)
-                _remember_json_cache_read(path)
-                mirrored = False
-        else:
-            _remember_json_cache_read(path)
-
-        # The mirrored file size is a cheap proxy for the payload bytes; it is
-        # never used for cache decisions and is reported only in aggregate.
-        approx_bytes = 0
-        if mirrored:
-            signature = _json_cache_file_signature(path)
-            if signature is not None:
-                approx_bytes = signature[1]
-        _record_json_cache_remote_result(
-            hit=True,
-            fallback_local=False,
-            approx_bytes=approx_bytes,
-        )
-        return remote_payload
+    return json_cache_store.read_json_cache_local_first(path, remote_reader=read_json_cache)
 
 
 def _read_local_json(path: Path) -> Optional[Dict[str, Any]]:
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        if isinstance(payload, dict):
-            return payload
-    except FileNotFoundError:
-        return None
-    except Exception:
-        return None
-    return None
+    return json_cache_store.read_local_json(path)
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -1334,12 +1192,7 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-    tmp.replace(path)
-    _remember_json_cache_read(path)
+    json_cache_store.write_local_json(path, payload)
     _MEMORY_CACHE.clear()
 
 
@@ -2733,6 +2586,7 @@ def upsert_fund_price_points(
             conn.commit()
         if upserted_count:
             _MEMORY_CACHE.clear()
+            invalidate_fund_price_points_cache()
         return {
             "db_path": str(_fund_prices_db_path(processed_dir)),
             "source": normalized_source,
@@ -2825,6 +2679,7 @@ def upsert_fund_price_points(
         conn.commit()
     if upserted_count:
         _MEMORY_CACHE.clear()
+        invalidate_fund_price_points_cache()
     return {
         "db_path": str(_fund_prices_db_path(processed_dir)),
         "source": normalized_source,
@@ -2837,24 +2692,238 @@ def upsert_fund_price_points(
     }
 
 
-def read_fund_price_points(
+def _fund_price_points_cache_key(
     processed_dir: Path,
-    fund_code: str,
-    *,
-    start_date: Optional[date] = None,
-    end_date: Optional[date] = None,
-    sources: Optional[Iterable[str]] = None,
+    normalized: str,
+    start_date: Optional[date],
+    end_date: Optional[date],
+    normalized_sources: Tuple[str, ...],
+) -> Tuple[Any, ...]:
+    scope: Any = "postgres" if database_enabled() else str(_fund_prices_db_path(processed_dir))
+    return (
+        scope,
+        normalized,
+        start_date.isoformat() if start_date else None,
+        end_date.isoformat() if end_date else None,
+        normalized_sources,
+    )
+
+
+def _remove_fund_price_points_cache_entry_locked(key: Any) -> None:
+    global _FUND_PRICE_POINTS_CACHE_BYTES
+    entry = _FUND_PRICE_POINTS_CACHE.pop(key, None)
+    if entry is not None:
+        _FUND_PRICE_POINTS_CACHE_BYTES = max(
+            0,
+            _FUND_PRICE_POINTS_CACHE_BYTES - entry.approx_bytes,
+        )
+
+
+def _purge_expired_fund_price_points_cache_locked(now: float) -> None:
+    for key in list(_FUND_PRICE_POINTS_CACHE):
+        entry = _FUND_PRICE_POINTS_CACHE.get(key)
+        if entry is not None and entry.expires_at <= now:
+            _remove_fund_price_points_cache_entry_locked(key)
+
+
+def _store_fund_price_points_cache_locked(
+    key: Any,
+    payload: List[Dict[str, Any]],
+    approx_bytes: int,
+    now: float,
+) -> None:
+    global _FUND_PRICE_POINTS_CACHE_BYTES
+    _remove_fund_price_points_cache_entry_locked(key)
+    _purge_expired_fund_price_points_cache_locked(now)
+    _FUND_PRICE_POINTS_CACHE[key] = _FundPricePointsCacheEntry(
+        payload=payload,
+        approx_bytes=max(0, int(approx_bytes)),
+        expires_at=now + FUND_PRICE_POINTS_CACHE_TTL_SECONDS,
+    )
+    _FUND_PRICE_POINTS_CACHE_BYTES += max(0, int(approx_bytes))
+    while (
+        len(_FUND_PRICE_POINTS_CACHE) > FUND_PRICE_POINTS_CACHE_MAX_ENTRIES
+        or _FUND_PRICE_POINTS_CACHE_BYTES > FUND_PRICE_POINTS_CACHE_MAX_TOTAL_BYTES
+    ):
+        _oldest_key, oldest = _FUND_PRICE_POINTS_CACHE.popitem(last=False)
+        _FUND_PRICE_POINTS_CACHE_BYTES = max(
+            0,
+            _FUND_PRICE_POINTS_CACHE_BYTES - oldest.approx_bytes,
+        )
+        _FUND_PRICE_POINTS_CACHE_METRICS["evictions"] += 1
+
+
+def _fund_price_points_cache_metrics_snapshot_locked(
+    now: float,
+) -> Optional[Tuple[float, Dict[str, int]]]:
+    global _FUND_PRICE_POINTS_CACHE_METRICS_SINCE
+    elapsed = now - _FUND_PRICE_POINTS_CACHE_METRICS_SINCE
+    if elapsed < FUND_PRICE_POINTS_CACHE_METRICS_FLUSH_SECONDS:
+        return None
+    snapshot = (
+        dict(_FUND_PRICE_POINTS_CACHE_METRICS)
+        if any(_FUND_PRICE_POINTS_CACHE_METRICS.values())
+        else None
+    )
+    if snapshot is not None:
+        snapshot["entries"] = len(_FUND_PRICE_POINTS_CACHE)
+        snapshot["approx_bytes"] = _FUND_PRICE_POINTS_CACHE_BYTES
+        for key in _FUND_PRICE_POINTS_CACHE_METRICS:
+            _FUND_PRICE_POINTS_CACHE_METRICS[key] = 0
+    _FUND_PRICE_POINTS_CACHE_METRICS_SINCE = now
+    return (elapsed, snapshot) if snapshot is not None else None
+
+
+def _log_fund_price_points_cache_metrics(
+    pending: Optional[Tuple[float, Dict[str, int]]],
+) -> None:
+    if pending is None:
+        return
+    elapsed, snapshot = pending
+    LOGGER.info(
+        "fund price cache window_s=%.0f hits=%d misses=%d coalesced_hits=%d "
+        "coalesced_errors=%d evictions=%d oversize_skips=%d invalidations=%d "
+        "entries=%d approx_kib=%.1f",
+        elapsed,
+        snapshot["hits"],
+        snapshot["misses"],
+        snapshot["coalesced_hits"],
+        snapshot["coalesced_errors"],
+        snapshot["evictions"],
+        snapshot["oversize_skips"],
+        snapshot["invalidations"],
+        snapshot["entries"],
+        snapshot["approx_bytes"] / 1024.0,
+    )
+
+
+def invalidate_fund_price_points_cache() -> None:
+    """Drop all in-process price history entries after a successful write."""
+
+    global _FUND_PRICE_POINTS_CACHE_BYTES, _FUND_PRICE_POINTS_CACHE_GENERATION
+    with _FUND_PRICE_POINTS_CACHE_LOCK:
+        _FUND_PRICE_POINTS_CACHE.clear()
+        _FUND_PRICE_POINTS_CACHE_BYTES = 0
+        _FUND_PRICE_POINTS_CACHE_GENERATION += 1
+        _FUND_PRICE_POINTS_CACHE_METRICS["invalidations"] += 1
+        pending = _fund_price_points_cache_metrics_snapshot_locked(time.monotonic())
+    _log_fund_price_points_cache_metrics(pending)
+
+
+def _reset_fund_price_points_cache_for_tests() -> None:
+    global _FUND_PRICE_POINTS_CACHE_BYTES, _FUND_PRICE_POINTS_CACHE_GENERATION
+    global _FUND_PRICE_POINTS_CACHE_METRICS_SINCE
+    with _FUND_PRICE_POINTS_CACHE_LOCK:
+        _FUND_PRICE_POINTS_CACHE.clear()
+        _FUND_PRICE_POINTS_IN_FLIGHT.clear()
+        _FUND_PRICE_POINTS_CACHE_BYTES = 0
+        _FUND_PRICE_POINTS_CACHE_GENERATION += 1
+        for key in _FUND_PRICE_POINTS_CACHE_METRICS:
+            _FUND_PRICE_POINTS_CACHE_METRICS[key] = 0
+        _FUND_PRICE_POINTS_CACHE_METRICS_SINCE = time.monotonic()
+
+
+def _read_fund_price_points_cached(
+    key: Tuple[Any, ...],
+    loader: Callable[[], List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
-    normalized = normalize_fund_code(fund_code)
-    if not normalized:
-        return []
+    ttl_seconds = FUND_PRICE_POINTS_CACHE_TTL_SECONDS
+    if ttl_seconds <= 0:
+        return loader()
+
+    while True:
+        now = time.monotonic()
+        pending: Optional[Tuple[float, Dict[str, int]]] = None
+        entry: Optional[_FundPricePointsCacheEntry] = None
+        inflight: Optional[_FundPricePointsReadInFlight] = None
+        leader = False
+        generation = 0
+
+        with _FUND_PRICE_POINTS_CACHE_LOCK:
+            entry = _FUND_PRICE_POINTS_CACHE.get(key)
+            if entry is not None:
+                if entry.expires_at > now:
+                    _FUND_PRICE_POINTS_CACHE.move_to_end(key)
+                    _FUND_PRICE_POINTS_CACHE_METRICS["hits"] += 1
+                    pending = _fund_price_points_cache_metrics_snapshot_locked(now)
+                else:
+                    _remove_fund_price_points_cache_entry_locked(key)
+                    entry = None
+
+            if entry is None:
+                current = _FUND_PRICE_POINTS_IN_FLIGHT.get(key)
+                if current is None:
+                    current = _FundPricePointsReadInFlight()
+                    _FUND_PRICE_POINTS_IN_FLIGHT[key] = current
+                    leader = True
+                    generation = _FUND_PRICE_POINTS_CACHE_GENERATION
+                    _FUND_PRICE_POINTS_CACHE_METRICS["misses"] += 1
+                    pending = _fund_price_points_cache_metrics_snapshot_locked(now)
+                inflight = current
+
+        _log_fund_price_points_cache_metrics(pending)
+
+        if entry is not None:
+            return copy.deepcopy(entry.payload)
+
+        if inflight is None:  # pragma: no cover - defensive
+            continue
+
+        if not leader:
+            inflight.event.wait()
+            if inflight.error is not None:
+                with _FUND_PRICE_POINTS_CACHE_LOCK:
+                    _FUND_PRICE_POINTS_CACHE_METRICS["coalesced_errors"] += 1
+                    pending = _fund_price_points_cache_metrics_snapshot_locked(
+                        time.monotonic()
+                    )
+                _log_fund_price_points_cache_metrics(pending)
+                raise inflight.error
+            with _FUND_PRICE_POINTS_CACHE_LOCK:
+                _FUND_PRICE_POINTS_CACHE_METRICS["coalesced_hits"] += 1
+                pending = _fund_price_points_cache_metrics_snapshot_locked(time.monotonic())
+            _log_fund_price_points_cache_metrics(pending)
+            return copy.deepcopy(inflight.payload or [])
+
+        try:
+            points = loader()
+            cached_payload = copy.deepcopy(points)
+            approx_bytes = len(_stable_json_dumps(cached_payload).encode("utf-8"))
+            with _FUND_PRICE_POINTS_CACHE_LOCK:
+                if approx_bytes > FUND_PRICE_POINTS_CACHE_MAX_ENTRY_BYTES:
+                    _FUND_PRICE_POINTS_CACHE_METRICS["oversize_skips"] += 1
+                    inflight.payload = points
+                else:
+                    inflight.payload = cached_payload
+                    if generation == _FUND_PRICE_POINTS_CACHE_GENERATION:
+                        _store_fund_price_points_cache_locked(
+                            key,
+                            cached_payload,
+                            approx_bytes,
+                            time.monotonic(),
+                        )
+            return points
+        except BaseException as exc:
+            inflight.error = exc
+            raise
+        finally:
+            with _FUND_PRICE_POINTS_CACHE_LOCK:
+                _FUND_PRICE_POINTS_IN_FLIGHT.pop(key, None)
+                inflight.event.set()
+                pending = _fund_price_points_cache_metrics_snapshot_locked(time.monotonic())
+            _log_fund_price_points_cache_metrics(pending)
+
+
+def _read_fund_price_points_uncached(
+    processed_dir: Path,
+    normalized: str,
+    *,
+    start_date: Optional[date],
+    end_date: Optional[date],
+    normalized_sources: Tuple[str, ...],
+) -> List[Dict[str, Any]]:
     conditions = ["fund_code = ?", "price > 0"]
     params: List[Any] = [normalized]
-    normalized_sources = [
-        _normalize_price_source(source)
-        for source in list(sources or [])
-        if _normalize_price_source(source)
-    ]
     if normalized_sources:
         placeholders = ", ".join("?" for _ in normalized_sources)
         conditions.append(f"source IN ({placeholders})")
@@ -2894,6 +2963,39 @@ def read_fund_price_points(
             by_date[str(row["date"])] = row
 
     return [_fund_price_storage_row_to_point(by_date[point_date]) for point_date in sorted(by_date)]
+
+
+def read_fund_price_points(
+    processed_dir: Path,
+    fund_code: str,
+    *,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    sources: Optional[Iterable[str]] = None,
+) -> List[Dict[str, Any]]:
+    normalized = normalize_fund_code(fund_code)
+    if not normalized:
+        return []
+    normalized_sources = tuple(
+        sorted({_normalize_price_source(source) for source in list(sources or [])})
+    )
+    cache_key = _fund_price_points_cache_key(
+        processed_dir,
+        normalized,
+        start_date,
+        end_date,
+        normalized_sources,
+    )
+    return _read_fund_price_points_cached(
+        cache_key,
+        lambda: _read_fund_price_points_uncached(
+            processed_dir,
+            normalized,
+            start_date=start_date,
+            end_date=end_date,
+            normalized_sources=normalized_sources,
+        ),
+    )
 
 
 def read_latest_fund_price_points(
@@ -3172,6 +3274,7 @@ def _persist_daily_return_overrides(
         _bump_fund_listing_price_revision(conn)
         conn.commit()
     _MEMORY_CACHE.clear()
+    invalidate_fund_price_points_cache()
 
 
 def _read_fintables_udf_price_points(

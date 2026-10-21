@@ -120,6 +120,7 @@ def configure_application_logging() -> None:
     """Keep low-volume operational metrics visible without verbose logging."""
 
     logging.getLogger("app.fund_service").setLevel(logging.INFO)
+    logging.getLogger("app.json_cache").setLevel(logging.INFO)
 
 
 _ADMIN_REFRESH_TOKEN_ENV = "RAGFIN_ADMIN_REFRESH_TOKEN"

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app import json_cache
 from src import kap_fetcher
 from src.kap_fetcher import (
     KAP_BROWSER_USER_AGENT,
@@ -37,6 +38,42 @@ class _FakeResponse:
 
 def _cfg(user_agent: str = "ragfin-test/1.0") -> SimpleNamespace:
     return SimpleNamespace(user_agent=user_agent, timeout_seconds=1.0)
+
+
+def test_kap_json_cache_mirrors_remote_and_uses_local_l1(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "kap" / "TERA.json"
+    remote_payload = {"version": 1, "fetched_at": "2026-10-21T10:00:00+00:00"}
+    remote_reads = []
+    remote_writes = []
+    with json_cache._JSON_CACHE_METRICS_LOCK:
+        json_cache._JSON_CACHE_METRICS_BY_READER.pop("kap", None)
+
+    def read_remote(cache_path):
+        remote_reads.append(cache_path)
+        return dict(remote_payload)
+
+    monkeypatch.setattr(kap_fetcher, "read_json_cache", read_remote)
+    monkeypatch.setattr(
+        kap_fetcher,
+        "write_json_cache",
+        lambda cache_path, payload: remote_writes.append((cache_path, dict(payload))),
+    )
+
+    assert kap_fetcher._read_cache(path) == remote_payload
+    assert json.loads(path.read_text(encoding="utf-8")) == remote_payload
+
+    remote_payload["version"] = 2
+    assert kap_fetcher._read_cache(path)["version"] == 1
+    assert remote_reads == [path]
+
+    kap_fetcher._write_cache(path, {"version": 3, "fetched_at": "2026-10-21T10:01:00+00:00"})
+    assert kap_fetcher._read_cache(path)["version"] == 3
+    assert len(remote_reads) == 1
+    assert remote_writes[-1][1]["version"] == 3
+
+    with json_cache._JSON_CACHE_METRICS_LOCK:
+        assert json_cache._JSON_CACHE_METRICS_BY_READER["kap"]["remote_reads"] == 1
+        assert json_cache._JSON_CACHE_METRICS_BY_READER["kap"]["local_hits"] == 2
 
 
 def test_list_member_disclosures_by_criteria_chunks_long_lookback(

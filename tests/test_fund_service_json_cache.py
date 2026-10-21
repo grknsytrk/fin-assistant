@@ -11,31 +11,32 @@ from pathlib import Path
 import pytest
 
 from app import cache as cache_module
-from app import fund_service
+from app import fund_service, json_cache
 
 
 @pytest.fixture(autouse=True)
 def _isolated_read_state(monkeypatch):
     """Keep the module-level read bookkeeping from leaking between tests."""
 
-    monkeypatch.setattr(fund_service, "JSON_CACHE_LOCAL_READ_TTL_SECONDS", 60)
-    monkeypatch.setattr(fund_service, "JSON_CACHE_METRICS_FLUSH_SECONDS", 3600.0)
-    with fund_service._JSON_CACHE_READ_STATE_LOCK:
-        fund_service._JSON_CACHE_READ_STATE.clear()
-    with fund_service._JSON_CACHE_METRICS_LOCK:
-        for key in fund_service._JSON_CACHE_METRICS:
-            fund_service._JSON_CACHE_METRICS[key] = 0
-        fund_service._JSON_CACHE_METRICS_SINCE = time.monotonic()
+    monkeypatch.setattr(json_cache, "JSON_CACHE_LOCAL_READ_TTL_SECONDS", 60)
+    monkeypatch.setattr(json_cache, "JSON_CACHE_METRICS_FLUSH_SECONDS", 3600.0)
+    with json_cache._JSON_CACHE_READ_STATE_LOCK:
+        json_cache._JSON_CACHE_READ_STATE.clear()
+    with json_cache._JSON_CACHE_METRICS_LOCK:
+        for key in json_cache._JSON_CACHE_METRICS:
+            json_cache._JSON_CACHE_METRICS[key] = 0
+        json_cache._JSON_CACHE_METRICS_BY_READER.clear()
+        json_cache._JSON_CACHE_METRICS_SINCE = time.monotonic()
     try:
         yield
     finally:
-        with fund_service._JSON_CACHE_READ_STATE_LOCK:
-            fund_service._JSON_CACHE_READ_STATE.clear()
+        with json_cache._JSON_CACHE_READ_STATE_LOCK:
+            json_cache._JSON_CACHE_READ_STATE.clear()
 
 
 def _metrics() -> dict[str, int]:
-    with fund_service._JSON_CACHE_METRICS_LOCK:
-        return dict(fund_service._JSON_CACHE_METRICS)
+    with json_cache._JSON_CACHE_METRICS_LOCK:
+        return dict(json_cache._JSON_CACHE_METRICS)
 
 
 class _FakeRemoteCache:
@@ -53,10 +54,10 @@ class _FakeRemoteCache:
 
 def _expire_read_state(path: Path) -> None:
     key = str(path)
-    with fund_service._JSON_CACHE_READ_STATE_LOCK:
-        read_at, signature = fund_service._JSON_CACHE_READ_STATE[key]
-        fund_service._JSON_CACHE_READ_STATE[key] = (
-            read_at - fund_service.JSON_CACHE_LOCAL_READ_TTL_SECONDS - 1,
+    with json_cache._JSON_CACHE_READ_STATE_LOCK:
+        read_at, signature = json_cache._JSON_CACHE_READ_STATE[key]
+        json_cache._JSON_CACHE_READ_STATE[key] = (
+            read_at - json_cache.JSON_CACHE_LOCAL_READ_TTL_SECONDS - 1,
             signature,
         )
 
@@ -152,15 +153,15 @@ def test_read_json_caches_miss_for_missing_local_and_remote(tmp_path, monkeypatc
 
     assert len(remote.calls) == 1
     assert not path.exists()
-    with fund_service._JSON_CACHE_READ_STATE_LOCK:
-        assert fund_service._JSON_CACHE_READ_STATE[str(path)][1] is None
+    with json_cache._JSON_CACHE_READ_STATE_LOCK:
+        assert json_cache._JSON_CACHE_READ_STATE[str(path)][1] is None
 
 
 def test_read_json_with_zero_ttl_always_consults_remote(tmp_path, monkeypatch) -> None:
     path = tmp_path / "cache" / "fund.json"
     remote = _FakeRemoteCache({"status": "ok", "version": 1})
     monkeypatch.setattr(fund_service, "read_json_cache", remote)
-    monkeypatch.setattr(fund_service, "JSON_CACHE_LOCAL_READ_TTL_SECONDS", 0)
+    monkeypatch.setattr(json_cache, "JSON_CACHE_LOCAL_READ_TTL_SECONDS", 0)
 
     assert fund_service._read_json(path) == {"status": "ok", "version": 1}
     remote.payload = {"status": "ok", "version": 2}
@@ -332,16 +333,17 @@ def test_json_cache_metrics_flush_emits_one_anonymous_aggregate(
     fund_service._read_json(path)
     fund_service._read_json(path)
 
-    monkeypatch.setattr(fund_service, "JSON_CACHE_METRICS_FLUSH_SECONDS", 1.0)
-    with fund_service._JSON_CACHE_METRICS_LOCK:
-        fund_service._JSON_CACHE_METRICS_SINCE -= 2
-    with caplog.at_level(logging.INFO, logger=fund_service.LOGGER.name):
+    monkeypatch.setattr(json_cache, "JSON_CACHE_METRICS_FLUSH_SECONDS", 1.0)
+    with json_cache._JSON_CACHE_METRICS_LOCK:
+        json_cache._JSON_CACHE_METRICS_SINCE -= 2
+    with caplog.at_level(logging.INFO, logger=json_cache.LOGGER.name):
         fund_service._read_json(path)
 
     messages = [
         record.getMessage()
         for record in caplog.records
         if "json cache reads" in record.getMessage()
+        and "json cache reads by_reader" not in record.getMessage()
     ]
 
     assert len(messages) == 1
@@ -354,21 +356,26 @@ def test_json_cache_metrics_flush_emits_one_anonymous_aggregate(
     assert "approx_payload_kib=" in message
     assert str(path) not in message
     assert "fund.json" not in message
+    assert any(
+        "json cache reads by_reader" in record.getMessage()
+        and "reader=funds" in record.getMessage()
+        for record in caplog.records
+    )
 
     assert _metrics()["local_hits"] == 0
     assert _metrics()["remote_reads"] == 0
 
 
 def test_read_state_eviction_stays_bounded(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(fund_service, "_JSON_CACHE_READ_STATE_MAX_ENTRIES", 3)
+    monkeypatch.setattr(json_cache, "JSON_CACHE_READ_STATE_MAX_ENTRIES", 3)
 
     paths = [tmp_path / f"cache-{index}.json" for index in range(4)]
     _write_json_file(paths[0], {"index": 0})
     for path in paths:
-        fund_service._remember_json_cache_read(path)
+        json_cache.remember_json_cache_read(path)
 
-    with fund_service._JSON_CACHE_READ_STATE_LOCK:
-        keys = list(fund_service._JSON_CACHE_READ_STATE)
+    with json_cache._JSON_CACHE_READ_STATE_LOCK:
+        keys = list(json_cache._JSON_CACHE_READ_STATE)
 
     assert len(keys) == 3
     assert str(paths[0]) not in keys
