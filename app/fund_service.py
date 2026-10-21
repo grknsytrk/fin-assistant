@@ -140,6 +140,10 @@ TEFAS_OPEN_ONLY = os.getenv("RAGFIN_TEFAS_OPEN_ONLY", "1").strip().lower() not i
 FUNDS_SNAPSHOT_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_TTL_SECONDS", str(24 * 60 * 60)))
 FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_SNAPSHOT_INTRADAY_CHECK_TTL_SECONDS", "300"))
 FUNDS_MAX_LOOKBACK_CALENDAR_DAYS = int(os.getenv("RAGFIN_FUNDS_MAX_LOOKBACK_CALENDAR_DAYS", "14"))
+JSON_CACHE_LOCAL_READ_TTL_SECONDS = max(
+    0,
+    int(os.getenv("RAGFIN_JSON_CACHE_LOCAL_READ_TTL_SECONDS", "60")),
+)
 FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS = int(
     os.getenv("RAGFIN_FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS", "60")
 )
@@ -191,6 +195,10 @@ KAP_HOLDINGS_LOOKBACK_DAYS = int(os.getenv("RAGFIN_KAP_HOLDINGS_LOOKBACK_DAYS", 
 KAP_HOLDINGS_ATTACHMENT_TEXT_CACHE_VERSION = 2
 
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
+_JSON_CACHE_READ_STATE: Dict[str, Tuple[float, Optional[Tuple[int, int]]]] = {}
+_JSON_CACHE_READ_STATE_LOCK = threading.RLock()
+_JSON_CACHE_READ_STATE_MAX_ENTRIES = 4096
+_JSON_CACHE_REMOTE_READ_LOCKS = tuple(threading.Lock() for _ in range(16))
 _SNAPSHOT_REFRESH_LOCK = threading.Lock()
 _FUND_PRICES_SCHEMA_LOCK = threading.Lock()
 _FUND_PRICES_SCHEMA_READY = False
@@ -1134,19 +1142,67 @@ def prune_fund_snapshot_rollback_copy(processed_dir: Path) -> bool:
     return True
 
 
+def _json_cache_file_signature(path: Path) -> Optional[Tuple[int, int]]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    mtime_ns = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
+    return int(mtime_ns), int(stat.st_size)
+
+
+def _json_cache_read_is_fresh(path: Path) -> bool:
+    ttl_seconds = JSON_CACHE_LOCAL_READ_TTL_SECONDS
+    if ttl_seconds <= 0:
+        return False
+    key = str(path)
+    with _JSON_CACHE_READ_STATE_LOCK:
+        state = _JSON_CACHE_READ_STATE.get(key)
+    if state is None or time.monotonic() - state[0] > ttl_seconds:
+        return False
+    return state[1] == _json_cache_file_signature(path)
+
+
+def _remember_json_cache_read(path: Path) -> None:
+    key = str(path)
+    state = (time.monotonic(), _json_cache_file_signature(path))
+    with _JSON_CACHE_READ_STATE_LOCK:
+        _JSON_CACHE_READ_STATE.pop(key, None)
+        if len(_JSON_CACHE_READ_STATE) >= _JSON_CACHE_READ_STATE_MAX_ENTRIES:
+            _JSON_CACHE_READ_STATE.pop(next(iter(_JSON_CACHE_READ_STATE)))
+        _JSON_CACHE_READ_STATE[key] = state
+
+
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
-    remote_payload = read_json_cache(path)
-    if remote_payload is not None:
-        # Daily snapshots are loaded from Supabase on demand rather than during
-        # every container bootstrap. Keep a local copy after the first read so
-        # later requests can still fall back if the remote cache is unavailable.
-        if not path.exists():
+    local_payload = _read_local_json(path)
+    if _json_cache_read_is_fresh(path):
+        return local_payload
+
+    # Coalesce revalidations for the same path. A striped lock keeps this
+    # bookkeeping bounded even when the cache contains one file per fund.
+    key = str(path)
+    read_lock = _JSON_CACHE_REMOTE_READ_LOCKS[hash(key) % len(_JSON_CACHE_REMOTE_READ_LOCKS)]
+    with read_lock:
+        local_payload = _read_local_json(path)
+        if _json_cache_read_is_fresh(path):
+            return local_payload
+
+        remote_payload = read_json_cache(path)
+        if remote_payload is None:
+            # Remember misses and temporary remote failures too, so a hot key
+            # cannot turn into a Supabase query on every concurrent request.
+            _remember_json_cache_read(path)
+            return local_payload
+
+        if remote_payload != local_payload:
             try:
                 _write_local_json(path, remote_payload)
             except OSError:
                 LOGGER.debug("Could not mirror remote JSON cache locally: %s", path, exc_info=True)
+                _remember_json_cache_read(path)
+        else:
+            _remember_json_cache_read(path)
         return remote_payload
-    return _read_local_json(path)
 
 
 def _read_local_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -1174,6 +1230,7 @@ def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
     with tmp.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     tmp.replace(path)
+    _remember_json_cache_read(path)
     _MEMORY_CACHE.clear()
 
 
