@@ -38,7 +38,66 @@ _RESPONSE_REFRESH_ACTIVE: set[str] = set()
 _CACHE_BACKEND_ENV = "RAGFIN_CACHE_BACKEND"
 _CACHE_REDIS_URL_ENV = "RAGFIN_REDIS_URL"
 _CACHE_NAMESPACE_ENV = "RAGFIN_CACHE_NAMESPACE"
+_REDIS_COOLDOWN_SECONDS_ENV = "RAGFIN_REDIS_COOLDOWN_SECONDS"
 _DEFAULT_NAMESPACE = "ragfin"
+_DEFAULT_REDIS_COOLDOWN_SECONDS = 120
+
+_CACHE_METRIC_FAMILIES = (
+    "kap_flow_store",
+    "snapshot-row-map",
+    "kap",
+    "funds",
+    "market",
+    "coordination",
+    "other",
+)
+_CACHE_METRIC_FIELDS = (
+    "get_calls",
+    "get_remote_attempts",
+    "get_hits",
+    "get_misses",
+    "get_errors",
+    "get_fallbacks",
+    "get_payload_bytes",
+    "set_calls",
+    "set_remote_attempts",
+    "set_successes",
+    "set_errors",
+    "set_fallbacks",
+    "set_payload_bytes",
+    "set_attempted_payload_bytes",
+    "cooldown_skips",
+    "other_remote_attempts",
+    "other_remote_errors",
+    "other_fallbacks",
+)
+
+
+def _cache_key_family(key: str) -> str:
+    """Map a cache key to a bounded, non-sensitive telemetry family."""
+
+    normalized = str(key or "").strip().lower()
+    if normalized.startswith("api:kap:flow:"):
+        return "kap_flow_store"
+    if normalized.startswith("api:funds:snapshot-row-map:"):
+        return "snapshot-row-map"
+    if normalized.startswith(("lock:", "swr-revalidate:", "single-flight:")):
+        return "coordination"
+    if normalized.startswith("api:kap:"):
+        return "kap"
+    if normalized.startswith("api:funds:"):
+        return "funds"
+    if normalized.startswith("api:market:"):
+        return "market"
+    return "other"
+
+
+def _text_payload_bytes(value: Any) -> int:
+    if isinstance(value, bytes):
+        return len(value)
+    if isinstance(value, bytearray):
+        return len(value)
+    return len(str(value).encode("utf-8", errors="replace"))
 
 
 class CacheBackend:
@@ -198,62 +257,190 @@ class RedisCache(CacheBackend):
         self._client = redis.Redis.from_url(url, decode_responses=True)
         self._namespace = namespace
         self.last_error: Optional[str] = None
+        self._cooldown_seconds = max(
+            0,
+            int(os.getenv(_REDIS_COOLDOWN_SECONDS_ENV, str(_DEFAULT_REDIS_COOLDOWN_SECONDS))),
+        )
+        self._circuit_lock = threading.Lock()
+        self._circuit_open = False
+        self._cooldown_until = 0.0
+        self._half_open_probe = False
         # A small in-memory fallback handles transient Redis blips so call
         # sites still see useful data while we wait for the network to recover.
         self._fallback = InMemoryCache()
-        # Probe the connection up front so configuration mistakes surface
-        # immediately at startup rather than masquerading as cache misses.
-        self._client.ping()
+        self._metrics_lock = threading.Lock()
+        self._metrics_started_at = time.monotonic()
+        self._metrics_totals = {field: 0 for field in _CACHE_METRIC_FIELDS}
+        self._metrics_by_family = {
+            family: {field: 0 for field in _CACHE_METRIC_FIELDS}
+            for family in _CACHE_METRIC_FAMILIES
+        }
+        # Probe once up front. A transient outage or quota error should keep
+        # Redis configured but open the circuit, so the process can retry
+        # after cooldown instead of permanently switching to memory.
+        self._record_metrics("redis-health:ping", other_remote_attempts=1)
+        try:
+            self._client.ping()
+        except Exception as exc:  # pragma: no cover - depends on Redis
+            self._record_metrics("redis-health:ping", other_remote_errors=1)
+            self._log_remote_error("ping", "redis-health:ping", exc)
+        else:
+            self._remember_success()
 
     def _prefixed(self, key: str) -> str:
         return f"{self._namespace}:{key}"
 
-    def _remember_error(self, exc: Exception) -> None:
-        self.last_error = str(exc)
+    def _record_metrics(self, key: str, **increments: int) -> None:
+        family = _cache_key_family(key)
+        with self._metrics_lock:
+            for field, value in increments.items():
+                if field not in self._metrics_totals:
+                    continue
+                amount = max(0, int(value))
+                self._metrics_totals[field] += amount
+                self._metrics_by_family[family][field] += amount
+
+    def metrics_snapshot(self) -> Dict[str, Any]:
+        with self._metrics_lock:
+            return {
+                "uptime_seconds": round(time.monotonic() - self._metrics_started_at, 1),
+                "totals": dict(self._metrics_totals),
+                "by_key_prefix": {
+                    family: dict(metrics)
+                    for family, metrics in self._metrics_by_family.items()
+                    if any(metrics.values())
+                },
+                "payload_bytes_are_approximate": True,
+            }
+
+    def circuit_snapshot(self) -> Dict[str, Any]:
+        with self._circuit_lock:
+            remaining = max(0.0, self._cooldown_until - time.monotonic())
+            return {
+                "open": self._circuit_open,
+                "cooldown_remaining_seconds": int(math.ceil(remaining)),
+                "cooldown_seconds": self._cooldown_seconds,
+                "half_open_probe_in_flight": self._half_open_probe,
+            }
+
+    def _should_attempt_redis(self) -> bool:
+        with self._circuit_lock:
+            if not self._circuit_open:
+                return True
+            if time.monotonic() < self._cooldown_until:
+                return False
+            # After cooldown, allow one request to probe recovery. Concurrent
+            # callers use memory until that probe succeeds or reopens the circuit.
+            if self._half_open_probe:
+                return False
+            self._half_open_probe = True
+            return True
+
+    def _remember_error(self, exc: Exception) -> bool:
+        now = time.monotonic()
+        with self._circuit_lock:
+            already_cooling_down = self._circuit_open and now < self._cooldown_until
+            self.last_error = str(exc)
+            self._circuit_open = True
+            self._cooldown_until = now + self._cooldown_seconds
+            self._half_open_probe = False
+        return not already_cooling_down
+
+    def _remember_success(self) -> None:
+        with self._circuit_lock:
+            self.last_error = None
+            self._circuit_open = False
+            self._cooldown_until = 0.0
+            self._half_open_probe = False
+
+    def _log_remote_error(self, operation: str, key: str, exc: Exception) -> None:
+        if self._remember_error(exc):
+            logger.warning(
+                "redis cache %s failed for key_family=%s; cooldown_seconds=%d: %s",
+                operation,
+                _cache_key_family(key),
+                self._cooldown_seconds,
+                exc,
+            )
 
     @staticmethod
     def _serialize(value: Any) -> str:
         return json.dumps(value, default=str, separators=(",", ":"))
 
     def get(self, key: str) -> Any:
+        self._record_metrics(key, get_calls=1)
+        if not self._should_attempt_redis():
+            self._record_metrics(key, get_fallbacks=1, cooldown_skips=1)
+            return self._fallback.get(key)
+        self._record_metrics(key, get_remote_attempts=1)
         try:
             raw = self._client.get(self._prefixed(key))
         except Exception as exc:  # pragma: no cover - depends on Redis
-            self._remember_error(exc)
-            logger.warning("redis cache get failed for %s: %s", key, exc)
+            self._record_metrics(key, get_errors=1, get_fallbacks=1)
+            self._log_remote_error("get", key, exc)
             return self._fallback.get(key)
         if raw is None:
+            self._remember_success()
+            self._record_metrics(key, get_misses=1)
             return None
+        self._remember_success()
+        self._record_metrics(key, get_hits=1, get_payload_bytes=_text_payload_bytes(raw))
         try:
             return json.loads(raw)
         except (TypeError, ValueError):
             return raw
 
     def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
+        self._record_metrics(key, set_calls=1)
+        if not self._should_attempt_redis():
+            self._record_metrics(key, set_fallbacks=1, cooldown_skips=1)
+            self._fallback.set(key, value, ttl_seconds=ttl_seconds)
+            return
         try:
             payload = self._serialize(value)
         except (TypeError, ValueError) as exc:
             logger.debug("skipping non-serialisable cache value for %s: %s", key, exc)
+            self._record_metrics(key, set_fallbacks=1)
             self._fallback.set(key, value, ttl_seconds=ttl_seconds)
             return
+        payload_bytes = _text_payload_bytes(payload)
+        self._record_metrics(
+            key,
+            set_remote_attempts=1,
+            set_attempted_payload_bytes=payload_bytes,
+        )
         try:
             if ttl_seconds and ttl_seconds > 0:
                 self._client.set(self._prefixed(key), payload, ex=int(ttl_seconds))
             else:
                 self._client.set(self._prefixed(key), payload)
         except Exception as exc:  # pragma: no cover - depends on Redis
-            self._remember_error(exc)
-            logger.warning("redis cache set failed for %s: %s", key, exc)
+            self._record_metrics(key, set_errors=1, set_fallbacks=1)
+            self._log_remote_error("set", key, exc)
             self._fallback.set(key, value, ttl_seconds=ttl_seconds)
+            return
+        self._remember_success()
+        self._record_metrics(key, set_successes=1, set_payload_bytes=payload_bytes)
 
     def set_if_absent(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
+        self._record_metrics(key, set_calls=1)
+        if not self._should_attempt_redis():
+            self._record_metrics(key, set_fallbacks=1, cooldown_skips=1)
+            return self._fallback.set_if_absent(key, value, ttl_seconds=ttl_seconds)
         try:
             payload = self._serialize(value)
         except (TypeError, ValueError) as exc:
             logger.debug("skipping non-serialisable cache value for %s: %s", key, exc)
+            self._record_metrics(key, set_fallbacks=1)
             return self._fallback.set_if_absent(key, value, ttl_seconds=ttl_seconds)
+        payload_bytes = _text_payload_bytes(payload)
+        self._record_metrics(
+            key,
+            set_remote_attempts=1,
+            set_attempted_payload_bytes=payload_bytes,
+        )
         try:
-            return bool(
+            inserted = bool(
                 self._client.set(
                     self._prefixed(key),
                     payload,
@@ -262,19 +449,37 @@ class RedisCache(CacheBackend):
                 )
             )
         except Exception as exc:  # pragma: no cover - depends on Redis
-            self._remember_error(exc)
-            logger.warning("redis cache set_if_absent failed for %s: %s", key, exc)
+            self._record_metrics(key, set_errors=1, set_fallbacks=1)
+            self._log_remote_error("set_if_absent", key, exc)
             return self._fallback.set_if_absent(key, value, ttl_seconds=ttl_seconds)
+        self._remember_success()
+        self._record_metrics(
+            key,
+            set_successes=1,
+            set_payload_bytes=payload_bytes if inserted else 0,
+        )
+        return inserted
 
     def delete(self, key: str) -> None:
+        if not self._should_attempt_redis():
+            self._record_metrics(key, other_fallbacks=1, cooldown_skips=1)
+            self._fallback.delete(key)
+            return
+        self._record_metrics(key, other_remote_attempts=1)
         try:
             self._client.delete(self._prefixed(key))
         except Exception as exc:  # pragma: no cover - depends on Redis
-            self._remember_error(exc)
-            logger.warning("redis cache delete failed for %s: %s", key, exc)
+            self._record_metrics(key, other_remote_errors=1, other_fallbacks=1)
+            self._log_remote_error("delete", key, exc)
+        else:
+            self._remember_success()
         self._fallback.delete(key)
 
     def renew_if_owner(self, key: str, owner: Any, *, ttl_seconds: int) -> bool:
+        if not self._should_attempt_redis():
+            self._record_metrics(key, other_fallbacks=1, cooldown_skips=1)
+            return self._fallback.renew_if_owner(key, owner, ttl_seconds=ttl_seconds)
+        self._record_metrics(key, other_remote_attempts=1)
         try:
             script = (
                 "if redis.call('get', KEYS[1]) == ARGV[1] then "
@@ -289,58 +494,95 @@ class RedisCache(CacheBackend):
                     max(1, int(ttl_seconds)),
                 )
             )
+            self._remember_success()
             if renewed:
                 self._fallback.renew_if_owner(key, owner, ttl_seconds=ttl_seconds)
             return renewed
         except Exception as exc:  # pragma: no cover - depends on Redis
-            self._remember_error(exc)
-            logger.warning("redis lease renew failed for %s: %s", key, exc)
+            self._record_metrics(key, other_remote_errors=1, other_fallbacks=1)
+            self._log_remote_error("lease_renew", key, exc)
             return self._fallback.renew_if_owner(key, owner, ttl_seconds=ttl_seconds)
 
     def release_if_owner(self, key: str, owner: Any) -> bool:
+        if not self._should_attempt_redis():
+            self._record_metrics(key, other_fallbacks=1, cooldown_skips=1)
+            return self._fallback.release_if_owner(key, owner)
+        self._record_metrics(key, other_remote_attempts=1)
         try:
             script = (
                 "if redis.call('get', KEYS[1]) == ARGV[1] then "
                 "return redis.call('del', KEYS[1]) else return 0 end"
             )
             released = bool(self._client.eval(script, 1, self._prefixed(key), self._serialize(owner)))
+            self._remember_success()
             self._fallback.release_if_owner(key, owner)
             return released
         except Exception as exc:  # pragma: no cover - depends on Redis
-            self._remember_error(exc)
-            logger.warning("redis lease release failed for %s: %s", key, exc)
+            self._record_metrics(key, other_remote_errors=1, other_fallbacks=1)
+            self._log_remote_error("lease_release", key, exc)
             return self._fallback.release_if_owner(key, owner)
 
     def delete_prefix(self, prefix: str) -> int:
         deleted = self._fallback.delete_prefix(prefix)
+        if not self._should_attempt_redis():
+            self._record_metrics(prefix, other_fallbacks=1, cooldown_skips=1)
+            return deleted
+        self._record_metrics(prefix, other_remote_attempts=1)
         try:
             full_prefix = self._prefixed(prefix)
             keys = list(self._client.scan_iter(match=f"{full_prefix}*"))
             if keys:
                 deleted += int(self._client.delete(*keys) or 0)
         except Exception as exc:  # pragma: no cover - depends on Redis
-            self._remember_error(exc)
-            logger.warning("redis cache delete_prefix failed for %s: %s", prefix, exc)
+            self._record_metrics(prefix, other_remote_errors=1, other_fallbacks=1)
+            self._log_remote_error("delete_prefix", prefix, exc)
+        else:
+            self._remember_success()
         return deleted
 
     @contextmanager
     def lock(self, key: str, *, timeout: float = 30.0) -> Iterator[bool]:
         token = uuid.uuid4().hex
-        full_key = self._prefixed(f"lock:{key}")
+        lock_key = f"lock:{key}"
+        full_key = self._prefixed(lock_key)
         ttl_ms = int(max(1.0, timeout) * 1000)
         acquired = False
+        token_bytes = _text_payload_bytes(token)
+        self._record_metrics(lock_key, set_calls=1)
+        if not self._should_attempt_redis():
+            self._record_metrics(
+                lock_key,
+                set_fallbacks=1,
+                cooldown_skips=1,
+            )
+            with self._fallback.lock(key, timeout=timeout) as got:
+                yield got
+            return
+        self._record_metrics(
+            lock_key,
+            set_remote_attempts=1,
+            set_attempted_payload_bytes=token_bytes,
+        )
         try:
-            try:
-                acquired = bool(self._client.set(full_key, token, nx=True, px=ttl_ms))
-            except Exception as exc:  # pragma: no cover - depends on Redis
-                self._remember_error(exc)
-                logger.warning("redis lock failed for %s, falling back to memory: %s", key, exc)
-                with self._fallback.lock(key, timeout=timeout) as got:
-                    yield got
-                return
+            acquired = bool(self._client.set(full_key, token, nx=True, px=ttl_ms))
+            self._remember_success()
+            self._record_metrics(
+                lock_key,
+                set_successes=1,
+                set_payload_bytes=token_bytes if acquired else 0,
+            )
+        except Exception as exc:  # pragma: no cover - depends on Redis
+            self._record_metrics(lock_key, set_errors=1, set_fallbacks=1)
+            self._log_remote_error("lock", lock_key, exc)
+            with self._fallback.lock(key, timeout=timeout) as got:
+                yield got
+            return
+
+        try:
             yield acquired
         finally:
-            if acquired:
+            if acquired and self._should_attempt_redis():
+                self._record_metrics(lock_key, other_remote_attempts=1)
                 try:
                     # Compare-and-delete via Lua so we never release a lock that
                     # has already expired and been re-acquired by another worker.
@@ -349,9 +591,10 @@ class RedisCache(CacheBackend):
                         "return redis.call('del', KEYS[1]) else return 0 end"
                     )
                     self._client.eval(script, 1, full_key, token)
+                    self._remember_success()
                 except Exception as exc:  # pragma: no cover
-                    self._remember_error(exc)
-                    logger.warning("redis unlock failed for %s: %s", key, exc)
+                    self._record_metrics(lock_key, other_remote_errors=1)
+                    self._log_remote_error("unlock", lock_key, exc)
 
 
 _BACKEND_LOCK = threading.Lock()
@@ -404,13 +647,20 @@ def cache_status() -> Dict[str, Any]:
     requested = _REQUESTED_BACKEND or (os.getenv(_CACHE_BACKEND_ENV) or "memory").strip().lower() or "memory"
     namespace = (os.getenv(_CACHE_NAMESPACE_ENV) or _DEFAULT_NAMESPACE).strip() or _DEFAULT_NAMESPACE
     redis_error = getattr(backend, "last_error", None)
-    return {
+    status = {
         "cache_backend": backend.name,
         "cache_requested_backend": requested,
         "cache_namespace": namespace,
         "cache_redis_fallback": requested == "redis" and (backend.name != "redis" or bool(redis_error)),
         "cache_last_error": redis_error or _LAST_BACKEND_ERROR,
     }
+    circuit_snapshot = getattr(backend, "circuit_snapshot", None)
+    if callable(circuit_snapshot):
+        status["cache_redis_circuit"] = circuit_snapshot()
+    metrics_snapshot = getattr(backend, "metrics_snapshot", None)
+    if callable(metrics_snapshot):
+        status["cache_redis_metrics"] = metrics_snapshot()
+    return status
 
 
 def get_json_dict(key: str) -> Optional[Dict[str, Any]]:

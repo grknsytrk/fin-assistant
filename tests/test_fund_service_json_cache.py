@@ -291,6 +291,26 @@ def test_json_cache_metrics_record_hits_and_single_remote_read(tmp_path, monkeyp
     assert metrics["remote_bytes"] > 0
 
 
+def test_json_cache_health_metrics_group_payload_bytes_by_safe_prefix(tmp_path) -> None:
+    path = tmp_path / "processed" / "funds_cache" / "AAA.json"
+    remote = _FakeRemoteCache({"fund_code": "AAA", "price": 12.5})
+    before = json_cache.json_cache_metrics_status()
+
+    assert json_cache.read_json_cache_local_first(path, remote_reader=remote) == remote.payload
+    assert json_cache.read_json_cache_local_first(path, remote_reader=remote) == remote.payload
+
+    after = json_cache.json_cache_metrics_status()
+    family = after["by_key_prefix"]["funds_cache"]
+    before_family = before["by_key_prefix"].get("funds_cache", {})
+    assert family["remote_reads"] - before_family.get("remote_reads", 0) == 1
+    assert family["remote_hits"] - before_family.get("remote_hits", 0) == 1
+    assert family["local_hits"] - before_family.get("local_hits", 0) == 1
+    assert family["approx_remote_payload_bytes"] > before_family.get(
+        "approx_remote_payload_bytes", 0
+    )
+    assert str(path) not in str(after)
+
+
 def test_read_json_uses_local_copy_when_remote_raises(tmp_path, monkeypatch) -> None:
     path = tmp_path / "cache" / "fund.json"
     _write_json_file(path, {"status": "ok", "rows": ["local"]})
@@ -359,6 +379,7 @@ def test_json_cache_metrics_flush_emits_one_anonymous_aggregate(
     assert any(
         "json cache reads by_reader" in record.getMessage()
         and "reader=funds" in record.getMessage()
+        and "approx_payload_kib=" in record.getMessage()
         for record in caplog.records
     )
 

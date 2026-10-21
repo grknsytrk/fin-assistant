@@ -53,21 +53,31 @@ def test_unknown_backend_falls_back_to_memory(monkeypatch) -> None:
     assert backend.name == "memory"
 
 
-def test_redis_backend_falls_back_when_unavailable(monkeypatch) -> None:
-    """If the redis client cannot reach the server we keep the app running."""
+def test_redis_backend_cools_down_when_unavailable_and_recovers(monkeypatch) -> None:
+    """A startup outage should use memory temporarily and retry after cooldown."""
 
+    clients = []
     class _ExplodingRedis:
         class Redis:
             @staticmethod
             def from_url(*_args, **_kwargs):
                 class _Client:
+                    get_calls = 0
+
                     def ping(self):
                         raise RuntimeError("boom")
 
-                return _Client()
+                    def get(self, _key):
+                        self.get_calls += 1
+                        return None
+
+                client = _Client()
+                clients.append(client)
+                return client
 
     monkeypatch.setenv("RAGFIN_CACHE_BACKEND", "redis")
     monkeypatch.setenv("RAGFIN_REDIS_URL", "redis://localhost:1")
+    monkeypatch.setenv("RAGFIN_REDIS_COOLDOWN_SECONDS", "30")
     monkeypatch.setattr(cache_module, "_BACKEND", None)
     # Replace the redis import target inside RedisCache.__init__.
     import sys
@@ -77,10 +87,64 @@ def test_redis_backend_falls_back_when_unavailable(monkeypatch) -> None:
         backend = cache_module.get_cache()
     finally:
         sys.modules.pop("redis", None)
-    assert backend.name == "memory"
+    assert backend.name == "redis"
     status = cache_module.cache_status()
     assert status["cache_redis_fallback"] is True
     assert "boom" in str(status["cache_last_error"])
+    assert status["cache_redis_circuit"]["open"] is True
+
+    assert backend.get("api:funds:AAA") is None
+    assert clients[0].get_calls == 0
+    assert backend.metrics_snapshot()["by_key_prefix"]["funds"]["cooldown_skips"] == 1
+
+    backend._cooldown_until = time.monotonic() - 1
+    assert backend.get("api:funds:AAA") is None
+    assert clients[0].get_calls == 1
+    assert backend.circuit_snapshot()["open"] is False
+
+
+def test_redis_runtime_error_suppresses_retries_during_cooldown(monkeypatch, caplog) -> None:
+    class _FailingRedis:
+        class Redis:
+            @staticmethod
+            def from_url(*_args, **_kwargs):
+                class _Client:
+                    get_calls = 0
+
+                    def ping(self):
+                        return True
+
+                    def get(self, _key):
+                        self.get_calls += 1
+                        raise RuntimeError("quota exceeded")
+
+                client = _Client()
+                _FailingRedis.client = client
+                return client
+
+    monkeypatch.setenv("RAGFIN_CACHE_BACKEND", "redis")
+    monkeypatch.setenv("RAGFIN_REDIS_COOLDOWN_SECONDS", "60")
+    monkeypatch.setattr(cache_module, "_BACKEND", None)
+    import sys
+
+    sys.modules["redis"] = _FailingRedis  # type: ignore[assignment]
+    try:
+        backend = cache_module.get_cache()
+    finally:
+        sys.modules.pop("redis", None)
+
+    with caplog.at_level("WARNING", logger=cache_module.logger.name):
+        assert backend.get("api:kap:flow:latest") is None
+        assert backend.get("api:kap:flow:latest") is None
+
+    assert _FailingRedis.client.get_calls == 1
+    assert backend.circuit_snapshot()["open"] is True
+    family = backend.metrics_snapshot()["by_key_prefix"]["kap_flow_store"]
+    assert family["get_calls"] == 2
+    assert family["get_remote_attempts"] == 1
+    assert family["get_errors"] == 1
+    assert family["cooldown_skips"] == 1
+    assert sum("redis cache get failed" in record.getMessage() for record in caplog.records) == 1
 
 
 def test_delete_prefix_invalidates_matching_keys() -> None:

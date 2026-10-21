@@ -292,8 +292,6 @@ def _shared_swr_payload(
     """
 
     local_entry = local_cache.get(local_key) if local_cache is not None and local_key else None
-    shared_entry = _shared_cache_get_dict(cache_key)
-
     if _swr_entry_is_fresh(local_entry):
         pending = _schedule_swr_revalidation(
             cache_key=cache_key,
@@ -302,6 +300,11 @@ def _shared_swr_payload(
             factory=factory,
         ) if force_revalidate else False
         return _swr_entry_payload(local_entry), "local_hit", False, pending
+
+    # Do not pay for a shared-cache round trip when this process already has
+    # a fresh entry. Stale or missing local entries still consult the shared
+    # cache so another worker's refresh can be observed.
+    shared_entry = _shared_cache_get_dict(cache_key)
 
     if _swr_entry_is_fresh(shared_entry):
         if local_cache is not None and local_key:

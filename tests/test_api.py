@@ -70,6 +70,35 @@ def test_api_health() -> None:
     assert payload["status"] == "ok"
     assert payload["cache_backend"] in {"memory", "redis"}
     assert payload["cache_namespace"]
+    assert "supabase_json_cache_metrics" in payload
+    assert "totals" in payload["supabase_json_cache_metrics"]
+
+
+def test_shared_swr_fresh_local_entry_skips_shared_cache_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    local_entry = api_module._swr_cache_entry(
+        {"value": "local"},
+        fresh_ttl_seconds=60,
+        stale_ttl_seconds=120,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_shared_cache_get_dict",
+        lambda _key: pytest.fail("fresh process-local cache should skip shared cache GET"),
+    )
+
+    payload, status, stale, pending = api_module._shared_swr_payload(
+        cache_key="api:market:test",
+        factory=lambda: pytest.fail("fresh cache should skip refresh"),
+        fresh_ttl_seconds=60,
+        stale_ttl_seconds=120,
+        local_cache={"test": local_entry},
+        local_key="test",
+    )
+
+    assert payload == {"value": "local"}
+    assert status == "local_hit"
+    assert stale is False
+    assert pending is False
 
 
 def test_market_universe_is_metadata_only_and_batch_resolved(monkeypatch: pytest.MonkeyPatch) -> None:

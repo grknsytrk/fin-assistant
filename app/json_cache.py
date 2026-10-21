@@ -29,6 +29,16 @@ JSON_CACHE_METRICS_FLUSH_SECONDS = max(
     float(os.getenv("RAGFIN_JSON_CACHE_METRICS_FLUSH_SECONDS", "300")),
 )
 JSON_CACHE_READ_STATE_MAX_ENTRIES = 4096
+_JSON_CACHE_TELEMETRY_FIELDS = (
+    "local_hits",
+    "coalesced_hits",
+    "remote_reads",
+    "remote_hits",
+    "remote_misses",
+    "fallback_local",
+    "approx_remote_payload_bytes",
+)
+_JSON_CACHE_TELEMETRY_PREFIXES = ("funds_cache", "kap_cache", "other")
 
 _JSON_CACHE_READ_STATE: Dict[str, Tuple[float, Optional[Tuple[int, int]]]] = {}
 _JSON_CACHE_READ_STATE_LOCK = threading.RLock()
@@ -45,6 +55,53 @@ _JSON_CACHE_METRICS: Dict[str, int] = {
     "remote_bytes": 0,
 }
 _JSON_CACHE_METRICS_BY_READER: Dict[str, Dict[str, int]] = {}
+_JSON_CACHE_TELEMETRY_STARTED = time.monotonic()
+_JSON_CACHE_TELEMETRY_TOTALS = {key: 0 for key in _JSON_CACHE_TELEMETRY_FIELDS}
+_JSON_CACHE_TELEMETRY_BY_PREFIX = {
+    prefix: {key: 0 for key in _JSON_CACHE_TELEMETRY_FIELDS}
+    for prefix in _JSON_CACHE_TELEMETRY_PREFIXES
+}
+
+
+def json_cache_key_prefix(path: Path) -> str:
+    """Return a bounded path family, never the actual database cache key."""
+
+    parts = [str(part).replace("\\", "/").strip("/").lower() for part in path.parts]
+    try:
+        processed_index = parts.index("processed")
+    except ValueError:
+        return "other"
+    if processed_index + 1 >= len(parts):
+        return "other"
+    prefix = parts[processed_index + 1]
+    return prefix if prefix in {"funds_cache", "kap_cache"} else "other"
+
+
+def _record_json_cache_telemetry_locked(prefix: str, **increments: int) -> None:
+    family = prefix if prefix in _JSON_CACHE_TELEMETRY_BY_PREFIX else "other"
+    for key, value in increments.items():
+        if key not in _JSON_CACHE_TELEMETRY_TOTALS:
+            continue
+        amount = max(0, int(value))
+        _JSON_CACHE_TELEMETRY_TOTALS[key] += amount
+        _JSON_CACHE_TELEMETRY_BY_PREFIX[family][key] += amount
+
+
+def json_cache_metrics_status() -> Dict[str, Any]:
+    """Return process-lifetime, bounded-cardinality cache counters for health."""
+
+    now = time.monotonic()
+    with _JSON_CACHE_METRICS_LOCK:
+        return {
+            "uptime_seconds": round(now - _JSON_CACHE_TELEMETRY_STARTED, 1),
+            "totals": dict(_JSON_CACHE_TELEMETRY_TOTALS),
+            "by_key_prefix": {
+                prefix: dict(metrics)
+                for prefix, metrics in _JSON_CACHE_TELEMETRY_BY_PREFIX.items()
+                if any(metrics.values())
+            },
+            "payload_bytes_are_approximate": True,
+        }
 
 
 def _reader_metrics_locked(reader: str) -> Dict[str, int]:
@@ -134,7 +191,7 @@ def log_json_cache_metrics(
         LOGGER.info(
             "json cache reads by_reader window_s=%.0f reader=%s local_hits=%d "
             "coalesced_hits=%d remote_reads=%d remote_hits=%d remote_misses=%d "
-            "fallback_local=%d",
+            "fallback_local=%d approx_payload_kib=%.1f",
             elapsed,
             reader,
             reader_snapshot["local_hits"],
@@ -143,18 +200,27 @@ def log_json_cache_metrics(
             reader_snapshot["remote_hits"],
             reader_snapshot["remote_misses"],
             reader_snapshot["fallback_local"],
+            reader_snapshot["remote_bytes"] / 1024.0,
         )
 
 
-def record_json_cache_local_hit(*, coalesced: bool, reader: str) -> None:
+def record_json_cache_local_hit(
+    *,
+    coalesced: bool,
+    reader: str,
+    prefix: str = "other",
+) -> None:
     now = time.monotonic()
     with _JSON_CACHE_METRICS_LOCK:
         _JSON_CACHE_METRICS["local_hits"] += 1
         reader_metrics = _reader_metrics_locked(reader)
         reader_metrics["local_hits"] += 1
+        telemetry_increments = {"local_hits": 1}
         if coalesced:
             _JSON_CACHE_METRICS["coalesced_hits"] += 1
             reader_metrics["coalesced_hits"] += 1
+            telemetry_increments["coalesced_hits"] = 1
+        _record_json_cache_telemetry_locked(prefix, **telemetry_increments)
         pending = json_cache_metrics_snapshot_locked(now)
     log_json_cache_metrics(pending)
 
@@ -165,23 +231,30 @@ def record_json_cache_remote_result(
     fallback_local: bool,
     approx_bytes: int = 0,
     reader: str,
+    prefix: str = "other",
 ) -> None:
     now = time.monotonic()
     with _JSON_CACHE_METRICS_LOCK:
         _JSON_CACHE_METRICS["remote_reads"] += 1
         reader_metrics = _reader_metrics_locked(reader)
         reader_metrics["remote_reads"] += 1
+        telemetry_increments = {"remote_reads": 1}
         if hit:
             _JSON_CACHE_METRICS["remote_hits"] += 1
             _JSON_CACHE_METRICS["remote_bytes"] += max(0, int(approx_bytes))
             reader_metrics["remote_hits"] += 1
             reader_metrics["remote_bytes"] += max(0, int(approx_bytes))
+            telemetry_increments["remote_hits"] = 1
+            telemetry_increments["approx_remote_payload_bytes"] = max(0, int(approx_bytes))
         else:
             _JSON_CACHE_METRICS["remote_misses"] += 1
             reader_metrics["remote_misses"] += 1
+            telemetry_increments["remote_misses"] = 1
             if fallback_local:
                 _JSON_CACHE_METRICS["fallback_local"] += 1
                 reader_metrics["fallback_local"] += 1
+                telemetry_increments["fallback_local"] = 1
+        _record_json_cache_telemetry_locked(prefix, **telemetry_increments)
         pending = json_cache_metrics_snapshot_locked(now)
     log_json_cache_metrics(pending)
 
@@ -226,9 +299,11 @@ def read_json_cache_local_first(
 
     ttl = JSON_CACHE_LOCAL_READ_TTL_SECONDS if ttl_seconds is None else max(0, int(ttl_seconds))
     read_remote = remote_reader or read_json_cache
+    key_prefix = json_cache_key_prefix(path)
+    metric_reader = "kap" if key_prefix == "kap_cache" else reader
     local_payload = read_local_json(path)
     if json_cache_read_is_fresh(path, ttl_seconds=ttl):
-        record_json_cache_local_hit(coalesced=False, reader=reader)
+        record_json_cache_local_hit(coalesced=False, reader=metric_reader, prefix=key_prefix)
         return local_payload
 
     key = str(path)
@@ -236,7 +311,7 @@ def read_json_cache_local_first(
     with read_lock:
         local_payload = read_local_json(path)
         if json_cache_read_is_fresh(path, ttl_seconds=ttl):
-            record_json_cache_local_hit(coalesced=True, reader=reader)
+            record_json_cache_local_hit(coalesced=True, reader=metric_reader, prefix=key_prefix)
             return local_payload
 
         try:
@@ -254,31 +329,37 @@ def read_json_cache_local_first(
             record_json_cache_remote_result(
                 hit=False,
                 fallback_local=local_payload is not None,
-                reader=reader,
+                reader=metric_reader,
+                prefix=key_prefix,
             )
             return local_payload
 
-        mirrored = True
         if remote_payload != local_payload:
             try:
                 write_local_json(path, remote_payload)
             except OSError:
                 LOGGER.debug("Could not mirror remote JSON cache locally: %s", path, exc_info=True)
-                mirrored = False
         else:
             remember_json_cache_read(path)
 
-        # The mirrored file size is a cheap proxy for the payload bytes; it is
-        # never used for cache decisions and is reported only in aggregate.
-        approx_bytes = 0
-        if mirrored:
-            signature = json_cache_file_signature(path)
-            if signature is not None:
-                approx_bytes = signature[1]
+        # Compact JSON length estimates payload size without exposing content.
+        # It is not the exact Postgres wire size and is used only for telemetry.
+        try:
+            approx_bytes = len(
+                json.dumps(
+                    remote_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError):
+            approx_bytes = 0
         record_json_cache_remote_result(
             hit=True,
             fallback_local=False,
             approx_bytes=approx_bytes,
-            reader=reader,
+            reader=metric_reader,
+            prefix=key_prefix,
         )
         return remote_payload

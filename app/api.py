@@ -34,6 +34,7 @@ from app.api_runtime import (
     sync_financial_snapshots_from_kap_cache,
     sync_reference_data_from_caches,
 )
+from app.json_cache import json_cache_metrics_status
 from app import api_runtime as _api_runtime
 from app import fund_api_service as _fund_api_service
 from app import foreign_instruments as _foreign_instruments
@@ -141,7 +142,11 @@ configure_http_middleware(app)
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"status": "ok", **_cache_status()}
+    return {
+        "status": "ok",
+        **_cache_status(),
+        "supabase_json_cache_metrics": json_cache_metrics_status(),
+    }
 
 
 from app.routers.market import router as market_router
