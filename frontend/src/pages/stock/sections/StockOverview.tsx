@@ -44,6 +44,53 @@ const MONTH_SHORT_LABELS_TR = [
 ];
 const PREMIUM_YEAR_COLORS = ['#63b39a', '#e4835d', '#8190b4', '#a86bd9'] as const;
 
+type OverviewCommentSection = {
+    heading: string;
+    text: string;
+};
+
+const OVERVIEW_COMMENT_HEADINGS: Record<string, string> = {
+    'dönem': 'Dönem performansı',
+    'dönem performansı': 'Dönem performansı',
+    'kârlılık': 'Kârlılık',
+    'karlilik': 'Kârlılık',
+    'kâr kalitesi': 'Kâr kalitesi',
+    'kar kalitesi': 'Kâr kalitesi',
+    'nakit': 'Nakit akışı',
+    'nakit akışı': 'Nakit akışı',
+    'bilanço': 'Bilanço',
+    'değerleme': 'Değerleme',
+    'genel sonuç': 'Genel sonuç',
+};
+
+function inferOverviewCommentHeading(text: string, index: number): string {
+    const normalized = text.toLocaleLowerCase('tr-TR');
+    if (/genel olarak|sonuç olarak|özetle|genel görünüm/.test(normalized)) return 'Genel sonuç';
+    if (/değerleme|çarpan|f\/k|pd\/dd|fd\/favök|pd\/satış/.test(normalized)) return 'Değerleme';
+    if (/nakit akışı|serbest nakit|nakit dönüş|nakit dönüşüm/.test(normalized)) return 'Nakit akışı';
+    if (/bilanç|net borç|özkaynak|cari oran|likidite/.test(normalized)) return 'Bilanço';
+    if (/net kâr|net kar|kâr kalitesi|kar kalitesi/.test(normalized)) return 'Kâr kalitesi';
+    if (/satış|ciro|gelir artış|büyüme/.test(normalized)) return 'Dönem performansı';
+    if (/favök|marj|brüt kâr|brüt kar|esas faaliyet/.test(normalized)) return 'Kârlılık';
+    return `Öne çıkan bulgu ${index + 1}`;
+}
+
+function formatOverviewComment(comment: string): OverviewCommentSection[] {
+    const lines = comment.split(/\r?\n+/).map((line) => line.trim()).filter(Boolean);
+    const entries = lines.length > 1
+        ? lines
+        : (lines[0] || '').split(/(?<=[.!?])\s+(?=[A-ZÇĞİÖŞÜ0-9])/u).map((sentence) => sentence.trim()).filter(Boolean);
+
+    return entries.map((entry, index) => {
+        const match = entry.match(/^([^:]{2,28}):\s*(.+)$/);
+        const explicitHeading = match ? OVERVIEW_COMMENT_HEADINGS[match[1].trim().toLocaleLowerCase('tr-TR')] : undefined;
+        return {
+            heading: explicitHeading || inferOverviewCommentHeading(match?.[2] || entry, index),
+            text: (explicitHeading ? match?.[2] : entry)?.trim() || entry,
+        };
+    });
+}
+
 type PremiumSeasonalObservation = {
     year: number;
     month: number;
@@ -569,7 +616,7 @@ export default function StockOverview({
     const valuationHash = useMemo(() => overviewPayloadHash(overviewValuationContext), [overviewValuationContext]);
     const commentaryBaseKey = `${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::${payloadHash}::${historyHash}`;
     const commentaryCacheKey = useMemo(
-        () => `kapOverviewAi::margin-trend-v2::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::ifm::${payloadHash}::${historyHash}::${valuationHash}`,
+        () => `kapOverviewAi::readable-comment-v3::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::ifm::${payloadHash}::${historyHash}::${valuationHash}`,
         [snapshot.stock_code, snapshot.company, latestPeriod, payloadHash, historyHash, valuationHash],
     );
     const [aiLoading, setAiLoading] = useState(false);
@@ -1068,7 +1115,14 @@ export default function StockOverview({
                             {aiCommentary.overall_comment ? (
                                 <section className="overview-ai-overall-comment" aria-label="Genel objektif değerlendirme">
                                     <h5>Genel değerlendirme</h5>
-                                    <p>{aiCommentary.overall_comment}</p>
+                                    <div className="overview-ai-overall-grid">
+                                        {formatOverviewComment(aiCommentary.overall_comment).map((section, idx) => (
+                                            <article className="overview-ai-overall-item" key={`${idx}-${section.heading}`}>
+                                                <h6>{section.heading}</h6>
+                                                <p>{section.text}</p>
+                                            </article>
+                                        ))}
+                                    </div>
                                 </section>
                             ) : null}
                             {aiCommentary.bullets.length > 0 ? (

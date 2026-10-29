@@ -903,10 +903,33 @@
     text-transform: uppercase;
 }
 
-.overview-ai-overall-comment p {
+.overview-ai-overall-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+    gap: 0.6rem;
+}
+
+.overview-ai-overall-item {
+    min-width: 0;
+    padding: 0.75rem 0.85rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 72%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--surface-color) 76%, transparent);
+}
+
+.overview-ai-overall-item h6 {
+    margin: 0 0 0.35rem;
+    color: color-mix(in srgb, var(--accent-color) 74%, var(--text-primary));
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.035em;
+    text-transform: uppercase;
+}
+
+.overview-ai-overall-item p {
     color: var(--text-primary);
-    font-size: 0.91rem;
-    line-height: 1.65;
+    font-size: 0.84rem;
+    line-height: 1.55;
     margin: 0;
 }
 
