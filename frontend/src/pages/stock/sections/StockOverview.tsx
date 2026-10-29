@@ -569,7 +569,7 @@ export default function StockOverview({
     const valuationHash = useMemo(() => overviewPayloadHash(overviewValuationContext), [overviewValuationContext]);
     const commentaryBaseKey = `${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::${payloadHash}::${historyHash}`;
     const commentaryCacheKey = useMemo(
-        () => `kapOverviewAi::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::ifm::${payloadHash}::${historyHash}::${valuationHash}`,
+        () => `kapOverviewAi::margin-trend-v2::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::ifm::${payloadHash}::${historyHash}::${valuationHash}`,
         [snapshot.stock_code, snapshot.company, latestPeriod, payloadHash, historyHash, valuationHash],
     );
     const [aiLoading, setAiLoading] = useState(false);

@@ -689,6 +689,8 @@ def _system_prompt() -> str:
         "Bütünleşik ve Objektif Şirket Değerlendirmesi:\n"
         "- Tek bir oran veya çeyreğe bakıp hüküm verme. Son çeyrek akışını önceki çeyrek ve geçen yılın aynı çeyreğiyle; YTD toplamını önceki yıl aynı YTD ile ayrı ayrı karşılaştır. Son 12 çeyrekteki yönü, sürdürülebilirliği ve varsa mevsimselliği kontrol et.\n"
         "- Gelir artışını brüt kâr, FAVÖK/esas faaliyet kârı, marjlar ve net kârla birlikte değerlendir. Net kârın operasyonel sonuçla uyumunu ve nakde dönüşümünü belirt.\n"
+        "- precomputed_facts.marj_trendleri içindeki güncel, önceki çeyrek ve geçen yılın aynı çeyrek marjlarını; çeyreklik/yıllık değişimleri yüzde puan (pp) olarak kullan. Marj seviyesi ile yönünü ayrı değerlendir.\n"
+        "- Tarihsel medyan kıyasını yalnızca historical_median değeri mevcutsa yap ve historical_median_sample_quarters sayısını dikkate al; bu kıyası tüm şirket geçmişi gibi sunma. Marj tarihsel medyanın altında olsa bile son çeyrekte yükselmişse 'tarihsel seviyenin altında, ancak son çeyrekte toparlanıyor' ayrımını açıkça yap; yalnızca düşük seviyeye bakıp marjlar zayıflıyor deme. Bir çeyreklik iyileşmeyi kalıcı trend olarak sunma. Kâr büyümesini yüzde, marj değişimini yüzde puan olarak ifade et.\n"
         "- Bilanço kalemlerini son çeyrek ve aynı çeyrek geçen yıla göre karşılaştır; likidite, borç, nakit ve özkaynak etkisini şirket türüne uygun metriklerle açıkla. Banka ve sigortada kendi sektör metriklerini kullan; sanayi oranlarını zorla uygulama.\n"
         "- Öne çıkan olumlu ve olumsuz kanıtları birlikte tart; önemli metrikleri atlama ama bütün rakamları listeleyip yorumu tekrara çevirme. Veri yoksa açıkça belirt ve neden uydurma.\n\n"
         "Değerleme ve Kendi Tarihçesi:\n"
@@ -738,6 +740,7 @@ def _user_prompt(normalized_payload: Dict[str, Any], base_analysis: Dict[str, An
         "Son aciklanan KAP finansal donemi, karsilastirma paketleri, son 20 ceyrege kadar tarihce, precomputed analitik gercekler/bayraklar ve deterministic base scorecard asagidadir:\n"
         f"{json.dumps(prompt_payload, ensure_ascii=False, sort_keys=True)}\n\n"
         "Once precomputed_facts ve financial_flags verilerini incele. Net kâr artışının arkasındaki kâr kalitesini (earnings_quality), FAVÖK desteğini ve nakit dönüşümünü tart. "
+        "Marj yorumunda precomputed_facts.marj_trendleri ve marj_ceyreklik_toparlandi/marj_ceyreklik_daraldi bayraklarını dikkate al; güncel seviye, ardışık çeyrek yönü ve yıllık karşılaştırmayı birbirine karıştırma. "
         "Base scorecard'i tamamen degistirme; sadece tutarli maddi kanit varsa adjustment_guards sinirlarinda kalarak adjustment uygula."
     )
 

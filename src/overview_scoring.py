@@ -384,6 +384,42 @@ def _margin(numerator: Optional[float], denominator: Optional[float]) -> Optiona
     return (numerator / denominator) * 100.0
 
 
+def _margin_for_period(
+    h: _History,
+    period: Optional[Tuple[int, int]],
+    numerator_key: str,
+    denominator_key: str,
+) -> Optional[float]:
+    return _margin(
+        h.value(period, "metrics", numerator_key),
+        h.value(period, "metrics", denominator_key),
+    )
+
+
+def _margin_delta_pp(
+    h: _History,
+    period: Optional[Tuple[int, int]],
+    numerator_key: str,
+    denominator_key: str,
+    *,
+    periods_back: int,
+) -> Optional[float]:
+    current = _margin_for_period(h, period, numerator_key, denominator_key)
+    comparison_period = _History.shift(period, periods_back) if period is not None else None
+    comparison = _margin_for_period(h, comparison_period, numerator_key, denominator_key)
+    return current - comparison if current is not None and comparison is not None else None
+
+
+def _margin_trend_label(qoq_change_pp: Optional[float]) -> str:
+    if qoq_change_pp is None:
+        return "veri_yok"
+    if qoq_change_pp >= 0.3:
+        return "ceyreklik_iyilesme"
+    if qoq_change_pp <= -0.3:
+        return "ceyreklik_daralma"
+    return "ceyreklik_yatay"
+
+
 def _margin_history(h: _History, numerator_key: str, denominator_key: str, limit: int = 8) -> List[float]:
     values: List[float] = []
     for key in h.prior_keys(limit):
@@ -722,15 +758,31 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
     roe = h.value(latest, "ratios", "roe")
     current_ratio = h.value(latest, "ratios", "cari_oran")
 
+    gross_margin = _margin_for_period(h, latest, "brut_kar", "satis_gelirleri")
+    gross_margin_prev = _margin_for_period(h, _History.shift(latest, 1) if latest else None, "brut_kar", "satis_gelirleri")
+    gross_margin_ly = _margin_for_period(h, _History.shift(latest, 4) if latest else None, "brut_kar", "satis_gelirleri")
+    gross_margin_qoq_pp = _margin_delta_pp(h, latest, "brut_kar", "satis_gelirleri", periods_back=1)
+    gross_margin_yoy_pp = _margin_delta_pp(h, latest, "brut_kar", "satis_gelirleri", periods_back=4)
+    gross_margin_hist = _margin_history(h, "brut_kar", "satis_gelirleri")
+    gross_margin_median = median(gross_margin_hist) if len(gross_margin_hist) >= 3 else None
+
     favok_margin = _margin(favok["cur"], sales["cur"])
     if favok_margin is None:
         favok_margin = h.value(latest, "ratios", "favok_marji")
+    favok_margin_prev = _margin_for_period(h, _History.shift(latest, 1) if latest else None, "favok", "satis_gelirleri")
+    favok_margin_qoq_pp = _margin_delta_pp(h, latest, "favok", "satis_gelirleri", periods_back=1)
     favok_margin_ly = _margin(favok["ly"], sales["ly"])
     favok_margin_hist = _margin_history(h, "favok", "satis_gelirleri")
     favok_margin_median = median(favok_margin_hist) if len(favok_margin_hist) >= 3 else None
     net_margin = _margin(net["cur"], sales["cur"])
     if net_margin is None:
         net_margin = h.value(latest, "ratios", "net_kar_marji")
+    net_margin_prev = _margin_for_period(h, _History.shift(latest, 1) if latest else None, "net_kar", "satis_gelirleri")
+    net_margin_ly = _margin_for_period(h, _History.shift(latest, 4) if latest else None, "net_kar", "satis_gelirleri")
+    net_margin_qoq_pp = _margin_delta_pp(h, latest, "net_kar", "satis_gelirleri", periods_back=1)
+    net_margin_yoy_pp = _margin_delta_pp(h, latest, "net_kar", "satis_gelirleri", periods_back=4)
+    net_margin_hist = _margin_history(h, "net_kar", "satis_gelirleri")
+    net_margin_median = median(net_margin_hist) if len(net_margin_hist) >= 3 else None
     net_base_margin = _margin(net["ly"], sales["ly"])
 
     operating = efk if efk["cur"] is not None and efk["ly"] is not None else favok
@@ -779,10 +831,13 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
     favok_margin_vs_hist = (favok_margin - favok_margin_median) if favok_margin is not None and favok_margin_median is not None else None
     favok_margin_yoy_pp = (favok_margin - favok_margin_ly) if favok_margin is not None and favok_margin_ly is not None else None
     karlilik = [
+        _spec("Brüt kâr marjı (çeyreklik değişim)", _score_growth(gross_margin_qoq_pp, 2.0), 0.35, _fmt_pp(gross_margin_qoq_pp)),
         _spec("FAVÖK marjı seviyesi", _score_higher(favok_margin, 4.0, 20.0), 0.6, _fmt_level_pct(favok_margin)),
         _spec("FAVÖK marjı (kendi geçmişine göre)", _score_growth(favok_margin_vs_hist, 3.0), 0.7, _fmt_pp(favok_margin_vs_hist)),
+        _spec("FAVÖK marjı (çeyreklik değişim)", _score_growth(favok_margin_qoq_pp, 2.0), 0.55, _fmt_pp(favok_margin_qoq_pp)),
         _spec("FAVÖK marjı yıllık değişim", _score_growth(favok_margin_yoy_pp, 3.0), 0.6, _fmt_pp(favok_margin_yoy_pp)),
         _spec("Net kâr marjı seviyesi", _score_higher(net_margin, 0.0, 12.0), 0.3 if non_operating else 0.6, _fmt_level_pct(net_margin)),
+        _spec("Net kâr marjı (çeyreklik değişim)" + (" · kalite indirimi" if non_operating else ""), _score_growth(net_margin_qoq_pp, 2.0), 0.2 if non_operating else 0.35, _fmt_pp(net_margin_qoq_pp)),
         _spec("ROE (son 12 ay)", _score_higher(roe, 4.0, 24.0), 0.8, _fmt_level_pct(roe)),
         _spec("Net kâr değişimi (aynı çeyrek)" + (" · kalite indirimi" if non_operating else ""), net_growth_for_profitability, 0.6, _fmt_change(net["cur"], net["ly"])),
         _spec(f"Kâr kalitesi ({operating_label} desteği)", quality["score"], 1.0, str(quality["code"] or "-")),
@@ -872,6 +927,25 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
         flags.append(_flag("marj_genislemesi", "positive", "FAVÖK marjı genişledi", f"FAVÖK marjı yıllık {_fmt_pp(favok_margin_yoy_pp)} değişimle {_fmt_level_pct(favok_margin)} oldu.", "karlilik"))
     elif favok_margin_yoy_pp is not None and favok_margin_yoy_pp <= -2.0:
         flags.append(_flag("marj_daralmasi", "negative", "FAVÖK marjı daraldı", f"FAVÖK marjı yıllık {_fmt_pp(favok_margin_yoy_pp)} değişimle {_fmt_level_pct(favok_margin)} oldu.", "karlilik"))
+    if favok_margin_qoq_pp is not None and favok_margin_qoq_pp >= 0.3:
+        margin_comparisons = [
+            f"FAVÖK marjı {_fmt_level_pct(favok_margin)} oldu ({_fmt_pp(favok_margin_qoq_pp)} çeyreklik, {_fmt_pp(favok_margin_yoy_pp)} yıllık değişim)"
+        ]
+        if gross_margin is not None:
+            margin_comparisons.append(f"brüt kâr marjı {_fmt_level_pct(gross_margin)} ({_fmt_pp(gross_margin_qoq_pp)} çeyreklik)")
+        if net_margin is not None:
+            margin_comparisons.append(f"net kâr marjı {_fmt_level_pct(net_margin)} ({_fmt_pp(net_margin_qoq_pp)} çeyreklik)")
+        flags.append(_flag(
+            "marj_ceyreklik_toparlandi", "positive", "FAVÖK marjı son çeyrekte toparlandı",
+            f"{period_label}: " + "; ".join(margin_comparisons) + ". Mutlak seviye ile son çeyrekteki yön ayrı değerlendirilmelidir.",
+            "karlilik",
+        ))
+    elif favok_margin_qoq_pp is not None and favok_margin_qoq_pp <= -0.3:
+        flags.append(_flag(
+            "marj_ceyreklik_daraldi", "negative", "FAVÖK marjı son çeyrekte daraldı",
+            f"{period_label} FAVÖK marjı {_fmt_level_pct(favok_margin)} oldu; önceki çeyreğe göre {_fmt_pp(favok_margin_qoq_pp)} değişti.",
+            "karlilik",
+        ))
     if sales["yoy"] is not None and sales["yoy"] <= -10:
         if favok_margin_yoy_pp is not None and favok_margin_yoy_pp > 0:
             flags.append(_flag("satis_dusus_marj_artis", "neutral", "Satış düşerken marj genişledi", f"Satışlar {_fmt_pct(sales['yoy'])} değişirken FAVÖK marjı {_fmt_pp(favok_margin_yoy_pp)} iyileşti.", "buyume"))
@@ -912,6 +986,10 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
         _tighten(guards, "buyume", maximum=0.3)
         # The base already discounts quality; AI should not double-punish.
         _tighten(guards, "karlilik", minimum=-0.5)
+        if favok_margin_qoq_pp is not None and favok_margin_qoq_pp >= 0.5:
+            # Recent operating margin recovery is positive evidence even when
+            # the net-profit increase itself is not explained by operations.
+            _tighten(guards, "karlilik", minimum=-0.3)
     if quality["code"] == "faaliyet_guclu_net_zayif":
         _tighten(guards, "buyume", minimum=-0.3)
     if negative_equity:
@@ -943,6 +1021,38 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
         "net_kar": _flow_fact(net),
         "net_kar_eksi_faaliyet_kari": _fmt_amount(quality["non_operating_current"]),
         "faaliyet_karinin_aciklama_payi": None if quality["explained_share"] is None else round(quality["explained_share"], 2),
+        "marj_trendleri": {
+            "brut_kar": {
+                "current": _fmt_level_pct(gross_margin),
+                "previous_quarter": _fmt_level_pct(gross_margin_prev),
+                "same_quarter_last_year": _fmt_level_pct(gross_margin_ly),
+                "qoq_change_pp": _fmt_pp(gross_margin_qoq_pp),
+                "yoy_change_pp": _fmt_pp(gross_margin_yoy_pp),
+                "historical_median": _fmt_level_pct(gross_margin_median),
+                "historical_median_sample_quarters": len(gross_margin_hist),
+                "trend": _margin_trend_label(gross_margin_qoq_pp),
+            },
+            "favok": {
+                "current": _fmt_level_pct(favok_margin),
+                "previous_quarter": _fmt_level_pct(favok_margin_prev),
+                "same_quarter_last_year": _fmt_level_pct(favok_margin_ly),
+                "qoq_change_pp": _fmt_pp(favok_margin_qoq_pp),
+                "yoy_change_pp": _fmt_pp(favok_margin_yoy_pp),
+                "historical_median": _fmt_level_pct(favok_margin_median),
+                "historical_median_sample_quarters": len(favok_margin_hist),
+                "trend": _margin_trend_label(favok_margin_qoq_pp),
+            },
+            "net_kar": {
+                "current": _fmt_level_pct(net_margin),
+                "previous_quarter": _fmt_level_pct(net_margin_prev),
+                "same_quarter_last_year": _fmt_level_pct(net_margin_ly),
+                "qoq_change_pp": _fmt_pp(net_margin_qoq_pp),
+                "yoy_change_pp": _fmt_pp(net_margin_yoy_pp),
+                "historical_median": _fmt_level_pct(net_margin_median),
+                "historical_median_sample_quarters": len(net_margin_hist),
+                "trend": _margin_trend_label(net_margin_qoq_pp),
+            },
+        },
         "favok_marji": _fmt_level_pct(favok_margin),
         "favok_marji_yillik_degisim": _fmt_pp(favok_margin_yoy_pp),
         "favok_marji_gecmis_medyan": _fmt_level_pct(favok_margin_median),
