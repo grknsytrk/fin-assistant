@@ -1,5 +1,6 @@
 import type { KapSnapshotResponse, KapQuarter } from '../api/types';
 import type { SeriesPoint } from './chartBuilders';
+import { ttmSum } from './financialMetrics';
 import {
     _buildMetricSeries,
     _buildCustomSeries,
@@ -16,7 +17,6 @@ import {
     _calcPctChange,
     _pctText,
     intSafe,
-    _periodLabel,
     FLOW_METRICS,
     classifyKapCompanyKind,
     type CompanyKind,
@@ -30,6 +30,7 @@ export type OverviewSummaryConfigRow = {
 export type OverviewAiSummaryRow = {
     key: string;
     label: string;
+    basis: 'year_to_date' | 'quarter_end';
     current_period: string;
     current_value: number | null;
     current_display: string;
@@ -38,6 +39,46 @@ export type OverviewAiSummaryRow = {
     base_display: string;
     pct_change: number | null;
     pct_display: string;
+};
+
+export type OverviewAiFlowComparison = {
+    key: string;
+    label: string;
+    current_period: string;
+    current_value: number | null;
+    previous_quarter_period: string;
+    previous_quarter_value: number | null;
+    previous_quarter_pct_change: number | null;
+    same_quarter_last_year_period: string;
+    same_quarter_last_year_value: number | null;
+    same_quarter_last_year_pct_change: number | null;
+    current_ytd_period: string;
+    current_ytd_value: number | null;
+    prior_year_ytd_period: string;
+    prior_year_ytd_value: number | null;
+    prior_year_ytd_pct_change: number | null;
+};
+
+export type OverviewAiBalanceComparison = {
+    key: string;
+    label: string;
+    current_period: string;
+    current_value: number | null;
+    previous_quarter_period: string;
+    previous_quarter_value: number | null;
+    previous_quarter_pct_change: number | null;
+    same_quarter_last_year_period: string;
+    same_quarter_last_year_value: number | null;
+    same_quarter_last_year_pct_change: number | null;
+};
+
+export type OverviewAiPeriodAnalysis = {
+    latest_period: string;
+    year: number;
+    quarter: number;
+    currency: string;
+    quarterly_flow_comparisons: OverviewAiFlowComparison[];
+    balance_sheet_comparisons: OverviewAiBalanceComparison[];
 };
 
 export type OverviewAiChart = {
@@ -54,6 +95,7 @@ export type OverviewAiPayload = {
     income_summary: OverviewAiSummaryRow[];
     balance_summary: OverviewAiSummaryRow[];
     charts: OverviewAiChart[];
+    period_analysis: OverviewAiPeriodAnalysis;
 };
 
 export type OverviewAiHistoryQuarter = {
@@ -251,7 +293,31 @@ export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters
 export function latestOverviewPeriod(quarters: KapQuarter[]): string {
     const latest = quarters.length ? quarters[quarters.length - 1] : null;
     if (!latest) return '';
-    return _periodLabel(intSafe(latest.year), intSafe(latest.period), latest.quarter);
+    return aiQuarterLabel(latest);
+}
+
+function aiQuarterLabel(row: Pick<KapQuarter, 'year' | 'period' | 'quarter'>): string {
+    const year = intSafe(row.year);
+    const period = intSafe(row.period);
+    return year > 0 && period >= 1 && period <= 4 ? `${year} Q${period}` : row.quarter || '-';
+}
+
+function ytdLabel(row: Pick<KapQuarter, 'year' | 'period' | 'quarter'>): string {
+    const period = aiQuarterLabel(row);
+    return period.includes(' Q') ? `${intSafe(row.year)} YTD through Q${intSafe(row.period)}` : `${period} YTD`;
+}
+
+function previousQuarterIndex(quarters: KapQuarter[], idx: number): number {
+    const row = quarters[idx];
+    if (!row) return -1;
+    const year = intSafe(row.year);
+    const quarter = intSafe(row.period);
+    if (quarter < 1 || quarter > 4) return -1;
+    const previousYear = quarter === 1 ? year - 1 : year;
+    const previousQuarter = quarter === 1 ? 4 : quarter - 1;
+    return quarters.findIndex((candidate) =>
+        intSafe(candidate.year) === previousYear && intSafe(candidate.period) === previousQuarter,
+    );
 }
 
 function safeDivide(numerator: number | null, denominator: number | null, scale = 1): number | null {
@@ -260,7 +326,34 @@ function safeDivide(numerator: number | null, denominator: number | null, scale 
 }
 
 function metricValueAt(quarters: KapQuarter[], idx: number, metricKey: string, asQuarterlyFlow = FLOW_METRICS.has(metricKey)) {
+    if (metricKey === 'net_faiz_geliri_gideri') {
+        const income = _resolveMetricValue(quarters, idx, 'faiz_gelirleri', true);
+        const expense = _resolveMetricValue(quarters, idx, 'faiz_giderleri', true);
+        return income === null && expense === null ? null : (income ?? 0) + (expense ?? 0);
+    }
     return _resolveMetricValue(quarters, idx, metricKey, asQuarterlyFlow);
+}
+
+function metricYtdValueAt(row: KapQuarter, metricKey: string): number | null {
+    if (metricKey === 'net_faiz_geliri_gideri') {
+        const income = _resolveMetricYtdValue(row, 'faiz_gelirleri');
+        const expense = _resolveMetricYtdValue(row, 'faiz_giderleri');
+        return income === null && expense === null ? null : (income ?? 0) + (expense ?? 0);
+    }
+    return _resolveMetricYtdValue(row, metricKey);
+}
+
+function annualizedRoeAt(quarters: KapQuarter[], idx: number): number | null {
+    const trailingProfit = ttmSum(quarters.slice(0, idx + 1), 'net_kar');
+    const equity = metricValueAt(quarters, idx, 'ozkaynaklar', false);
+    if (trailingProfit === null || equity === null || equity === 0) return null;
+
+    const previousIdx = previousQuarterIndex(quarters, idx);
+    const previousEquity = previousIdx >= 0 ? metricValueAt(quarters, previousIdx, 'ozkaynaklar', false) : null;
+    const averageEquity = previousEquity !== null && previousEquity !== 0
+        ? (equity + previousEquity) / 2
+        : equity;
+    return safeDivide(trailingProfit, averageEquity, 100);
 }
 
 function ratioMapForQuarter(
@@ -269,6 +362,7 @@ function ratioMapForQuarter(
     idx: number,
 ): Record<string, number | null> {
     const netKar = metricValueAt(quarters, idx, 'net_kar', true);
+    const roe = annualizedRoeAt(quarters, idx);
     const ozkaynak = metricValueAt(quarters, idx, 'ozkaynaklar', false);
 
     if (companyKindValue === 'bank') {
@@ -276,7 +370,7 @@ function ratioMapForQuarter(
         const mevduatlar = metricValueAt(quarters, idx, 'mevduatlar', false);
         const karsiliklar = metricValueAt(quarters, idx, 'beklenen_zarar_karsiliklari', false);
         return {
-            roe: safeDivide(netKar, ozkaynak, 100),
+            roe,
             kredi_mevduat_orani: safeDivide(krediler, mevduatlar),
             karsilik_kredi_orani: safeDivide(karsiliklar, krediler),
         };
@@ -290,7 +384,7 @@ function ratioMapForQuarter(
         const teknikKarsiliklar = metricValueAt(quarters, idx, 'teknik_karsiliklar', false);
         const esasFaaliyetBorclar = metricValueAt(quarters, idx, 'esas_faaliyetlerden_borclar', false);
         return {
-            roe: safeDivide(netKar, ozkaynak, 100),
+            roe,
             teknik_denge_marji: safeDivide(teknikDenge, alinanNetPrimler ?? primUretimi, 100),
             nakit_karsilik_orani: safeDivide(nakitBenzeri, teknikKarsiliklar),
             ozkaynak_karsilik_orani: safeDivide(ozkaynak, teknikKarsiliklar),
@@ -308,7 +402,7 @@ function ratioMapForQuarter(
     return {
         favok_marji: safeDivide(favok, satislar, 100),
         net_kar_marji: safeDivide(netKar, satislar, 100),
-        roe: safeDivide(netKar, ozkaynak, 100),
+        roe,
         cari_oran: safeDivide(donenVarliklar, kisaVadeliYukumlulukler),
         net_borc_ozkaynak: safeDivide(netBorc, ozkaynak),
         nakit_donusum: safeDivide(serbestNakitAkisi ?? faaliyetNakitAkisi, netKar),
@@ -326,16 +420,30 @@ export function buildOverviewHistoryContext(
     const metricsByKind: Record<OverviewAiHistoryContext['company_kind'], string[]> = {
         generic: [
             'satis_gelirleri',
+            'brut_kar',
+            'esas_faaliyet_kari',
             'favok',
+            'net_faaliyet_kari',
             'net_kar',
             'faaliyet_nakit_akisi',
+            'capex',
             'serbest_nakit_akisi',
+            'donen_varliklar',
+            'kisa_vadeli_yukumlulukler',
+            'toplam_varliklar',
+            'nakit_ve_nakit_benzerleri',
+            'finansal_borclar',
+            'net_borc',
             'ozkaynaklar',
         ],
         bank: [
+            'net_faiz_geliri_gideri',
+            'faiz_gelirleri',
+            'faiz_giderleri',
             'net_ucret_komisyon_gelirleri',
             'net_faaliyet_kari',
             'net_kar',
+            'toplam_varliklar',
             'krediler',
             'mevduatlar',
             'beklenen_zarar_karsiliklari',
@@ -350,8 +458,10 @@ export function buildOverviewHistoryContext(
             'net_kar',
             'ozkaynaklar',
             'nakit_benzeri_finansal_varliklar',
+            'esas_faaliyetlerden_alacaklar',
             'teknik_karsiliklar',
             'esas_faaliyetlerden_borclar',
+            'finansal_varliklar_sigortacilik',
         ],
     };
 
@@ -361,7 +471,7 @@ export function buildOverviewHistoryContext(
             metricsByKind[kind].map((metricKey) => [metricKey, metricValueAt(quarters, idx, metricKey)]),
         ) as Record<string, number | null>;
         historyRows.push({
-            label: _periodLabel(intSafe(row.year), intSafe(row.period), row.quarter),
+            label: aiQuarterLabel(row),
             year: intSafe(row.year),
             period: intSafe(row.period),
             metrics,
@@ -378,7 +488,7 @@ export function buildOverviewHistoryContext(
 export function buildOverviewAiPayload(snapshot: KapSnapshotResponse, quarters: KapQuarter[]): OverviewAiPayload {
     const latestQuarterIdx = quarters.length ? quarters.length - 1 : -1;
     const latestQuarter = latestQuarterIdx >= 0 ? quarters[latestQuarterIdx] : null;
-    const prevQuarterIdx = latestQuarterIdx > 0 ? latestQuarterIdx - 1 : -1;
+    const prevQuarterIdx = latestQuarter ? previousQuarterIndex(quarters, latestQuarterIdx) : -1;
     const prevQuarter = prevQuarterIdx >= 0 ? quarters[prevQuarterIdx] : null;
     const prevYearSameQuarterIdx = latestQuarter
         ? quarters.findIndex(
@@ -389,12 +499,13 @@ export function buildOverviewAiPayload(snapshot: KapSnapshotResponse, quarters: 
         : -1;
     const prevYearSameQuarter = prevYearSameQuarterIdx >= 0 ? quarters[prevYearSameQuarterIdx] : null;
     const { incomeSummaryRows, balanceSummaryRows } = getOverviewSummaryRows(snapshot);
-    const currentPeriod = latestQuarter ? _periodLabel(intSafe(latestQuarter.year), intSafe(latestQuarter.period), latestQuarter.quarter) : '';
+    const currentPeriod = latestQuarter ? aiQuarterLabel(latestQuarter) : '';
+    const currentYtdPeriod = latestQuarter ? ytdLabel(latestQuarter) : '';
     const incomeBasePeriod = prevYearSameQuarter
-        ? _periodLabel(intSafe(prevYearSameQuarter.year), intSafe(prevYearSameQuarter.period), prevYearSameQuarter.quarter)
+        ? ytdLabel(prevYearSameQuarter)
         : '';
     const balanceBasePeriod = prevQuarter
-        ? _periodLabel(intSafe(prevQuarter.year), intSafe(prevQuarter.period), prevQuarter.quarter)
+        ? aiQuarterLabel(prevQuarter)
         : '';
 
     const incomeSummary = latestQuarter
@@ -408,7 +519,8 @@ export function buildOverviewAiPayload(snapshot: KapSnapshotResponse, quarters: 
             return {
                 key: row.key,
                 label: row.label,
-                current_period: currentPeriod,
+                basis: 'year_to_date',
+                current_period: currentYtdPeriod,
                 current_value: currentValue,
                 current_display: _resolveMetricYtdDisplay(latestQuarter, row.key),
                 base_period: incomeBasePeriod,
@@ -431,6 +543,7 @@ export function buildOverviewAiPayload(snapshot: KapSnapshotResponse, quarters: 
             return {
                 key: row.key,
                 label: row.label,
+                basis: 'quarter_end',
                 current_period: currentPeriod,
                 current_value: currentValue,
                 current_display: _resolveMetricDisplay(quarters, latestQuarterIdx, row.key, false),
@@ -443,9 +556,134 @@ export function buildOverviewAiPayload(snapshot: KapSnapshotResponse, quarters: 
         }).filter((row): row is OverviewAiSummaryRow => row !== null)
         : [];
 
+    const { kind } = companyKind(snapshot);
+    const flowMetricRows: Record<OverviewAiHistoryContext['company_kind'], OverviewSummaryConfigRow[]> = {
+        generic: [
+            { key: 'satis_gelirleri', label: 'Satış Gelirleri' },
+            { key: 'brut_kar', label: 'Brüt Kar' },
+            { key: 'esas_faaliyet_kari', label: 'Esas Faaliyet Karı' },
+            { key: 'favok', label: 'FAVÖK' },
+            { key: 'net_faaliyet_kari', label: 'Net Faaliyet Karı' },
+            { key: 'net_kar', label: 'Net Dönem Karı' },
+            { key: 'faaliyet_nakit_akisi', label: 'Faaliyet Nakit Akışı' },
+            { key: 'capex', label: 'Yatırım Harcamaları (CapEx)' },
+            { key: 'serbest_nakit_akisi', label: 'Serbest Nakit Akışı' },
+        ],
+        bank: [
+            { key: 'net_faiz_geliri_gideri', label: 'Net Faiz Geliri / Gideri' },
+            { key: 'faiz_gelirleri', label: 'Faiz Gelirleri' },
+            { key: 'faiz_giderleri', label: 'Faiz Giderleri' },
+            { key: 'net_ucret_komisyon_gelirleri', label: 'Net Ücret ve Komisyon Gelirleri' },
+            { key: 'net_faaliyet_kari', label: 'Net Faaliyet Karı (Zararı)' },
+            { key: 'net_kar', label: 'Net Dönem Karı' },
+        ],
+        insurance: [
+            { key: 'prim_uretimi', label: 'Prim Üretimi' },
+            { key: 'alinan_net_primler', label: 'Alınan Net Primler' },
+            { key: 'teknik_gelirler', label: 'Teknik Gelirler' },
+            { key: 'teknik_denge', label: 'Teknik Denge' },
+            { key: 'net_kar', label: 'Net Dönem Karı' },
+            { key: 'faaliyet_nakit_akisi', label: 'Faaliyet Nakit Akışı' },
+        ],
+    };
+    const balanceMetricRows: Record<OverviewAiHistoryContext['company_kind'], OverviewSummaryConfigRow[]> = {
+        generic: [
+            { key: 'donen_varliklar', label: 'Dönen Varlıklar' },
+            { key: 'kisa_vadeli_yukumlulukler', label: 'Kısa Vadeli Yükümlülükler' },
+            { key: 'toplam_varliklar', label: 'Toplam Varlıklar' },
+            { key: 'nakit_ve_nakit_benzerleri', label: 'Nakit ve Nakit Benzerleri' },
+            { key: 'finansal_borclar', label: 'Finansal Borçlar' },
+            { key: 'net_borc', label: 'Net Borç' },
+            { key: 'ozkaynaklar', label: 'Özkaynaklar' },
+        ],
+        bank: [
+            { key: 'toplam_varliklar', label: 'Toplam Varlıklar' },
+            { key: 'finansal_varliklar_net', label: 'Finansal Varlıklar (Net)' },
+            { key: 'krediler', label: 'Krediler' },
+            { key: 'mevduatlar', label: 'Mevduatlar' },
+            { key: 'beklenen_zarar_karsiliklari', label: 'Beklenen Zarar Karşılıkları' },
+            { key: 'ozkaynaklar', label: 'Özkaynaklar' },
+        ],
+        insurance: [
+            { key: 'nakit_benzeri_finansal_varliklar', label: 'Nakit Benzeri Finansal Varlıklar' },
+            { key: 'esas_faaliyetlerden_alacaklar', label: 'Esas Faaliyetlerden Alacaklar' },
+            { key: 'teknik_karsiliklar', label: 'Teknik Karşılıklar' },
+            { key: 'esas_faaliyetlerden_borclar', label: 'Esas Faaliyetlerden Borçlar' },
+            { key: 'finansal_varliklar_sigortacilik', label: 'Sigortacılık Finansal Varlıkları' },
+            { key: 'ozkaynaklar', label: 'Özkaynaklar' },
+        ],
+    };
+
+    const priorYearYtd = latestQuarter && prevYearSameQuarter ? prevYearSameQuarter : null;
+    const quarterlyFlowComparisons = latestQuarter
+        ? flowMetricRows[kind].map((metric): OverviewAiFlowComparison | null => {
+            const currentValue = metricValueAt(quarters, latestQuarterIdx, metric.key, true);
+            const previousQuarterValue = prevQuarterIdx >= 0 ? metricValueAt(quarters, prevQuarterIdx, metric.key, true) : null;
+            const sameQuarterLastYearValue = prevYearSameQuarterIdx >= 0
+                ? metricValueAt(quarters, prevYearSameQuarterIdx, metric.key, true)
+                : null;
+            const currentYtdValue = metricYtdValueAt(latestQuarter, metric.key);
+            const priorYearYtdValue = priorYearYtd
+                ? metricYtdValueAt(priorYearYtd, metric.key)
+                : null;
+            if ([currentValue, previousQuarterValue, sameQuarterLastYearValue, currentYtdValue, priorYearYtdValue].every((value) => value === null)) {
+                return null;
+            }
+            return {
+                key: metric.key,
+                label: metric.label,
+                current_period: currentPeriod,
+                current_value: currentValue,
+                previous_quarter_period: prevQuarter ? aiQuarterLabel(prevQuarter) : '',
+                previous_quarter_value: previousQuarterValue,
+                previous_quarter_pct_change: _calcPctChange(currentValue, previousQuarterValue),
+                same_quarter_last_year_period: prevYearSameQuarter ? aiQuarterLabel(prevYearSameQuarter) : '',
+                same_quarter_last_year_value: sameQuarterLastYearValue,
+                same_quarter_last_year_pct_change: _calcPctChange(currentValue, sameQuarterLastYearValue),
+                current_ytd_period: currentYtdPeriod,
+                current_ytd_value: currentYtdValue,
+                prior_year_ytd_period: priorYearYtd ? ytdLabel(priorYearYtd) : '',
+                prior_year_ytd_value: priorYearYtdValue,
+                prior_year_ytd_pct_change: _calcPctChange(currentYtdValue, priorYearYtdValue),
+            };
+        }).filter((row): row is OverviewAiFlowComparison => row !== null)
+        : [];
+    const balanceSheetComparisons = latestQuarter
+        ? balanceMetricRows[kind].map((metric): OverviewAiBalanceComparison | null => {
+            const currentValue = metricValueAt(quarters, latestQuarterIdx, metric.key, false);
+            const previousQuarterValue = prevQuarterIdx >= 0 ? metricValueAt(quarters, prevQuarterIdx, metric.key, false) : null;
+            const sameQuarterLastYearValue = prevYearSameQuarterIdx >= 0
+                ? metricValueAt(quarters, prevYearSameQuarterIdx, metric.key, false)
+                : null;
+            if ([currentValue, previousQuarterValue, sameQuarterLastYearValue].every((value) => value === null)) {
+                return null;
+            }
+            return {
+                key: metric.key,
+                label: metric.label,
+                current_period: currentPeriod,
+                current_value: currentValue,
+                previous_quarter_period: prevQuarter ? aiQuarterLabel(prevQuarter) : '',
+                previous_quarter_value: previousQuarterValue,
+                previous_quarter_pct_change: _calcPctChange(currentValue, previousQuarterValue),
+                same_quarter_last_year_period: prevYearSameQuarter ? aiQuarterLabel(prevYearSameQuarter) : '',
+                same_quarter_last_year_value: sameQuarterLastYearValue,
+                same_quarter_last_year_pct_change: _calcPctChange(currentValue, sameQuarterLastYearValue),
+            };
+        }).filter((row): row is OverviewAiBalanceComparison => row !== null)
+        : [];
+
     return {
         income_summary: incomeSummary.slice(0, 8),
         balance_summary: balanceSummary.slice(0, 8),
+        period_analysis: {
+            latest_period: currentPeriod,
+            year: latestQuarter ? intSafe(latestQuarter.year) : 0,
+            quarter: latestQuarter ? intSafe(latestQuarter.period) : 0,
+            currency: latestQuarter?.currency || '',
+            quarterly_flow_comparisons: quarterlyFlowComparisons,
+            balance_sheet_comparisons: balanceSheetComparisons,
+        },
         charts: buildOverviewChartGroups(snapshot, quarters).slice(0, 9).map((chart) => ({
             title: chart.title,
             kind: chart.kind,

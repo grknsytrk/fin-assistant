@@ -1059,6 +1059,7 @@ export interface KapOverviewCommentaryRequest {
     income_summary: unknown[];
     balance_summary: unknown[];
     charts: unknown[];
+    period_analysis: unknown;
   };
 }
 

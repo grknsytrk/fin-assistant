@@ -128,7 +128,14 @@ export function prepareOrderedQuarters(snapshot: any): KapQuarter[] {
     const byPeriod = new Map<string, KapQuarter>();
     for (const q of snapshot.quarters) {
         const key = `${intSafe(q.year)}-${intSafe(q.period)}`;
-        if (!byPeriod.has(key)) {
+        const existing = byPeriod.get(key);
+        const candidatePublishedAt = Date.parse(String(q.publish_date || ''));
+        const existingPublishedAt = existing ? Date.parse(String(existing.publish_date || '')) : Number.NaN;
+        if (
+            !existing ||
+            (Number.isFinite(candidatePublishedAt) &&
+                (!Number.isFinite(existingPublishedAt) || candidatePublishedAt > existingPublishedAt))
+        ) {
             byPeriod.set(key, q);
         }
     }

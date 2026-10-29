@@ -44,10 +44,11 @@ MAX_DEBUG_TRACE_ITEMS = 40
 
 TOP_LEVEL_KEYS = {"company", "company_title", "latest_period", "overview_payload", "history_context", "model"}
 REQUIRED_TOP_LEVEL_KEYS = {"company", "company_title", "latest_period", "overview_payload", "history_context"}
-OVERVIEW_KEYS = {"income_summary", "balance_summary", "charts"}
+OVERVIEW_KEYS = {"income_summary", "balance_summary", "charts", "period_analysis"}
 SUMMARY_ROW_KEYS = {
     "key",
     "label",
+    "basis",
     "current_period",
     "current_value",
     "current_display",
@@ -61,6 +62,43 @@ CHART_KEYS = {"title", "kind", "series"}
 SERIES_POINT_KEYS = {"label", "value", "display"}
 HISTORY_CONTEXT_KEYS = {"company_kind", "quarters"}
 HISTORY_QUARTER_KEYS = {"label", "year", "period", "metrics", "ratios"}
+PERIOD_ANALYSIS_KEYS = {
+    "latest_period",
+    "year",
+    "quarter",
+    "currency",
+    "quarterly_flow_comparisons",
+    "balance_sheet_comparisons",
+}
+FLOW_COMPARISON_KEYS = {
+    "key",
+    "label",
+    "current_period",
+    "current_value",
+    "previous_quarter_period",
+    "previous_quarter_value",
+    "previous_quarter_pct_change",
+    "same_quarter_last_year_period",
+    "same_quarter_last_year_value",
+    "same_quarter_last_year_pct_change",
+    "current_ytd_period",
+    "current_ytd_value",
+    "prior_year_ytd_period",
+    "prior_year_ytd_value",
+    "prior_year_ytd_pct_change",
+}
+BALANCE_COMPARISON_KEYS = {
+    "key",
+    "label",
+    "current_period",
+    "current_value",
+    "previous_quarter_period",
+    "previous_quarter_value",
+    "previous_quarter_pct_change",
+    "same_quarter_last_year_period",
+    "same_quarter_last_year_value",
+    "same_quarter_last_year_pct_change",
+}
 
 SUPPORTED_NVIDIA_MODELS = {
     "minimaxai/minimax-m2.7",
@@ -315,12 +353,13 @@ def _normalize_requested_model(value: Any, path: str) -> Optional[str]:
     return resolved
 
 
-def _normalize_summary_row(row: Any, path: str) -> Dict[str, Any]:
+def _normalize_summary_row(row: Any, path: str, *, default_basis: str) -> Dict[str, Any]:
     item = _require_object(row, path)
     _unknown_keys(item, SUMMARY_ROW_KEYS, path)
     normalized = {
         "key": _text(item.get("key"), f"{path}.key", max_len=64),
         "label": _text(item.get("label"), f"{path}.label", max_len=80),
+        "basis": _text(item.get("basis") or default_basis, f"{path}.basis", max_len=24, required=False),
         "current_period": _text(item.get("current_period"), f"{path}.current_period", max_len=24),
         "current_value": _number_or_none(item.get("current_value"), f"{path}.current_value"),
         "current_display": _text(item.get("current_display"), f"{path}.current_display", max_len=80),
@@ -332,7 +371,71 @@ def _normalize_summary_row(row: Any, path: str) -> Dict[str, Any]:
     }
     if normalized["current_value"] is None and normalized["base_value"] is None:
         raise PayloadValidationError(f"{path} en az bir sayisal deger icermeli")
+    if normalized["basis"] not in {"", "year_to_date", "quarter_end"}:
+        raise PayloadValidationError(f"{path}.basis desteklenmeyen deger")
     return normalized
+
+
+def _normalize_period_comparison(row: Any, path: str, *, flow: bool) -> Dict[str, Any]:
+    item = _require_object(row, path)
+    _unknown_keys(item, FLOW_COMPARISON_KEYS if flow else BALANCE_COMPARISON_KEYS, path)
+    normalized: Dict[str, Any] = {
+        "key": _text(item.get("key"), f"{path}.key", max_len=64),
+        "label": _text(item.get("label"), f"{path}.label", max_len=80),
+        "current_period": _text(item.get("current_period"), f"{path}.current_period", max_len=32, required=False),
+        "current_value": _number_or_none(item.get("current_value"), f"{path}.current_value"),
+        "previous_quarter_period": _text(item.get("previous_quarter_period"), f"{path}.previous_quarter_period", max_len=32, required=False),
+        "previous_quarter_value": _number_or_none(item.get("previous_quarter_value"), f"{path}.previous_quarter_value"),
+        "previous_quarter_pct_change": _number_or_none(item.get("previous_quarter_pct_change"), f"{path}.previous_quarter_pct_change"),
+        "same_quarter_last_year_period": _text(item.get("same_quarter_last_year_period"), f"{path}.same_quarter_last_year_period", max_len=32, required=False),
+        "same_quarter_last_year_value": _number_or_none(item.get("same_quarter_last_year_value"), f"{path}.same_quarter_last_year_value"),
+        "same_quarter_last_year_pct_change": _number_or_none(item.get("same_quarter_last_year_pct_change"), f"{path}.same_quarter_last_year_pct_change"),
+    }
+    if flow:
+        normalized.update({
+            "current_ytd_period": _text(item.get("current_ytd_period"), f"{path}.current_ytd_period", max_len=40, required=False),
+            "current_ytd_value": _number_or_none(item.get("current_ytd_value"), f"{path}.current_ytd_value"),
+            "prior_year_ytd_period": _text(item.get("prior_year_ytd_period"), f"{path}.prior_year_ytd_period", max_len=40, required=False),
+            "prior_year_ytd_value": _number_or_none(item.get("prior_year_ytd_value"), f"{path}.prior_year_ytd_value"),
+            "prior_year_ytd_pct_change": _number_or_none(item.get("prior_year_ytd_pct_change"), f"{path}.prior_year_ytd_pct_change"),
+        })
+    if all(value is None for key, value in normalized.items() if key.endswith("_value")):
+        raise PayloadValidationError(f"{path} en az bir sayisal deger icermeli")
+    return normalized
+
+
+def _normalize_period_analysis(value: Any, fallback_period: str) -> Dict[str, Any]:
+    if value is None:
+        return {
+            "latest_period": fallback_period,
+            "year": 0,
+            "quarter": 0,
+            "currency": "",
+            "quarterly_flow_comparisons": [],
+            "balance_sheet_comparisons": [],
+        }
+    item = _require_object(value, "overview_payload.period_analysis")
+    _unknown_keys(item, PERIOD_ANALYSIS_KEYS, "overview_payload.period_analysis")
+    raw_flows = _require_list(item.get("quarterly_flow_comparisons"), "overview_payload.period_analysis.quarterly_flow_comparisons", 16)
+    raw_balances = _require_list(item.get("balance_sheet_comparisons"), "overview_payload.period_analysis.balance_sheet_comparisons", 16)
+    year = _integer_field(item.get("year"), "overview_payload.period_analysis.year", minimum=0, maximum=2100)
+    quarter = _integer_field(item.get("quarter"), "overview_payload.period_analysis.quarter", minimum=0, maximum=4)
+    if (year == 0) != (quarter == 0):
+        raise PayloadValidationError("overview_payload.period_analysis.year ve quarter birlikte bos olmali")
+    return {
+        "latest_period": _text(item.get("latest_period"), "overview_payload.period_analysis.latest_period", max_len=32, required=False),
+        "year": year,
+        "quarter": quarter,
+        "currency": _text(item.get("currency"), "overview_payload.period_analysis.currency", max_len=12, required=False),
+        "quarterly_flow_comparisons": [
+            _normalize_period_comparison(row, f"overview_payload.period_analysis.quarterly_flow_comparisons[{idx}]", flow=True)
+            for idx, row in enumerate(raw_flows)
+        ],
+        "balance_sheet_comparisons": [
+            _normalize_period_comparison(row, f"overview_payload.period_analysis.balance_sheet_comparisons[{idx}]", flow=False)
+            for idx, row in enumerate(raw_balances)
+        ],
+    }
 
 
 def _normalize_series_point(point: Any, path: str) -> Dict[str, Any]:
@@ -433,13 +536,14 @@ def validate_overview_commentary_request(payload: Any) -> Dict[str, Any]:
         "model": _normalize_requested_model(root.get("model"), "model"),
         "overview_payload": {
             "income_summary": [
-                _normalize_summary_row(row, f"overview_payload.income_summary[{idx}]")
+                _normalize_summary_row(row, f"overview_payload.income_summary[{idx}]", default_basis="year_to_date")
                 for idx, row in enumerate(income_rows)
             ],
             "balance_summary": [
-                _normalize_summary_row(row, f"overview_payload.balance_summary[{idx}]")
+                _normalize_summary_row(row, f"overview_payload.balance_summary[{idx}]", default_basis="quarter_end")
                 for idx, row in enumerate(balance_rows)
             ],
+            "period_analysis": _normalize_period_analysis(overview.get("period_analysis"), _text(root.get("latest_period"), "latest_period", max_len=24)),
             "charts": [
                 _normalize_chart(chart, f"overview_payload.charts[{idx}]")
                 for idx, chart in enumerate(charts)
@@ -454,9 +558,20 @@ def _system_prompt() -> str:
         "Turkce finansal analiz ureten bir asistansin.\n"
         "Kurallar:\n"
         "- Sadece verilen JSON verisini kullan.\n"
+        "- Analizin ana konusu en son KAP'ta aciklanan donemdir; yillik/TTM toplamlari son ceyregin yerine koyma. Donem etiketini acikca kullan (ornegin 2026 Q2).\n"
+        "- period_analysis.quarterly_flow_comparisons gelir tablosu ve nakit akisinin tek ceyreklik akisini verir. Once son ceyregi ardil onceki ceyrekle, sonra gecen yilin ayni ceyregiyle karsilastir.\n"
+        "- Ayni akista current_ytd_value ile prior_year_ytd_value, icinde bulunulan rapor yilinin basindan son aciklanan ceyrege kadarki birikimli tutarlari onceki yilin ayni donem birikimiyle karsilastirir. Bunlari tek ceyrek tutari gibi adlandirma. 2026 Q2 varsa 2026 YTD, ilk yari verisidir; Q3/Q4 aciklanmadiysa yil sonu sonucu veya tahmini uretme.\n"
+        "- period_analysis.balance_sheet_comparisons bilanconun ceyrek sonu stok degerleridir. Son donemi onceki ceyrek sonu ve gecen yil ayni ceyrek sonuyla ayri ayri karsilastir; bunlari gelir/nakit akis toplami gibi yorumlama.\n"
+        "- income_summary satirlari YTD, balance_summary satirlari ceyrek sonu degeridir; basis alanini ve donem etiketlerini dikkate al. period_analysis varsa karsilastirmalarda onu esas al. Tarihsel quarters dizisini mevsimsellik, trend ve tek ceyreklik sapmalari kontrol etmek icin kullan; tarihsel ortalama son aciklanan ceyregi gormezden getirmesin.\n"
+        "- Sirket turune uygun metrikleri sec: genel sirketlerde satis, faaliyet karliligi/marjlar, net kar, nakit donusumu ve borc; bankalarda faiz/komisyon, kredi-mevduat, karsilik ve ozkaynak; sigortada prim, teknik denge, karsilik ve ozkaynak. Alakasiz sektorel metrikleri yorumlama.\n"
+        "- Tarihsel ratios.roe degeri dort ardışık ceyreklik net karin ortalama ozkaynakla hesaplanan TTM ROE'sidir; null ise yillik getiri yorumu yapma. Diger marjlari son ceyrekteki akislardan, likidite/borc oranlarini ceyrek sonu bilancosundan hesapla.\n"
+        "- Rakam listesini tekrar etme. Birbirine bagli 2-4 onemli etkene odaklan: buyume -> faaliyet kari ve marj -> net kar; kar -> faaliyet/serbest nakit akisina donusum; bilanco -> likidite, borcluluk veya sektorel risk. Olumlu ve olumsuz sinyalleri birlikte tart.\n"
+        "- Yuzde degisimde ozellikle onceki deger sifira yakin ya da negatifse matematiksel yuzdeyi ekonomik buyume gibi sunma; tutar yonunu ve karliligin zarardan kara gecip gecmedigini acikla. Veri yoksa tahmin etme. Karsilastirma donemi yoksa bunu belirt; fiyat hedefi, rakip kiyaslamasi veya dis bilgi ekleme.\n"
+        "- Veriler celiskiliyse, tek seferlik etki oldugu veriden anlasilmiyorsa bunu kesin neden gibi yazma. Sinyaller karisik/zayifsa score adjustment'i sifira yakin veya sifir tut.\n"
         "- Final scorecard uretme; sadece bounded adjustment ve kisa gerekce uret.\n"
         "- Rakam uydurma, dis bilgi kullanma, fiyat hedefi verme.\n"
         "- Cumleleri tamamla; metin alanlarini yarim birakma.\n"
+        "- Headline en son rapor donemini ve genel yonu soylesin. Bullets alaninda 3-5 kisa, kanita dayali bulgu yaz; mumkunse son ceyrek, ayni ceyrek yillik/YTD karsilastirmasi, nakit kalitesi ve bilancodan en anlamli konulari kapsa.\n"
         "- score_adjustments.overall_adjustment -0.5 ile 0.5 arasinda olsun.\n"
         "- score_adjustments.subscores yalniz buyume, karlilik, bilanco, nakit_akisi keylerini kullansin.\n"
         "- Her subscore adjustment -1.0 ile 1.0 arasinda olsun.\n"
@@ -475,9 +590,9 @@ def _user_prompt(normalized_payload: Dict[str, Any], base_analysis: Dict[str, An
         "base_scorecard": base_analysis["scorecard"],
     }
     return (
-        "Genel bakis ekranindan uretilen finansal veri ve deterministic base scorecard asagidadir:\n"
+        "Son aciklanan KAP finansal donemi, karsilastirma paketleri, 12 ceyrege kadar tarihce ve deterministic base scorecard asagidadir. Donem kiyaslari hazir hesaplanmistir; once bazlarini kontrol et:\n"
         f"{json.dumps(prompt_payload, ensure_ascii=False, sort_keys=True)}\n\n"
-        "Base scorecard'i tamamen degistirme. Sadece gerekiyorsa sinirli adjustment uygula ve kisa finansal yorum yaz."
+        "Once period_analysis.latest_period donemini merkez al. Akis kalemleri icin standalone ceyrek karsilastirmalarini, yil icindeki birikimli performans icin YTD karsilastirmasini; bilanco kalemleri icin ceyrek sonu stok karsilastirmalarini birbirinden ayri yorumla. Ardindan tarihceyle mevsimsellik ve trendi dogrula. Base scorecard'i tamamen degistirme; sadece birbiriyle tutarli ve maddi kanit varsa sinirli adjustment uygula."
     )
 
 
