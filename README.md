@@ -148,7 +148,7 @@ Eski `/stocks/:ticker/ask` adresleri bozulmaz; frontend bu yolu şirketin Genel 
 - `RAGFIN_CACHE_BACKEND`, `RAGFIN_REDIS_URL`
 - `RAGFIN_KAP_FLOW_HEAD_CACHE_TTL_SECONDS`, `RAGFIN_KAP_FLOW_RETAINED_EVENTS`
 
-KAP yorumunu etkinleştirmek için `NVIDIA_API_KEY` ve ilgili `NVIDIA_AI_*` değişkenlerini doldurabilirsiniz. Yorum özelliği isteğe bağlıdır; yapılandırılmış KAP tablolarının çalışması için gerekli değildir.
+KAP AI yorumunda IFM kullanılır. `IFM_API_KEY` değerini yerelde proje kökündeki `.env` dosyasına, Hugging Face dağıtımında ise Space'in **Settings → Variables and secrets** bölümüne secret olarak ekleyin. İsteğe bağlı model/endpoint ayarları `IFM_MODEL` ve `IFM_BASE_URL` ile belirlenir; varsayılan model `IFM/K2-Horizon-375B-A23B`, endpoint `https://api.ifm.ai/v1` olur. Anahtar yalnızca backend'de okunur. IFM anahtarı yoksa eski NVIDIA ayarları geriye dönük fallback olarak kullanılabilir. Yorum özelliği isteğe bağlıdır; yapılandırılmış KAP tablolarının çalışması için gerekli değildir.
 
 ## Test ve doğrulama
 

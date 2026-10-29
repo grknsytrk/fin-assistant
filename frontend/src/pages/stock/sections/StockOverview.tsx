@@ -26,12 +26,7 @@ import {
 import StockCharts from './StockCharts';
 import './StockOverview.css';
 
-const OVERVIEW_AI_MODEL_STORAGE_KEY = 'kapOverviewAi::selectedModel';
-const OVERVIEW_AI_MODELS = [
-    { id: 'minimaxai/minimax-m2.7', label: 'MiniMax M2.7' },
-    { id: 'meta/llama-4-maverick-17b-128e-instruct', label: 'Llama 4 Maverick 17B' },
-];
-const DEFAULT_OVERVIEW_AI_MODEL = OVERVIEW_AI_MODELS[0].id;
+const OVERVIEW_AI_PROVIDER_LABEL = 'IFM';
 const OVERVIEW_AI_LOADING_STEPS = [
     {
         title: 'Tarihsel baz kuruluyor',
@@ -578,16 +573,9 @@ export default function StockOverview({
     const latestPeriod = useMemo(() => latestOverviewPeriod(quarters), [quarters]);
     const payloadHash = useMemo(() => overviewPayloadHash(overviewAiPayload), [overviewAiPayload]);
     const historyHash = useMemo(() => overviewPayloadHash(overviewHistoryContext), [overviewHistoryContext]);
-    const [selectedModel, setSelectedModel] = useState(() => {
-        if (typeof window === 'undefined') {
-            return DEFAULT_OVERVIEW_AI_MODEL;
-        }
-        const saved = window.localStorage.getItem(OVERVIEW_AI_MODEL_STORAGE_KEY) || '';
-        return OVERVIEW_AI_MODELS.some((item) => item.id === saved) ? saved : DEFAULT_OVERVIEW_AI_MODEL;
-    });
     const commentaryCacheKey = useMemo(
-        () => `kapOverviewAi::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::${selectedModel}::${payloadHash}::${historyHash}`,
-        [snapshot.stock_code, snapshot.company, latestPeriod, selectedModel, payloadHash, historyHash],
+        () => `kapOverviewAi::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::ifm::${payloadHash}::${historyHash}`,
+        [snapshot.stock_code, snapshot.company, latestPeriod, payloadHash, historyHash],
     );
     const [aiLoading, setAiLoading] = useState(false);
     const [aiLoadingStep, setAiLoadingStep] = useState(0);
@@ -602,9 +590,6 @@ export default function StockOverview({
         (overviewAiPayload.income_summary.length > 0 ||
             overviewAiPayload.balance_summary.length > 0 ||
             overviewAiPayload.charts.length > 0);
-    const selectedModelLabel =
-        OVERVIEW_AI_MODELS.find((item) => item.id === selectedModel)?.label || selectedModel;
-
     const [chartQuarterWindow, setChartQuarterWindow] = useState(readStoredChartQuarterWindow);
     const displayedChartQuarterWindow = useMemo(
         () => displayQuarterWindowOption(chartQuarterWindow, quarters.length),
@@ -683,10 +668,6 @@ export default function StockOverview({
     }, []);
 
     useEffect(() => {
-        window.localStorage.setItem(OVERVIEW_AI_MODEL_STORAGE_KEY, selectedModel);
-    }, [selectedModel]);
-
-    useEffect(() => {
         if (!aiLoading) {
             setAiLoadingStep(0);
             return;
@@ -706,7 +687,7 @@ export default function StockOverview({
         console.debug('[overview-ai] request started', {
             company: snapshot.stock_code || snapshot.company,
             latestPeriod,
-            model: selectedModel,
+            provider: OVERVIEW_AI_PROVIDER_LABEL,
             forceRefresh,
             incomeRows: overviewAiPayload.income_summary.length,
             balanceRows: overviewAiPayload.balance_summary.length,
@@ -736,7 +717,6 @@ export default function StockOverview({
                 company: snapshot.stock_code || snapshot.company,
                 company_title: snapshot.company_title || snapshot.company,
                 latest_period: latestPeriod,
-                model: selectedModel,
                 history_context: overviewHistoryContext,
                 overview_payload: overviewAiPayload,
             }, {
@@ -1007,20 +987,7 @@ export default function StockOverview({
                             <p>Bu yorum yalnızca ekranda görülen finansal verilerden otomatik üretilmiştir.</p>
                         </div>
                         <div className="overview-ai-controls">
-                            <label className="overview-ai-model-picker">
-                                <span>Model</span>
-                                <select
-                                    value={selectedModel}
-                                    onChange={(event) => setSelectedModel(event.target.value)}
-                                    disabled={aiLoading}
-                                >
-                                    {OVERVIEW_AI_MODELS.map((option) => (
-                                        <option key={option.id} value={option.id}>
-                                            {option.label}
-                                        </option>
-                                    ))}
-                                </select>
-                            </label>
+                            <span className="overview-ai-model-badge">{OVERVIEW_AI_PROVIDER_LABEL}</span>
                             <button
                                 className="overview-ai-button"
                                 type="button"
@@ -1042,7 +1009,7 @@ export default function StockOverview({
                             <div className="overview-ai-loading-copy">
                                 <strong>{OVERVIEW_AI_LOADING_STEPS[aiLoadingStep].title}</strong>
                                 <p>{OVERVIEW_AI_LOADING_STEPS[aiLoadingStep].detail}</p>
-                                <small>{selectedModelLabel} ile skor ve yorum birlikte hazırlanıyor.</small>
+                                <small>{OVERVIEW_AI_PROVIDER_LABEL} ile skor ve yorum birlikte hazırlanıyor.</small>
                             </div>
                             {!aiCommentary?.ok ? (
                                 <div className="overview-ai-loading-skeleton" aria-hidden="true">

@@ -26,6 +26,11 @@ DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_NVIDIA_TIMEOUT_S = 300.0
 DEFAULT_NVIDIA_MAX_TOKENS = 32000
 DEFAULT_NVIDIA_RETRIES = 1
+DEFAULT_IFM_MODEL = "IFM/K2-Horizon-375B-A23B"
+DEFAULT_IFM_BASE_URL = "https://api.ifm.ai/v1"
+DEFAULT_IFM_TIMEOUT_S = 300.0
+DEFAULT_IFM_MAX_TOKENS = 32000
+DEFAULT_IFM_RETRIES = 1
 
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_SUMMARY_ROWS = 8
@@ -57,10 +62,12 @@ SERIES_POINT_KEYS = {"label", "value", "display"}
 HISTORY_CONTEXT_KEYS = {"company_kind", "quarters"}
 HISTORY_QUARTER_KEYS = {"label", "year", "period", "metrics", "ratios"}
 
-SUPPORTED_OVERVIEW_MODELS = {
+SUPPORTED_NVIDIA_MODELS = {
     "minimaxai/minimax-m2.7",
     "meta/llama-4-maverick-17b-128e-instruct",
 }
+SUPPORTED_IFM_MODELS = {DEFAULT_IFM_MODEL}
+SUPPORTED_OVERVIEW_MODELS = SUPPORTED_NVIDIA_MODELS | SUPPORTED_IFM_MODELS
 OVERVIEW_MODEL_ALIASES = {
     "minimax": "minimaxai/minimax-m2.7",
     "minimax m2.7": "minimaxai/minimax-m2.7",
@@ -86,20 +93,36 @@ def _nvidia_model() -> str:
     if not raw:
         return DEFAULT_NVIDIA_MODEL
     resolved = OVERVIEW_MODEL_ALIASES.get(raw.lower(), raw)
-    if resolved in SUPPORTED_OVERVIEW_MODELS:
+    if resolved in SUPPORTED_NVIDIA_MODELS:
         return resolved
     return DEFAULT_NVIDIA_MODEL
 
 
+def _ifm_model() -> str:
+    raw = os.getenv("IFM_MODEL", "").strip()
+    return raw or DEFAULT_IFM_MODEL
+
+
 def _resolve_nvidia_model(model_override: Optional[str] = None) -> str:
     chosen = str(model_override or "").strip()
-    if chosen:
+    if chosen in SUPPORTED_NVIDIA_MODELS:
         return chosen
     return _nvidia_model()
 
 
+def _resolve_ifm_model(model_override: Optional[str] = None) -> str:
+    chosen = str(model_override or "").strip()
+    if chosen in SUPPORTED_IFM_MODELS:
+        return chosen
+    return _ifm_model()
+
+
 def _nvidia_base_url() -> str:
     return (os.getenv("NVIDIA_AI_BASE_URL", "").strip() or DEFAULT_NVIDIA_BASE_URL).rstrip("/")
+
+
+def _ifm_base_url() -> str:
+    return (os.getenv("IFM_BASE_URL", "").strip() or DEFAULT_IFM_BASE_URL).rstrip("/")
 
 
 def _nvidia_timeout_s() -> float:
@@ -137,6 +160,41 @@ def _nvidia_debug_enabled() -> bool:
     return raw in {"1", "true", "yes", "on", "debug"}
 
 
+def _ifm_timeout_s() -> float:
+    raw = os.getenv("IFM_TIMEOUT_S", "").strip()
+    if not raw:
+        return DEFAULT_IFM_TIMEOUT_S
+    try:
+        return max(5.0, min(float(raw), 900.0))
+    except ValueError:
+        return DEFAULT_IFM_TIMEOUT_S
+
+
+def _ifm_max_tokens() -> int:
+    raw = os.getenv("IFM_MAX_TOKENS", "").strip()
+    if not raw:
+        return DEFAULT_IFM_MAX_TOKENS
+    try:
+        return max(128, min(int(raw), DEFAULT_IFM_MAX_TOKENS))
+    except ValueError:
+        return DEFAULT_IFM_MAX_TOKENS
+
+
+def _ifm_retry_count() -> int:
+    raw = os.getenv("IFM_MAX_RETRIES", "").strip()
+    if not raw:
+        return DEFAULT_IFM_RETRIES
+    try:
+        return max(0, min(int(raw), 3))
+    except ValueError:
+        return DEFAULT_IFM_RETRIES
+
+
+def _ifm_debug_enabled() -> bool:
+    raw = os.getenv("IFM_DEBUG", "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "debug"}
+
+
 def _append_debug_trace(
     debug_trace: Optional[List[str]],
     stage: str,
@@ -169,8 +227,8 @@ def _log_debug(
     **fields: Any,
 ) -> None:
     _append_debug_trace(debug_trace, stage, message, **fields)
-    if _nvidia_debug_enabled():
-        LOGGER.log(level, "[nvidia_commentary] %s", debug_trace[-1] if debug_trace else f"{stage}: {message}")
+    if _nvidia_debug_enabled() or _ifm_debug_enabled():
+        LOGGER.log(level, "[ai_commentary] %s", debug_trace[-1] if debug_trace else f"{stage}: {message}")
 
 
 def _trim_text(value: Any, max_len: int = 240) -> str:
@@ -432,22 +490,22 @@ def _extract_json_object(text: str) -> Dict[str, Any]:
     start = raw.find("{")
     end = raw.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        raise NvidiaCommentaryError("NVIDIA modeli JSON formatinda yanit donmedi")
+        raise NvidiaCommentaryError("AI modeli JSON formatinda yanit donmedi")
     try:
         parsed = json.loads(raw[start : end + 1])
     except json.JSONDecodeError as exc:
-        raise NvidiaCommentaryError(f"NVIDIA JSON parse hatasi: {exc}") from exc
+        raise NvidiaCommentaryError(f"AI JSON parse hatasi: {exc}") from exc
     if not isinstance(parsed, dict):
-        raise NvidiaCommentaryError("NVIDIA yaniti object olmali")
+        raise NvidiaCommentaryError("AI yaniti object olmali")
     return parsed
 
 
 def _response_text_from_payload(payload: Any) -> str:
     if not isinstance(payload, dict):
-        raise NvidiaCommentaryError("NVIDIA yaniti object degil")
+        raise NvidiaCommentaryError("AI yaniti object degil")
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise NvidiaCommentaryError("NVIDIA yanitinda choices yok")
+        raise NvidiaCommentaryError("AI yanitinda choices yok")
     first = choices[0] if isinstance(choices[0], dict) else {}
     message = first.get("message") if isinstance(first, dict) else {}
     if isinstance(message, dict) and message.get("content") is not None:
@@ -455,7 +513,7 @@ def _response_text_from_payload(payload: Any) -> str:
     delta = first.get("delta") if isinstance(first, dict) else {}
     if isinstance(delta, dict) and delta.get("content") is not None:
         return str(delta.get("content") or "")
-    raise NvidiaCommentaryError("NVIDIA bos icerik dondu")
+    raise NvidiaCommentaryError("AI bos icerik dondu")
 
 
 def _text_list(value: Any) -> List[str]:
@@ -472,17 +530,17 @@ def _text_list(value: Any) -> List[str]:
 def _normalized_adjustment_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_adjustments = payload.get("score_adjustments")
     if not isinstance(raw_adjustments, dict):
-        raise NvidiaCommentaryError("NVIDIA yanitinda score_adjustments object'i yok")
+        raise NvidiaCommentaryError("AI yanitinda score_adjustments object'i yok")
 
     overall_adjustment_raw = raw_adjustments.get("overall_adjustment", 0.0)
     if overall_adjustment_raw is None:
         overall_adjustment_raw = 0.0
     if isinstance(overall_adjustment_raw, bool) or not isinstance(overall_adjustment_raw, (int, float)):
-        raise NvidiaCommentaryError("NVIDIA overall_adjustment sayi olmali")
+        raise NvidiaCommentaryError("AI overall_adjustment sayi olmali")
 
     raw_subscores = raw_adjustments.get("subscores")
     if not isinstance(raw_subscores, list):
-        raise NvidiaCommentaryError("NVIDIA score_adjustments.subscores array olmali")
+        raise NvidiaCommentaryError("AI score_adjustments.subscores array olmali")
 
     normalized_subscores: List[Dict[str, Any]] = []
     for raw_item in raw_subscores:
@@ -495,7 +553,7 @@ def _normalized_adjustment_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         if adjustment_raw is None:
             adjustment_raw = 0.0
         if isinstance(adjustment_raw, bool) or not isinstance(adjustment_raw, (int, float)):
-            raise NvidiaCommentaryError(f"NVIDIA adjustment sayi olmali: {key}")
+            raise NvidiaCommentaryError(f"AI adjustment sayi olmali: {key}")
         normalized_subscores.append(
             {
                 "key": key,
@@ -505,7 +563,7 @@ def _normalized_adjustment_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     if not normalized_subscores:
-        raise NvidiaCommentaryError("NVIDIA yanitinda gecerli subscore adjustment yok")
+        raise NvidiaCommentaryError("AI yanitinda gecerli subscore adjustment yok")
 
     return {
         "overall_adjustment": float(overall_adjustment_raw),
@@ -605,29 +663,34 @@ def _normalize_model_json(
     )
 
 
-async def _call_nvidia_chat(
+async def _call_chat_completion(
     normalized_payload: Dict[str, Any],
     base_analysis: Dict[str, Any],
     api_key: str,
     model: str,
     *,
+    provider: str,
+    base_url: str,
+    timeout_s: float,
+    max_tokens: int,
+    retry_count: int,
     debug_trace: Optional[List[str]] = None,
 ) -> str:
-    timeout_s = _nvidia_timeout_s()
-    max_tokens = _nvidia_max_tokens()
-    base_url = _nvidia_base_url()
-    retry_count = _nvidia_retry_count()
     body = {
         "model": model,
         "messages": [
             {"role": "system", "content": _system_prompt()},
             {"role": "user", "content": _user_prompt(normalized_payload, base_analysis)},
         ],
-        "temperature": 0.4,
-        "top_p": 0.9,
+        "temperature": 1.0 if provider == "IFM" else 0.4,
+        "top_p": 0.95 if provider == "IFM" else 0.9,
         "max_tokens": max_tokens,
-        "chat_template_kwargs": {"thinking": False},
     }
+    if provider == "IFM":
+        body["chat_template_kwargs"] = {"reasoning_effort": "low"}
+        body["response_format"] = {"type": "json_object"}
+    else:
+        body["chat_template_kwargs"] = {"thinking": False}
     body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -645,7 +708,7 @@ async def _call_nvidia_chat(
     _log_debug(
         debug_trace,
         "request",
-        "NVIDIA overview commentary request hazirlandi",
+        f"{provider} overview commentary request hazirlandi",
         model=model,
         timeout_s=timeout_s,
         max_tokens=max_tokens,
@@ -660,7 +723,7 @@ async def _call_nvidia_chat(
             _log_debug(
                 debug_trace,
                 "request",
-                "NVIDIA istegi gonderiliyor",
+                f"{provider} istegi gonderiliyor",
                 attempt=attempt,
                 total_attempts=total_attempts,
             )
@@ -681,7 +744,7 @@ async def _call_nvidia_chat(
                 _log_debug(
                     debug_trace,
                     "response",
-                    "NVIDIA yaniti alindi",
+                    f"{provider} yaniti alindi",
                     attempt=attempt,
                     elapsed_ms=elapsed_ms,
                     finish_reason=finish_reason,
@@ -693,7 +756,7 @@ async def _call_nvidia_chat(
                 _log_debug(
                     debug_trace,
                     "cancel",
-                    "NVIDIA istegi iptal edildi",
+                    f"{provider} istegi iptal edildi",
                     attempt=attempt,
                     elapsed_ms=elapsed_ms,
                 )
@@ -706,7 +769,7 @@ async def _call_nvidia_chat(
                 _log_debug(
                     debug_trace,
                     "error",
-                    "NVIDIA HTTP hatasi",
+                    f"{provider} HTTP hatasi",
                     level=logging.WARNING,
                     attempt=attempt,
                     elapsed_ms=elapsed_ms,
@@ -718,21 +781,21 @@ async def _call_nvidia_chat(
                     _log_debug(
                         debug_trace,
                         "retry",
-                        "NVIDIA istegi yeniden denenecek",
+                        f"{provider} istegi yeniden denenecek",
                         level=logging.WARNING,
                         attempt=attempt,
                         backoff_s=backoff_s,
                     )
                     await asyncio.sleep(backoff_s)
                     continue
-                raise NvidiaCommentaryError(f"NVIDIA HTTP hata: {status_code} {detail[:240]}".strip()) from exc
+                raise NvidiaCommentaryError(f"{provider} HTTP hata: {status_code} {detail[:240]}".strip()) from exc
             except (httpx.RequestError, json.JSONDecodeError, ValueError) as exc:
                 elapsed_ms = int((time.perf_counter() - started_at) * 1000)
                 last_error = exc
                 _log_debug(
                     debug_trace,
                     "error",
-                    "NVIDIA baglanti/parsing hatasi",
+                    f"{provider} baglanti/parsing hatasi",
                     level=logging.WARNING,
                     attempt=attempt,
                     elapsed_ms=elapsed_ms,
@@ -744,28 +807,81 @@ async def _call_nvidia_chat(
                     _log_debug(
                         debug_trace,
                         "retry",
-                        "NVIDIA istegi yeniden denenecek",
+                        f"{provider} istegi yeniden denenecek",
                         level=logging.WARNING,
                         attempt=attempt,
                         backoff_s=backoff_s,
                     )
                     await asyncio.sleep(backoff_s)
                     continue
-                raise NvidiaCommentaryError(f"NVIDIA baglanti hatasi: {exc}") from exc
-    raise NvidiaCommentaryError(f"NVIDIA baglanti hatasi: {last_error}")
+                raise NvidiaCommentaryError(f"{provider} baglanti hatasi: {exc}") from exc
+    raise NvidiaCommentaryError(f"{provider} baglanti hatasi: {last_error}")
+
+
+async def _call_nvidia_chat(
+    normalized_payload: Dict[str, Any],
+    base_analysis: Dict[str, Any],
+    api_key: str,
+    model: str,
+    *,
+    debug_trace: Optional[List[str]] = None,
+) -> str:
+    return await _call_chat_completion(
+        normalized_payload,
+        base_analysis,
+        api_key,
+        model,
+        provider="NVIDIA",
+        base_url=_nvidia_base_url(),
+        timeout_s=_nvidia_timeout_s(),
+        max_tokens=_nvidia_max_tokens(),
+        retry_count=_nvidia_retry_count(),
+        debug_trace=debug_trace,
+    )
+
+
+async def _call_ifm_chat(
+    normalized_payload: Dict[str, Any],
+    base_analysis: Dict[str, Any],
+    api_key: str,
+    model: str,
+    *,
+    debug_trace: Optional[List[str]] = None,
+) -> str:
+    return await _call_chat_completion(
+        normalized_payload,
+        base_analysis,
+        api_key,
+        model,
+        provider="IFM",
+        base_url=_ifm_base_url(),
+        timeout_s=_ifm_timeout_s(),
+        max_tokens=_ifm_max_tokens(),
+        retry_count=_ifm_retry_count(),
+        debug_trace=debug_trace,
+    )
 
 
 async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any]:
     debug_trace: List[str] = []
+    ifm_api_key = os.getenv("IFM_API_KEY", "").strip()
+    legacy_nvidia_api_key = os.getenv("NVIDIA_API_KEY", "").strip()
+    use_ifm = bool(ifm_api_key)
+    default_model = _ifm_model() if use_ifm or not legacy_nvidia_api_key else _nvidia_model()
     _log_debug(
         debug_trace,
         "request",
         "Overview commentary istegi alindi",
-        default_model=_nvidia_model(),
+        default_model=default_model,
         payload_bytes=len(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
     )
     normalized_payload = validate_overview_commentary_request(payload)
-    model = _resolve_nvidia_model(normalized_payload.get("model"))
+    model = (
+        _resolve_ifm_model(normalized_payload.get("model"))
+        if use_ifm
+        else _resolve_nvidia_model(normalized_payload.get("model"))
+    )
+    provider = "IFM" if use_ifm else "NVIDIA"
     _log_debug(
         debug_trace,
         "validation",
@@ -782,19 +898,21 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
     for line in base_analysis.get("debug_lines", []):
         _log_debug(debug_trace, "scoring", line)
 
-    api_key = os.getenv("NVIDIA_API_KEY", "").strip()
+    api_key = ifm_api_key or legacy_nvidia_api_key
     if not api_key:
-        _log_debug(debug_trace, "error", "NVIDIA_API_KEY bulunamadi", level=logging.WARNING)
+        missing_key_error = "IFM_API_KEY bulunamadi; NVIDIA_API_KEY bulunamadi"
+        _log_debug(debug_trace, "error", missing_key_error, level=logging.WARNING)
         return _build_fallback_response(
             base_analysis=base_analysis,
             model=model,
             score_source=SCORE_SOURCE_DETERMINISTIC_ONLY,
-            error="NVIDIA_API_KEY bulunamadi",
+            error=missing_key_error,
             debug_trace=debug_trace,
         )
 
     try:
-        maybe_response_text = _call_nvidia_chat(
+        chat_call = _call_ifm_chat if use_ifm else _call_nvidia_chat
+        maybe_response_text = chat_call(
             normalized_payload,
             base_analysis,
             api_key=api_key,
@@ -808,14 +926,14 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
         _log_debug(
             debug_trace,
             "response",
-            "NVIDIA metin yaniti alindi",
+            f"{provider} metin yaniti alindi",
             response_preview=_trim_text(response_text, 180),
         )
         model_json = _extract_json_object(response_text)
         _log_debug(
             debug_trace,
             "parse",
-            "NVIDIA yaniti JSON object olarak parse edildi",
+            f"{provider} yaniti JSON object olarak parse edildi",
             keys=",".join(sorted(model_json.keys())),
         )
         return _normalize_model_json(

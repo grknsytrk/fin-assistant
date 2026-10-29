@@ -201,7 +201,7 @@ async def _run_overview_commentary_until_done_or_disconnected(
             if await request.is_disconnected():
                 task.cancel()
                 LOGGER.info(
-                    "[kap_overview_commentary] client disconnected; cancelling NVIDIA request | company=%s",
+                    "[kap_overview_commentary] client disconnected; cancelling AI request | company=%s",
                     company,
                 )
                 try:
