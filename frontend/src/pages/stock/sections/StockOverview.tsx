@@ -693,18 +693,30 @@ export default function StockOverview({
         aiRequestIdRef.current += 1;
         aiAbortRef.current?.abort();
         aiAbortRef.current = null;
+        hasRequestedAiRef.current = false;
+        lastRequestedBaseKeyRef.current = null;
+        lastRequestedValuationHashRef.current = null;
+        autoRefreshedBaseKeyRef.current = null;
         setAiLoading(false);
         setAiError('');
         setAiCommentary(null);
+    }, [commentaryBaseKey]);
+
+    useEffect(() => {
+        // A valuation-history update changes the cache key, but must not hide
+        // or abort an in-flight request for the same company and KAP period.
+        if (hasRequestedAiRef.current || aiLoading) return;
         try {
             const cached = window.sessionStorage.getItem(commentaryCacheKey);
             if (cached) {
                 setAiCommentary(JSON.parse(cached) as KapOverviewCommentaryResponse);
+            } else {
+                setAiCommentary(null);
             }
         } catch {
             setAiCommentary(null);
         }
-    }, [commentaryCacheKey]);
+    }, [aiLoading, commentaryCacheKey]);
 
     useEffect(() => {
         return () => {
@@ -776,6 +788,8 @@ export default function StockOverview({
             setAiCommentary(response);
             if (response.ok) {
                 window.sessionStorage.setItem(commentaryCacheKey, JSON.stringify(response));
+            } else {
+                setAiError(response.error || 'AI yorumu üretilemedi. Tekrar deneyebilirsin.');
             }
         } catch (error) {
             if ((error as Error)?.name === 'AbortError') {
