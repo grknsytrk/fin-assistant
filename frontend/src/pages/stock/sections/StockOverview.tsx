@@ -5,7 +5,7 @@ import type {
     KapInsurancePremiumDisclosure,
     MarketStockCardItem,
 } from '../../../api/types';
-import type { KapOverviewCommentaryResponse } from '../../../api/types';
+import type { KapOverviewCommentaryResponse, KapValuationHistoryResponse } from '../../../api/types';
 import { apiClient } from '../../../api/client';
 import { BarChartCard } from '../../../components/charts/BarChartCard';
 import { MultiplesRow } from '../../../components/stock/MultiplesRow';
@@ -21,6 +21,7 @@ import {
     getOverviewSummaryRows,
     latestOverviewPeriod,
     overviewPayloadHash,
+    buildOverviewValuationContext,
     type OverviewChartGroup,
 } from '../../../utils/overviewPayload';
 import StockCharts from './StockCharts';
@@ -517,7 +518,7 @@ export default function StockOverview({
     snapshot: KapSnapshotResponse;
     quarters: KapQuarter[];
     historyLoading?: boolean;
-    marketCard?: Pick<MarketStockCardItem, 'fk' | 'pd_dd' | 'fd_favok' | 'net_borc_favok'> | null;
+    marketCard?: Pick<MarketStockCardItem, 'fk' | 'pd_dd' | 'fd_favok' | 'net_borc_favok' | 'market_cap' | 'as_of'> | null;
 }) {
     const isRefreshing = historyLoading || Boolean(snapshot.refresh_pending);
     const latestQuarterIdx = quarters.length ? quarters.length - 1 : -1;
@@ -555,14 +556,21 @@ export default function StockOverview({
     const premiumQuarterlySeries = useMemo(() => buildQuarterlyPremiumSeries(premiumRows), [premiumRows]);
     const latestPremiumIsKapSource = Boolean(latestPremium?.source_url?.includes('kap.org.tr'));
     const latestPremiumSourceLabel = latestPremiumIsKapSource ? 'Son KAP' : 'Kaynak';
+    const [valuationHistory, setValuationHistory] = useState<KapValuationHistoryResponse | null>(null);
     const overviewAiPayload = useMemo(() => buildOverviewAiPayload(snapshot, quarters), [snapshot, quarters]);
     const overviewHistoryContext = useMemo(() => buildOverviewHistoryContext(snapshot, quarters), [snapshot, quarters]);
+    const overviewValuationContext = useMemo(
+        () => buildOverviewValuationContext(snapshot, quarters, valuationHistory, marketCard),
+        [snapshot, quarters, valuationHistory, marketCard],
+    );
     const latestPeriod = useMemo(() => latestOverviewPeriod(quarters), [quarters]);
     const payloadHash = useMemo(() => overviewPayloadHash(overviewAiPayload), [overviewAiPayload]);
     const historyHash = useMemo(() => overviewPayloadHash(overviewHistoryContext), [overviewHistoryContext]);
+    const valuationHash = useMemo(() => overviewPayloadHash(overviewValuationContext), [overviewValuationContext]);
+    const commentaryBaseKey = `${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::${payloadHash}::${historyHash}`;
     const commentaryCacheKey = useMemo(
-        () => `kapOverviewAi::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::ifm::${payloadHash}::${historyHash}`,
-        [snapshot.stock_code, snapshot.company, latestPeriod, payloadHash, historyHash],
+        () => `kapOverviewAi::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::ifm::${payloadHash}::${historyHash}::${valuationHash}`,
+        [snapshot.stock_code, snapshot.company, latestPeriod, payloadHash, historyHash, valuationHash],
     );
     const [aiLoading, setAiLoading] = useState(false);
     const [aiError, setAiError] = useState('');
@@ -570,6 +578,11 @@ export default function StockOverview({
     const [premiumHighlightedIndex, setPremiumHighlightedIndex] = useState<number | null>(null);
     const aiAbortRef = useRef<AbortController | null>(null);
     const aiRequestIdRef = useRef(0);
+    const hasRequestedAiRef = useRef(false);
+    const lastRequestedBaseKeyRef = useRef<string | null>(null);
+    const lastRequestedValuationHashRef = useRef<string | null>(null);
+    const autoRefreshedBaseKeyRef = useRef<string | null>(null);
+    const requestAiCommentaryRef = useRef<((forceRefresh?: boolean) => Promise<void>) | null>(null);
     const canRequestAi =
         Boolean(latestQuarter) &&
         overviewHistoryContext.quarters.length > 0 &&
@@ -655,6 +668,9 @@ export default function StockOverview({
 
     const requestAiCommentary = async (forceRefresh = false) => {
         if (!canRequestAi || aiLoading) return;
+        hasRequestedAiRef.current = true;
+        lastRequestedBaseKeyRef.current = commentaryBaseKey;
+        lastRequestedValuationHashRef.current = valuationHash;
         let requestController: AbortController | null = null;
         let requestId = aiRequestIdRef.current;
         setAiLoading(true);
@@ -668,6 +684,7 @@ export default function StockOverview({
             balanceRows: overviewAiPayload.balance_summary.length,
             charts: overviewAiPayload.charts.length,
             historyQuarters: overviewHistoryContext.quarters.length,
+            valuationHistoryQuarters: overviewValuationContext.history_periods.length,
             cacheKey: commentaryCacheKey,
         });
         try {
@@ -693,6 +710,7 @@ export default function StockOverview({
                 company_title: snapshot.company_title || snapshot.company,
                 latest_period: latestPeriod,
                 history_context: overviewHistoryContext,
+                valuation_context: overviewValuationContext,
                 overview_payload: overviewAiPayload,
             }, {
                 signal: controller.signal,
@@ -732,6 +750,17 @@ export default function StockOverview({
             }
         }
     };
+
+    requestAiCommentaryRef.current = requestAiCommentary;
+
+    useEffect(() => {
+        if (!hasRequestedAiRef.current || aiLoading || overviewValuationContext.history_periods.length < 8) return;
+        if (lastRequestedBaseKeyRef.current !== commentaryBaseKey) return;
+        if (lastRequestedValuationHashRef.current === valuationHash) return;
+        if (autoRefreshedBaseKeyRef.current === commentaryBaseKey) return;
+        autoRefreshedBaseKeyRef.current = commentaryBaseKey;
+        void requestAiCommentaryRef.current?.(true);
+    }, [aiLoading, commentaryBaseKey, overviewValuationContext.history_periods.length, valuationHash]);
 
     return (
         <div className="section-overview fade-in">
@@ -853,7 +882,11 @@ export default function StockOverview({
                 </div>
             )}
 
-            <HistoricalMultiplesChart snapshot={snapshot} historyLoading={historyLoading} />
+            <HistoricalMultiplesChart
+                snapshot={snapshot}
+                historyLoading={historyLoading}
+                onHistoryChange={setValuationHistory}
+            />
 
             {latestPremium && (
                 <section className="kap-premium-panel panel">
@@ -959,7 +992,7 @@ export default function StockOverview({
                     <div className="overview-ai-head">
                         <div>
                             <h3>AI Finansal Yorum</h3>
-                            <p>Bu yorum yalnızca ekranda görülen finansal verilerden otomatik üretilmiştir.</p>
+                            <p>Son açıklanan dönem, geçmiş çeyrekler ve erişilebilen değerleme çarpanları birlikte değerlendirilir.</p>
                         </div>
                         <div className="overview-ai-controls">
                             <span className="overview-ai-model-badge">{OVERVIEW_AI_PROVIDER_LABEL}</span>
@@ -1032,6 +1065,12 @@ export default function StockOverview({
                                 </div>
                             ) : null}
                             {aiCommentary.headline ? <h4>{aiCommentary.headline}</h4> : null}
+                            {aiCommentary.overall_comment ? (
+                                <section className="overview-ai-overall-comment" aria-label="Genel objektif değerlendirme">
+                                    <h5>Genel değerlendirme</h5>
+                                    <p>{aiCommentary.overall_comment}</p>
+                                </section>
+                            ) : null}
                             {aiCommentary.bullets.length > 0 ? (
                                 <ul>
                                     {aiCommentary.bullets.map((item, idx) => (

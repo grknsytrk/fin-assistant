@@ -1,4 +1,10 @@
-import type { KapSnapshotResponse, KapQuarter } from '../api/types';
+import type {
+    KapSnapshotResponse,
+    KapQuarter,
+    KapValuationHistoryResponse,
+    KapOverviewValuationContext,
+    MarketStockCardItem,
+} from '../api/types';
 import type { SeriesPoint } from './chartBuilders';
 import { ttmSum } from './financialMetrics';
 import {
@@ -415,7 +421,7 @@ export function buildOverviewHistoryContext(
 ): OverviewAiHistoryContext {
     const { kind } = companyKind(snapshot);
     const historyRows: OverviewAiHistoryQuarter[] = [];
-    const startIdx = Math.max(0, quarters.length - 12);
+    const startIdx = Math.max(0, quarters.length - 20);
 
     const metricsByKind: Record<OverviewAiHistoryContext['company_kind'], string[]> = {
         generic: [
@@ -482,6 +488,43 @@ export function buildOverviewHistoryContext(
     return {
         company_kind: kind,
         quarters: historyRows,
+    };
+}
+
+export function buildOverviewValuationContext(
+    snapshot: KapSnapshotResponse,
+    quarters: KapQuarter[],
+    history: KapValuationHistoryResponse | null,
+    marketCard?: Pick<MarketStockCardItem, 'fk' | 'pd_dd' | 'fd_favok' | 'market_cap' | 'as_of'> | null,
+): KapOverviewValuationContext {
+    const company = String(snapshot.stock_code || snapshot.company || '').trim().toUpperCase();
+    const financialCompany = companyKind(snapshot).kind !== 'generic';
+    const historyMatchesCompany = Boolean(history?.company && history.company.trim().toUpperCase() === company);
+    const historicalPeriods = historyMatchesCompany ? (history?.periods || []).slice(-40) : [];
+    const marketCap = marketCard?.market_cap ?? snapshot.valuation?.market_cap ?? null;
+    const ttmSales = ttmSum(quarters, 'satis_gelirleri');
+    const pdSales = marketCap != null && marketCap > 0 && ttmSales != null && ttmSales > 0
+        ? marketCap / ttmSales
+        : null;
+
+    return {
+        company,
+        latest_report_period: latestOverviewPeriod(quarters),
+        as_of: marketCard?.as_of || snapshot.valuation?.price_as_of || '',
+        current_multiples: {
+            fk: marketCard?.fk ?? snapshot.valuation?.fk ?? null,
+            pd_satis: financialCompany ? null : pdSales,
+            pd_dd: marketCard?.pd_dd ?? snapshot.valuation?.pd_dd ?? null,
+            fd_favok: financialCompany ? null : (marketCard?.fd_favok ?? snapshot.valuation?.fd_favok ?? null),
+        },
+        history_periods: historicalPeriods.map((point) => ({
+            year: point.year,
+            period: point.period,
+            fk: point.fk,
+            pd_satis: financialCompany ? null : point.pd_satis,
+            pd_dd: point.pd_dd,
+            fd_favok: financialCompany ? null : point.fd_favok,
+        })),
     };
 }
 

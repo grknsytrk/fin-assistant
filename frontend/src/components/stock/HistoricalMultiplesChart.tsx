@@ -69,9 +69,11 @@ function formatMultiple(value: number): string {
 export default function HistoricalMultiplesChart({
     snapshot,
     historyLoading = false,
+    onHistoryChange,
 }: {
     snapshot: KapSnapshotResponse;
     historyLoading?: boolean;
+    onHistoryChange?: (history: KapValuationHistoryResponse | null) => void;
 }) {
     const company = snapshot.stock_code || snapshot.company;
     const compactQuarters = useMemo(
@@ -99,6 +101,10 @@ export default function HistoricalMultiplesChart({
         setExpandedMultiple(null);
         setHighlightedQuarterKey(null);
     }, []);
+
+    useEffect(() => {
+        onHistoryChange?.(history);
+    }, [history, onHistoryChange]);
 
     useEffect(() => {
         const controller = new AbortController();

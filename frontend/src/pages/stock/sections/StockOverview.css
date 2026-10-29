@@ -887,6 +887,29 @@
     margin: 0 0 0.7rem;
 }
 
+.overview-ai-overall-comment {
+    background: rgba(127, 153, 196, 0.07);
+    border: 1px solid var(--surface-border);
+    border-radius: 12px;
+    margin: 0 0 1rem;
+    padding: 0.85rem 1rem;
+}
+
+.overview-ai-overall-comment h5 {
+    color: var(--text-secondary);
+    font-size: 0.74rem;
+    letter-spacing: 0.045em;
+    margin: 0 0 0.45rem;
+    text-transform: uppercase;
+}
+
+.overview-ai-overall-comment p {
+    color: var(--text-primary);
+    font-size: 0.91rem;
+    line-height: 1.65;
+    margin: 0;
+}
+
 .overview-ai-body ul {
     display: grid;
     gap: 0.55rem;

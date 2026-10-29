@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import time
+from statistics import median
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -36,13 +37,14 @@ MAX_REQUEST_BYTES = 64 * 1024
 MAX_SUMMARY_ROWS = 8
 MAX_CHARTS = 9
 MAX_SERIES_POINTS = 10
-MAX_HISTORY_QUARTERS = 12
+MAX_HISTORY_QUARTERS = 20
 MAX_HISTORY_METRIC_KEYS = 32
 MAX_HISTORY_RATIO_KEYS = 24
+MAX_VALUATION_HISTORY_PERIODS = 44
 MAX_ABS_NUMBER = 1_000_000_000_000_000_000
 MAX_DEBUG_TRACE_ITEMS = 40
 
-TOP_LEVEL_KEYS = {"company", "company_title", "latest_period", "overview_payload", "history_context", "model"}
+TOP_LEVEL_KEYS = {"company", "company_title", "latest_period", "overview_payload", "history_context", "valuation_context", "model"}
 REQUIRED_TOP_LEVEL_KEYS = {"company", "company_title", "latest_period", "overview_payload", "history_context"}
 OVERVIEW_KEYS = {"income_summary", "balance_summary", "charts", "period_analysis"}
 SUMMARY_ROW_KEYS = {
@@ -62,6 +64,9 @@ CHART_KEYS = {"title", "kind", "series"}
 SERIES_POINT_KEYS = {"label", "value", "display"}
 HISTORY_CONTEXT_KEYS = {"company_kind", "quarters"}
 HISTORY_QUARTER_KEYS = {"label", "year", "period", "metrics", "ratios"}
+VALUATION_CONTEXT_KEYS = {"company", "latest_report_period", "as_of", "current_multiples", "history_periods"}
+VALUATION_PERIOD_KEYS = {"year", "period", "fk", "pd_satis", "pd_dd", "fd_favok"}
+VALUATION_MULTIPLE_KEYS = ("fk", "pd_satis", "pd_dd", "fd_favok")
 PERIOD_ANALYSIS_KEYS = {
     "latest_period",
     "year",
@@ -515,6 +520,123 @@ def _normalize_history_context(value: Any) -> Dict[str, Any]:
     }
 
 
+def _normalize_valuation_context(value: Any) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    item = _require_object(value, "valuation_context")
+    _unknown_keys(item, VALUATION_CONTEXT_KEYS, "valuation_context")
+    current_raw = _require_object(item.get("current_multiples"), "valuation_context.current_multiples")
+    _unknown_keys(current_raw, set(VALUATION_MULTIPLE_KEYS), "valuation_context.current_multiples")
+    current_multiples = {
+        key: _number_or_none(current_raw.get(key), f"valuation_context.current_multiples.{key}")
+        for key in VALUATION_MULTIPLE_KEYS
+    }
+    raw_periods = _require_list(
+        item.get("history_periods"),
+        "valuation_context.history_periods",
+        MAX_VALUATION_HISTORY_PERIODS,
+    )
+    periods: List[Dict[str, Any]] = []
+    for idx, raw_period in enumerate(raw_periods):
+        path = f"valuation_context.history_periods[{idx}]"
+        period = _require_object(raw_period, path)
+        _unknown_keys(period, VALUATION_PERIOD_KEYS, path)
+        periods.append({
+            "year": _integer_field(period.get("year"), f"{path}.year", minimum=2000, maximum=2100),
+            "period": _integer_field(period.get("period"), f"{path}.period", minimum=1, maximum=4),
+            **{
+                key: _number_or_none(period.get(key), f"{path}.{key}")
+                for key in VALUATION_MULTIPLE_KEYS
+            },
+        })
+    periods.sort(key=lambda row: (row["year"], row["period"]))
+    return {
+        "company": _text(item.get("company"), "valuation_context.company", max_len=32),
+        "latest_report_period": _text(item.get("latest_report_period"), "valuation_context.latest_report_period", max_len=32, required=False),
+        "as_of": _text(item.get("as_of"), "valuation_context.as_of", max_len=40, required=False),
+        "current_multiples": current_multiples,
+        "history_periods": periods,
+    }
+
+
+def _build_valuation_facts(
+    context: Optional[Dict[str, Any]],
+    *,
+    requested_company: str,
+) -> Dict[str, Any]:
+    if not context:
+        return {"status": "not_provided", "metrics": {}}
+    if context.get("company", "").strip().upper() != requested_company.strip().upper():
+        return {"status": "company_mismatch", "metrics": {}}
+
+    history = list(context.get("history_periods") or [])[-20:]
+    latest_history = history[-1] if history else None
+    labels = {"fk": "F/K", "pd_satis": "PD/Satış", "pd_dd": "PD/DD", "fd_favok": "FD/FAVÖK"}
+    metrics: Dict[str, Any] = {}
+    for key in VALUATION_MULTIPLE_KEYS:
+        current = context.get("current_multiples", {}).get(key)
+        valid_history = [
+            row
+            for row in history
+            if isinstance(row.get(key), (int, float))
+            and not isinstance(row.get(key), bool)
+            and math.isfinite(float(row[key]))
+            and float(row[key]) > 0
+        ]
+        historical_values = [float(row[key]) for row in valid_history]
+        current_is_comparable = (
+            isinstance(current, (int, float))
+            and not isinstance(current, bool)
+            and math.isfinite(float(current))
+            and float(current) > 0
+        )
+        enough_history = len(historical_values) >= 8
+        historical_average = round(sum(historical_values) / len(historical_values), 2) if enough_history else None
+        historical_median = round(median(historical_values), 2) if enough_history else None
+        relative_to_average = None
+        relative_to_median = None
+        if current_is_comparable and historical_average is not None and historical_average > 0:
+            relative_to_average = round((float(current) / historical_average - 1.0) * 100.0, 1)
+        if current_is_comparable and historical_median is not None and historical_median > 0:
+            relative_to_median = round((float(current) / historical_median - 1.0) * 100.0, 1)
+
+        if current is None:
+            status = "current_missing"
+        elif not current_is_comparable:
+            status = "current_not_comparable"
+        elif not enough_history:
+            status = "insufficient_history"
+        else:
+            status = "comparable"
+
+        latest_report_value = latest_history.get(key) if latest_history else None
+        metrics[key] = {
+            "label": labels[key],
+            "current_multiple": round(float(current), 2) if current_is_comparable else current,
+            "current_status": status,
+            "historical_average": historical_average,
+            "historical_median": historical_median,
+            "historical_observations": len(historical_values),
+            "historical_start": f"{valid_history[0]['year']} Q{valid_history[0]['period']}" if valid_history else None,
+            "historical_end": f"{valid_history[-1]['year']} Q{valid_history[-1]['period']}" if valid_history else None,
+            "current_vs_average_pct": relative_to_average,
+            "current_vs_median_pct": relative_to_median,
+            "latest_report_multiple": latest_report_value,
+        }
+
+    return {
+        "status": "available" if history else "no_history",
+        "as_of": context.get("as_of") or None,
+        "latest_report_period": context.get("latest_report_period") or None,
+        "history_window": "Son 20 rapor dönemi (en fazla yaklaşık 5 yıl); metrik bazında gerçek tarih aralığı ve gözlem sayısı ayrıca verilir.",
+        "history_observations": len(history),
+        "latest_history_period": (
+            f"{latest_history['year']} Q{latest_history['period']}" if latest_history else None
+        ),
+        "metrics": metrics,
+    }
+
+
 def validate_overview_commentary_request(payload: Any) -> Dict[str, Any]:
     root = _require_object(payload, "request")
     _unknown_keys(root, TOP_LEVEL_KEYS, "request")
@@ -550,34 +672,49 @@ def validate_overview_commentary_request(payload: Any) -> Dict[str, Any]:
             ],
         },
         "history_context": _normalize_history_context(root.get("history_context")),
+        "valuation_context": _normalize_valuation_context(root.get("valuation_context")),
     }
 
 
 def _system_prompt() -> str:
     return (
-        "Turkce finansal analiz ureten bir asistansin.\n"
-        "Kurallar:\n"
-        "- Sadece verilen JSON verisini kullan.\n"
-        "- Analizin ana konusu en son KAP'ta aciklanan donemdir; yillik/TTM toplamlari son ceyregin yerine koyma. Donem etiketini acikca kullan (ornegin 2026 Q2).\n"
-        "- period_analysis.quarterly_flow_comparisons gelir tablosu ve nakit akisinin tek ceyreklik akisini verir. Once son ceyregi ardil onceki ceyrekle, sonra gecen yilin ayni ceyregiyle karsilastir.\n"
-        "- Ayni akista current_ytd_value ile prior_year_ytd_value, icinde bulunulan rapor yilinin basindan son aciklanan ceyrege kadarki birikimli tutarlari onceki yilin ayni donem birikimiyle karsilastirir. Bunlari tek ceyrek tutari gibi adlandirma. 2026 Q2 varsa 2026 YTD, ilk yari verisidir; Q3/Q4 aciklanmadiysa yil sonu sonucu veya tahmini uretme.\n"
-        "- period_analysis.balance_sheet_comparisons bilanconun ceyrek sonu stok degerleridir. Son donemi onceki ceyrek sonu ve gecen yil ayni ceyrek sonuyla ayri ayri karsilastir; bunlari gelir/nakit akis toplami gibi yorumlama.\n"
-        "- income_summary satirlari YTD, balance_summary satirlari ceyrek sonu degeridir; basis alanini ve donem etiketlerini dikkate al. period_analysis varsa karsilastirmalarda onu esas al. Tarihsel quarters dizisini mevsimsellik, trend ve tek ceyreklik sapmalari kontrol etmek icin kullan; tarihsel ortalama son aciklanan ceyregi gormezden getirmesin.\n"
-        "- Sirket turune uygun metrikleri sec: genel sirketlerde satis, faaliyet karliligi/marjlar, net kar, nakit donusumu ve borc; bankalarda faiz/komisyon, kredi-mevduat, karsilik ve ozkaynak; sigortada prim, teknik denge, karsilik ve ozkaynak. Alakasiz sektorel metrikleri yorumlama.\n"
-        "- Tarihsel ratios.roe degeri dort ardışık ceyreklik net karin ortalama ozkaynakla hesaplanan TTM ROE'sidir; null ise yillik getiri yorumu yapma. Diger marjlari son ceyrekteki akislardan, likidite/borc oranlarini ceyrek sonu bilancosundan hesapla.\n"
-        "- Rakam listesini tekrar etme. Birbirine bagli 2-4 onemli etkene odaklan: buyume -> faaliyet kari ve marj -> net kar; kar -> faaliyet/serbest nakit akisina donusum; bilanco -> likidite, borcluluk veya sektorel risk. Olumlu ve olumsuz sinyalleri birlikte tart.\n"
-        "- Yuzde degisimde ozellikle onceki deger sifira yakin ya da negatifse matematiksel yuzdeyi ekonomik buyume gibi sunma; tutar yonunu ve karliligin zarardan kara gecip gecmedigini acikla. Veri yoksa tahmin etme. Karsilastirma donemi yoksa bunu belirt; fiyat hedefi, rakip kiyaslamasi veya dis bilgi ekleme.\n"
-        "- Veriler celiskiliyse, tek seferlik etki oldugu veriden anlasilmiyorsa bunu kesin neden gibi yazma. Sinyaller karisik/zayifsa score adjustment'i sifira yakin veya sifir tut.\n"
-        "- Karlilik adjustment'inda son ceyrekteki net kar ve esas faaliyet kari artislarini ayni ceyrek yillik karsilastirmasi, YTD teyidi, marjlar ve tarihsel trendle birlikte tart. Pozitif ve maddi bir baz uzerinde net kar ile faaliyet kari birlikte gucleniyorsa, yalnizca mutlak marj seviyesi nedeniyle karlilik adjustment'ini otomatik sifirda birakma. Dusuk/sifira yakin baz veya zarardan kara geciste yuzde buyumeyi abartma. Net kar artisini bilanco gucu kaniti sayma; bilanco adjustment'ini borc, likidite, ozkaynak ve ilgili sektor bilancosi gostergelerine dayandir.\n"
-        "- Final scorecard uretme; sadece bounded adjustment ve kisa gerekce uret.\n"
-        "- Rakam uydurma, dis bilgi kullanma, fiyat hedefi verme.\n"
-        "- Cumleleri tamamla; metin alanlarini yarim birakma.\n"
-        "- Headline en son rapor donemini ve genel yonu soylesin. Bullets alaninda 3-5 kisa, kanita dayali bulgu yaz; mumkunse son ceyrek, ayni ceyrek yillik/YTD karsilastirmasi, nakit kalitesi ve bilancodan en anlamli konulari kapsa.\n"
-        "- score_adjustments.overall_adjustment -0.5 ile 0.5 arasinda olsun.\n"
-        "- score_adjustments.subscores yalniz buyume, karlilik, bilanco, nakit_akisi keylerini kullansin.\n"
-        "- Her subscore adjustment -1.0 ile 1.0 arasinda olsun.\n"
+        "Turkce finansal analiz ureten kurumsal bir hisse ve sirket analizi asistansin.\n"
+        "Temel Kurallar:\n"
+        "- Sadece verilen JSON verisini kullan; disaridan bilgi uydurma, fiyat hedefi verme.\n"
+        "- Analizin ana odak noktasi en son KAP'ta aciklanan donemdir. Donem etiketini acikca kullan (ornegin 2026 Q2 veya 2026/6).\n"
+        "- period_analysis.quarterly_flow_comparisons gelir tablosu ve nakit akisinin tek ceyreklik akisidir. Once son ceyregi ardil onceki ceyrekle, sonra gecen yilin ayni ceyregiyle karsilastir.\n"
+        "- current_ytd_value ile prior_year_ytd_value, rapor yilinin basindan son ceyrege kadarki birikimli tutarlardir; bunlari tek ceyrek gibi adlandirma.\n"
+        "- period_analysis.balance_sheet_comparisons ceyrek sonu stok bilanconun durumudur; gelir/akis gibi toplama.\n"
+        "- precomputed_facts ve financial_flags alanlarindaki hazir hesaplanmis gercekleri ve analitik bayraklari mutlaka dikkate al.\n\n"
+        "Bütünleşik ve Objektif Şirket Değerlendirmesi:\n"
+        "- Tek bir oran veya çeyreğe bakıp hüküm verme. Son çeyrek akışını önceki çeyrek ve geçen yılın aynı çeyreğiyle; YTD toplamını önceki yıl aynı YTD ile ayrı ayrı karşılaştır. Son 12 çeyrekteki yönü, sürdürülebilirliği ve varsa mevsimselliği kontrol et.\n"
+        "- Gelir artışını brüt kâr, FAVÖK/esas faaliyet kârı, marjlar ve net kârla birlikte değerlendir. Net kârın operasyonel sonuçla uyumunu ve nakde dönüşümünü belirt.\n"
+        "- Bilanço kalemlerini son çeyrek ve aynı çeyrek geçen yıla göre karşılaştır; likidite, borç, nakit ve özkaynak etkisini şirket türüne uygun metriklerle açıkla. Banka ve sigortada kendi sektör metriklerini kullan; sanayi oranlarını zorla uygulama.\n"
+        "- Öne çıkan olumlu ve olumsuz kanıtları birlikte tart; önemli metrikleri atlama ama bütün rakamları listeleyip yorumu tekrara çevirme. Veri yoksa açıkça belirt ve neden uydurma.\n\n"
+        "Değerleme ve Kendi Tarihçesi:\n"
+        "- valuation_facts.metrics içindeki güncel F/K, PD/Satış, PD/DD ve FD/FAVÖK'ü mevcutsa verilen tarih aralığındaki şirket ortalaması ve medyanıyla karşılaştır. historical_start/end, gözlem sayısı ve as_of tarihini belirt; en az 8 geçerli gözlem yoksa tarihsel kıyas yapma. Ortalama ile medyan belirgin ayrışıyorsa oynaklık/uç değer olasılığını veri sınırları içinde söyle.\n"
+        "- Güncel çarpan kendi tarihsel ortalamasının üzerindeyse tarihine göre primli, altındaysa iskontolu olduğunu söyle; bunu tek başına ucuzluk/pahalılık veya al/sat hükmü sayma. Kâr kalitesi, büyüme ve marjlarla birlikte yorumla. Negatif/sıfır F/K'yı karşılaştırma; sektör/rakip kıyası veya hedef fiyat üretme.\n\n"
+        "Kar Kalitesi ve FAVOK/Operasyon Desteği (Earnings Quality):\n"
+        "- Net kar artisinda (ornegin 2 milyardan 8.5 milyara cikis gibi) precomputed_facts.earnings_quality degerini kontrol et:\n"
+        "  1) 'faaliyet_destekli': Net kar artisini buyuk olcude FAVOK veya esas faaliyet kari acikliyorsa kâr kalitesi yuksektir. Sektorel kar marji yuzdesel olarak dusuk olsa dahi (perakende/toptan gibi), marj genislemesini ve operasyonel kaldiraci takdir et.\n"
+        "  2) 'faaliyet_disi_kar_artisi' veya 'net_kar_favoku_asiyor': Net kar artisini ana faaliyet gostergeleri aciklamiyorsa bunu belirt; alt kalem dokumu verilmiyorsa finansman geliri, vergi, parasal kazanc veya tek seferlik satis gibi nedenler tahmin etme. Buyume ve karlilik adjustment'larini sisirme.\n"
+        "  3) 'faaliyet_guclu_net_zayif': Operasyonel kar artarken net kar dusmusse operasyonel basariyi teslim et; nedenini finansal kalemlerden veriyle gosteremiyorsan kaynagini belirsiz birak.\n\n"
+        "Karin Nakde Donusumu (Accrual vs. Cash Quality):\n"
+        "- Nakit donusumu zayifsa bunu verilen nakit akis verisiyle sinirli anlat; isletme sermayesi, tahsilat, nakit disi gelir veya baska bir nedeni alt kalemler gosterilmedikce ileri surme.\n"
+        "- Faaliyet nakit akisi pozitifken serbest nakit akisinin negatif oldugu ('faaliyet_pozitif_fcf_negatif' bayragi) durumda bu iki olcumu belirt; yatirim harcamalarinin tutari/verisi yoksa CapEx veya buyume yatirimi nedeni uydurma.\n\n"
+        "Baz Etkisi ve Donusumler:\n"
+        "- Gecen yilin ayni ceyregi dusuk bir bazdaysa ('dusuk_baz' bayragi), yuzde buyumeyi (%1000 gibi) ekonomik mucize gibi abartma; tutarsal buyuklugu ve marj seviyesini tart.\n"
+        "- Zarardan kara geciste ('zarardan_kara' bayragi) yuzde tanimsizdir; toparlanmanin operasyonel teyidini ve ciroya katkisini one cikar.\n\n"
+        "Cikti Formati ve Bounded Adjustments:\n"
+        "- Final scorecard uretme; sadece deterministic tabana bounded adjustment ve kisa kanita dayali gerekceler yaz.\n"
+        "- adjustment_guards icindeki min/max sinirlarini kesinlikle asma.\n"
+        "- score_adjustments.overall_adjustment 0 olsun; genel puan duzeltilmis alt puanlarin agirlikli ortalamasindan hesaplanir.\n"
+        "- score_adjustments.subscores yalniz buyume, karlilik, bilanco, nakit_akisi keylerini kullansin (-0.8 ile 0.8 arasi bounded).\n"
+        "- summary, duzeltilmis alt puanlar ve agirlikli genel puanla tutarli olsun; eski taban puanlari son puan gibi tekrar etme.\n"
+        "- overall_comment alanında 4-6 cümlelik tek bir objektif şirket değerlendirmesi yaz. En son rapor dönemindeki çeyrek performansını, önceki çeyrek ve geçen yıl aynı çeyrek/YTD kıyasını, son dönem eğilimini, gelir-FAVÖK/marj-net kâr bağlantısını, nakit/bilanço dengesini ve veri yeterliyse tarihsel değerleme görünümünü bütünleştir. Hem güçlü hem zayıf tarafları tart; tüm rakamları sıralama.\n"
+        "- Headline temel yönü tek cümlede özetlesin. Bullets alanında 5-7 kısa, kanıta dayalı ayrıntı yaz; genel yorumu tekrar etme. Başlık ve bulgular en son rapor dönemini açıkça adlandırsın.\n"
         "- Yalniz su JSON semasini dondur:\n"
-        '{"headline":"","bullets":[],"risk_note":"","watch_metrics":[],"summary":"","seasonality_note":"","score_adjustments":{"overall_adjustment":0,"subscores":[{"key":"buyume","adjustment":0,"summary":""},{"key":"karlilik","adjustment":0,"summary":""},{"key":"bilanco","adjustment":0,"summary":""},{"key":"nakit_akisi","adjustment":0,"summary":""}]}}'
+        '{"headline":"","overall_comment":"","bullets":[],"risk_note":"","watch_metrics":[],"summary":"","seasonality_note":"","score_adjustments":{"overall_adjustment":0,"subscores":[{"key":"buyume","adjustment":0,"summary":""},{"key":"karlilik","adjustment":0,"summary":""},{"key":"bilanco","adjustment":0,"summary":""},{"key":"nakit_akisi","adjustment":0,"summary":""}]}}'
     )
 
 
@@ -589,11 +726,19 @@ def _user_prompt(normalized_payload: Dict[str, Any], base_analysis: Dict[str, An
         "overview_payload": normalized_payload["overview_payload"],
         "history_context": normalized_payload["history_context"],
         "base_scorecard": base_analysis["scorecard"],
+        "precomputed_facts": base_analysis.get("facts", {}),
+        "valuation_facts": base_analysis.get("facts", {}).get("valuation", {}),
+        "financial_flags": [
+            {"code": flag["code"], "tone": flag["tone"], "title": flag["title"], "detail": flag["detail"]}
+            for flag in base_analysis.get("scorecard", {}).get("flags", [])
+        ],
+        "adjustment_guards": base_analysis.get("scorecard", {}).get("adjustment_guards", {}),
     }
     return (
-        "Son aciklanan KAP finansal donemi, karsilastirma paketleri, 12 ceyrege kadar tarihce ve deterministic base scorecard asagidadir. Donem kiyaslari hazir hesaplanmistir; once bazlarini kontrol et:\n"
+        "Son aciklanan KAP finansal donemi, karsilastirma paketleri, son 20 ceyrege kadar tarihce, precomputed analitik gercekler/bayraklar ve deterministic base scorecard asagidadir:\n"
         f"{json.dumps(prompt_payload, ensure_ascii=False, sort_keys=True)}\n\n"
-        "Once period_analysis.latest_period donemini merkez al. Akis kalemleri icin standalone ceyrek karsilastirmalarini, yil icindeki birikimli performans icin YTD karsilastirmasini; bilanco kalemleri icin ceyrek sonu stok karsilastirmalarini birbirinden ayri yorumla. Ardindan tarihceyle mevsimsellik ve trendi dogrula. Base scorecard'i tamamen degistirme; sadece birbiriyle tutarli ve maddi kanit varsa sinirli adjustment uygula."
+        "Once precomputed_facts ve financial_flags verilerini incele. Net kâr artışının arkasındaki kâr kalitesini (earnings_quality), FAVÖK desteğini ve nakit dönüşümünü tart. "
+        "Base scorecard'i tamamen degistirme; sadece tutarli maddi kanit varsa adjustment_guards sinirlarinda kalarak adjustment uygula."
     )
 
 
@@ -696,7 +841,9 @@ def _normalized_adjustment_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise NvidiaCommentaryError("AI yanitinda gecerli subscore adjustment yok")
 
     return {
-        "overall_adjustment": float(overall_adjustment_raw),
+        # Retain the response field for compatibility; overall is derived from
+        # the weighted adjusted subscores in the deterministic merge.
+        "overall_adjustment": 0.0,
         "subscores": normalized_subscores,
         "summary": _clean_text(payload.get("summary")),
         "seasonality_note": _clean_text(payload.get("seasonality_note")),
@@ -708,6 +855,7 @@ def _build_success_response(
     model: str,
     scorecard: Dict[str, Any],
     headline: str,
+    overall_comment: str,
     bullets: List[str],
     risk_note: str,
     watch_metrics: List[str],
@@ -717,6 +865,7 @@ def _build_success_response(
     response = {
         "ok": True,
         "headline": headline,
+        "overall_comment": overall_comment,
         "bullets": bullets,
         "risk_note": risk_note,
         "watch_metrics": watch_metrics,
@@ -745,6 +894,7 @@ def _build_fallback_response(
         model=model,
         scorecard=scorecard,
         headline=base_analysis["headline"],
+        overall_comment=" ".join([base_analysis["headline"], *list(base_analysis["bullets"])[:4]]),
         bullets=list(base_analysis["bullets"]),
         risk_note=base_analysis["risk_note"],
         watch_metrics=list(base_analysis["watch_metrics"]),
@@ -778,6 +928,11 @@ def _normalize_model_json(
 
     headline = _clean_text(payload.get("headline"), default=base_analysis["headline"])
     bullets = _text_list(payload.get("bullets")) or list(base_analysis["bullets"])
+    overall_comment = _clean_text(
+        payload.get("overall_comment"),
+        max_len=1800,
+        default=" ".join([headline, *bullets[:4]]),
+    )
     risk_note = _clean_text(payload.get("risk_note"), default=base_analysis["risk_note"])
     watch_metrics = _text_list(payload.get("watch_metrics")) or list(base_analysis["watch_metrics"])
 
@@ -785,6 +940,7 @@ def _normalize_model_json(
         model=model,
         scorecard=scorecard,
         headline=headline,
+        overall_comment=overall_comment,
         bullets=bullets,
         risk_note=risk_note,
         watch_metrics=watch_metrics,
@@ -996,41 +1152,66 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
     debug_trace: List[str] = []
     ifm_api_key = os.getenv("IFM_API_KEY", "").strip()
     legacy_nvidia_api_key = os.getenv("NVIDIA_API_KEY", "").strip()
-    use_ifm = bool(ifm_api_key)
-    default_model = _ifm_model() if use_ifm or not legacy_nvidia_api_key else _nvidia_model()
+    normalized_payload = validate_overview_commentary_request(payload)
+    requested_model = normalized_payload.get("model")
+
+    if requested_model in SUPPORTED_NVIDIA_MODELS:
+        provider = "NVIDIA"
+        model = requested_model
+        api_key = legacy_nvidia_api_key
+        missing_key_error = "NVIDIA_API_KEY bulunamadi"
+    elif requested_model in SUPPORTED_IFM_MODELS:
+        provider = "IFM"
+        model = requested_model
+        api_key = ifm_api_key
+        missing_key_error = "IFM_API_KEY bulunamadi"
+    elif ifm_api_key:
+        provider = "IFM"
+        model = _resolve_ifm_model(requested_model)
+        api_key = ifm_api_key
+        missing_key_error = "IFM_API_KEY bulunamadi"
+    elif legacy_nvidia_api_key:
+        provider = "NVIDIA"
+        model = _resolve_nvidia_model(requested_model)
+        api_key = legacy_nvidia_api_key
+        missing_key_error = "NVIDIA_API_KEY bulunamadi"
+    else:
+        provider = "IFM"
+        model = _ifm_model()
+        api_key = ""
+        missing_key_error = "IFM_API_KEY bulunamadi; NVIDIA_API_KEY bulunamadi"
+
     _log_debug(
         debug_trace,
         "request",
         "Overview commentary istegi alindi",
-        default_model=default_model,
+        provider=provider,
+        model=model,
         payload_bytes=len(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
     )
-    normalized_payload = validate_overview_commentary_request(payload)
-    model = (
-        _resolve_ifm_model(normalized_payload.get("model"))
-        if use_ifm
-        else _resolve_nvidia_model(normalized_payload.get("model"))
-    )
-    provider = "IFM" if use_ifm else "NVIDIA"
     _log_debug(
         debug_trace,
         "validation",
         "Overview commentary payload dogrulandi",
+        provider=provider,
         model=model,
         income_rows=len(normalized_payload.get("overview_payload", {}).get("income_summary", [])),
         balance_rows=len(normalized_payload.get("overview_payload", {}).get("balance_summary", [])),
         charts=len(normalized_payload.get("overview_payload", {}).get("charts", [])),
         history_quarters=len(normalized_payload.get("history_context", {}).get("quarters", [])),
+        valuation_history_quarters=len((normalized_payload.get("valuation_context") or {}).get("history_periods", [])),
         company_kind=normalized_payload.get("history_context", {}).get("company_kind"),
     )
 
     base_analysis = compute_base_analysis(normalized_payload["history_context"])
+    base_analysis.setdefault("facts", {})["valuation"] = _build_valuation_facts(
+        normalized_payload.get("valuation_context"),
+        requested_company=normalized_payload["company"],
+    )
     for line in base_analysis.get("debug_lines", []):
         _log_debug(debug_trace, "scoring", line)
 
-    api_key = ifm_api_key or legacy_nvidia_api_key
     if not api_key:
-        missing_key_error = "IFM_API_KEY bulunamadi; NVIDIA_API_KEY bulunamadi"
         _log_debug(debug_trace, "error", missing_key_error, level=logging.WARNING)
         return _build_fallback_response(
             base_analysis=base_analysis,
@@ -1041,7 +1222,7 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
         )
 
     try:
-        chat_call = _call_ifm_chat if use_ifm else _call_nvidia_chat
+        chat_call = _call_ifm_chat if provider == "IFM" else _call_nvidia_chat
         maybe_response_text = chat_call(
             normalized_payload,
             base_analysis,

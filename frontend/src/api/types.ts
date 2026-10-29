@@ -1055,12 +1055,30 @@ export interface KapOverviewCommentaryRequest {
   latest_period: string;
   model?: string;
   history_context: KapOverviewHistoryContext;
+  valuation_context?: KapOverviewValuationContext | null;
   overview_payload: {
     income_summary: unknown[];
     balance_summary: unknown[];
     charts: unknown[];
     period_analysis: unknown;
   };
+}
+
+export interface KapOverviewValuationPeriod {
+  year: number;
+  period: number;
+  fk: number | null;
+  pd_satis: number | null;
+  pd_dd: number | null;
+  fd_favok: number | null;
+}
+
+export interface KapOverviewValuationContext {
+  company: string;
+  latest_report_period: string;
+  as_of: string;
+  current_multiples: Record<'fk' | 'pd_satis' | 'pd_dd' | 'fd_favok', number | null>;
+  history_periods: KapOverviewValuationPeriod[];
 }
 
 export interface KapOverviewHistoryQuarter {
@@ -1095,6 +1113,7 @@ export interface KapOverviewScorecard {
 export interface KapOverviewCommentaryResponse {
   ok: boolean;
   headline: string;
+  overall_comment?: string;
   bullets: string[];
   risk_note: string;
   watch_metrics: string[];
