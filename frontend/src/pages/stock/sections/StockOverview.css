@@ -626,8 +626,15 @@
 
 .overview-ai-controls {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     gap: 0.75rem;
+}
+
+.overview-ai-meta-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
 }
 
 .overview-ai-model-badge {
@@ -639,6 +646,44 @@
     font-weight: 700;
     padding: 0.58rem 0.85rem;
     white-space: nowrap;
+}
+
+.overview-ai-reasoning-toggle {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    background: color-mix(in srgb, var(--surface-border) 40%, transparent);
+    border: 1px solid var(--surface-border);
+    border-radius: 999px;
+    gap: 2px;
+}
+
+.overview-ai-reasoning-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.36rem 0.65rem;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+    line-height: 1.2;
+}
+
+.overview-ai-reasoning-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+}
+
+.overview-ai-reasoning-btn.is-active {
+    background: var(--accent-color);
+    color: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.overview-ai-reasoning-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
 }
 
 .overview-ai-button,
@@ -1008,6 +1053,11 @@
     .overview-ai-controls {
         flex-direction: column;
         align-items: stretch;
+    }
+
+    .overview-ai-meta-group {
+        width: 100%;
+        justify-content: space-between;
     }
 
     .overview-ai-scorecard-main,

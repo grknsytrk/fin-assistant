@@ -44,7 +44,7 @@ MAX_VALUATION_HISTORY_PERIODS = 44
 MAX_ABS_NUMBER = 1_000_000_000_000_000_000
 MAX_DEBUG_TRACE_ITEMS = 40
 
-TOP_LEVEL_KEYS = {"company", "company_title", "latest_period", "overview_payload", "history_context", "valuation_context", "model"}
+TOP_LEVEL_KEYS = {"company", "company_title", "latest_period", "overview_payload", "history_context", "valuation_context", "model", "reasoning_effort"}
 REQUIRED_TOP_LEVEL_KEYS = {"company", "company_title", "latest_period", "overview_payload", "history_context"}
 OVERVIEW_KEYS = {"income_summary", "balance_summary", "charts", "period_analysis"}
 SUMMARY_ROW_KEYS = {
@@ -358,6 +358,15 @@ def _normalize_requested_model(value: Any, path: str) -> Optional[str]:
     return resolved
 
 
+def _normalize_reasoning_effort(value: Any, path: str) -> str:
+    raw = _text(value, path, max_len=20, required=False).lower()
+    if not raw:
+        return os.getenv("IFM_REASONING_EFFORT", "low").strip().lower() or "low"
+    if raw not in {"low", "medium", "high"}:
+        raise PayloadValidationError(f"{path} gecersiz deger. Desteklenenler: low, medium, high")
+    return raw
+
+
 def _normalize_summary_row(row: Any, path: str, *, default_basis: str) -> Dict[str, Any]:
     item = _require_object(row, path)
     _unknown_keys(item, SUMMARY_ROW_KEYS, path)
@@ -656,6 +665,7 @@ def validate_overview_commentary_request(payload: Any) -> Dict[str, Any]:
         "company_title": _text(root.get("company_title"), "company_title", max_len=180),
         "latest_period": _text(root.get("latest_period"), "latest_period", max_len=24),
         "model": _normalize_requested_model(root.get("model"), "model"),
+        "reasoning_effort": _normalize_reasoning_effort(root.get("reasoning_effort"), "reasoning_effort"),
         "overview_payload": {
             "income_summary": [
                 _normalize_summary_row(row, f"overview_payload.income_summary[{idx}]", default_basis="year_to_date")
@@ -863,6 +873,7 @@ def _build_success_response(
     risk_note: str,
     watch_metrics: List[str],
     error: Optional[str],
+    reasoning_effort: Optional[str] = None,
     debug_trace: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     response = {
@@ -873,6 +884,7 @@ def _build_success_response(
         "risk_note": risk_note,
         "watch_metrics": watch_metrics,
         "model_used": model,
+        "reasoning_effort": reasoning_effort or "low",
         "scorecard": scorecard,
         "error": error,
     }
@@ -887,6 +899,7 @@ def _build_fallback_response(
     model: str,
     score_source: str,
     error: Optional[str],
+    reasoning_effort: Optional[str] = None,
     debug_trace: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     scorecard = {
@@ -902,6 +915,7 @@ def _build_fallback_response(
         risk_note=base_analysis["risk_note"],
         watch_metrics=list(base_analysis["watch_metrics"]),
         error=error,
+        reasoning_effort=reasoning_effort,
         debug_trace=debug_trace,
     )
 
@@ -911,6 +925,7 @@ def _normalize_model_json(
     *,
     base_analysis: Dict[str, Any],
     model: str,
+    reasoning_effort: Optional[str] = None,
     debug_trace: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     adjustments = _normalized_adjustment_payload(payload)
@@ -948,6 +963,7 @@ def _normalize_model_json(
         risk_note=risk_note,
         watch_metrics=watch_metrics,
         error=None,
+        reasoning_effort=reasoning_effort,
         debug_trace=debug_trace,
     )
 
@@ -963,6 +979,7 @@ async def _call_chat_completion(
     timeout_s: float,
     max_tokens: int,
     retry_count: int,
+    reasoning_effort: str = "low",
     debug_trace: Optional[List[str]] = None,
 ) -> str:
     body = {
@@ -976,7 +993,7 @@ async def _call_chat_completion(
         "max_tokens": max_tokens,
     }
     if provider == "IFM":
-        body["chat_template_kwargs"] = {"reasoning_effort": "low"}
+        body["chat_template_kwargs"] = {"reasoning_effort": reasoning_effort}
         body["response_format"] = {"type": "json_object"}
     else:
         body["chat_template_kwargs"] = {"thinking": False}
@@ -999,6 +1016,7 @@ async def _call_chat_completion(
         "request",
         f"{provider} overview commentary request hazirlandi",
         model=model,
+        reasoning_effort=reasoning_effort,
         timeout_s=timeout_s,
         max_tokens=max_tokens,
         retries=retry_count,
@@ -1113,6 +1131,7 @@ async def _call_nvidia_chat(
     api_key: str,
     model: str,
     *,
+    reasoning_effort: str = "low",
     debug_trace: Optional[List[str]] = None,
 ) -> str:
     return await _call_chat_completion(
@@ -1125,6 +1144,7 @@ async def _call_nvidia_chat(
         timeout_s=_nvidia_timeout_s(),
         max_tokens=_nvidia_max_tokens(),
         retry_count=_nvidia_retry_count(),
+        reasoning_effort=reasoning_effort,
         debug_trace=debug_trace,
     )
 
@@ -1135,6 +1155,7 @@ async def _call_ifm_chat(
     api_key: str,
     model: str,
     *,
+    reasoning_effort: str = "low",
     debug_trace: Optional[List[str]] = None,
 ) -> str:
     return await _call_chat_completion(
@@ -1147,6 +1168,7 @@ async def _call_ifm_chat(
         timeout_s=_ifm_timeout_s(),
         max_tokens=_ifm_max_tokens(),
         retry_count=_ifm_retry_count(),
+        reasoning_effort=reasoning_effort,
         debug_trace=debug_trace,
     )
 
@@ -1157,6 +1179,7 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
     legacy_nvidia_api_key = os.getenv("NVIDIA_API_KEY", "").strip()
     normalized_payload = validate_overview_commentary_request(payload)
     requested_model = normalized_payload.get("model")
+    reasoning_effort = normalized_payload.get("reasoning_effort", "low")
 
     if requested_model in SUPPORTED_NVIDIA_MODELS:
         provider = "NVIDIA"
@@ -1190,6 +1213,7 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
         "Overview commentary istegi alindi",
         provider=provider,
         model=model,
+        reasoning_effort=reasoning_effort,
         payload_bytes=len(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
     )
     _log_debug(
@@ -1221,18 +1245,32 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
             model=model,
             score_source=SCORE_SOURCE_DETERMINISTIC_ONLY,
             error=missing_key_error,
+            reasoning_effort=reasoning_effort,
             debug_trace=debug_trace,
         )
 
     try:
         chat_call = _call_ifm_chat if provider == "IFM" else _call_nvidia_chat
-        maybe_response_text = chat_call(
-            normalized_payload,
-            base_analysis,
-            api_key=api_key,
-            model=model,
-            debug_trace=debug_trace,
-        )
+        try:
+            maybe_response_text = chat_call(
+                normalized_payload,
+                base_analysis,
+                api_key=api_key,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                debug_trace=debug_trace,
+            )
+        except TypeError as type_err:
+            if "reasoning_effort" in str(type_err):
+                maybe_response_text = chat_call(
+                    normalized_payload,
+                    base_analysis,
+                    api_key=api_key,
+                    model=model,
+                    debug_trace=debug_trace,
+                )
+            else:
+                raise
         if inspect.isawaitable(maybe_response_text):
             response_text = await maybe_response_text
         else:
@@ -1254,6 +1292,7 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
             model_json,
             base_analysis=base_analysis,
             model=model,
+            reasoning_effort=reasoning_effort,
             debug_trace=debug_trace,
         )
     except asyncio.CancelledError:
@@ -1277,5 +1316,6 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
             model=model,
             score_source=SCORE_SOURCE_AI_FAILED_FALLBACK,
             error=str(exc),
+            reasoning_effort=reasoning_effort,
             debug_trace=debug_trace,
         )

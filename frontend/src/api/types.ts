@@ -1054,6 +1054,7 @@ export interface KapOverviewCommentaryRequest {
   company_title: string;
   latest_period: string;
   model?: string;
+  reasoning_effort?: 'low' | 'medium' | 'high';
   history_context: KapOverviewHistoryContext;
   valuation_context?: KapOverviewValuationContext | null;
   overview_payload: {
@@ -1118,6 +1119,7 @@ export interface KapOverviewCommentaryResponse {
   risk_note: string;
   watch_metrics: string[];
   model_used: string;
+  reasoning_effort?: 'low' | 'medium' | 'high';
   scorecard: KapOverviewScorecard;
   error: string | null;
   debug_trace?: string[];

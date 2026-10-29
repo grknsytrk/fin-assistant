@@ -178,3 +178,34 @@ def test_merge_scorecard_synthesizes_summary_when_empty():
     # Summary should not be empty, and should be regenerated based on updated scores
     assert merged["summary"] != ""
     assert merged["overall_score"] >= base["scorecard"]["overall_score"]
+
+
+def test_reasoning_effort_validation_and_default():
+    from src.nvidia_commentary import PayloadValidationError, validate_overview_commentary_request
+
+    base_req = {
+        "company": "THYAO",
+        "company_title": "Turk Hava Yollari",
+        "latest_period": "2026/2",
+        "history_context": {"company_kind": "generic", "quarters": [_base_history()[0]]},
+        "overview_payload": {
+            "income_summary": [],
+            "balance_summary": [],
+            "charts": [],
+        },
+    }
+
+    # Default should be low
+    validated_default = validate_overview_commentary_request(base_req)
+    assert validated_default["reasoning_effort"] == "low"
+
+    # Explicit medium and high should be accepted
+    for effort in ("low", "medium", "high"):
+        req = dict(base_req, reasoning_effort=effort)
+        assert validate_overview_commentary_request(req)["reasoning_effort"] == effort
+
+    # Invalid should raise PayloadValidationError
+    with pytest.raises(PayloadValidationError):
+        validate_overview_commentary_request(dict(base_req, reasoning_effort="extreme"))
+
+

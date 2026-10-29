@@ -31,6 +31,15 @@ import './StockOverview.css';
 const OVERVIEW_AI_PROVIDER_LABEL = 'IFM';
 
 const CHART_QUARTER_WINDOW_STORAGE_KEY = 'ragfin_chart_quarter_window';
+const OVERVIEW_AI_REASONING_STORAGE_KEY = 'ragfin_overview_ai_reasoning_effort';
+
+function readStoredReasoningEffort(): 'low' | 'medium' | 'high' {
+    try {
+        const raw = window.localStorage.getItem(OVERVIEW_AI_REASONING_STORAGE_KEY);
+        if (raw === 'low' || raw === 'medium' || raw === 'high') return raw;
+    } catch { /* ignore */ }
+    return 'low';
+}
 const QUARTER_WINDOW_OPTIONS = [5, 10, 15, 20] as const;
 const DEFAULT_CHART_QUARTER_WINDOW = 20;
 const PREMIUM_TABLE_ROW_LIMIT = 12;
@@ -615,9 +624,16 @@ export default function StockOverview({
     const historyHash = useMemo(() => overviewPayloadHash(overviewHistoryContext), [overviewHistoryContext]);
     const valuationHash = useMemo(() => overviewPayloadHash(overviewValuationContext), [overviewValuationContext]);
     const commentaryBaseKey = `${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::${payloadHash}::${historyHash}`;
+    const [reasoningEffort, setReasoningEffort] = useState<'low' | 'medium' | 'high'>(readStoredReasoningEffort);
+    const handleReasoningEffortChange = (level: 'low' | 'medium' | 'high') => {
+        setReasoningEffort(level);
+        try {
+            window.localStorage.setItem(OVERVIEW_AI_REASONING_STORAGE_KEY, level);
+        } catch { /* ignore */ }
+    };
     const commentaryCacheKey = useMemo(
-        () => `kapOverviewAi::readable-comment-v3::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::ifm::${payloadHash}::${historyHash}::${valuationHash}`,
-        [snapshot.stock_code, snapshot.company, latestPeriod, payloadHash, historyHash, valuationHash],
+        () => `kapOverviewAi::readable-comment-v3::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::ifm::${reasoningEffort}::${payloadHash}::${historyHash}::${valuationHash}`,
+        [snapshot.stock_code, snapshot.company, latestPeriod, reasoningEffort, payloadHash, historyHash, valuationHash],
     );
     const [aiLoading, setAiLoading] = useState(false);
     const [aiError, setAiError] = useState('');
@@ -768,6 +784,7 @@ export default function StockOverview({
                 company: snapshot.stock_code || snapshot.company,
                 company_title: snapshot.company_title || snapshot.company,
                 latest_period: latestPeriod,
+                reasoning_effort: reasoningEffort,
                 history_context: overviewHistoryContext,
                 valuation_context: overviewValuationContext,
                 overview_payload: overviewAiPayload,
@@ -1056,7 +1073,29 @@ export default function StockOverview({
                             <p>Son açıklanan dönem, geçmiş çeyrekler ve erişilebilen değerleme çarpanları birlikte değerlendirilir.</p>
                         </div>
                         <div className="overview-ai-controls">
-                            <span className="overview-ai-model-badge">{OVERVIEW_AI_PROVIDER_LABEL}</span>
+                            <div className="overview-ai-meta-group">
+                                <span className="overview-ai-model-badge">{OVERVIEW_AI_PROVIDER_LABEL}</span>
+                                <div className="overview-ai-reasoning-toggle" role="group" aria-label="Muhakeme Seviyesi">
+                                    {(['low', 'medium', 'high'] as const).map((level) => (
+                                        <button
+                                            key={level}
+                                            type="button"
+                                            className={`overview-ai-reasoning-btn${reasoningEffort === level ? ' is-active' : ''}`}
+                                            onClick={() => handleReasoningEffortChange(level)}
+                                            disabled={aiLoading}
+                                            title={
+                                                level === 'low'
+                                                    ? 'Düşük muhakeme (Low): Hızlı yanıt (varsayılan)'
+                                                    : level === 'medium'
+                                                        ? 'Orta muhakeme (Medium): Dengeli analiz'
+                                                        : 'Yüksek muhakeme (High): Derin düşünme zinciri (Chain-of-Thought)'
+                                            }
+                                        >
+                                            {level === 'low' ? 'Low' : level === 'medium' ? 'Med' : 'High'}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
                             <button
                                 className="overview-ai-button"
                                 type="button"
@@ -1162,7 +1201,10 @@ export default function StockOverview({
                                 </div>
                             ) : null}
                             {aiCommentary.model_used ? (
-                                <p className="overview-ai-model">Model: {aiCommentary.model_used}</p>
+                                <p className="overview-ai-model">
+                                    Model: {aiCommentary.model_used}
+                                    {aiCommentary.reasoning_effort ? ` · Reasoning: ${aiCommentary.reasoning_effort.toUpperCase()}` : ''}
+                                </p>
                             ) : null}
                         </div>
                     ) : null}
