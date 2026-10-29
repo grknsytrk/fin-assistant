@@ -568,6 +568,7 @@ def _system_prompt() -> str:
         "- Rakam listesini tekrar etme. Birbirine bagli 2-4 onemli etkene odaklan: buyume -> faaliyet kari ve marj -> net kar; kar -> faaliyet/serbest nakit akisina donusum; bilanco -> likidite, borcluluk veya sektorel risk. Olumlu ve olumsuz sinyalleri birlikte tart.\n"
         "- Yuzde degisimde ozellikle onceki deger sifira yakin ya da negatifse matematiksel yuzdeyi ekonomik buyume gibi sunma; tutar yonunu ve karliligin zarardan kara gecip gecmedigini acikla. Veri yoksa tahmin etme. Karsilastirma donemi yoksa bunu belirt; fiyat hedefi, rakip kiyaslamasi veya dis bilgi ekleme.\n"
         "- Veriler celiskiliyse, tek seferlik etki oldugu veriden anlasilmiyorsa bunu kesin neden gibi yazma. Sinyaller karisik/zayifsa score adjustment'i sifira yakin veya sifir tut.\n"
+        "- Karlilik adjustment'inda son ceyrekteki net kar ve esas faaliyet kari artislarini ayni ceyrek yillik karsilastirmasi, YTD teyidi, marjlar ve tarihsel trendle birlikte tart. Pozitif ve maddi bir baz uzerinde net kar ile faaliyet kari birlikte gucleniyorsa, yalnizca mutlak marj seviyesi nedeniyle karlilik adjustment'ini otomatik sifirda birakma. Dusuk/sifira yakin baz veya zarardan kara geciste yuzde buyumeyi abartma. Net kar artisini bilanco gucu kaniti sayma; bilanco adjustment'ini borc, likidite, ozkaynak ve ilgili sektor bilancosi gostergelerine dayandir.\n"
         "- Final scorecard uretme; sadece bounded adjustment ve kisa gerekce uret.\n"
         "- Rakam uydurma, dis bilgi kullanma, fiyat hedefi verme.\n"
         "- Cumleleri tamamla; metin alanlarini yarim birakma.\n"
@@ -598,21 +599,35 @@ def _user_prompt(normalized_payload: Dict[str, Any], base_analysis: Dict[str, An
 
 def _extract_json_object(text: str) -> Dict[str, Any]:
     raw = str(text or "").strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`").strip()
-        if raw.lower().startswith("json"):
-            raw = raw[4:].strip()
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise NvidiaCommentaryError("AI modeli JSON formatinda yanit donmedi")
-    try:
-        parsed = json.loads(raw[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise NvidiaCommentaryError(f"AI JSON parse hatasi: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise NvidiaCommentaryError("AI yaniti object olmali")
-    return parsed
+    decoder = json.JSONDecoder()
+    first_object: Optional[Dict[str, Any]] = None
+    last_error: Optional[json.JSONDecodeError] = None
+    cursor = 0
+
+    while cursor < len(raw):
+        start = raw.find("{", cursor)
+        if start < 0:
+            break
+        try:
+            parsed, end = decoder.raw_decode(raw, start)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            cursor = start + 1
+            continue
+
+        if isinstance(parsed, dict):
+            if first_object is None:
+                first_object = parsed
+            adjustments = parsed.get("score_adjustments")
+            if isinstance(adjustments, dict) and isinstance(adjustments.get("subscores"), list):
+                return parsed
+        cursor = max(end, start + 1)
+
+    if first_object is not None:
+        return first_object
+    if last_error is not None:
+        raise NvidiaCommentaryError(f"AI JSON parse hatasi: {last_error}") from last_error
+    raise NvidiaCommentaryError("AI modeli JSON formatinda yanit donmedi")
 
 
 def _response_text_from_payload(payload: Any) -> str:

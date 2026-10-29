@@ -122,6 +122,38 @@ def _score_sign(value: Optional[float]) -> Optional[float]:
     return 2.2
 
 
+def _score_positive_base_growth(
+    snapshot: Dict[str, Any],
+    revenue_snapshot: Dict[str, Any],
+    scale: float,
+) -> Optional[float]:
+    current_profit = snapshot.get("current")
+    prior_profit = snapshot.get("same_period_last")
+    current_revenue = revenue_snapshot.get("current")
+    prior_revenue = revenue_snapshot.get("same_period_last")
+    change = snapshot.get("yoy_change")
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (
+        current_profit,
+        prior_profit,
+        current_revenue,
+        prior_revenue,
+        change,
+    )):
+        return None
+    if current_profit <= 0 or prior_profit <= 0 or current_revenue <= 0 or prior_revenue <= 0:
+        return None
+
+    growth_score = _score_centered(float(change), scale)
+    if growth_score is None:
+        return None
+
+    # A percentage jump from a tiny profit base should count less. Blend it
+    # toward neutral until prior-year profit is material relative to sales.
+    prior_profit_margin = (float(prior_profit) / float(prior_revenue)) * 100.0
+    confidence = _clamp(prior_profit_margin / 3.0, 0.25, 1.0)
+    return 5.0 + ((growth_score - 5.0) * confidence)
+
+
 def _bucket_tone(score: float) -> str:
     if score >= 7.5:
         return "güçlü"
@@ -179,6 +211,7 @@ def _series_snapshot(history_context: Dict[str, Any], source: str, key: str) -> 
     return {
         "current": current_value,
         "yoy_change": yoy_change,
+        "same_period_last": same_period_last,
         "seasonal_delta": seasonal_delta,
         "trend_delta": trend_delta,
         "same_period_count": len(same_period_values),
@@ -280,6 +313,7 @@ def _generic_bucket_signals(
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     sales = _series_snapshot(history_context, "metrics", "satis_gelirleri")
     favok = _series_snapshot(history_context, "metrics", "favok")
+    operating_profit = _series_snapshot(history_context, "metrics", "esas_faaliyet_kari")
     net_profit = _series_snapshot(history_context, "metrics", "net_kar")
     cfo = _series_snapshot(history_context, "metrics", "faaliyet_nakit_akisi")
     fcf = _series_snapshot(history_context, "metrics", "serbest_nakit_akisi")
@@ -314,6 +348,8 @@ def _generic_bucket_signals(
                     _signal("FAVÖK marjı", _score_higher(favok_margin["current"], 4.0, 20.0), 1.0),
                     _signal("Net kar marjı", _score_higher(net_margin["current"], 0.0, 12.0), 1.1),
                     _signal("ROE", _score_higher(roe["current"], 4.0, 24.0), 0.8),
+                    _signal("Net kar büyümesi (aynı çeyrek)", _score_positive_base_growth(net_profit, sales, 90.0), 0.9),
+                    _signal("Esas faaliyet karı büyümesi (aynı çeyrek)", _score_positive_base_growth(operating_profit, sales, 90.0), 0.6),
                     _signal("Net marjın mevsimsel sapması", _score_centered(net_margin["seasonal_delta"], 18.0), 0.6),
                 ]
                 if item
