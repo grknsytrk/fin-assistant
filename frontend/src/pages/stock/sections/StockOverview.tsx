@@ -1001,10 +1001,8 @@ export default function StockOverview({
 
                     {aiLoading ? (
                         <div className={`overview-ai-loading ${aiCommentary?.ok ? 'is-refreshing' : ''}`} aria-live="polite">
-                            <div className="overview-ai-loading-orb" aria-hidden="true">
-                                <span />
-                                <span />
-                                <span />
+                            <div className="overview-ai-loading-illustration" aria-hidden="true">
+                                <img src="/ai-finance.svg" alt="" />
                             </div>
                             <div className="overview-ai-loading-copy">
                                 <strong>{OVERVIEW_AI_LOADING_STEPS[aiLoadingStep].title}</strong>
