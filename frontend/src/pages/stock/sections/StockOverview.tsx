@@ -24,23 +24,10 @@ import {
     type OverviewChartGroup,
 } from '../../../utils/overviewPayload';
 import StockCharts from './StockCharts';
+import { OverviewAiLoadingIllustration } from './OverviewAiLoadingIllustration';
 import './StockOverview.css';
 
 const OVERVIEW_AI_PROVIDER_LABEL = 'IFM';
-const OVERVIEW_AI_LOADING_STEPS = [
-    {
-        title: 'Tarihsel baz kuruluyor',
-        detail: 'Son 12 çeyrek içinden mevsimsel desen ve yakın trend eşleştiriliyor.',
-    },
-    {
-        title: 'Base skor hesaplanıyor',
-        detail: 'Deterministic büyüme, karlılık, bilanço ve nakit akışı puanları çıkarılıyor.',
-    },
-    {
-        title: 'AI ayarlamaları yazılıyor',
-        detail: 'Model yalnız sınırlı adjustment ve kısa finansal gerekçeler üretiyor.',
-    },
-];
 
 const CHART_QUARTER_WINDOW_STORAGE_KEY = 'ragfin_chart_quarter_window';
 const QUARTER_WINDOW_OPTIONS = [5, 10, 15, 20] as const;
@@ -578,7 +565,6 @@ export default function StockOverview({
         [snapshot.stock_code, snapshot.company, latestPeriod, payloadHash, historyHash],
     );
     const [aiLoading, setAiLoading] = useState(false);
-    const [aiLoadingStep, setAiLoadingStep] = useState(0);
     const [aiError, setAiError] = useState('');
     const [aiCommentary, setAiCommentary] = useState<KapOverviewCommentaryResponse | null>(null);
     const [premiumHighlightedIndex, setPremiumHighlightedIndex] = useState<number | null>(null);
@@ -666,17 +652,6 @@ export default function StockOverview({
             aiAbortRef.current = null;
         };
     }, []);
-
-    useEffect(() => {
-        if (!aiLoading) {
-            setAiLoadingStep(0);
-            return;
-        }
-        const timer = window.setInterval(() => {
-            setAiLoadingStep((previous) => (previous + 1) % OVERVIEW_AI_LOADING_STEPS.length);
-        }, 2200);
-        return () => window.clearInterval(timer);
-    }, [aiLoading]);
 
     const requestAiCommentary = async (forceRefresh = false) => {
         if (!canRequestAi || aiLoading) return;
@@ -1000,22 +975,8 @@ export default function StockOverview({
                     </div>
 
                     {aiLoading ? (
-                        <div className={`overview-ai-loading ${aiCommentary?.ok ? 'is-refreshing' : ''}`} aria-live="polite">
-                            <div className="overview-ai-loading-illustration" aria-hidden="true">
-                                <img src="/ai-finance.svg" alt="" />
-                            </div>
-                            <div className="overview-ai-loading-copy">
-                                <strong>{OVERVIEW_AI_LOADING_STEPS[aiLoadingStep].title}</strong>
-                                <p>{OVERVIEW_AI_LOADING_STEPS[aiLoadingStep].detail}</p>
-                                <small>{OVERVIEW_AI_PROVIDER_LABEL} ile skor ve yorum birlikte hazırlanıyor.</small>
-                            </div>
-                            {!aiCommentary?.ok ? (
-                                <div className="overview-ai-loading-skeleton" aria-hidden="true">
-                                    <span className="overview-ai-loading-line overview-ai-loading-line-wide" />
-                                    <span className="overview-ai-loading-line" />
-                                    <span className="overview-ai-loading-line overview-ai-loading-line-soft" />
-                                </div>
-                            ) : null}
+                        <div className="overview-ai-loading">
+                            <OverviewAiLoadingIllustration />
                         </div>
                     ) : null}
 
