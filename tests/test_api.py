@@ -2757,6 +2757,78 @@ def test_api_fund_holdings_live_returns_small_market_payload(
     assert payload["source_metadata"]["static_cache_hit"] is True
 
 
+def test_kap_holdings_parser_handles_name_first_portfolio_rows() -> None:
+    text = """
+III- FON PORTFÖY DEĞERİ 
+TABLOSU
+Vade İhraçcı Nominal Değeri Rayiç Değeri %
+bold bold bold
+Isin Kodu
+:Ğ) YABANCI HİSSE 
+SENETLERİ
+APPLE US 24,247.00 398,638,321.90 2.90US0378331005AAPL.O
+Analog Devices Inc 21,812.00 423,197,258.90 3.08US0326541051ADI
+BROADCOM Ltd 49,845.00 866,515,530.52 6.31US11135F1012A VGO.O
+Alnylam Pharmaceuticals Inc. - 
+Common Stock
+9,972.00 123,272,844.69 0.90US02043Q1076ALNY .O
+06/10/2026 10:18:22 Sayfa 1 / 8
+Taiwan Semiconductor 
+Manufacturing Co.Ltd.
+16,139.00 361,139,252.60 2.63US8740391003TSM
+719,503.00 13,166,216,457.12 95.87TOPLAM
+:S) V ADELİ 
+MEVDUAT/YABANCI PARA 
+01.10.2026 Yapı ve Kredi Bankası 4,760,000.00 232,915,247.05 1.70Vadeli Mevduat YP gün 1
+232,915,247.05 1.70TOPLAM
+:Ş) YATIRIM FONU KATILMA 
+PAYI
+redi Portföy Yönetimi A.Ş. Frwrd 
+Birinci Girişim Sermayesi Yatırım 
+Fonu
+5,964,506.00 11,255,380.69 0.08YHG
+YAPI KREDI PORTFOY PARA 
+PIYASASI FONU
+164,084,794.00 310,480,426.78 2.26YLB
+YAPI KREDI PORTFOY PARA 
+PIYASASI FONU
+370,008.00 679,999.96 0.01YLB
+333,926,038.44 2.43TOPLAM
+:AF) SERTIFIKALAR
+TOPLAM
+IV- FON TOPLAM DEĞERİ TABLOSU
+"""
+
+    positions = fund_service_module._parse_kap_holdings_pdf_text(
+        text,
+        fund_code="YAY",
+        report_date="2026-09-30",
+        source_url="https://www.kap.org.tr/tr/Bildirim/1",
+    )
+
+    by_code = {position["asset_code"]: position for position in positions}
+    assert set(by_code) == {"AAPL", "ADI", "AVGO", "ALNY", "TSM", "YHG", "YLB"}
+    assert by_code["AAPL"]["asset_type"] == "foreign_equity"
+    assert by_code["AAPL"]["asset_name"] == "APPLE US"
+    assert by_code["AAPL"]["isin"] == "US0378331005"
+    assert by_code["AAPL"]["provider_symbol"] == "AAPL"
+    assert by_code["AAPL"]["weight"] == pytest.approx(2.90)
+    assert by_code["AVGO"]["weight"] == pytest.approx(6.31)
+    assert by_code["AVGO"]["isin"] == "US11135F1012"
+    assert by_code["AVGO"]["provider_symbol"] == "AVGO"
+    assert by_code["ALNY"]["asset_name"] == "Alnylam Pharmaceuticals Inc. - Common Stock"
+    assert by_code["ALNY"]["provider_symbol"] == "ALNY"
+    assert by_code["TSM"]["asset_name"] == "Taiwan Semiconductor Manufacturing Co.Ltd."
+    assert by_code["TSM"]["weight"] == pytest.approx(2.63)
+    assert by_code["YHG"]["asset_type"] == "fund"
+    assert by_code["YHG"]["asset_name"].startswith("redi Portföy Yönetimi A.Ş. Frwrd")
+    assert by_code["YHG"]["weight"] == pytest.approx(0.08)
+    assert by_code["YLB"]["weight"] == pytest.approx(2.27)
+    assert by_code["YLB"]["amount"] == pytest.approx(164_454_802.0)
+    assert "PAYI" not in by_code
+    assert all(position["asset_type"] != "cash_fx" for position in positions)
+
+
 def test_kap_holdings_parser_keeps_only_equities_and_funds() -> None:
     text = """
 III-FON PORTFÖY DEĞERİ TABLOSU

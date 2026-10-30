@@ -9706,7 +9706,7 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
 
 
 KAP_HOLDINGS_SOURCE = "kap_portfolio_allocation_report"
-KAP_HOLDINGS_PARSE_VERSION = 23
+KAP_HOLDINGS_PARSE_VERSION = 24
 _KAP_NUMBER_PATTERN = re.compile(
     r"-?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?(?!\d)|\d+[.,]\d+|\d+)(?:\s*%)?"
 )
@@ -9850,6 +9850,58 @@ _KAP_FOREIGN_EQUITY_PREFIX_PATTERN = re.compile(
     r"^(?P<symbol>[A-Z0-9]{1,12})\s+(?P<exchange>US|FP|PA|SW|LN|CN|GY|GR|NA|AS)\b(?:\s+EQUITY\b)?",
     flags=re.IGNORECASE,
 )
+# Some KAP PDFs publish the portfolio table with the security name in the
+# first column and the ISIN/fund code glued to the weight
+# (``APPLE US 24,247.00 398,638,321.90 2.90US0378331005AAPL.O``).  Category
+# headers in that layout are also split across lines and prefixed with a
+# letter marker such as ``:Ğ) YABANCI HİSSE`` / ``SENETLERİ``.
+_KAP_ISIN_PATTERN = re.compile(r"[A-Z]{2}[A-Z0-9]{9}[0-9]")
+_KAP_NAME_FIRST_CATEGORY_PATTERN = re.compile(
+    r"^\s*:\s*[A-ZÇĞİÖŞÜ]{1,3}\s*\)\s*(?P<label>.*)$",
+    flags=re.IGNORECASE,
+)
+_KAP_NAME_FIRST_PAGE_FOOTER_PATTERN = re.compile(
+    r"^\s*\d{2}[./]\d{2}[./]\d{4}\s+\d{2}:\d{2}:\d{2}\s+Sayfa\s+\d+\s*/\s*\d+\s*$",
+    flags=re.IGNORECASE,
+)
+_KAP_NAME_FIRST_CATEGORY_WORDS = {
+    "ARACLARI",
+    "BORCLANMA",
+    "BORSA",
+    "BYF",
+    "DIGER",
+    "DOVIZ",
+    "FON",
+    "FONLARI",
+    "FONU",
+    "HISSE",
+    "KATILMA",
+    "KIYMETLI",
+    "MADEN",
+    "MEVDUAT",
+    "NAKIT",
+    "PARA",
+    "PAYI",
+    "PAYLARI",
+    "PIYASASI",
+    "REPO",
+    "SENEDI",
+    "SENETLERI",
+    "SERBEST",
+    "SERTIFIKA",
+    "SERTIFIKALAR",
+    "SERMAYE",
+    "TL",
+    "TURK",
+    "VADELI",
+    "VARLIK",
+    "VARLIKLAR",
+    "YABANCI",
+    "YATIRIM",
+    "YP",
+}
+_KAP_NAME_FIRST_US_TICKER_SUFFIXES = {"K", "N", "O", "OQ", "P", "UQ", "US", "UN"}
+
 _KAP_EXTRA_STOCK_SYMBOLS = {
     # Keep the parser tolerant of very recent KAP rows before the bundled
     # BIST universe fallback is refreshed.
@@ -10707,7 +10759,7 @@ def _kap_category_marker(line: str) -> Optional[str]:
     norm = _normalize_match_text(line)
     if not norm or len(norm) > 80:
         return None
-    norm = re.sub(r"^[A-Z]\s*[\).:-]\s*", "", norm).strip()
+    norm = re.sub(r"^(?::\s*)?[A-Z]{1,3}\s*[\).:-]\s*", "", norm).strip()
     compact = re.sub(r"[\s.]", "", norm)
     if norm == "DOVIZ" and str(line or "").strip() == str(line or "").strip().upper():
         return None
@@ -11108,6 +11160,266 @@ def _parse_kap_column_holding_row(
     return position
 
 
+def _kap_name_first_ticker_identity(raw_ticker: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Split a KAP trailing ticker into a display code and provider symbol.
+
+    The name-first KAP layout glues a Bloomberg-like ticker to the ISIN
+    (``...2.90US0378331005AAPL.O``).  US exchange suffixes are not part of
+    the Yahoo symbol, while country suffixes such as ``.L`` must stay.
+    """
+    compact = re.sub(r"\s+", "", str(raw_ticker or "")).strip().upper().strip(".,;:")
+    if not compact or not re.fullmatch(r"[A-Z][A-Z0-9]{0,11}(?:\.[A-Z]{1,3})?", compact):
+        return None, None
+    if "." not in compact:
+        return compact, compact
+    base, suffix = compact.rsplit(".", 1)
+    if suffix in _KAP_NAME_FIRST_US_TICKER_SUFFIXES:
+        return base, base
+    return base, compact
+
+
+def _kap_name_first_row_parts(line: str) -> Optional[Dict[str, Any]]:
+    """Read one ``name / nominal / market value / weight+ISIN`` row."""
+    text = " ".join(str(line or "").replace("\xa0", " ").split())
+    if not text or "TOPLAM" in _normalize_match_text(text):
+        return None
+    tokens = _kap_number_tokens(text)
+    if len(tokens) < 3:
+        return None
+    weight_token = tokens[-1]
+    weight = _coerce_float(weight_token.get("value"))
+    if weight is None or not _kap_weight_candidate_is_valid(weight_token.get("text"), weight):
+        return None
+    weight_end = int(weight_token.get("end") or 0)
+    if weight_end <= 0 or weight_end >= len(text):
+        return None
+    remainder = re.sub(r"\s+", "", text[weight_end:].strip()).upper()
+    remainder = remainder.lstrip("%")
+    if not remainder:
+        return None
+
+    amount_token = tokens[-3]
+    market_value_token = tokens[-2]
+    amount = _coerce_float(amount_token.get("value"))
+    market_value = _coerce_float(market_value_token.get("value"))
+    name_end = int(amount_token.get("start") or 0)
+    name = text[:name_end].strip(" -:;")
+    name = _KAP_DATE_PATTERN.sub(" ", name)
+    name = " ".join(name.split()).strip(" -:;")
+    if not name or not amount or market_value is None:
+        return None
+
+    isin: Optional[str] = None
+    provider_symbol: Optional[str] = None
+    isin_match = _KAP_ISIN_PATTERN.match(remainder)
+    if isin_match:
+        isin = isin_match.group(0)
+        code, provider_symbol = _kap_name_first_ticker_identity(remainder[isin_match.end():])
+        if not code:
+            code = isin
+    else:
+        if not re.fullmatch(r"[A-Z0-9]{2,10}", remainder):
+            return None
+        code = normalize_fund_code(remainder).replace(".", "")
+        if not code or code in _KAP_POSITION_STOPWORDS:
+            return None
+        if not (_kap_looks_like_fund_symbol(code) or _kap_looks_like_equity_symbol(code)):
+            return None
+    if not code or code in _KAP_POSITION_STOPWORDS:
+        return None
+    return {
+        "code": code,
+        "name": name,
+        "isin": isin,
+        "provider_symbol": provider_symbol,
+        "amount": amount,
+        "market_value": market_value,
+        "weight": round(float(weight), 6),
+    }
+
+
+def _kap_name_first_position(
+    parts: Dict[str, Any],
+    *,
+    fund_code: str,
+    category: str,
+    report_date: Optional[str],
+    source_url: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    code = str(parts.get("code") or "").strip().upper()
+    name = str(parts.get("name") or "").strip() or code
+    asset_type = _kap_asset_type_from_context(category, code, name)
+    if not code or not _kap_is_included_holding_type(asset_type):
+        return None
+    is_foreign = asset_type.startswith("foreign_")
+    provider_symbol = str(parts.get("provider_symbol") or "").strip() or None
+    return {
+        "fund_code": fund_code,
+        "asset_code": code,
+        "asset_name": name,
+        "asset_type": asset_type,
+        "asset_region": "foreign" if is_foreign else "TR",
+        "isin": parts.get("isin"),
+        "provider_symbol": provider_symbol,
+        "logo_symbol": provider_symbol or code,
+        "detail_clickable": False if is_foreign else True,
+        "weight": parts.get("weight"),
+        "weight_quality": "ok",
+        "weight_warning": None,
+        "previous_weight": None,
+        "weight_change": None,
+        "change_status": "unchanged",
+        "amount": parts.get("amount"),
+        "market_value": parts.get("market_value"),
+        "price": None,
+        "report_date": report_date,
+        "previous_report_date": None,
+        "source_report_url": source_url,
+        "source_type": "kap_pdf",
+        "parse_confidence": 0.86,
+    }
+
+
+def _kap_name_first_category_is_continuation(line: str, parts: List[str]) -> bool:
+    if len(parts) >= 3:
+        return False
+    text = " ".join(str(line or "").split())
+    if not text or len(text) > 45 or _KAP_NAME_FIRST_PAGE_FOOTER_PATTERN.match(text):
+        return False
+    if _kap_number_tokens(text):
+        return False
+    words = re.findall(r"[A-Z]+", _normalize_match_text(text))
+    if not words or len(words) > 4:
+        return False
+    return all(word in _KAP_NAME_FIRST_CATEGORY_WORDS for word in words)
+
+
+def _kap_name_first_resolve_category(parts: List[str]) -> str:
+    joined = " ".join(str(part or "").strip() for part in parts if str(part or "").strip())
+    if not joined:
+        return ""
+    return _kap_category_marker(joined) or ""
+
+
+def _kap_name_first_is_boilerplate(line: str) -> bool:
+    text = " ".join(str(line or "").split())
+    if not text or _KAP_NAME_FIRST_PAGE_FOOTER_PATTERN.match(text):
+        return True
+    norm = _normalize_match_text(text)
+    if re.fullmatch(r"(?:BOLD\s*)+", norm):
+        return True
+    if "ISIN KODU" in norm and len(norm) <= 40:
+        return True
+    if "RAYIC DEGERI" in norm and "NOMINAL" in norm:
+        return True
+    return norm in {"TABLOSU", "FON PORTFOY DEGERI"}
+
+
+def _kap_name_first_line_can_be_name(line: str) -> bool:
+    text = " ".join(str(line or "").split())
+    if not text or len(text) > 160 or _kap_name_first_is_boilerplate(text):
+        return False
+    if _kap_number_tokens(text):
+        return False
+    if not re.search(r"[A-Za-zÇĞİÖŞÜçğıöşü]", text):
+        return False
+    norm = _normalize_match_text(text)
+    if any(token in norm for token in ("TOPLAM", "SAYFA", "ISIN KODU", "NOMINAL DEGERI", "RAYIC DEGERI")):
+        return False
+    if re.match(r"^(?:IV|VI|VII|VIII|IX|V)\s*[-–]\s*", norm):
+        return False
+    return True
+
+
+def _kap_is_name_first_holdings_table(text: str) -> bool:
+    normalized = _normalize_match_text(text)
+    if not (re.search(r"\bRAYIC\s+DEGERI\b", normalized) and re.search(r"\bISIN\s+KODU\b", normalized)):
+        return False
+    category_prefixes = 0
+    for line in str(text or "").splitlines():
+        if _KAP_NAME_FIRST_CATEGORY_PATTERN.match(line):
+            category_prefixes += 1
+        tokens = _kap_number_tokens(line)
+        if len(tokens) < 3:
+            continue
+        remainder = re.sub(r"\s+", "", line[int(tokens[-1]["end"]):]).upper()
+        if _KAP_ISIN_PATTERN.match(remainder):
+            return True
+    return category_prefixes >= 2
+
+
+def _parse_kap_name_first_holdings_pdf_text(
+    text: str,
+    *,
+    fund_code: str,
+    report_date: Optional[str],
+    source_url: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Parse KAP PDFs that put the security name in the first column.
+
+    Rows end with nominal value, market value and a percentage glued to the
+    ISIN or fund code.  Category headers and security names may be split over
+    several lines, so both are buffered until the next complete row.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    positions: List[Dict[str, Any]] = []
+    pending_names: List[str] = []
+    category_parts: List[str] = []
+    category = ""
+    category_open = False
+
+    for line in lines:
+        norm = _normalize_match_text(line)
+        if category_open:
+            if _kap_name_first_category_is_continuation(line, category_parts):
+                category_parts.append(line)
+                continue
+            category = _kap_name_first_resolve_category(category_parts)
+            category_parts = []
+            category_open = False
+
+        if re.match(r"^(?:IV|VI|VII|VIII|IX|V)\s*[-–]\s*", norm):
+            break
+        if _kap_name_first_is_boilerplate(line):
+            pending_names = []
+            continue
+        category_match = _KAP_NAME_FIRST_CATEGORY_PATTERN.match(line)
+        if category_match:
+            category_parts = [category_match.group("label")]
+            category_open = True
+            category = ""
+            pending_names = []
+            continue
+        if "TOPLAM" in norm:
+            pending_names = []
+            continue
+        if not category:
+            pending_names = []
+            continue
+
+        parts = _kap_name_first_row_parts(" ".join([*pending_names, line]) if pending_names else line)
+        if parts:
+            position = _kap_name_first_position(
+                parts,
+                fund_code=fund_code,
+                category=category,
+                report_date=report_date,
+                source_url=source_url,
+            )
+            if position:
+                positions.append(position)
+            pending_names = []
+            continue
+        if _kap_name_first_line_can_be_name(line):
+            pending_names.append(line)
+            if len(pending_names) > 8:
+                pending_names = pending_names[-8:]
+        else:
+            pending_names = []
+
+    return _kap_deduplicate_positions(positions)
+
+
 def _parse_kap_nominal_value_table(
     text: str,
     *,
@@ -11223,6 +11535,12 @@ def _parse_kap_holdings_pdf_text(
         return _parse_kap_nominal_value_table(
             raw_text, fund_code=fund_code, report_date=report_date, source_url=source_url,
         )
+    if _kap_is_name_first_holdings_table(raw_text):
+        parsed_name_first = _parse_kap_name_first_holdings_pdf_text(
+            raw_text, fund_code=fund_code, report_date=report_date, source_url=source_url,
+        )
+        if parsed_name_first:
+            return parsed_name_first
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
     positions: List[Dict[str, Any]] = []
     current_category = ""
