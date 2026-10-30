@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
-import { CalendarDays, GripHorizontal, Plus, Search, Trash2, X } from 'lucide-react';
+import { GripHorizontal, Plus, Search, Trash2, X } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type {
     MarketIndexCode,
@@ -3916,11 +3916,14 @@ export default function MarketsView({
                     </div>
                     <div className="market-session-bar">
                         <div className="market-session-date">
-                            <CalendarDays size={18} aria-hidden="true" />
-                            <strong>Bugün</strong>
-                            <span>{formatTerminalDate(terminalNow)}</span>
-                            <time>{formatTerminalClock(terminalNow)}</time>
                             <span className="market-session-dot" aria-label="Piyasa izleme aktif" />
+                            <strong className="market-session-status">Piyasa Özeti</strong>
+                            <span className="market-session-divider">/</span>
+                            <span>{formatTerminalDate(terminalNow)}</span>
+                            <time className="market-session-clock">{formatTerminalClock(terminalNow)}</time>
+                        </div>
+                        <div className="market-session-hint">
+                            <span>Canlı Akış · İmleç ile durdurabilirsiniz</span>
                         </div>
                     </div>
                     <MarketWatchStrip variant="compact" />

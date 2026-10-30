@@ -202,35 +202,61 @@
 }
 
 .market-session-bar {
-    min-height: 52px;
+    min-height: 38px;
+    height: 38px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
-    padding: 0 1rem;
-    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 78%, transparent);
+    padding: 0 1.15rem;
+    background: #141413;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
 }
 
 .market-session-date {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 0.65rem;
     min-width: 0;
     color: var(--text-secondary);
     font-family: var(--font-mono);
-    font-size: 0.9rem;
+    font-size: 0.78rem;
     font-variant-numeric: tabular-nums;
 }
 
-.market-session-date svg {
-    flex: 0 0 auto;
-    color: var(--text-secondary);
+.market-session-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: #10b981;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+    animation: mw-dot-pulse 2s infinite ease-in-out;
+    flex-shrink: 0;
 }
 
-.market-session-date strong {
+@keyframes mw-dot-pulse {
+    0%, 100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    50% {
+        opacity: 0.5;
+        transform: scale(0.85);
+    }
+}
+
+.market-session-status {
     color: var(--text-primary);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
     font-family: inherit;
-    font-size: 0.9rem;
+}
+
+.market-session-divider {
+    color: rgba(255, 255, 255, 0.2);
+    font-size: 0.8rem;
 }
 
 .market-session-date span,
@@ -238,31 +264,21 @@
     white-space: nowrap;
 }
 
-.market-session-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 999px;
-    background: var(--success-color);
-    box-shadow: 0 0 0 4px color-mix(in srgb, var(--success-color) 14%, transparent);
+.market-session-clock {
+    color: #f1f5f9;
+    font-weight: 600;
+    letter-spacing: 0.02em;
 }
 
-.market-session-refresh {
-    min-height: 30px;
-    padding: 0 0.62rem;
-    border: 1px solid color-mix(in srgb, var(--accent-color) 40%, transparent);
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--accent-color) 20%, transparent);
-    color: color-mix(in srgb, var(--accent-color) 30%, var(--text-primary));
+.market-session-hint {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     font-family: var(--font-mono);
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    cursor: pointer;
-}
-
-.market-session-refresh:hover {
-    border-color: color-mix(in srgb, var(--accent-color) 68%, transparent);
-    background: color-mix(in srgb, var(--accent-color) 28%, transparent);
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    opacity: 0.75;
+    letter-spacing: 0.02em;
 }
 
 .market-content-terminal {
@@ -2707,25 +2723,26 @@
         box-shadow: none;
     }
 
-    .market-terminal-shell .market-overview-head,
-    .market-terminal-shell .mw-strip-compact {
+    .market-terminal-shell .market-overview-head {
         display: none;
     }
 
     .market-session-bar {
-        align-items: flex-start;
-        flex-direction: column;
-        padding: 0.85rem;
+        min-height: 34px;
+        height: auto;
+        padding: 0.4rem 0.85rem;
+        flex-direction: row;
+        justify-content: space-between;
     }
 
     .market-session-date {
-        flex-wrap: wrap;
-        gap: 0.55rem;
-        font-size: 0.82rem;
+        flex-wrap: nowrap;
+        gap: 0.5rem;
+        font-size: 0.72rem;
     }
 
-    .market-session-refresh {
-        width: 100%;
+    .market-session-hint {
+        display: none;
     }
 
     .market-watch-slot {

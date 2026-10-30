@@ -53,19 +53,20 @@ function pickDecimals(value: number | null): number {
 }
 
 function formatPrice(item: MarketWatchItem): string {
-    if (item.price == null) return '-';
+    if (item.price == null) return '—';
 
     let prefix = '';
-    if (item.currency === 'TRY') prefix = '₺';
+    let suffix = '';
+    if (item.currency === 'TRY') suffix = ' ₺';
     else if (item.currency === 'USD') prefix = '$';
     else if (item.currency === 'EUR') prefix = '€';
-    else if (item.currency) prefix = `${item.currency} `;
+    else if (item.currency) suffix = ` ${item.currency}`;
 
     const decimals = pickDecimals(item.price);
     return `${prefix}${item.price.toLocaleString('tr-TR', {
         minimumFractionDigits: decimals,
         maximumFractionDigits: decimals,
-    })}`;
+    })}${suffix}`;
 }
 
 function formatPct(changePct: number | null): string {
@@ -104,7 +105,14 @@ function watchItemKind(symbol: string): SymbolLogoKind {
     if (COMMODITY_SYMBOLS.includes(normalized as (typeof COMMODITY_SYMBOLS)[number])) {
         return 'commodity';
     }
-    if (normalized.includes('/') || normalized === 'DXY') {
+    if (
+        normalized.includes('/') ||
+        normalized === 'DXY' ||
+        normalized.endsWith('TRY') ||
+        normalized === 'EURUSD' ||
+        normalized === 'GBPUSD' ||
+        normalized === 'USDJPY'
+    ) {
         return 'fx';
     }
     return 'index';
@@ -231,24 +239,81 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
         [lookup],
     );
 
+    const tickerItems = useMemo(() => {
+        const priorityOrder: Record<string, number> = {
+            'XU100': 1,
+            'USD/TRY': 2,
+            'USDTRY': 2,
+            'EUR/TRY': 3,
+            'EURTRY': 3,
+            'XU030': 4,
+            'ALTIN': 5,
+            'BRENT': 6,
+            'XUTUM': 7,
+            'GBP/TRY': 8,
+            'GBPTRY': 8,
+            'EUR/USD': 9,
+            'EURUSD': 9,
+            'GUMUS': 10,
+            'DOGALGAZ': 11,
+        };
+
+        const defaultOrder = ['XU100', 'USD/TRY', 'EUR/TRY', 'XU030', 'ALTIN', 'BRENT', 'XUTUM', 'GUMUS'];
+        const seen = new Set<string>();
+        const list: MarketWatchItem[] = [];
+
+        if (payload?.sections) {
+            const all = [
+                ...(payload.sections.indices || []),
+                ...(payload.sections.fx || []),
+                ...(payload.sections.commodities || []),
+            ];
+            for (const item of all) {
+                const norm = normalizeSymbol(item.symbol);
+                if (norm && !seen.has(norm)) {
+                    seen.add(norm);
+                    list.push(item);
+                }
+            }
+        }
+
+        for (const sym of defaultOrder) {
+            const norm = normalizeSymbol(sym);
+            if (!seen.has(norm)) {
+                seen.add(norm);
+                list.push(lookup.get(norm) || placeholderItem(sym));
+            }
+        }
+
+        list.sort((a, b) => {
+            const pA = priorityOrder[normalizeSymbol(a.symbol)] ?? 99;
+            const pB = priorityOrder[normalizeSymbol(b.symbol)] ?? 99;
+            return pA - pB;
+        });
+
+        return list;
+    }, [payload, lookup]);
+
+    const marqueeItems = useMemo(() => {
+        if (tickerItems.length === 0) return [];
+        const repeatCount = Math.max(2, Math.ceil(14 / tickerItems.length));
+        const oneHalf = Array.from({ length: repeatCount }, () => tickerItems).flat();
+        return [...oneHalf, ...oneHalf];
+    }, [tickerItems]);
+
     const isInitialLoading = loading && !payload;
     const delayNote = payload?.delay_note || DEFAULT_DELAY_NOTE;
 
     if (variant === 'compact') {
         return (
-            <section className="mw-strip mw-strip-compact" aria-label="Kompakt piyasa bandı">
+            <div className="mw-strip mw-strip-compact" aria-label="Canlı borsa ve döviz akış bandı">
                 {isInitialLoading && (
-                    <div className="mw-compact-skeleton-grid">
-                        {[...Array(PRIMARY_SYMBOLS.length)].map((_, i) => (
-                            <div key={i} className="mw-compact-skeleton-card">
-                                <div className="mw-compact-skeleton-head">
-                                    <div className="mw-compact-skeleton-logo mw-compact-skeleton-pulse" />
-                                    <div className="mw-compact-skeleton-symbol mw-compact-skeleton-pulse" />
-                                </div>
-                                <div className="mw-compact-skeleton-price-row">
-                                    <div className="mw-compact-skeleton-price mw-compact-skeleton-pulse" />
-                                    <div className="mw-compact-skeleton-change mw-compact-skeleton-pulse" />
-                                </div>
+                    <div className="mw-ticker-skeleton">
+                        {[...Array(6)].map((_, i) => (
+                            <div key={i} className="mw-ticker-skeleton-item">
+                                <div className="mw-compact-skeleton-symbol mw-compact-skeleton-pulse" />
+                                <div className="mw-compact-skeleton-price mw-compact-skeleton-pulse" />
+                                <div className="mw-compact-skeleton-change mw-compact-skeleton-pulse" />
                             </div>
                         ))}
                     </div>
@@ -257,35 +322,45 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
                     <div className="mw-compact-state mw-compact-error">{error}</div>
                 )}
                 {(payload || !isInitialLoading) && (
-                    <div className="mw-compact-grid">
-                        {primaryItems.map((item) => (
-                            <FlashMarketCard
-                                key={item.symbol}
-                                item={item}
-                                className="mw-card-compact"
-                            >
-                                <div className="mw-compact-head">
-                                    <SymbolLogo
-                                        symbol={item.symbol}
-                                        name={item.label}
-                                        kind={watchItemKind(item.symbol)}
-                                        logoUrl={item.logo_url}
-                                        size="xs"
-                                        className="mw-symbol-logo"
-                                    />
-                                    <div className="mw-compact-symbol">{compactSymbol(item.symbol)}</div>
-                                </div>
-                                <div className="mw-compact-price-row">
-                                    <span className="mw-compact-price">{formatPrice(item)}</span>
-                                    <span className={`mw-compact-change ${changeClass(item.change_pct)}`}>
-                                        {formatPct(item.change_pct)}
-                                    </span>
-                                </div>
-                            </FlashMarketCard>
-                        ))}
+                    <div
+                        className="mw-ticker-viewport"
+                        tabIndex={0}
+                        role="region"
+                        aria-label="Canlı borsa ve döviz akış bandı. İmleç ile durdurabilirsiniz."
+                    >
+                        <div className="mw-ticker-track">
+                            {marqueeItems.map((item, index) => {
+                                const isPositive = item.change_pct != null && item.change_pct > 0;
+                                const isNegative = item.change_pct != null && item.change_pct < 0;
+                                return (
+                                    <div
+                                        key={`${item.symbol}-${index}`}
+                                        className={`mw-ticker-item ${item.price == null ? 'is-muted' : ''}`}
+                                        title={`${item.label} · Son güncelleme: ${itemMetaLabel(item)}`}
+                                    >
+                                        <div className="mw-ticker-identity">
+                                            <SymbolLogo
+                                                symbol={item.symbol}
+                                                name={item.label}
+                                                kind={watchItemKind(item.symbol)}
+                                                logoUrl={item.logo_url}
+                                                size="xs"
+                                                className="mw-ticker-logo"
+                                            />
+                                            <span className="mw-ticker-symbol mp-mono">{compactSymbol(item.symbol)}</span>
+                                        </div>
+                                        <span className="mw-ticker-price mp-mono">{formatPrice(item)}</span>
+                                        <span className={`mw-ticker-change mp-mono ${changeClass(item.change_pct)}`}>
+                                            {isPositive ? '▲ ' : isNegative ? '▼ ' : ''}
+                                            {formatPct(item.change_pct)}
+                                        </span>
+                                    </div>
+                                );
+                            })}
+                        </div>
                     </div>
                 )}
-            </section>
+            </div>
         );
     }
 
