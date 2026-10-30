@@ -239,11 +239,7 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
         [lookup],
     );
 
-    type TickerSegment =
-        | { type: 'badge'; category: 'indices' | 'fx' | 'commodities'; label: string }
-        | { type: 'item'; item: MarketWatchItem };
-
-    const groupedSegments = useMemo(() => {
+    const orderedItems = useMemo(() => {
         const indexOrder: Record<string, number> = {
             XU100: 1,
             XU030: 2,
@@ -344,43 +340,15 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
             return pA - pB;
         });
 
-        const singleSequence: TickerSegment[] = [];
-
-        if (indices.length > 0) {
-            singleSequence.push({ type: 'badge', category: 'indices', label: 'ENDEKS' });
-            for (const item of indices) {
-                singleSequence.push({ type: 'item', item });
-            }
-        }
-
-        if (fx.length > 0) {
-            singleSequence.push({ type: 'badge', category: 'fx', label: 'DÖVİZ' });
-            for (const item of fx) {
-                singleSequence.push({ type: 'item', item });
-            }
-        }
-
-        if (commodities.length > 0) {
-            singleSequence.push({ type: 'badge', category: 'commodities', label: 'EMTİA' });
-            for (const item of commodities) {
-                singleSequence.push({ type: 'item', item });
-            }
-        }
-
-        return singleSequence;
+        return [...indices, ...fx, ...commodities];
     }, [payload, lookup]);
 
-    const marqueeSegments = useMemo(() => {
-        if (groupedSegments.length === 0) return [];
-        const repeatCount = Math.max(2, Math.ceil(24 / groupedSegments.length));
-        const oneHalf: TickerSegment[] = [];
-        for (let i = 0; i < repeatCount; i++) {
-            for (const seg of groupedSegments) {
-                oneHalf.push(seg);
-            }
-        }
+    const marqueeItems = useMemo(() => {
+        if (orderedItems.length === 0) return [];
+        const repeatCount = Math.max(2, Math.ceil(20 / orderedItems.length));
+        const oneHalf = Array.from({ length: repeatCount }, () => orderedItems).flat();
         return [...oneHalf, ...oneHalf];
-    }, [groupedSegments]);
+    }, [orderedItems]);
 
     const isInitialLoading = loading && !payload;
     const delayNote = payload?.delay_note || DEFAULT_DELAY_NOTE;
@@ -410,21 +378,7 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
                         aria-label="Canlı borsa ve döviz akış bandı. İmleç ile durdurabilirsiniz."
                     >
                         <div className="mw-ticker-track">
-                            {marqueeSegments.map((seg, index) => {
-                                if (seg.type === 'badge') {
-                                    return (
-                                        <div
-                                            key={`seg-badge-${seg.category}-${index}`}
-                                            className={`mw-ticker-badge mw-badge-${seg.category}`}
-                                            aria-hidden="true"
-                                        >
-                                            <span className="mw-badge-dot" />
-                                            <span>{seg.label}</span>
-                                        </div>
-                                    );
-                                }
-
-                                const item = seg.item;
+                            {marqueeItems.map((item, index) => {
                                 const isPositive = item.change_pct != null && item.change_pct > 0;
                                 const isNegative = item.change_pct != null && item.change_pct < 0;
                                 return (
