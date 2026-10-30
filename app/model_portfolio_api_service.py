@@ -78,15 +78,16 @@ def _model_portfolio_cached_quote_map(symbols: List[str]) -> Dict[str, Dict[str,
                 }
     return result
 
-def _model_portfolio_cached_xu100() -> Optional[float]:
-    """Read current XU100 index level from already-warm caches before falling back."""
+def _model_portfolio_cached_index(index_symbol: str) -> Optional[float]:
+    """Read a current index level from already-warm caches before falling back."""
+    normalized_symbol = str(index_symbol or "").strip().upper()
     indices_entry = _MARKET_INDICES_CACHE.get("payload")
     indices_payload = _swr_entry_payload(indices_entry)
     if indices_payload is None:
         indices_payload = _swr_entry_payload(_shared_cache_get_dict("api:market:indices:v2"))
     if isinstance(indices_payload, dict):
         for row in list(indices_payload.get("rows") or []):
-            if isinstance(row, dict) and str(row.get("symbol") or "").upper() == "XU100":
+            if isinstance(row, dict) and str(row.get("symbol") or "").upper() == normalized_symbol:
                 price = _positive_float(row.get("price"))
                 if price is not None:
                     return price
@@ -96,22 +97,28 @@ def _model_portfolio_cached_xu100() -> Optional[float]:
     if isinstance(watch_payload, dict):
         sections = watch_payload.get("sections") if isinstance(watch_payload.get("sections"), dict) else {}
         for row in list(sections.get("indices") or []):
-            if isinstance(row, dict) and str(row.get("symbol") or "").upper() == "XU100":
+            if isinstance(row, dict) and str(row.get("symbol") or "").upper() == normalized_symbol:
                 price = _positive_float(row.get("price"))
                 if price is not None:
                     return price
 
-    base_entry = _STOCK_RETURN_BASE_CACHE.get("XU100")
+    base_entry = _STOCK_RETURN_BASE_CACHE.get(normalized_symbol)
     if isinstance(base_entry, dict) and isinstance(base_entry.get("data"), dict):
         price = _positive_float(base_entry["data"].get("latest_close"))
         if price is not None:
             return price
 
     try:
-        row = _market_index_row("XU100")
+        row = _market_index_row(normalized_symbol)
         return _positive_float(row.get("price"))
     except Exception:
         return None
+
+def _model_portfolio_cached_xu100() -> Optional[float]:
+    return _model_portfolio_cached_index("XU100")
+
+def _model_portfolio_cached_xu030() -> Optional[float]:
+    return _model_portfolio_cached_index("XU030")
 
 def _model_portfolio_comparison_series(
     kind: str,

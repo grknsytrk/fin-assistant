@@ -59,6 +59,7 @@ import './ModelPortfolioPage.css';
 
 type PortfolioTab = 'active' | 'closed' | 'changelog';
 type PerfRange = '1m' | '3m' | '6m' | 'ytd' | '1y' | 'all';
+type PerformanceSeries = 'portfolio' | 'xu100' | 'xu030';
 
 type ExplainedOption = {
     value: string;
@@ -417,20 +418,27 @@ function sliceAndNormalizePerformance(
     if (!working.length) return [];
     const basePort = working[0].portfolio_value || 100;
     const baseXu = working[0].xu100_value || 100;
+    const baseXu030 = working[0].xu030_value || 100;
 
     return working.map((pt) => {
         const normPort = Number(((pt.portfolio_value / basePort) * 100).toFixed(2));
         const normXu = Number(((pt.xu100_value / baseXu) * 100).toFixed(2));
+        const normXu030 = Number(((pt.xu030_value / baseXu030) * 100).toFixed(2));
         const portRet = Number((normPort - 100).toFixed(2));
         const xuRet = Number((normXu - 100).toFixed(2));
+        const xu030Ret = Number((normXu030 - 100).toFixed(2));
         const relRet = compoundAlpha(portRet, xuRet) ?? 0;
+        const relXu030Ret = compoundAlpha(portRet, xu030Ret) ?? 0;
         return {
             date: pt.date,
             portfolio_value: normPort,
             xu100_value: normXu,
+            xu030_value: normXu030,
             portfolio_return_pct: portRet,
             xu100_return_pct: xuRet,
+            xu030_return_pct: xu030Ret,
             relative_return_pct: relRet,
+            relative_xu030_return_pct: relXu030Ret,
         };
     });
 }
@@ -886,9 +894,9 @@ export default function ModelPortfolioPage() {
                                 <div className="mp-panel-header">
                                     <div>
                                         <span className="mp-panel-kicker">AKTİF MODEL PORTFÖYÜN GEÇMİŞ PERFORMANSI</span>
-                                        <h2 className="mp-panel-title">Aktif Sepet vs. BIST 100 (100 ₺ Bazlı)</h2>
+                                        <h2 className="mp-panel-title">Aktif Sepet vs. BIST 100 / BIST 30 (100 ₺ Bazlı)</h2>
                                         <p className="mp-chart-note">
-                                            Bugünkü aktif hisseler ve ağırlıklarıyla hesaplanır; kapanmış pozisyonları ve geçmiş ağırlık değişikliklerini içermez. Grafik portföyün ilk giriş tarihinden başlar.
+                                            Bugünkü aktif hisseler ve ağırlıklarıyla hesaplanır; kapanmış pozisyonları ve geçmiş ağırlık değişikliklerini içermez. Grafik ilk giriş tarihinden başlar; XU100/XU030 serilerini lejanttan açıp kapatabilirsiniz.
                                         </p>
                                     </div>
                                     <div className="mp-range-tabs" role="tablist" aria-label="Grafik periyodu">
@@ -1580,6 +1588,11 @@ function ModelPortfolioPerformanceChart({
 }) {
     const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
     const [selectedMeasureRange, setSelectedMeasureRange] = useState<{ start: number; end: number } | null>(null);
+    const [visibleSeries, setVisibleSeries] = useState<Record<PerformanceSeries, boolean>>({
+        portfolio: true,
+        xu100: true,
+        xu030: true,
+    });
     const pointWindowKey = `${points.length}:${points[0]?.date || ''}:${points[points.length - 1]?.date || ''}`;
 
     useEffect(() => {
@@ -1617,7 +1630,12 @@ function ModelPortfolioPerformanceChart({
         );
     }
 
-    const allVals = points.flatMap((p) => [p.portfolio_value, p.xu100_value]);
+    const allVals = points.flatMap((p) => [
+        ...(visibleSeries.portfolio ? [p.portfolio_value] : []),
+        ...(visibleSeries.xu100 ? [p.xu100_value] : []),
+        ...(visibleSeries.xu030 ? [p.xu030_value] : []),
+    ]);
+    if (allVals.length === 0) allVals.push(100);
     const rawMin = Math.min(...allVals, 100);
     const rawMax = Math.max(...allVals, 100);
     const span = Math.max(4, rawMax - rawMin);
@@ -1634,6 +1652,9 @@ function ModelPortfolioPerformanceChart({
 
     const xuPath = points
         .map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(p.xu100_value).toFixed(1)}`)
+        .join(' ');
+    const xu030Path = points
+        .map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(p.xu030_value).toFixed(1)}`)
         .join(' ');
 
     const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => {
@@ -1658,7 +1679,15 @@ function ModelPortfolioPerformanceChart({
     const measureXu100Return = measureStartPt && measureEndPt && measureStartPt.xu100_value !== 0
         ? ((measureEndPt.xu100_value / measureStartPt.xu100_value) - 1) * 100
         : null;
-    const measureRelativeReturn = compoundAlpha(measurePortfolioReturn, measureXu100Return);
+    const measureXu030Return = measureStartPt && measureEndPt && measureStartPt.xu030_value !== 0
+        ? ((measureEndPt.xu030_value / measureStartPt.xu030_value) - 1) * 100
+        : null;
+    const measureRelativeXu100Return = compoundAlpha(measurePortfolioReturn, measureXu100Return);
+    const measureRelativeXu030Return = compoundAlpha(measurePortfolioReturn, measureXu030Return);
+    const toggleSeries = (series: PerformanceSeries) => {
+        setVisibleSeries((current) => ({ ...current, [series]: !current[series] }));
+    };
+    const hasVisibleSeries = visibleSeries.portfolio || visibleSeries.xu100 || visibleSeries.xu030;
     const formatMeasureDelta = (end: number, start: number) => {
         const delta = end - start;
         const sign = delta > 0 ? '+' : '';
@@ -1751,27 +1780,61 @@ function ModelPortfolioPerformanceChart({
     return (
         <div className="mp-chart-container">
             <div className="mp-chart-legend">
-                <div className="mp-legend-item">
+                <button
+                    type="button"
+                    className={`mp-legend-item mp-legend-toggle${visibleSeries.portfolio ? '' : ' is-hidden'}`}
+                    aria-pressed={visibleSeries.portfolio}
+                    aria-label={`${visibleSeries.portfolio ? 'Grafikten gizle' : 'Grafikte göster'}: Model Portföy`}
+                    onClick={() => toggleSeries('portfolio')}
+                >
                     <span className="mp-legend-swatch is-portfolio" />
                     <span className="mp-legend-label">Model Portföy:</span>
                     <strong className="mp-mono">{activePt.portfolio_value.toFixed(2)} ₺</strong>
                     <span className={`mp-mono ${toneClass(activePt.portfolio_return_pct)}`}>
                         ({formatPct(activePt.portfolio_return_pct)})
                     </span>
-                </div>
-                <div className="mp-legend-item">
+                </button>
+                <button
+                    type="button"
+                    className={`mp-legend-item mp-legend-toggle${visibleSeries.xu100 ? '' : ' is-hidden'}`}
+                    aria-pressed={visibleSeries.xu100}
+                    aria-label={`${visibleSeries.xu100 ? 'Grafikten gizle' : 'Grafikte göster'}: BIST 100 XU100`}
+                    onClick={() => toggleSeries('xu100')}
+                >
                     <span className="mp-legend-swatch is-xu100" />
                     <span className="mp-legend-label">BIST 100 (XU100):</span>
                     <strong className="mp-mono">{activePt.xu100_value.toFixed(2)} ₺</strong>
                     <span className={`mp-mono ${toneClass(activePt.xu100_return_pct)}`}>
                         ({formatPct(activePt.xu100_return_pct)})
                     </span>
-                </div>
-                <div className="mp-legend-item mp-legend-alpha">
-                    <span className="mp-legend-label">Rölatif Alfa:</span>
-                    <strong className={`mp-mono ${toneClass(activePt.relative_return_pct)}`}>
-                        {formatPct(activePt.relative_return_pct)}
-                    </strong>
+                </button>
+                <button
+                    type="button"
+                    className={`mp-legend-item mp-legend-toggle${visibleSeries.xu030 ? '' : ' is-hidden'}`}
+                    aria-pressed={visibleSeries.xu030}
+                    aria-label={`${visibleSeries.xu030 ? 'Grafikten gizle' : 'Grafikte göster'}: BIST 30 XU030`}
+                    onClick={() => toggleSeries('xu030')}
+                >
+                    <span className="mp-legend-swatch is-xu030" />
+                    <span className="mp-legend-label">BIST 30 (XU030):</span>
+                    <strong className="mp-mono">{activePt.xu030_value.toFixed(2)} ₺</strong>
+                    <span className={`mp-mono ${toneClass(activePt.xu030_return_pct)}`}>
+                        ({formatPct(activePt.xu030_return_pct)})
+                    </span>
+                </button>
+                <div className="mp-legend-alpha-group">
+                    <div className="mp-legend-item mp-legend-alpha">
+                        <span className="mp-legend-label">Alfa / XU100:</span>
+                        <strong className={`mp-mono ${toneClass(activePt.relative_return_pct)}`}>
+                            {formatPct(activePt.relative_return_pct)}
+                        </strong>
+                    </div>
+                    <div className="mp-legend-item mp-legend-alpha">
+                        <span className="mp-legend-label">Alfa / XU030:</span>
+                        <strong className={`mp-mono ${toneClass(activePt.relative_xu030_return_pct)}`}>
+                            {formatPct(activePt.relative_xu030_return_pct)}
+                        </strong>
+                    </div>
                     <span className="mp-legend-date mp-mono">{formatDateTR(activePt.date)}</span>
                 </div>
             </div>
@@ -1789,24 +1852,44 @@ function ModelPortfolioPerformanceChart({
                 )}
             </div>
 
-            {visibleMeasureRange && measureStartPt && measureEndPt && (
+            {visibleMeasureRange && hasVisibleSeries && measureStartPt && measureEndPt && (
                 <div className="mp-chart-measure-summary" role="status" aria-live="polite">
-                    <span className="mp-measure-result">
-                        <span>Sepet</span>
-                        <strong className={toneClass(measurePortfolioReturn)}>
-                            {formatMeasureDelta(measureEndPt.portfolio_value, measureStartPt.portfolio_value)} · {formatPct(measurePortfolioReturn)}
-                        </strong>
-                    </span>
-                    <span className="mp-measure-result">
-                        <span>XU100</span>
-                        <strong className={toneClass(measureXu100Return)}>
-                            {formatMeasureDelta(measureEndPt.xu100_value, measureStartPt.xu100_value)} · {formatPct(measureXu100Return)}
-                        </strong>
-                    </span>
-                    <span className="mp-measure-result">
-                        <span>Rölatif alfa</span>
-                        <strong className={toneClass(measureRelativeReturn)}>{formatPct(measureRelativeReturn)}</strong>
-                    </span>
+                    {visibleSeries.portfolio && (
+                        <span className="mp-measure-result">
+                            <span>Sepet</span>
+                            <strong className={toneClass(measurePortfolioReturn)}>
+                                {formatMeasureDelta(measureEndPt.portfolio_value, measureStartPt.portfolio_value)} · {formatPct(measurePortfolioReturn)}
+                            </strong>
+                        </span>
+                    )}
+                    {visibleSeries.xu100 && (
+                        <span className="mp-measure-result">
+                            <span>XU100</span>
+                            <strong className={toneClass(measureXu100Return)}>
+                                {formatMeasureDelta(measureEndPt.xu100_value, measureStartPt.xu100_value)} · {formatPct(measureXu100Return)}
+                            </strong>
+                        </span>
+                    )}
+                    {visibleSeries.xu030 && (
+                        <span className="mp-measure-result">
+                            <span>XU030</span>
+                            <strong className={toneClass(measureXu030Return)}>
+                                {formatMeasureDelta(measureEndPt.xu030_value, measureStartPt.xu030_value)} · {formatPct(measureXu030Return)}
+                            </strong>
+                        </span>
+                    )}
+                    {visibleSeries.portfolio && visibleSeries.xu100 && (
+                        <span className="mp-measure-result">
+                            <span>Alfa / XU100</span>
+                            <strong className={toneClass(measureRelativeXu100Return)}>{formatPct(measureRelativeXu100Return)}</strong>
+                        </span>
+                    )}
+                    {visibleSeries.portfolio && visibleSeries.xu030 && (
+                        <span className="mp-measure-result">
+                            <span>Alfa / XU030</span>
+                            <strong className={toneClass(measureRelativeXu030Return)}>{formatPct(measureRelativeXu030Return)}</strong>
+                        </span>
+                    )}
                 </div>
             )}
 
@@ -1814,7 +1897,7 @@ function ModelPortfolioPerformanceChart({
                 className="mp-perf-svg"
                 viewBox={`0 0 ${width} ${height}`}
                 role="group"
-                aria-label="Portföy ve XU100 performans grafiği. İki tarih arasındaki değişimi görmek için grafikte sürükleyin; klavyede ok tuşlarıyla ilerleyip boşluk veya Enter ile başlangıç ve bitiş noktalarını seçin. Escape ölçümü temizler."
+                aria-label="Model portföyü, XU100 ve XU030 performans grafiği. Serileri göstermek veya gizlemek için lejantlarına basın. İki tarih arasındaki değişimi görmek için grafikte sürükleyin; klavyede ok tuşlarıyla ilerleyip boşluk veya Enter ile başlangıç ve bitiş noktalarını seçin. Escape ölçümü temizler."
                 tabIndex={0}
                 onPointerMove={handlePointerMove}
                 onPointerDown={handlePointerDown}
@@ -1825,7 +1908,7 @@ function ModelPortfolioPerformanceChart({
                 }}
                 onKeyDown={handleChartKeyDown}
             >
-                <title>Portföy ve BIST 100 performansı</title>
+                <title>Model Portföy, BIST 100 ve BIST 30 performansı</title>
                 <defs>
                     <linearGradient id="mpPortFill" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.26" />
@@ -1869,9 +1952,14 @@ function ModelPortfolioPerformanceChart({
                     />
                 )}
 
-                <path d={portArea} fill="url(#mpPortFill)" />
-                <path d={xuPath} fill="none" className="mp-line-xu100" />
-                <path d={portPath} fill="none" className="mp-line-portfolio" />
+                {visibleSeries.portfolio && <path d={portArea} fill="url(#mpPortFill)" />}
+                {visibleSeries.xu100 && <path d={xuPath} fill="none" className="mp-line-xu100" />}
+                {visibleSeries.xu030 && <path d={xu030Path} fill="none" className="mp-line-xu030" />}
+                {!hasVisibleSeries && (
+                    <text x={width / 2} y={padTop + plotH / 2} textAnchor="middle" className="mp-chart-no-series">
+                        Görmek için üstteki serilerden birine basın
+                    </text>
+                )}
 
                 {/* Active crosshair & dots */}
                 <line
@@ -1881,27 +1969,41 @@ function ModelPortfolioPerformanceChart({
                     y2={padTop + plotH}
                     className="mp-chart-crosshair"
                 />
-                <circle
-                    cx={toX(activeIdx)}
-                    cy={toY(activePt.xu100_value)}
-                    r="4"
-                    className="mp-dot-xu100"
-                />
-                <circle
-                    cx={toX(activeIdx)}
-                    cy={toY(activePt.portfolio_value)}
-                    r="4.5"
-                    className="mp-dot-portfolio"
-                />
+                {visibleSeries.xu100 && (
+                    <circle
+                        cx={toX(activeIdx)}
+                        cy={toY(activePt.xu100_value)}
+                        r="4"
+                        className="mp-dot-xu100"
+                    />
+                )}
+                {visibleSeries.xu030 && (
+                    <circle
+                        cx={toX(activeIdx)}
+                        cy={toY(activePt.xu030_value)}
+                        r="4"
+                        className="mp-dot-xu030"
+                    />
+                )}
+                {visibleSeries.portfolio && (
+                    <circle
+                        cx={toX(activeIdx)}
+                        cy={toY(activePt.portfolio_value)}
+                        r="4.5"
+                        className="mp-dot-portfolio"
+                    />
+                )}
 
                 {visibleMeasureRange && measureStartPt && measureEndPt && (
                     <g className="mp-chart-measure-markers">
                         <line x1={toX(visibleMeasureRange.start)} y1={padTop} x2={toX(visibleMeasureRange.start)} y2={padTop + plotH} />
                         <line x1={toX(visibleMeasureRange.end)} y1={padTop} x2={toX(visibleMeasureRange.end)} y2={padTop + plotH} />
-                        <circle cx={toX(visibleMeasureRange.start)} cy={toY(measureStartPt.portfolio_value)} r="4" className="mp-dot-portfolio" />
-                        <circle cx={toX(visibleMeasureRange.end)} cy={toY(measureEndPt.portfolio_value)} r="4" className="mp-dot-portfolio" />
-                        <circle cx={toX(visibleMeasureRange.start)} cy={toY(measureStartPt.xu100_value)} r="3.5" className="mp-dot-xu100" />
-                        <circle cx={toX(visibleMeasureRange.end)} cy={toY(measureEndPt.xu100_value)} r="3.5" className="mp-dot-xu100" />
+                        {visibleSeries.portfolio && <circle cx={toX(visibleMeasureRange.start)} cy={toY(measureStartPt.portfolio_value)} r="4" className="mp-dot-portfolio" />}
+                        {visibleSeries.portfolio && <circle cx={toX(visibleMeasureRange.end)} cy={toY(measureEndPt.portfolio_value)} r="4" className="mp-dot-portfolio" />}
+                        {visibleSeries.xu100 && <circle cx={toX(visibleMeasureRange.start)} cy={toY(measureStartPt.xu100_value)} r="3.5" className="mp-dot-xu100" />}
+                        {visibleSeries.xu100 && <circle cx={toX(visibleMeasureRange.end)} cy={toY(measureEndPt.xu100_value)} r="3.5" className="mp-dot-xu100" />}
+                        {visibleSeries.xu030 && <circle cx={toX(visibleMeasureRange.start)} cy={toY(measureStartPt.xu030_value)} r="3.5" className="mp-dot-xu030" />}
+                        {visibleSeries.xu030 && <circle cx={toX(visibleMeasureRange.end)} cy={toY(measureEndPt.xu030_value)} r="3.5" className="mp-dot-xu030" />}
                     </g>
                 )}
 

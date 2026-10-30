@@ -1237,9 +1237,12 @@ export interface ModelPortfolioPerformancePoint {
   date: string;
   portfolio_value: number;
   xu100_value: number;
+  xu030_value: number;
   portfolio_return_pct: number;
   xu100_return_pct: number;
+  xu030_return_pct: number;
   relative_return_pct: number;
+  relative_xu030_return_pct: number;
 }
 
 export interface ModelPortfolioPerformanceResponse {

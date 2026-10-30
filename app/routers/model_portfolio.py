@@ -35,11 +35,13 @@ def get_model_portfolio_performance() -> Dict[str, Any]:
     )
     quote_map = _model_portfolio_cached_quote_map(active_symbols)
     current_xu100 = _model_portfolio_cached_xu100()
+    current_xu030 = _model_portfolio_cached_xu030()
     return build_model_portfolio_performance_payload(
         CONFIG.paths.processed_dir,
         fetch_series_fn=_model_portfolio_comparison_series,
         quote_map=quote_map,
         current_xu100=current_xu100,
+        current_xu030=current_xu030,
         shared_cache_get=_shared_cache_get_dict,
         shared_cache_set=_shared_cache_set,
     )

@@ -1051,10 +1051,11 @@ def build_model_portfolio_performance_payload(
     fetch_series_fn: Callable[[str, str, date, date], List[Dict[str, Any]]],
     quote_map: Dict[str, Dict[str, Any]],
     current_xu100: Optional[float],
+    current_xu030: Optional[float] = None,
     shared_cache_get: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     shared_cache_set: Optional[Callable[[str, Dict[str, Any], int], None]] = None,
 ) -> Dict[str, Any]:
-    """Build canonical daily Model Portfolio vs XU100 series with version+day caching.
+    """Build canonical daily Model Portfolio vs XU100/XU030 series with version+day caching.
 
     All range filters (1M, 3M, 6M, YTD, 1Y, ALL) are sliced client-side from this
     canonical response so switching ranges never triggers an extra network request.
@@ -1084,7 +1085,7 @@ def build_model_portfolio_performance_payload(
             continue
     canonical_start = min(entry_dates) if entry_dates else today
 
-    cache_key = f"api:model-portfolio:performance:v2:ver={version}:day={today_iso}"
+    cache_key = f"api:model-portfolio:performance:v3:ver={version}:day={today_iso}"
     now_ts = time.time()
 
     mem_entry = _MODEL_PORTFOLIO_PERF_MEMORY_CACHE.get(cache_key)
@@ -1107,9 +1108,9 @@ def build_model_portfolio_performance_payload(
 
         def fetch_one(item: Tuple[str, str]) -> Tuple[str, List[Dict[str, Any]]]:
             kind, sym = item
-            return sym if kind == "stock" else "XU100", fetch_series_fn(kind, sym, canonical_start, today)
+            return sym, fetch_series_fn(kind, sym, canonical_start, today)
 
-        tasks: List[Tuple[str, str]] = [("index", "XU100")] + [("stock", sym) for sym in symbols]
+        tasks: List[Tuple[str, str]] = [("index", "XU100"), ("index", "XU030")] + [("stock", sym) for sym in symbols]
         series_by_symbol: Dict[str, Dict[str, float]] = {}
         with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as pool:
             for key, pts in pool.map(fetch_one, tasks):
@@ -1122,6 +1123,7 @@ def build_model_portfolio_performance_payload(
                 series_by_symbol[key] = date_map
 
         all_dates_set = set(series_by_symbol.get("XU100", {}).keys())
+        all_dates_set.update(series_by_symbol.get("XU030", {}).keys())
         for sym in symbols:
             all_dates_set.update(series_by_symbol.get(sym, {}).keys())
         sorted_dates = sorted(d for d in all_dates_set if canonical_start.isoformat() <= d <= today_iso)
@@ -1146,6 +1148,9 @@ def build_model_portfolio_performance_payload(
     if current_xu100 is not None and current_xu100 > 0:
         raw_series_map.setdefault("XU100", {})[today_iso] = float(current_xu100)
         has_live_today = True
+    if current_xu030 is not None and current_xu030 > 0:
+        raw_series_map.setdefault("XU030", {})[today_iso] = float(current_xu030)
+        has_live_today = True
     for pos in active_positions:
         sym = str(pos.get("symbol") or "").strip().upper()
         live_p = _positive_float((quote_map.get(sym) or {}).get("price"))
@@ -1169,21 +1174,22 @@ def build_model_portfolio_performance_payload(
     # Forward-fill missing trading days per symbol & compute daily weighted index (base 100)
     symbols = [str(p.get("symbol") or "").strip().upper() for p in active_positions if p.get("symbol")]
     last_price: Dict[str, Optional[float]] = {sym: None for sym in symbols}
-    last_xu100: Optional[float] = None
+    last_index_prices: Dict[str, Optional[float]] = {"XU100": None, "XU030": None}
 
     portfolio_index = 100.0
-    xu100_index = 100.0
+    index_values: Dict[str, float] = {"XU100": 100.0, "XU030": 100.0}
     points: List[Dict[str, Any]] = []
 
     for idx, d_str in enumerate(sorted_dates):
-        xu_val = raw_series_map.get("XU100", {}).get(d_str)
-        prev_xu = last_xu100
-        if xu_val is not None and xu_val > 0:
-            last_xu100 = xu_val
-
-        if idx > 0 and prev_xu is not None and last_xu100 is not None and prev_xu > 0:
-            xu_daily_ret = (last_xu100 - prev_xu) / prev_xu
-            xu100_index = xu100_index * (1.0 + xu_daily_ret)
+        for index_symbol in ("XU100", "XU030"):
+            current_index_price = raw_series_map.get(index_symbol, {}).get(d_str)
+            previous_index_price = last_index_prices[index_symbol]
+            if current_index_price is not None and current_index_price > 0:
+                last_index_prices[index_symbol] = current_index_price
+            last_index_price = last_index_prices[index_symbol]
+            if idx > 0 and previous_index_price is not None and last_index_price is not None and previous_index_price > 0:
+                index_daily_return = (last_index_price - previous_index_price) / previous_index_price
+                index_values[index_symbol] *= 1.0 + index_daily_return
 
         weighted_daily_ret = 0.0
         active_weight_sum = 0.0
@@ -1210,17 +1216,22 @@ def build_model_portfolio_performance_payload(
             portfolio_index = portfolio_index * (1.0 + portfolio_daily_ret)
 
         port_ret_pct = round(portfolio_index - 100.0, 2)
-        xu_ret_pct = round(xu100_index - 100.0, 2)
+        xu_ret_pct = round(index_values["XU100"] - 100.0, 2)
+        xu030_ret_pct = round(index_values["XU030"] - 100.0, 2)
         rel_pct = compound_relative_return_pct(port_ret_pct, xu_ret_pct)
+        rel_xu030_pct = compound_relative_return_pct(port_ret_pct, xu030_ret_pct)
 
         points.append(
             {
                 "date": d_str,
                 "portfolio_value": round(portfolio_index, 2),
-                "xu100_value": round(xu100_index, 2),
+                "xu100_value": round(index_values["XU100"], 2),
+                "xu030_value": round(index_values["XU030"], 2),
                 "portfolio_return_pct": port_ret_pct,
                 "xu100_return_pct": xu_ret_pct,
+                "xu030_return_pct": xu030_ret_pct,
                 "relative_return_pct": rel_pct if rel_pct is not None else 0.0,
+                "relative_xu030_return_pct": rel_xu030_pct if rel_xu030_pct is not None else 0.0,
             }
         )
 
