@@ -881,7 +881,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    padding: 0.65rem 1rem;
+    padding: 0 1rem;
     border-bottom: 1px solid var(--surface-border);
     flex-wrap: wrap;
 }
@@ -889,45 +889,57 @@
 .mp-tabs-nav {
     display: flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: 0.25rem;
     flex-wrap: wrap;
 }
 
 .mp-tab-btn {
     display: inline-flex;
     align-items: center;
-    gap: 0.42rem;
-    height: 32px;
+    gap: 0.5rem;
+    height: 44px;
     padding: 0 0.75rem;
-    border-radius: var(--border-radius);
-    border: 1px solid transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
     background: transparent;
     color: var(--text-secondary);
     font-family: var(--font-sans);
-    font-size: 0.79rem;
-    font-weight: 600;
+    font-size: 0.8rem;
+    font-weight: 500;
     cursor: pointer;
-    transition: all 0.12s ease;
+    transition: color 0.12s ease, border-color 0.12s ease;
 }
 
 .mp-tab-btn:hover {
     color: var(--text-primary);
-    background: var(--surface-hover);
 }
 
 .mp-tab-btn.active {
-    background: rgba(59, 130, 246, 0.12);
-    border-color: rgba(59, 130, 246, 0.38);
-    color: #60a5fa;
+    color: var(--text-primary);
+    border-bottom-color: var(--accent-color);
+    font-weight: 600;
 }
 
 .mp-tab-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.25rem;
+    height: 1.25rem;
+    padding: 0 0.35rem;
+    border-radius: 999px;
     font-family: var(--font-mono);
     font-size: 0.69rem;
-    padding: 0.08rem 0.38rem;
-    border-radius: 2px;
-    background: rgba(255, 255, 255, 0.06);
-    color: var(--text-primary);
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-muted);
+    transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.mp-tab-btn.active .mp-tab-count {
+    background: color-mix(in srgb, var(--accent-color) 16%, transparent);
+    color: #93c5fd;
 }
 
 .mp-tabs-meta {
@@ -1278,78 +1290,125 @@
 .mp-closed-scorecard {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 0.65rem;
-    padding: 0.8rem 1rem;
-    background: rgba(10, 12, 15, 0.5);
+    padding: 0.85rem 1rem;
     border-bottom: 1px solid var(--surface-border);
 }
 
 .mp-score-item {
     display: flex;
     flex-direction: column;
-    gap: 0.2rem;
+    gap: 0.25rem;
+    padding: 0.1rem 1rem;
+    border-left: 1px solid var(--surface-border);
+}
+
+.mp-score-item:first-child {
+    padding-left: 0;
+    border-left: 0;
 }
 
 .mp-score-item span {
-    font-size: 0.68rem;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 600;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    font-weight: 500;
 }
 
 .mp-score-item strong {
     font-family: var(--font-mono);
-    font-size: 0.96rem;
+    font-size: 1.15rem;
+    font-weight: 600;
     color: var(--text-primary);
 }
 
 .mp-close-reason {
-    display: inline-block;
     font-size: 0.75rem;
     color: var(--text-secondary);
-    padding: 0.15rem 0.48rem;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--surface-border);
-    border-radius: 2px;
+}
+
+.mp-closed-table td,
+.mp-closed-table th {
+    padding-left: 1rem;
+    padding-right: 1rem;
+}
+
+.mp-closed-table th {
+    background: var(--surface-color);
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.mp-closed-table th:first-child,
+.mp-closed-table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--surface-color);
+    padding-left: 1rem;
+}
+
+.mp-closed-table td:first-child {
+    box-shadow: 1px 0 0 var(--surface-border);
+}
+
+.mp-closed-table tr:last-child td {
+    border-bottom: 0;
+}
+
+.mp-closed-table .mp-row:hover td {
+    background: var(--surface-hover);
 }
 
 /* Tab 3: Changelog Timeline */
 .mp-changelog-list {
     display: flex;
     flex-direction: column;
-    divide-y: 1px solid var(--surface-border);
 }
 
 .mp-changelog-item {
     display: flex;
     align-items: flex-start;
-    gap: 0.85rem;
-    padding: 0.85rem 1rem;
+    gap: 1.25rem;
+    padding: 0.9rem 1rem;
     border-bottom: 1px solid var(--surface-border);
+    transition: background-color 0.12s ease;
+}
+
+.mp-changelog-item:hover {
+    background: var(--surface-hover);
 }
 
 .mp-changelog-item:last-child {
     border-bottom: none;
 }
 
+.mp-changelog-meta {
+    flex: 0 0 115px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.mp-changelog-date {
+    font-size: 0.73rem;
+    color: var(--text-muted);
+}
+
 .mp-changelog-badge {
-    flex: 0 0 132px;
-    text-align: center;
-    font-family: var(--font-mono);
-    font-size: 0.66rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    padding: 0.24rem 0.45rem;
-    border-radius: 2px;
-    border: 1px solid var(--surface-border);
-    background: rgba(255, 255, 255, 0.04);
-    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.12rem 0.48rem;
+    border-radius: 999px;
+    letter-spacing: 0;
 }
 
 .mp-changelog-badge.is-added {
     background: rgba(16, 185, 129, 0.12);
-    border-color: rgba(16, 185, 129, 0.35);
     color: #34d399;
 }
 
@@ -1357,26 +1416,34 @@
 .mp-changelog-badge.is-weight_revised,
 .mp-changelog-badge.is-updated {
     background: rgba(59, 130, 246, 0.12);
-    border-color: rgba(59, 130, 246, 0.35);
     color: #60a5fa;
 }
 
 .mp-changelog-badge.is-closed {
     background: rgba(245, 158, 11, 0.12);
-    border-color: rgba(245, 158, 11, 0.35);
     color: #fbbf24;
+}
+
+.mp-changelog-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
 }
 
 .mp-changelog-content {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
 }
 
 .mp-changelog-top {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 0.5rem;
-    margin-bottom: 0.25rem;
     flex-wrap: wrap;
 }
 
@@ -1385,31 +1452,31 @@
     background: none;
     padding: 0;
     font-family: var(--font-mono);
-    font-size: 0.84rem;
+    font-size: 0.85rem;
     font-weight: 700;
-    color: #60a5fa;
+    color: var(--text-primary);
     cursor: pointer;
+    transition: color 0.12s ease;
 }
 
 .mp-changelog-ticker:hover {
+    color: #60a5fa;
     text-decoration: underline;
 }
 
 .mp-changelog-company {
-    font-size: 0.76rem;
+    font-size: 0.74rem;
     color: var(--text-secondary);
-}
-
-.mp-changelog-date {
-    margin-left: auto;
-    font-size: 0.72rem;
-    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 320px;
 }
 
 .mp-changelog-summary {
     margin: 0;
     font-size: 0.81rem;
-    color: var(--text-primary);
+    color: var(--text-secondary);
     line-height: 1.45;
 }
 

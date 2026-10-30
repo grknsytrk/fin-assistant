@@ -989,7 +989,6 @@ export default function ModelPortfolioPage() {
                                     className={`mp-tab-btn${activeTab === 'active' ? ' active' : ''}`}
                                     onClick={() => setActiveTab('active')}
                                 >
-                                    <BriefcaseBusiness size={15} />
                                     <span>Aktif Pozisyonlar</span>
                                     <span className="mp-tab-count">{liveActivePositions.length}</span>
                                 </button>
@@ -1000,8 +999,7 @@ export default function ModelPortfolioPage() {
                                     className={`mp-tab-btn${activeTab === 'closed' ? ' active' : ''}`}
                                     onClick={() => setActiveTab('closed')}
                                 >
-                                    <Award size={15} />
-                                    <span>Kapatılan Pozisyonlar (Geçmiş)</span>
+                                    <span>Kapatılan Pozisyonlar</span>
                                     <span className="mp-tab-count">{portfolioData?.closed_positions.length || 0}</span>
                                 </button>
                                 <button
@@ -1011,7 +1009,6 @@ export default function ModelPortfolioPage() {
                                     className={`mp-tab-btn${activeTab === 'changelog' ? ' active' : ''}`}
                                     onClick={() => setActiveTab('changelog')}
                                 >
-                                    <History size={15} />
                                     <span>Değişiklik Günlüğü</span>
                                     <span className="mp-tab-count">{portfolioData?.changelog.length || 0}</span>
                                 </button>
@@ -1264,7 +1261,7 @@ export default function ModelPortfolioPage() {
                             (portfolioData?.closed_positions.length || 0) === 0 ? (
                                 <div className="mp-empty-box">
                                     <Award size={26} className="mp-empty-icon" />
-                                    <h3>Henüz Kapatılan Pozisyon Bulunmuyor</h3>
+                                    <h3>Henüz kapatılan pozisyon bulunmuyor</h3>
                                     <p>
                                         Hedef fiyatına ulaşan veya portföyden çıkarılan hisseler gerçekleşen getiri ve
                                         BIST 100 rölatif performans karnesiyle bu sekmede arşivlenir.
@@ -1274,23 +1271,23 @@ export default function ModelPortfolioPage() {
                                 <div className="mp-closed-section">
                                     <div className="mp-closed-scorecard">
                                         <div className="mp-score-item">
-                                            <span>Kapatılan Öneri Sayısı</span>
-                                            <strong>{liveSummary.closed_count} İşlem</strong>
+                                            <span>Kapatılan öneri</span>
+                                            <strong>{liveSummary.closed_count} işlem</strong>
                                         </div>
                                         <div className="mp-score-item">
-                                            <span>BIST 100 Üzeri Başarı (Hit Rate)</span>
+                                            <span>BIST 100 üzeri başarı</span>
                                             <strong className="mp-tone-up">
                                                 %{liveSummary.closed_hit_rate_pct?.toFixed(1) ?? '0.0'} ({liveSummary.closed_win_count}/{liveSummary.closed_count})
                                             </strong>
                                         </div>
                                         <div className="mp-score-item">
-                                            <span>Ortalama Gerçekleşen Getiri</span>
+                                            <span>Ortalama net getiri</span>
                                             <strong className={toneClass(liveSummary.closed_avg_return_pct)}>
                                                 {formatPct(liveSummary.closed_avg_return_pct)}
                                             </strong>
                                         </div>
                                         <div className="mp-score-item">
-                                            <span>Ortalama Rölatif Alfa</span>
+                                            <span>Ortalama alfa</span>
                                             <strong className={toneClass(liveSummary.closed_avg_relative_pct)}>
                                                 {formatPct(liveSummary.closed_avg_relative_pct)}
                                             </strong>
@@ -1303,13 +1300,13 @@ export default function ModelPortfolioPage() {
                                             <thead>
                                                 <tr>
                                                     <th>Hisse</th>
-                                                    <th className="num">Giriş → Çıkış Tarihi</th>
-                                                    <th className="num">Giriş Fiyatı</th>
-                                                    <th className="num">Çıkış Fiyatı</th>
-                                                    <th className="num">Gerçekleşen Getiri</th>
-                                                    <th className="num">XU100 Rölatif (Alfa)</th>
-                                                    <th>Kapanış Gerekçesi</th>
-                                                    <th className="act">Detay</th>
+                                                    <th className="num">Tarih</th>
+                                                    <th className="num">Giriş</th>
+                                                    <th className="num">Çıkış</th>
+                                                    <th className="num">Net getiri</th>
+                                                    <th className="num">XU100’e göre</th>
+                                                    <th>Gerekçe</th>
+                                                    <th className="act"><span className="mp-sr-only">İşlemler</span></th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -1363,14 +1360,6 @@ export default function ModelPortfolioPage() {
                                                         </td>
                                                         <td className="act" onClick={(e) => e.stopPropagation()}>
                                                             <div className="mp-row-actions">
-                                                                <button
-                                                                    type="button"
-                                                                    className="mp-thesis-btn"
-                                                                    onClick={() => setSelectedPositionId(pos.id)}
-                                                                >
-                                                                    <span>Tezi Gör</span>
-                                                                    <ChevronRight size={14} />
-                                                                </button>
                                                                 {isAdminVerified && (
                                                                     <button
                                                                         type="button"
@@ -1382,6 +1371,14 @@ export default function ModelPortfolioPage() {
                                                                         <Trash2 size={13} />
                                                                     </button>
                                                                 )}
+                                                                <button
+                                                                    type="button"
+                                                                    className="mp-thesis-btn"
+                                                                    onClick={() => setSelectedPositionId(pos.id)}
+                                                                >
+                                                                    <span>Tez</span>
+                                                                    <ChevronRight size={14} />
+                                                                </button>
                                                             </div>
                                                         </td>
                                                     </tr>
@@ -1398,7 +1395,7 @@ export default function ModelPortfolioPage() {
                             (portfolioData?.changelog.length || 0) === 0 ? (
                                 <div className="mp-empty-box">
                                     <History size={26} className="mp-empty-icon" />
-                                    <h3>Henüz Portföy Hareketi Kaydedilmedi</h3>
+                                    <h3>Henüz portföy hareketi kaydedilmedi</h3>
                                     <p>
                                         Model portföye hisse eklendiğinde, hedef fiyat/ağırlık revizyonu yapıldığında veya
                                         pozisyon kapatıldığında tüm değişiklikler tarih sırasıyla burada listelenir.
@@ -1406,33 +1403,53 @@ export default function ModelPortfolioPage() {
                                 </div>
                             ) : (
                                 <div className="mp-changelog-list">
-                                    {(portfolioData?.changelog || []).map((entry: ModelPortfolioChangelogItem) => (
-                                        <div key={entry.id} className="mp-changelog-item">
-                                            <div className={`mp-changelog-badge is-${entry.action}`}>
-                                                {entry.action === 'added' && 'YENİ GİRİŞ'}
-                                                {entry.action === 'target_revised' && 'HEDEF REVİZYONU'}
-                                                {entry.action === 'weight_revised' && 'AĞIRLIK REVİZYONU'}
-                                                {entry.action === 'updated' && 'GÜNCELLEME'}
-                                                {entry.action === 'closed' && 'POZİSYON KAPANIŞI'}
-                                            </div>
-                                            <div className="mp-changelog-content">
-                                                <div className="mp-changelog-top">
-                                                    <button
-                                                        type="button"
-                                                        className="mp-changelog-ticker"
-                                                        onClick={() => navigate(toStockDetail(entry.symbol, DEFAULT_STOCK_TAB))}
-                                                    >
-                                                        {entry.symbol}
-                                                    </button>
-                                                    <span className="mp-changelog-company">{entry.company_name}</span>
+                                    {(portfolioData?.changelog || []).map((entry: ModelPortfolioChangelogItem) => {
+                                        const cleanSummary = entry.summary.startsWith(`${entry.symbol} `)
+                                            ? entry.summary.slice(entry.symbol.length + 1)
+                                            : entry.summary;
+                                        const formattedSummary = cleanSummary.replace(/(\d+)\.(\d+)/g, '$1,$2');
+                                        return (
+                                            <div key={entry.id} className="mp-changelog-item">
+                                                <div className="mp-changelog-meta">
+                                                    <span className={`mp-changelog-badge is-${entry.action}`}>
+                                                        {entry.action === 'added' && 'Yeni Giriş'}
+                                                        {entry.action === 'target_revised' && 'Hedef Revizyonu'}
+                                                        {entry.action === 'weight_revised' && 'Ağırlık Revizyonu'}
+                                                        {entry.action === 'updated' && 'Güncelleme'}
+                                                        {entry.action === 'closed' && 'Pozisyon Kapanışı'}
+                                                    </span>
                                                     <time className="mp-changelog-date mp-mono">
                                                         {formatDateTR(entry.date)}
                                                     </time>
                                                 </div>
-                                                <p className="mp-changelog-summary">{entry.summary}</p>
+                                                <div className="mp-changelog-body">
+                                                    <SymbolLogo
+                                                        symbol={entry.symbol}
+                                                        name={entry.company_name}
+                                                        kind="stock"
+                                                        size="sm"
+                                                    />
+                                                    <div className="mp-changelog-content">
+                                                        <div className="mp-changelog-top">
+                                                            <button
+                                                                type="button"
+                                                                className="mp-changelog-ticker mp-mono"
+                                                                onClick={() => navigate(toStockDetail(entry.symbol, DEFAULT_STOCK_TAB))}
+                                                            >
+                                                                {entry.symbol}
+                                                            </button>
+                                                            {entry.company_name && (
+                                                                <span className="mp-changelog-company" title={entry.company_name}>
+                                                                    {entry.company_name}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <p className="mp-changelog-summary">{formattedSummary}</p>
+                                                    </div>
+                                                </div>
                                             </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             )
                         )}
