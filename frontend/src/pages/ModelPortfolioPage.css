@@ -1059,13 +1059,14 @@
 .mp-stock-cell {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
-    min-width: 165px;
+    gap: 0.65rem;
+    min-width: 200px;
 }
 
 .mp-stock-meta {
     display: flex;
     flex-direction: column;
+    gap: 0.12rem;
     min-width: 0;
 }
 
@@ -1078,65 +1079,94 @@
 .mp-ticker {
     font-family: var(--font-mono);
     font-weight: 700;
-    font-size: 0.83rem;
+    font-size: 0.85rem;
     color: var(--text-primary);
 }
 
 .mp-sector-tag {
-    font-size: 0.64rem;
-    font-weight: 600;
-    padding: 0.08rem 0.38rem;
-    border-radius: 2px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid var(--surface-border);
-    color: var(--text-secondary);
+    font-size: 0.68rem;
+    color: var(--text-muted);
     white-space: nowrap;
 }
 
 .mp-company-name {
-    font-size: 0.72rem;
+    font-size: 0.73rem;
     color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 210px;
+    max-width: 240px;
 }
 
 .mp-sub-cell {
     display: block;
-    font-size: 0.69rem;
+    font-size: 0.7rem;
     color: var(--text-muted);
     margin-top: 2px;
+    white-space: nowrap;
 }
 
 .mp-price-main {
     font-weight: 600;
 }
 
-.mp-entry-date {
-    white-space: nowrap;
+/* Active table: one-line primary value + one muted line per cell */
+.mp-active-table td,
+.mp-active-table th {
+    padding-left: 1rem;
+    padding-right: 1rem;
 }
 
-.mp-current-price .mp-sub-cell {
-    white-space: nowrap;
+.mp-active-table th {
+    background: var(--surface-color);
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-secondary);
 }
 
-/* Target Price Progress Bar Column */
+.mp-active-table th:first-child,
+.mp-active-table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--surface-color);
+    padding-left: 1rem;
+}
+
+.mp-active-table td:first-child {
+    box-shadow: 1px 0 0 var(--surface-border);
+}
+
+.mp-active-table tr:last-child td {
+    border-bottom: 0;
+}
+
+.mp-active-table .mp-row:hover td {
+    background: var(--surface-hover);
+}
+
+.mp-active-table .mp-row.is-selected td {
+    background: color-mix(in srgb, var(--accent-color) 10%, var(--surface-color));
+}
+
+/* Target price column */
 .mp-col-target {
-    min-width: 165px;
+    min-width: 190px;
 }
 
 .mp-target-cell {
     display: flex;
     flex-direction: column;
-    gap: 0.28rem;
+    gap: 0.4rem;
 }
 
 .mp-target-top {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     justify-content: space-between;
-    gap: 0.4rem;
+    gap: 0.75rem;
 }
 
 .mp-target-price {
@@ -1144,40 +1174,36 @@
     color: var(--text-primary);
 }
 
-.mp-progress-label {
-    font-size: 0.7rem;
-    color: var(--text-secondary);
+.mp-target-upside {
+    font-size: 0.75rem;
+    font-weight: 600;
 }
 
 .mp-reached-badge {
     display: inline-flex;
     align-items: center;
-    gap: 0.22rem;
-    font-size: 0.66rem;
-    font-weight: 700;
+    gap: 0.25rem;
+    font-size: 0.72rem;
+    font-weight: 600;
     color: #34d399;
-    background: rgba(16, 185, 129, 0.14);
-    border: 1px solid rgba(16, 185, 129, 0.35);
-    padding: 0.06rem 0.35rem;
-    border-radius: 2px;
 }
 
 .mp-progress-track {
     width: 100%;
-    height: 5px;
-    background: rgba(255, 255, 255, 0.07);
-    border-radius: 2px;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
     overflow: hidden;
 }
 
 .mp-progress-track-lg {
-    height: 7px;
+    height: 6px;
 }
 
 .mp-progress-fill {
     height: 100%;
     background: var(--accent-color);
-    border-radius: 2px;
+    border-radius: 999px;
     transition: width 0.25s ease;
 }
 
@@ -1189,15 +1215,6 @@
     background: var(--error-color);
 }
 
-.mp-weight-pill {
-    display: inline-block;
-    padding: 0.14rem 0.42rem;
-    border-radius: 2px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid var(--surface-border);
-    font-size: 0.75rem;
-}
-
 .mp-row-actions {
     display: inline-flex;
     align-items: center;
@@ -1205,28 +1222,58 @@
     gap: 0.35rem;
 }
 
+/* Thesis opener: quiet text link; the whole row is also clickable */
 .mp-thesis-btn {
     display: inline-flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: 0.15rem;
     height: 28px;
-    padding: 0 0.58rem;
+    padding: 0 0.3rem 0 0.5rem;
+    border: 0;
     border-radius: var(--border-radius);
-    border: 1px solid rgba(59, 130, 246, 0.32);
-    background: rgba(59, 130, 246, 0.1);
-    color: #60a5fa;
+    background: transparent;
+    color: var(--text-secondary);
     font-family: var(--font-sans);
-    font-size: 0.74rem;
+    font-size: 0.76rem;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.12s ease;
+    transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.mp-row:hover .mp-thesis-btn,
+.mp-thesis-btn:hover,
+.mp-thesis-btn:focus-visible {
+    color: #60a5fa;
 }
 
 .mp-thesis-btn:hover {
-    background: rgba(59, 130, 246, 0.2);
-    border-color: rgba(59, 130, 246, 0.55);
+    background: rgba(59, 130, 246, 0.1);
 }
 
+.mp-thesis-btn:focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 1px;
+}
+
+.mp-table-footnote {
+    margin: 0;
+    padding: 0.65rem 1rem 0.75rem;
+    border-top: 1px solid var(--surface-border);
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.mp-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
 /* Tab 2: Closed Positions Scorecard */
 .mp-closed-scorecard {
     display: grid;
@@ -1421,12 +1468,8 @@
 }
 
 .mp-rating-badge {
-    font-size: 0.67rem;
-    font-weight: 700;
-    padding: 0.14rem 0.45rem;
-    border-radius: 2px;
-    background: rgba(16, 185, 129, 0.14);
-    border: 1px solid rgba(16, 185, 129, 0.35);
+    font-size: 0.72rem;
+    font-weight: 600;
     color: #34d399;
 }
 
@@ -1455,84 +1498,85 @@
 .mp-drawer-body {
     flex: 1;
     overflow-y: auto;
-    padding: 1.05rem 1.15rem;
+    padding: 1.15rem 1.25rem 1.5rem;
     display: flex;
     flex-direction: column;
-    gap: 1.1rem;
+    gap: 1.25rem;
 }
 
-.mp-drawer-card {
-    background: var(--bg-color);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--border-radius);
-    padding: 0.85rem 0.95rem;
-}
-
-.mp-drawer-metrics-grid {
+/* Key figures: flat grid, no nested boxes */
+.mp-drawer-summary {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.75rem;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1.1rem 1rem;
 }
 
-.mp-drawer-metrics-grid span {
-    display: block;
-    font-size: 0.69rem;
-    color: var(--text-muted);
-    margin-bottom: 0.18rem;
+.mp-drawer-figure {
+    display: flex;
+    flex-direction: column;
+    gap: 0.18rem;
+    min-width: 0;
 }
 
-.mp-drawer-metrics-grid strong {
-    font-size: 0.94rem;
+.mp-drawer-figure span {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.mp-drawer-figure strong {
+    font-size: 1.02rem;
+    font-weight: 600;
     color: var(--text-primary);
 }
 
+.mp-drawer-figure small {
+    min-height: 1em;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
 .mp-drawer-progress-box {
-    margin-top: 0.85rem;
-    padding-top: 0.75rem;
-    border-top: 1px solid var(--surface-border);
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
 }
 
 .mp-drawer-progress-labels {
     display: flex;
     justify-content: space-between;
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    margin-bottom: 0.35rem;
-}
-
-.mp-drawer-section {
-    display: flex;
-    flex-direction: column;
-    gap: 0.48rem;
-}
-
-.mp-section-heading {
-    display: flex;
-    align-items: center;
-    gap: 0.42rem;
-}
-
-.mp-section-heading h3 {
-    margin: 0;
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    gap: 0.75rem;
+    font-size: 0.74rem;
     color: var(--text-secondary);
 }
 
-.mp-thesis-box {
-    background: var(--bg-color);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--border-radius);
-    padding: 0.85rem 0.95rem;
-    font-size: 0.84rem;
-    line-height: 1.58;
+.mp-drawer-progress-labels .mp-mono {
     color: var(--text-primary);
 }
 
+/* Sections separated by a hairline instead of boxes */
+.mp-drawer-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding-top: 1.1rem;
+    border-top: 1px solid var(--surface-border);
+}
+
+.mp-drawer-section h3 {
+    margin: 0;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.mp-thesis-box {
+    font-size: 0.86rem;
+    line-height: 1.65;
+    color: var(--text-secondary);
+}
+
 .mp-thesis-box p {
-    margin: 0 0 0.55rem;
+    margin: 0 0 0.7rem;
 }
 
 .mp-thesis-box p:last-child {
@@ -1551,37 +1595,29 @@
 }
 
 .mp-catalyst-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    padding: 0.24rem 0.55rem;
-    border-radius: 2px;
-    background: rgba(59, 130, 246, 0.1);
-    border: 1px solid rgba(59, 130, 246, 0.32);
-    color: #93c5fd;
-    font-size: 0.75rem;
-    font-weight: 500;
+    padding: 0.2rem 0.55rem;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-primary);
+    font-size: 0.76rem;
 }
 
-/* Multiples Compare Table */
+/* Multiples table: hairline rows only */
 .mp-multiples-compare-table-wrap {
-    border: 1px solid var(--surface-border);
-    border-radius: var(--border-radius);
     overflow: hidden;
 }
 
 .mp-multiples-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.78rem;
-    background: var(--bg-color);
+    font-size: 0.8rem;
 }
 
 .mp-multiples-table th {
-    padding: 0.5rem 0.75rem;
+    padding: 0.4rem 0 0.4rem;
     text-align: left;
-    font-size: 0.66rem;
-    text-transform: uppercase;
+    font-size: 0.72rem;
+    font-weight: 500;
     color: var(--text-muted);
     border-bottom: 1px solid var(--surface-border);
 }
@@ -1592,8 +1628,8 @@
 }
 
 .mp-multiples-table td {
-    padding: 0.52rem 0.75rem;
-    border-bottom: 1px solid var(--surface-border);
+    padding: 0.55rem 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 60%, transparent);
     color: var(--text-primary);
 }
 
@@ -1602,38 +1638,37 @@
 }
 
 .mp-risk-box {
-    background: rgba(245, 158, 11, 0.07);
-    border: 1px solid rgba(245, 158, 11, 0.28);
-    border-radius: var(--border-radius);
-    padding: 0.7rem 0.85rem;
-    font-size: 0.8rem;
-    color: #fde68a;
-    line-height: 1.5;
+    padding-left: 0.8rem;
+    border-left: 2px solid rgba(245, 158, 11, 0.7);
+    font-size: 0.84rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
 }
 
 .mp-risk-box p {
     margin: 0;
 }
 
-/* Revision History inside Drawer */
+/* Revision history */
 .mp-revisions-list {
     display: flex;
     flex-direction: column;
-    gap: 0.45rem;
 }
 
 .mp-revision-item {
-    background: var(--bg-color);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--border-radius);
-    padding: 0.6rem 0.75rem;
-    font-size: 0.76rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 60%, transparent);
+    font-size: 0.78rem;
+}
+
+.mp-revision-item:last-child {
+    border-bottom: 0;
 }
 
 .mp-revision-top {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 0.5rem 1rem;
     flex-wrap: wrap;
     color: var(--text-secondary);
 }
@@ -1644,9 +1679,8 @@
 
 .mp-revision-note {
     margin: 0.3rem 0 0;
-    color: var(--text-primary);
+    color: var(--text-secondary);
 }
-
 .mp-drawer-footer {
     display: flex;
     align-items: center;

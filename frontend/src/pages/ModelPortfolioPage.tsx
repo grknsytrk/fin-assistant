@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import {
     AlertTriangle,
-    ArrowUpRight,
     Award,
     BriefcaseBusiness,
     Check,
@@ -13,7 +12,6 @@ import {
     ExternalLink,
     History,
     KeyRound,
-    Layers,
     Lock,
     LogOut,
     Pencil,
@@ -22,9 +20,7 @@ import {
     Search,
     SlidersHorizontal,
     Sparkles,
-    Target,
     Trash2,
-    TrendingUp,
     X,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -1098,21 +1094,20 @@ export default function ModelPortfolioPage() {
                                     )}
                                 </div>
                             ) : (
+                                <>
                                 <div className="mp-table-wrap" role="region" aria-label="Aktif pozisyon tablosu; yatay kaydırılabilir" tabIndex={0}>
                                     <p className="mp-table-scroll-hint">Tabloyu yana kaydırarak tüm sütunları görebilirsiniz.</p>
                                     <table className="mp-table mp-active-table">
                                         <thead>
                                             <tr>
-                                                <th>Hisse / Strateji</th>
-                                                <th className="num">Giriş Tarihi</th>
-                                                <th className="num">Giriş Fiyatı</th>
-                                                <th className="num">Güncel Fiyat</th>
-                                                <th className="mp-col-target">Hedef Fiyat & İlerleme</th>
-                                                <th className="num">Potansiyel</th>
+                                                <th>Hisse</th>
+                                                <th className="num">Giriş</th>
+                                                <th className="num">Güncel</th>
+                                                <th className="mp-col-target">Hedef ve potansiyel</th>
                                                 <th className="num">Ağırlık</th>
-                                                <th className="num">Net Getiri</th>
-                                                <th className="num">XU100 Rölatif</th>
-                                                <th className="act">Yatırım Tezi</th>
+                                                <th className="num">Net getiri</th>
+                                                <th className="num">XU100’e göre</th>
+                                                <th className="act"><span className="mp-sr-only">İşlemler</span></th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -1144,32 +1139,28 @@ export default function ModelPortfolioPage() {
                                                                     size="sm"
                                                                 />
                                                                 <div className="mp-stock-meta">
-                                                                    <div className="mp-stock-line">
-                                                                        <span className="mp-ticker">{pos.symbol}</span>
-                                                                        {pos.sector && (
-                                                                            <span className="mp-sector-tag">{pos.sector}</span>
-                                                                        )}
-                                                                    </div>
-                                                                    <span className="mp-company-name" title={pos.company_name}>
+                                                                    <span className="mp-ticker">{pos.symbol}</span>
+                                                                    <span className="mp-company-name" title={pos.sector ? `${pos.company_name} · ${pos.sector}` : pos.company_name}>
                                                                         {pos.company_name}
                                                                     </span>
                                                                 </div>
                                                             </div>
                                                         </td>
-                                                        <td className="num mp-mono mp-entry-date">
-                                                            <div>{formatCompactDateTR(pos.entry_date)}</div>
-                                                            <span className="mp-sub-cell">{pos.holding_days} gün</span>
+                                                        <td className="num mp-mono">
+                                                            <div>{formatPrice(pos.entry_price)}</div>
+                                                            <span className="mp-sub-cell">
+                                                                {formatCompactDateTR(pos.entry_date)} · {pos.holding_days} gün
+                                                            </span>
                                                         </td>
-                                                        <td className="num mp-mono">{formatPrice(pos.entry_price)}</td>
-                                                        <td className="num mp-mono mp-current-price">
+                                                        <td
+                                                            className="num mp-mono"
+                                                            title={pos.price_as_of ? `Fiyat zamanı: ${formatCompactDateTimeTR(pos.price_as_of)}` : undefined}
+                                                        >
                                                             <div className="mp-price-main">{formatPrice(pos.current_price)}</div>
                                                             {pos.daily_change_pct != null && (
                                                                 <span className={`mp-sub-cell ${toneClass(pos.daily_change_pct)}`}>
-                                                                    Günlük {formatPct(pos.daily_change_pct)}
+                                                                    {formatPct(pos.daily_change_pct)} bugün
                                                                 </span>
-                                                            )}
-                                                            {pos.price_as_of && (
-                                                                <span className="mp-sub-cell">Fiyat: {formatCompactDateTimeTR(pos.price_as_of)}</span>
                                                             )}
                                                         </td>
                                                         <td className="mp-col-target">
@@ -1180,27 +1171,27 @@ export default function ModelPortfolioPage() {
                                                                     </span>
                                                                     {pos.target_reached ? (
                                                                         <span className="mp-reached-badge">
-                                                                            <CheckCircle2 size={11} /> Hedefe Ulaştı
+                                                                            <CheckCircle2 size={11} /> Hedefe ulaştı
                                                                         </span>
                                                                     ) : (
-                                                                        <span className="mp-progress-label mp-mono">
-                                                                            %{progress.toFixed(0)}
+                                                                        <span className={`mp-target-upside mp-mono ${toneClass(pos.target_upside_pct)}`}>
+                                                                            {formatPct(pos.target_upside_pct)}
                                                                         </span>
                                                                     )}
                                                                 </div>
-                                                                <div className="mp-progress-track">
+                                                                <div
+                                                                    className="mp-progress-track"
+                                                                    title={`Hedefe ilerleme: ${formatPct(progress, false)}`}
+                                                                >
                                                                     <div
-                                                                        className={`mp-progress-fill${pos.target_reached ? ' is-reached' : progress < 0 ? ' is-negative' : ''}`}
+                                                                        className={`mp-progress-fill${pos.target_reached ? ' is-reached' : ''}`}
                                                                         style={{ width: `${clampedBar}%` }}
                                                                     />
                                                                 </div>
                                                             </div>
                                                         </td>
-                                                        <td className={`num mp-mono ${toneClass(pos.target_upside_pct)}`}>
-                                                            {formatPct(pos.target_upside_pct)}
-                                                        </td>
                                                         <td className="num mp-mono">
-                                                            <span className="mp-weight-pill">%{pos.weight_pct.toFixed(1)}</span>
+                                                            %{pos.weight_pct.toLocaleString('tr-TR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                                                         </td>
                                                         <td className={`num mp-mono mp-bold ${toneClass(pos.return_pct)}`}>
                                                             {formatPct(pos.return_pct)}
@@ -1210,14 +1201,6 @@ export default function ModelPortfolioPage() {
                                                         </td>
                                                         <td className="act" onClick={(e) => e.stopPropagation()}>
                                                             <div className="mp-row-actions">
-                                                                <button
-                                                                    type="button"
-                                                                    className="mp-thesis-btn"
-                                                                    onClick={() => setSelectedPositionId(pos.id)}
-                                                                >
-                                                                    <span>Tezi İncele</span>
-                                                                    <ChevronRight size={14} />
-                                                                </button>
                                                                 {isAdminVerified && (
                                                                     <>
                                                                         <button
@@ -1243,6 +1226,14 @@ export default function ModelPortfolioPage() {
                                                                         </button>
                                                                     </>
                                                                 )}
+                                                                <button
+                                                                    type="button"
+                                                                    className="mp-thesis-btn"
+                                                                    onClick={() => setSelectedPositionId(pos.id)}
+                                                                >
+                                                                    <span>Tez</span>
+                                                                    <ChevronRight size={14} />
+                                                                </button>
                                                             </div>
                                                         </td>
                                                     </tr>
@@ -1251,6 +1242,20 @@ export default function ModelPortfolioPage() {
                                         </tbody>
                                     </table>
                                 </div>
+                                {(() => {
+                                    const latestPriceAsOf = liveActivePositions
+                                        .map((p) => p.price_as_of)
+                                        .filter((v): v is string => Boolean(v))
+                                        .sort()
+                                        .pop();
+                                    return (
+                                        <p className="mp-table-footnote">
+                                            Satıra tıklayarak yatırım tezini açabilirsiniz.
+                                            {latestPriceAsOf ? ` Fiyatlar: ${formatCompactDateTimeTR(latestPriceAsOf)}.` : ''}
+                                        </p>
+                                    );
+                                })()}
+                                </>
                             )
                         )}
 
@@ -2220,22 +2225,26 @@ function ModelPortfolioThesisDrawer({
 
     const multipleRows = [
         {
-            label: 'F/K (Fiyat / Kazanç)',
+            label: 'F/K',
+            title: 'Fiyat / Kazanç',
             entry: position.entry_multiples?.fk,
             current: position.current_multiples?.fk,
         },
         {
             label: 'FD/FAVÖK',
+            title: 'Firma Değeri / FAVÖK',
             entry: position.entry_multiples?.fd_favok,
             current: position.current_multiples?.fd_favok,
         },
         {
-            label: 'PD/DD (Piyasa Değeri / Defter Değeri)',
+            label: 'PD/DD',
+            title: 'Piyasa Değeri / Defter Değeri',
             entry: position.entry_multiples?.pd_dd,
             current: position.current_multiples?.pd_dd,
         },
         {
-            label: 'Net Borç / FAVÖK',
+            label: 'Net Borç/FAVÖK',
+            title: 'Net Borç / FAVÖK',
             entry: position.entry_multiples?.net_borc_favok,
             current: position.current_multiples?.net_borc_favok,
         },
@@ -2270,7 +2279,7 @@ function ModelPortfolioThesisDrawer({
                                     <span className="mp-closed-badge">KAPATILDI</span>
                                 )}
                             </div>
-                            <p className="mp-drawer-company">{position.company_name}</p>
+                            <p className="mp-drawer-company">{position.sector ? `${position.company_name} · ${position.sector}` : position.company_name}</p>
                         </div>
                     </div>
                     <div className="mp-drawer-header-btns">
@@ -2290,55 +2299,69 @@ function ModelPortfolioThesisDrawer({
 
                 {/* Drawer Body */}
                 <div className="mp-drawer-body">
-                    {/* Price & Target Progress Summary */}
-                    <div className="mp-drawer-card mp-drawer-price-card">
-                        <div className="mp-drawer-metrics-grid">
-                            <div>
-                                <span>Giriş Fiyatı ({formatDateTR(position.entry_date)})</span>
-                                <strong className="mp-mono">{formatPrice(position.entry_price)}</strong>
-                            </div>
-                            <div>
-                                <span>{position.status === 'closed' ? 'Çıkış Fiyatı' : 'Güncel Fiyat'}</span>
-                                <strong className="mp-mono">{formatPrice(position.current_price)}</strong>
-                            </div>
-                            <div>
-                                <span>Hedef Fiyat ({position.horizon})</span>
-                                <strong className="mp-mono mp-tone-accent">{formatPrice(position.target_price)}</strong>
-                            </div>
-                            <div>
-                                <span>Net Getiri / XU100 Alfa</span>
-                                <strong className={`mp-mono ${toneClass(position.return_pct)}`}>
-                                    {formatPct(position.return_pct)} / {formatPct(position.relative_return_pct)}
-                                </strong>
-                            </div>
+                    {/* Key figures */}
+                    <div className="mp-drawer-summary">
+                        <div className="mp-drawer-figure">
+                            <span>Giriş fiyatı</span>
+                            <strong className="mp-mono">{formatPrice(position.entry_price)}</strong>
+                            <small>{formatDateTR(position.entry_date)}</small>
                         </div>
-
+                        <div className="mp-drawer-figure">
+                            <span>{position.status === 'closed' ? 'Çıkış fiyatı' : 'Güncel fiyat'}</span>
+                            <strong className="mp-mono">{formatPrice(position.current_price)}</strong>
+                            {position.daily_change_pct != null && position.status !== 'closed' && (
+                                <small className={toneClass(position.daily_change_pct)}>
+                                    {formatPct(position.daily_change_pct)} bugün
+                                </small>
+                            )}
+                        </div>
+                        <div className="mp-drawer-figure">
+                            <span>Hedef fiyat</span>
+                            <strong className="mp-mono">{formatPrice(position.target_price)}</strong>
+                            {position.horizon && <small>{position.horizon}</small>}
+                        </div>
+                        <div className="mp-drawer-figure">
+                            <span>Net getiri</span>
+                            <strong className={`mp-mono ${toneClass(position.return_pct)}`}>{formatPct(position.return_pct)}</strong>
+                        </div>
+                        <div className="mp-drawer-figure">
+                            <span>XU100’e göre</span>
+                            <strong className={`mp-mono ${toneClass(position.relative_return_pct)}`}>
+                                {formatPct(position.relative_return_pct)}
+                            </strong>
+                        </div>
                         {position.status === 'active' && (
-                            <div className="mp-drawer-progress-box">
-                                <div className="mp-drawer-progress-labels">
-                                    <span>
-                                        Hedef Fiyat İlerlemesi: <b>%{progress.toFixed(1)}</b>
-                                    </span>
-                                    <span className={toneClass(position.target_upside_pct)}>
-                                        Kalan Potansiyel: <b>{formatPct(position.target_upside_pct)}</b>
-                                    </span>
-                                </div>
-                                <div className="mp-progress-track mp-progress-track-lg">
-                                    <div
-                                        className={`mp-progress-fill${position.target_reached ? ' is-reached' : ''}`}
-                                        style={{ width: `${clampedBar}%` }}
-                                    />
-                                </div>
+                            <div className="mp-drawer-figure">
+                                <span>Hedef potansiyeli</span>
+                                <strong className={`mp-mono ${toneClass(position.target_upside_pct)}`}>
+                                    {formatPct(position.target_upside_pct)}
+                                </strong>
                             </div>
                         )}
                     </div>
 
-                    {/* Investment Thesis Section */}
-                    <div className="mp-drawer-section">
-                        <div className="mp-section-heading">
-                            <TrendingUp size={15} className="mp-accent-icon" />
-                            <h3>Model Portföye Giriş Gerekçesi & Yatırım Tezi</h3>
+                    {position.status === 'active' && (
+                        <div className="mp-drawer-progress-box">
+                            <div className="mp-drawer-progress-labels">
+                                <span>Hedefe ilerleme</span>
+                                <span className="mp-mono">
+                                    {progress < 0
+                                        ? `Giriş fiyatının altında (${formatPct(progress, false)})`
+                                        : `%${progress.toLocaleString('tr-TR', { maximumFractionDigits: 1 })}`}
+                                </span>
+                            </div>
+                            <div className="mp-progress-track mp-progress-track-lg">
+                                <div
+                                    className={`mp-progress-fill${position.target_reached ? ' is-reached' : ''}`}
+                                    style={{ width: `${clampedBar}%` }}
+                                />
+                            </div>
                         </div>
+                    )}
+
+                    {/* Investment Thesis Section */}
+                    <section className="mp-drawer-section">
+                        <h3>Yatırım tezi</h3>
                         <div className="mp-thesis-box">
                             {position.thesis ? (
                                 position.thesis.split('\n').map((para, i) => (
@@ -2348,40 +2371,31 @@ function ModelPortfolioThesisDrawer({
                                 <p className="mp-muted">Bu pozisyon için henüz detaylı yatırım tezi metni girilmemiş.</p>
                             )}
                         </div>
-                    </div>
+                    </section>
 
                     {/* Catalysts / Expectations */}
                     {position.catalysts && position.catalysts.length > 0 && (
-                        <div className="mp-drawer-section">
-                            <div className="mp-section-heading">
-                                <Target size={15} className="mp-accent-icon" />
-                                <h3>Beklentiler & Katalizörler</h3>
-                            </div>
+                        <section className="mp-drawer-section">
+                            <h3>Katalizörler</h3>
                             <div className="mp-catalyst-tags">
                                 {position.catalysts.map((cat) => (
-                                    <span key={cat} className="mp-catalyst-chip">
-                                        <ArrowUpRight size={13} />
-                                        {cat}
-                                    </span>
+                                    <span key={cat} className="mp-catalyst-chip">{cat}</span>
                                 ))}
                             </div>
-                        </div>
+                        </section>
                     )}
 
                     {/* Entry Day vs Current Valuation Multiples */}
-                    <div className="mp-drawer-section">
-                        <div className="mp-section-heading">
-                            <Layers size={15} className="mp-accent-icon" />
-                            <h3>Giriş Günü vs. Güncel Çarpan Kıyaslaması</h3>
-                        </div>
+                    <section className="mp-drawer-section">
+                        <h3>Çarpanlar</h3>
                         <div className="mp-multiples-compare-table-wrap">
                             <table className="mp-multiples-table">
                                 <thead>
                                     <tr>
                                         <th>Çarpan</th>
-                                        <th className="num">Portföye Girişte</th>
+                                        <th className="num">Girişte</th>
                                         <th className="num">Güncel</th>
-                                        <th className="num">Değişim</th>
+                                        <th className="num">Fark</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -2392,7 +2406,7 @@ function ModelPortfolioThesisDrawer({
                                                 : null;
                                         return (
                                             <tr key={row.label}>
-                                                <td>{row.label}</td>
+                                                <td title={row.title}>{row.label}</td>
                                                 <td className="num mp-mono">{formatMultiple(row.entry)}</td>
                                                 <td className="num mp-mono mp-bold">{formatMultiple(row.current)}</td>
                                                 <td className="num mp-mono">
@@ -2411,28 +2425,22 @@ function ModelPortfolioThesisDrawer({
                                 </tbody>
                             </table>
                         </div>
-                    </div>
+                    </section>
 
                     {/* Risk Note */}
                     {position.risk_note && (
-                        <div className="mp-drawer-section">
-                            <div className="mp-section-heading">
-                                <AlertTriangle size={15} className="mp-warn-icon" />
-                                <h3>Riskler & İzlenecek Metrikler</h3>
-                            </div>
+                        <section className="mp-drawer-section">
+                            <h3>Riskler</h3>
                             <div className="mp-risk-box">
                                 <p>{position.risk_note}</p>
                             </div>
-                        </div>
+                        </section>
                     )}
 
                     {/* Target Price & Weight Revision History */}
                     {position.revisions && position.revisions.length > 0 && (
-                        <div className="mp-drawer-section">
-                            <div className="mp-section-heading">
-                                <Clock size={15} className="mp-accent-icon" />
-                                <h3>Hedef Fiyat & Ağırlık Revizyon Geçmişi</h3>
-                            </div>
+                        <section className="mp-drawer-section">
+                            <h3>Revizyon geçmişi</h3>
                             <div className="mp-revisions-list">
                                 {position.revisions.map((rev) => (
                                     <div key={rev.id} className="mp-revision-item">
@@ -2452,7 +2460,7 @@ function ModelPortfolioThesisDrawer({
                                     </div>
                                 ))}
                             </div>
-                        </div>
+                        </section>
                     )}
                 </div>
 
