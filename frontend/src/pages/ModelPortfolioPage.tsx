@@ -894,7 +894,7 @@ export default function ModelPortfolioPage() {
                                         <span className="mp-panel-kicker">AKTİF MODEL PORTFÖYÜN GEÇMİŞ PERFORMANSI</span>
                                         <h2 className="mp-panel-title">Aktif Sepet vs. BIST 100 / BIST 30 (100 ₺ Bazlı)</h2>
                                         <p className="mp-chart-note">
-                                            Bugünkü aktif hisseler ve ağırlıklarıyla hesaplanır; kapanmış pozisyonları ve geçmiş ağırlık değişikliklerini içermez. Grafik ilk giriş tarihinden başlar; XU100/XU030 serilerini lejanttan açıp kapatabilirsiniz.
+                                            Bugünkü aktif hisse ve ağırlıklarla hesaplanır; kapanmış pozisyonlar ve geçmiş ağırlık değişiklikleri dahil değildir.
                                         </p>
                                     </div>
                                     <div className="mp-range-tabs" role="tablist" aria-label="Grafik periyodu">
@@ -1708,14 +1708,37 @@ function ModelPortfolioPerformanceChart({
         ticks.push({ y: toY(v), val: v });
     }
 
-    const xLabelCount = Math.min(points.length, plotW >= 600 ? 5 : 3);
-    const xLabelIndexes = Array.from(
-        new Set(
-            Array.from({ length: xLabelCount }, (_, k) =>
-                Math.round((k / Math.max(1, xLabelCount - 1)) * (points.length - 1)),
+    // Evenly spaced date labels; drop any label that would collide with the next one.
+    const minLabelGap = 120;
+    const xLabelIndexes: number[] = [];
+    {
+        const wanted = Math.min(points.length, 4);
+        const candidates = Array.from(
+            new Set(
+                Array.from({ length: wanted }, (_, k) =>
+                    Math.round((k / Math.max(1, wanted - 1)) * (points.length - 1)),
+                ),
             ),
-        ),
-    );
+        );
+        candidates.forEach((idx) => {
+            const prev = xLabelIndexes[xLabelIndexes.length - 1];
+            if (prev != null && toX(idx) - toX(prev) < minLabelGap) {
+                if (idx === points.length - 1) xLabelIndexes.pop();
+                else return;
+            }
+            xLabelIndexes.push(idx);
+        });
+    }
+    const spansMultipleYears = points[0].date.slice(0, 4) !== points[points.length - 1].date.slice(0, 4);
+    const formatAxisDate = (iso: string) => {
+        const d = new Date(`${iso.slice(0, 10)}T00:00:00`);
+        if (Number.isNaN(d.getTime())) return iso;
+        return d.toLocaleDateString('tr-TR', spansMultipleYears
+            ? { day: '2-digit', month: 'short', year: 'numeric' }
+            : { day: '2-digit', month: 'short' });
+    };
+    const formatLegendValue = (v: number) =>
+        `${v.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₺`;
     const activeIdx = hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length
         ? hoverIndex
         : points.length - 1;
@@ -1738,62 +1761,52 @@ function ModelPortfolioPerformanceChart({
         : null;
     const measureRelativeXu100Return = compoundAlpha(measurePortfolioReturn, measureXu100Return);
     const measureRelativeXu030Return = compoundAlpha(measurePortfolioReturn, measureXu030Return);
-    const formatMeasureDelta = (end: number, start: number) => {
-        const delta = end - start;
-        const sign = delta > 0 ? '+' : '';
-        return `${sign}${delta.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₺`;
-    };
-    const measureTooltipItems: Array<{ label: string; value: string; change: number | null }> = [];
+    // Only series currently drawn on the chart are reported; alpha needs both sides visible.
+    const measureTooltipItems: Array<{ label: string; color?: string; change: number | null }> = [];
     if (measureStartPt && measureEndPt) {
         if (visibleSeries.portfolio) {
-            measureTooltipItems.push({
-                label: 'Sepet',
-                value: `${formatMeasureDelta(measureEndPt.portfolio_value, measureStartPt.portfolio_value)} · ${formatPct(measurePortfolioReturn)}`,
-                change: measurePortfolioReturn,
-            });
+            measureTooltipItems.push({ label: 'Model Portföy', color: '#3b82f6', change: measurePortfolioReturn });
         }
         if (visibleSeries.xu100) {
-            measureTooltipItems.push({
-                label: 'XU100',
-                value: `${formatMeasureDelta(measureEndPt.xu100_value, measureStartPt.xu100_value)} · ${formatPct(measureXu100Return)}`,
-                change: measureXu100Return,
-            });
+            measureTooltipItems.push({ label: 'BIST 100', color: '#94a3b8', change: measureXu100Return });
         }
         if (visibleSeries.xu030) {
-            measureTooltipItems.push({
-                label: 'XU030',
-                value: `${formatMeasureDelta(measureEndPt.xu030_value, measureStartPt.xu030_value)} · ${formatPct(measureXu030Return)}`,
-                change: measureXu030Return,
-            });
+            measureTooltipItems.push({ label: 'BIST 30', color: '#f59e0b', change: measureXu030Return });
         }
         if (visibleSeries.portfolio && visibleSeries.xu100) {
-            measureTooltipItems.push({
-                label: 'Alfa / XU100',
-                value: formatPct(measureRelativeXu100Return),
-                change: measureRelativeXu100Return,
-            });
+            measureTooltipItems.push({ label: 'Alfa · BIST 100', change: measureRelativeXu100Return });
         }
         if (visibleSeries.portfolio && visibleSeries.xu030) {
-            measureTooltipItems.push({
-                label: 'Alfa / XU030',
-                value: formatPct(measureRelativeXu030Return),
-                change: measureRelativeXu030Return,
+            measureTooltipItems.push({ label: 'Alfa · BIST 30', change: measureRelativeXu030Return });
+        }
+    }
+    // Pin the tooltip above the plotted lines when there is room, otherwise below them.
+    let measureLineTop = Infinity;
+    let measureLineBottom = -Infinity;
+    if (visibleMeasureRange) {
+        for (let i = visibleMeasureRange.start; i <= visibleMeasureRange.end; i++) {
+            const p = points[i];
+            const ys = [
+                ...(visibleSeries.portfolio ? [toY(p.portfolio_value)] : []),
+                ...(visibleSeries.xu100 ? [toY(p.xu100_value)] : []),
+                ...(visibleSeries.xu030 ? [toY(p.xu030_value)] : []),
+            ];
+            ys.forEach((y) => {
+                measureLineTop = Math.min(measureLineTop, y);
+                measureLineBottom = Math.max(measureLineBottom, y);
             });
         }
     }
-    const measureFocusX = visibleMeasureRange ? toX(visibleMeasureRange.end) : 0;
-    const measureFocusY = measureEndPt
-        ? Math.min(
-            visibleSeries.portfolio ? toY(measureEndPt.portfolio_value) : Infinity,
-            visibleSeries.xu100 ? toY(measureEndPt.xu100_value) : Infinity,
-            visibleSeries.xu030 ? toY(measureEndPt.xu030_value) : Infinity,
-        )
-        : padTop;
+    const measureCenterX = visibleMeasureRange
+        ? (toX(visibleMeasureRange.start) + toX(visibleMeasureRange.end)) / 2
+        : 0;
+    const tooltipAbove = Number.isFinite(measureLineTop) && (measureLineTop / height) * 100 > 46;
     const measureTooltipStyle = {
-        left: `clamp(8px, calc(${(measureFocusX / width) * 100}% - 140px), calc(100% - 288px))`,
-        top: `clamp(8px, calc(${(measureFocusY / height) * 100}% - 78px), calc(100% - 190px))`,
-    };
-    const toggleSeries = (series: PerformanceSeries) => {
+        left: `clamp(8px, calc(${(measureCenterX / width) * 100}% - 90px), calc(100% - 188px))`,
+        ...(tooltipAbove
+            ? { top: `calc(${(measureLineTop / height) * 100}% - 14px)`, transform: 'translateY(-100%)' }
+            : { top: `calc(${(Math.min(measureLineBottom, padTop + plotH) / height) * 100}% + 14px)` }),
+    };    const toggleSeries = (series: PerformanceSeries) => {
         setVisibleSeries((current) => ({ ...current, [series]: !current[series] }));
     };
     const hasVisibleSeries = visibleSeries.portfolio || visibleSeries.xu100 || visibleSeries.xu030;
@@ -1884,70 +1897,51 @@ function ModelPortfolioPerformanceChart({
     return (
         <div className="mp-chart-container">
             <div className="mp-chart-legend">
-                <button
-                    type="button"
-                    className={`mp-legend-item mp-legend-toggle${visibleSeries.portfolio ? '' : ' is-hidden'}`}
-                    aria-pressed={visibleSeries.portfolio}
-                    aria-label={`${visibleSeries.portfolio ? 'Grafikten gizle' : 'Grafikte göster'}: Model Portföy`}
-                    onClick={() => toggleSeries('portfolio')}
-                >
-                    <span className="mp-legend-swatch is-portfolio" />
-                    <span className="mp-legend-label">Model Portföy</span>
-                    <strong className="mp-mono">{activePt.portfolio_value.toFixed(2)} ₺</strong>
-                    <span className={`mp-mono ${toneClass(activePt.portfolio_return_pct)}`}>
-                        ({formatPct(activePt.portfolio_return_pct)})
-                    </span>
-                </button>
-                <button
-                    type="button"
-                    className={`mp-legend-item mp-legend-toggle${visibleSeries.xu100 ? '' : ' is-hidden'}`}
-                    aria-pressed={visibleSeries.xu100}
-                    aria-label={`${visibleSeries.xu100 ? 'Grafikten gizle' : 'Grafikte göster'}: BIST 100 XU100`}
-                    onClick={() => toggleSeries('xu100')}
-                >
-                    <span className="mp-legend-swatch is-xu100" />
-                    <span className="mp-legend-label">BIST 100</span>
-                    <strong className="mp-mono">{activePt.xu100_value.toFixed(2)} ₺</strong>
-                    <span className={`mp-mono ${toneClass(activePt.xu100_return_pct)}`}>
-                        ({formatPct(activePt.xu100_return_pct)})
-                    </span>
-                </button>
-                <button
-                    type="button"
-                    className={`mp-legend-item mp-legend-toggle${visibleSeries.xu030 ? '' : ' is-hidden'}`}
-                    aria-pressed={visibleSeries.xu030}
-                    aria-label={`${visibleSeries.xu030 ? 'Grafikten gizle' : 'Grafikte göster'}: BIST 30 XU030`}
-                    onClick={() => toggleSeries('xu030')}
-                >
-                    <span className="mp-legend-swatch is-xu030" />
-                    <span className="mp-legend-label">BIST 30</span>
-                    <strong className="mp-mono">{activePt.xu030_value.toFixed(2)} ₺</strong>
-                    <span className={`mp-mono ${toneClass(activePt.xu030_return_pct)}`}>
-                        ({formatPct(activePt.xu030_return_pct)})
-                    </span>
-                </button>
-                <div className="mp-legend-alpha-group">
-                    <div className="mp-legend-item mp-legend-alpha">
-                        <span className="mp-legend-label">Alfa · XU100</span>
-                        <strong className={`mp-mono ${toneClass(activePt.relative_return_pct)}`}>
-                            {formatPct(activePt.relative_return_pct)}
-                        </strong>
-                    </div>
-                    <div className="mp-legend-item mp-legend-alpha">
-                        <span className="mp-legend-label">Alfa · XU030</span>
-                        <strong className={`mp-mono ${toneClass(activePt.relative_xu030_return_pct)}`}>
-                            {formatPct(activePt.relative_xu030_return_pct)}
-                        </strong>
-                    </div>
+                {([
+                    { key: 'portfolio', label: 'Model Portföy', aria: 'Model Portföy', value: activePt.portfolio_value, pct: activePt.portfolio_return_pct },
+                    { key: 'xu100', label: 'BIST 100', aria: 'BIST 100 XU100', value: activePt.xu100_value, pct: activePt.xu100_return_pct },
+                    { key: 'xu030', label: 'BIST 30', aria: 'BIST 30 XU030', value: activePt.xu030_value, pct: activePt.xu030_return_pct },
+                ] as Array<{ key: PerformanceSeries; label: string; aria: string; value: number; pct: number | null }>).map((s) => (
+                    <button
+                        key={s.key}
+                        type="button"
+                        className={`mp-legend-toggle${visibleSeries[s.key] ? '' : ' is-hidden'}`}
+                        aria-pressed={visibleSeries[s.key]}
+                        aria-label={`${visibleSeries[s.key] ? 'Grafikten gizle' : 'Grafikte göster'}: ${s.aria}`}
+                        onClick={() => toggleSeries(s.key)}
+                    >
+                        <span className="mp-legend-name">
+                            <span className={`mp-legend-swatch is-${s.key}`} />
+                            {s.label}
+                        </span>
+                        <span className="mp-legend-figures mp-mono">
+                            <strong>{formatLegendValue(s.value)}</strong>
+                            <span className={toneClass(s.pct)}>{formatPct(s.pct)}</span>
+                        </span>
+                    </button>
+                ))}
+                <div className="mp-legend-meta">
                     <span className="mp-legend-date mp-mono">{formatDateTR(activePt.date)}</span>
+                    <span className="mp-legend-alphas">
+                        {visibleSeries.portfolio && visibleSeries.xu100 && (
+                            <span className="mp-legend-alpha">
+                                Alfa · BIST 100
+                                <strong className={`mp-mono ${toneClass(activePt.relative_return_pct)}`}>
+                                    {formatPct(activePt.relative_return_pct)}
+                                </strong>
+                            </span>
+                        )}
+                        {visibleSeries.portfolio && visibleSeries.xu030 && (
+                            <span className="mp-legend-alpha">
+                                Alfa · BIST 30
+                                <strong className={`mp-mono ${toneClass(activePt.relative_xu030_return_pct)}`}>
+                                    {formatPct(activePt.relative_xu030_return_pct)}
+                                </strong>
+                            </span>
+                        )}
+                    </span>
                 </div>
             </div>
-
-            {!visibleMeasureRange && (
-                <div className="mp-chart-measure-hint">
-                    İki nokta arasındaki değişimi görmek için grafikte sürükleyin.
-                </div>
-            )}
 
             <div className="mp-chart-stage">
             <svg
@@ -2094,13 +2088,14 @@ function ModelPortfolioPerformanceChart({
                         textAnchor={k === 0 ? 'start' : k === xLabelIndexes.length - 1 ? 'end' : 'middle'}
                         className="mp-chart-axis-text"
                     >
-                        {formatDateTR(points[idx].date)}
+                        {formatAxisDate(points[idx].date)}
                     </text>
-                ))}            </svg>
+                ))}
+            </svg>
                 {visibleMeasureRange && hasVisibleSeries && measureStartPt && measureEndPt && (
                     <div className="mp-chart-measure-tooltip" style={measureTooltipStyle} role="status" aria-live="polite">
                         <div className="mp-chart-measure-tooltip-header">
-                            <strong>{formatDateTR(measureStartPt.date)} → {formatDateTR(measureEndPt.date)}</strong>
+                            <span>{formatDateTR(measureStartPt.date)} → {formatDateTR(measureEndPt.date)}</span>
                             {selectedMeasureRange && (
                                 <button
                                     type="button"
@@ -2108,25 +2103,32 @@ function ModelPortfolioPerformanceChart({
                                     title="Ölçümü temizle"
                                     onClick={() => setSelectedMeasureRange(null)}
                                 >
-                                    <X size={13} />
+                                    <X size={12} />
                                 </button>
                             )}
                         </div>
-                        <div className="mp-chart-measure-tooltip-grid">
+                        <ul className="mp-chart-measure-tooltip-list">
                             {measureTooltipItems.map((item) => (
-                                <div className="mp-chart-measure-tooltip-item" key={item.label}>
-                                    <span>{item.label}</span>
-                                    <strong className={toneClass(item.change)}>{item.value}</strong>
-                                </div>
+                                <li key={item.label}>
+                                    <span className="mp-chart-measure-tooltip-name">
+                                        {item.color && (
+                                            <span className="mp-chart-measure-tooltip-dot" style={{ backgroundColor: item.color }} />
+                                        )}
+                                        {item.label}
+                                    </span>
+                                    <strong className={`mp-mono ${toneClass(item.change)}`}>{formatPct(item.change)}</strong>
+                                </li>
                             ))}
-                        </div>
+                        </ul>
                     </div>
                 )}
             </div>
+            <p className="mp-chart-footnote">
+                Aralığı ölçmek için grafikte sürükleyin · Seriyi gizlemek veya göstermek için üstteki başlıklara tıklayın.
+            </p>
         </div>
     );
 }
-
 /* ==========================================================================
    Subcomponent 2: Portfolio Weight Donut Chart
    ========================================================================== */
