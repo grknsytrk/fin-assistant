@@ -1684,15 +1684,65 @@ function ModelPortfolioPerformanceChart({
         : null;
     const measureRelativeXu100Return = compoundAlpha(measurePortfolioReturn, measureXu100Return);
     const measureRelativeXu030Return = compoundAlpha(measurePortfolioReturn, measureXu030Return);
-    const toggleSeries = (series: PerformanceSeries) => {
-        setVisibleSeries((current) => ({ ...current, [series]: !current[series] }));
-    };
-    const hasVisibleSeries = visibleSeries.portfolio || visibleSeries.xu100 || visibleSeries.xu030;
     const formatMeasureDelta = (end: number, start: number) => {
         const delta = end - start;
         const sign = delta > 0 ? '+' : '';
         return `${sign}${delta.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₺`;
     };
+    const measureTooltipItems: Array<{ label: string; value: string; change: number | null }> = [];
+    if (measureStartPt && measureEndPt) {
+        if (visibleSeries.portfolio) {
+            measureTooltipItems.push({
+                label: 'Sepet',
+                value: `${formatMeasureDelta(measureEndPt.portfolio_value, measureStartPt.portfolio_value)} · ${formatPct(measurePortfolioReturn)}`,
+                change: measurePortfolioReturn,
+            });
+        }
+        if (visibleSeries.xu100) {
+            measureTooltipItems.push({
+                label: 'XU100',
+                value: `${formatMeasureDelta(measureEndPt.xu100_value, measureStartPt.xu100_value)} · ${formatPct(measureXu100Return)}`,
+                change: measureXu100Return,
+            });
+        }
+        if (visibleSeries.xu030) {
+            measureTooltipItems.push({
+                label: 'XU030',
+                value: `${formatMeasureDelta(measureEndPt.xu030_value, measureStartPt.xu030_value)} · ${formatPct(measureXu030Return)}`,
+                change: measureXu030Return,
+            });
+        }
+        if (visibleSeries.portfolio && visibleSeries.xu100) {
+            measureTooltipItems.push({
+                label: 'Alfa / XU100',
+                value: formatPct(measureRelativeXu100Return),
+                change: measureRelativeXu100Return,
+            });
+        }
+        if (visibleSeries.portfolio && visibleSeries.xu030) {
+            measureTooltipItems.push({
+                label: 'Alfa / XU030',
+                value: formatPct(measureRelativeXu030Return),
+                change: measureRelativeXu030Return,
+            });
+        }
+    }
+    const measureFocusX = visibleMeasureRange ? toX(visibleMeasureRange.end) : 0;
+    const measureFocusY = measureEndPt
+        ? Math.min(
+            visibleSeries.portfolio ? toY(measureEndPt.portfolio_value) : Infinity,
+            visibleSeries.xu100 ? toY(measureEndPt.xu100_value) : Infinity,
+            visibleSeries.xu030 ? toY(measureEndPt.xu030_value) : Infinity,
+        )
+        : padTop;
+    const measureTooltipStyle = {
+        left: `clamp(8px, calc(${(measureFocusX / width) * 100}% - 140px), calc(100% - 288px))`,
+        top: `clamp(8px, calc(${(measureFocusY / height) * 100}% - 78px), calc(100% - 190px))`,
+    };
+    const toggleSeries = (series: PerformanceSeries) => {
+        setVisibleSeries((current) => ({ ...current, [series]: !current[series] }));
+    };
+    const hasVisibleSeries = visibleSeries.portfolio || visibleSeries.xu100 || visibleSeries.xu030;
 
     const handlePointerMove = (e: ReactPointerEvent<SVGSVGElement>) => {
         const rect = e.currentTarget.getBoundingClientRect();
@@ -1839,60 +1889,13 @@ function ModelPortfolioPerformanceChart({
                 </div>
             </div>
 
-            <div className="mp-chart-measure-hint">
-                <span>
-                    {visibleMeasureRange && measureStartPt && measureEndPt
-                        ? `${formatDateTR(measureStartPt.date)} → ${formatDateTR(measureEndPt.date)}`
-                        : 'İki nokta arasındaki değişimi görmek için grafikte sürükleyin.'}
-                </span>
-                {selectedMeasureRange && (
-                    <button type="button" onClick={() => setSelectedMeasureRange(null)}>
-                        Ölçümü temizle
-                    </button>
-                )}
-            </div>
-
-            {visibleMeasureRange && hasVisibleSeries && measureStartPt && measureEndPt && (
-                <div className="mp-chart-measure-summary" role="status" aria-live="polite">
-                    {visibleSeries.portfolio && (
-                        <span className="mp-measure-result">
-                            <span>Sepet</span>
-                            <strong className={toneClass(measurePortfolioReturn)}>
-                                {formatMeasureDelta(measureEndPt.portfolio_value, measureStartPt.portfolio_value)} · {formatPct(measurePortfolioReturn)}
-                            </strong>
-                        </span>
-                    )}
-                    {visibleSeries.xu100 && (
-                        <span className="mp-measure-result">
-                            <span>XU100</span>
-                            <strong className={toneClass(measureXu100Return)}>
-                                {formatMeasureDelta(measureEndPt.xu100_value, measureStartPt.xu100_value)} · {formatPct(measureXu100Return)}
-                            </strong>
-                        </span>
-                    )}
-                    {visibleSeries.xu030 && (
-                        <span className="mp-measure-result">
-                            <span>XU030</span>
-                            <strong className={toneClass(measureXu030Return)}>
-                                {formatMeasureDelta(measureEndPt.xu030_value, measureStartPt.xu030_value)} · {formatPct(measureXu030Return)}
-                            </strong>
-                        </span>
-                    )}
-                    {visibleSeries.portfolio && visibleSeries.xu100 && (
-                        <span className="mp-measure-result">
-                            <span>Alfa / XU100</span>
-                            <strong className={toneClass(measureRelativeXu100Return)}>{formatPct(measureRelativeXu100Return)}</strong>
-                        </span>
-                    )}
-                    {visibleSeries.portfolio && visibleSeries.xu030 && (
-                        <span className="mp-measure-result">
-                            <span>Alfa / XU030</span>
-                            <strong className={toneClass(measureRelativeXu030Return)}>{formatPct(measureRelativeXu030Return)}</strong>
-                        </span>
-                    )}
+            {!visibleMeasureRange && (
+                <div className="mp-chart-measure-hint">
+                    İki nokta arasındaki değişimi görmek için grafikte sürükleyin.
                 </div>
             )}
 
+            <div className="mp-chart-stage">
             <svg
                 className="mp-perf-svg"
                 viewBox={`0 0 ${width} ${height}`}
@@ -2018,6 +2021,32 @@ function ModelPortfolioPerformanceChart({
                     {formatDateTR(points[points.length - 1].date)}
                 </text>
             </svg>
+                {visibleMeasureRange && hasVisibleSeries && measureStartPt && measureEndPt && (
+                    <div className="mp-chart-measure-tooltip" style={measureTooltipStyle} role="status" aria-live="polite">
+                        <div className="mp-chart-measure-tooltip-header">
+                            <strong>{formatDateTR(measureStartPt.date)} → {formatDateTR(measureEndPt.date)}</strong>
+                            {selectedMeasureRange && (
+                                <button
+                                    type="button"
+                                    aria-label="Ölçümü temizle"
+                                    title="Ölçümü temizle"
+                                    onClick={() => setSelectedMeasureRange(null)}
+                                >
+                                    <X size={13} />
+                                </button>
+                            )}
+                        </div>
+                        <div className="mp-chart-measure-tooltip-grid">
+                            {measureTooltipItems.map((item) => (
+                                <div className="mp-chart-measure-tooltip-item" key={item.label}>
+                                    <span>{item.label}</span>
+                                    <strong className={toneClass(item.change)}>{item.value}</strong>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </div>
         </div>
     );
 }
