@@ -815,73 +815,71 @@ export default function ModelPortfolioPage() {
                         </div>
                     )}
 
-                    {/* 5 KPI Summary Strip */}
-                    <section className="market-quick-stats mp-kpi-strip" aria-label="Model portföy özet göstergeleri">
-                        <div className="quick-stat mp-kpi-card">
-                            <span className="qs-label">AKTİF HİSSELERİN AĞIRLIKLI GETİRİSİ</span>
+                    {/* Portfolio Summary Strip */}
+                    <section className="mp-kpi-strip" aria-label="Model portföy özet göstergeleri">
+                        <div className="mp-kpi-item">
+                            <span className="mp-kpi-label">Ağırlıklı getiri</span>
                             <strong
-                                className={`qs-value ${toneClass(liveSummary.invested_return_pct)}`}
+                                className={`mp-kpi-value ${toneClass(liveSummary.invested_return_pct)}`}
                                 title="Her pozisyonun getirisi kendi giriş gününden bugüne hesaplanır ve ağırlıkla birleştirilir."
                             >
                                 {formatPct(liveSummary.invested_return_pct)}
                             </strong>
                             <span className="mp-kpi-sub">
-                                Nakit dâhil portföy: <b>{formatPct(liveSummary.portfolio_return_pct)}</b>
+                                Nakit dâhil: <b>{formatPct(liveSummary.portfolio_return_pct)}</b>
                             </span>
                         </div>
 
-                        <div className="quick-stat mp-kpi-card">
-                            <span className="qs-label">XU100’E GÖRE AĞIRLIKLI GETİRİ (ALFA)</span>
-                            <strong className={`qs-value ${toneClass(liveSummary.relative_return_pct)}`}>
+                        <div className="mp-kpi-item">
+                            <span className="mp-kpi-label">XU100’e göre alfa</span>
+                            <strong className={`mp-kpi-value ${toneClass(liveSummary.relative_return_pct)}`}>
                                 {formatPct(liveSummary.relative_return_pct)}
                             </strong>
                             <span
                                 className="mp-kpi-sub"
                                 title="Her pozisyon, kendi giriş günündeki XU100 seviyesinden itibaren kıyaslanır."
                             >
-                                XU100 baz getirisi: <b>{formatPct(liveSummary.xu100_return_pct)}</b>
+                                XU100 getirisi: <b>{formatPct(liveSummary.xu100_return_pct)}</b>
                             </span>
                         </div>
 
-                        <div className="quick-stat mp-kpi-card">
-                            <span className="qs-label">AĞIRLIKLI HEDEF POTANSİYELİ</span>
-                            <strong className={`qs-value ${toneClass(liveSummary.weighted_target_upside_pct)}`}>
+                        <div className="mp-kpi-item">
+                            <span className="mp-kpi-label">Hedef potansiyeli</span>
+                            <strong className={`mp-kpi-value ${toneClass(liveSummary.weighted_target_upside_pct)}`}>
                                 {formatPct(liveSummary.weighted_target_upside_pct)}
                             </strong>
-                            <span className="mp-kpi-sub">
-                                Model hedeflerine göre · nakit hariç · garanti değildir
-                            </span>
+                            <span className="mp-kpi-sub">Ağırlıklı, nakit hariç · garanti değildir</span>
                         </div>
 
-                        <div className="quick-stat mp-kpi-card">
-                            <span className="qs-label">AKTİF POZİSYON & NAKİT DAĞILIMI</span>
-                            <strong className={`qs-value${!hasPortfolioSetup ? ' mp-kpi-empty-value' : ''}`}>
+                        <div className="mp-kpi-item">
+                            <span className="mp-kpi-label">Pozisyon ve nakit</span>
+                            <strong className={`mp-kpi-value${!hasPortfolioSetup ? ' mp-kpi-empty-value' : ''}`}>
                                 {!hasPortfolioSetup
                                     ? 'Kurulmadı'
                                     : liveSummary.active_count > 0
-                                        ? `${liveSummary.active_count} Hisse · %${liveSummary.total_weight_pct.toFixed(0)}`
-                                        : 'Aktif pozisyon yok'}
+                                        ? `${liveSummary.active_count} hisse`
+                                        : 'Pozisyon yok'}
                             </strong>
                             <span className="mp-kpi-sub">
                                 {!hasPortfolioSetup
                                     ? 'Portföy verisi henüz eklenmedi'
                                     : liveSummary.active_count > 0
-                                        ? <>Nakit / Boşta Pay: <b>%{liveSummary.cash_weight_pct.toFixed(1)}</b></>
+                                        ? <>Yatırım <b>%{liveSummary.total_weight_pct.toFixed(0)}</b> · Nakit <b>%{liveSummary.cash_weight_pct.toFixed(1)}</b></>
                                         : 'Kapanmış kayıtlar Geçmiş sekmesinde'}
                             </span>
                         </div>
 
-                        <div className="quick-stat mp-kpi-card">
-                            <span className="qs-label">XU100’Ü GEÇEN KAPALI İŞLEM ORANI</span>
-                            <strong className="qs-value mp-tone-accent">
+                        <div className="mp-kpi-item">
+                            <span className="mp-kpi-label">XU100’ü geçen işlemler</span>
+                            <strong className="mp-kpi-value mp-tone-accent">
                                 {liveSummary.closed_hit_rate_pct != null
                                     ? `%${liveSummary.closed_hit_rate_pct.toFixed(0)}`
                                     : '—'}
                             </strong>
                             <span className="mp-kpi-sub">
                                 {liveSummary.closed_count > 0
-                                    ? `${liveSummary.closed_win_count}/${liveSummary.closed_count} işlemde XU100 geçildi`
-                                    : 'Henüz kapatılan pozisyon yok'}
+                                    ? `${liveSummary.closed_win_count}/${liveSummary.closed_count} kapalı işlem`
+                                    : 'Henüz kapanan pozisyon yok'}
                             </span>
                         </div>
                     </section>
@@ -1571,6 +1569,59 @@ export default function ModelPortfolioPage() {
    Subcomponent 1: Cumulative Performance vs XU100 SVG Chart
    ========================================================================== */
 
+/** Picks a 1/2/5 × 10^n step so axis ticks land on round numbers. */
+function niceAxisStep(rawStep: number): number {
+    const exp = Math.floor(Math.log10(rawStep));
+    const base = 10 ** exp;
+    const frac = rawStep / base;
+    const nice = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 5 ? 5 : 10;
+    return nice * base;
+}
+
+/** Monotone cubic (Fritsch–Carlson) path: smooth, but never overshoots the data points. */
+function smoothLinePath(coords: Array<[number, number]>): string {
+    const n = coords.length;
+    if (n === 0) return '';
+    const fmt = (v: number) => v.toFixed(1);
+    if (n < 3) return coords.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${fmt(x)},${fmt(y)}`).join(' ');
+
+    const dx: number[] = [];
+    const slope: number[] = [];
+    for (let i = 0; i < n - 1; i++) {
+        dx.push(coords[i + 1][0] - coords[i][0]);
+        slope.push((coords[i + 1][1] - coords[i][1]) / (dx[i] || 1));
+    }
+    const tangent: number[] = [slope[0]];
+    for (let i = 1; i < n - 1; i++) {
+        tangent.push(slope[i - 1] * slope[i] <= 0 ? 0 : (slope[i - 1] + slope[i]) / 2);
+    }
+    tangent.push(slope[n - 2]);
+    for (let i = 0; i < n - 1; i++) {
+        if (slope[i] === 0) {
+            tangent[i] = 0;
+            tangent[i + 1] = 0;
+            continue;
+        }
+        const a = tangent[i] / slope[i];
+        const b = tangent[i + 1] / slope[i];
+        const h = Math.hypot(a, b);
+        if (h > 3) {
+            tangent[i] = (3 * a * slope[i]) / h;
+            tangent[i + 1] = (3 * b * slope[i]) / h;
+        }
+    }
+
+    let d = `M${fmt(coords[0][0])},${fmt(coords[0][1])}`;
+    for (let i = 0; i < n - 1; i++) {
+        const [x0, y0] = coords[i];
+        const [x1, y1] = coords[i + 1];
+        const c1x = x0 + dx[i] / 3;
+        const c2x = x1 - dx[i] / 3;
+        d += ` C${fmt(c1x)},${fmt(y0 + (tangent[i] * dx[i]) / 3)} ${fmt(c2x)},${fmt(y1 - (tangent[i + 1] * dx[i]) / 3)} ${fmt(x1)},${fmt(y1)}`;
+    }
+    return d;
+}
+
 function ModelPortfolioPerformanceChart({
     points,
     loading,
@@ -1600,12 +1651,12 @@ function ModelPortfolioPerformanceChart({
         setSelectedMeasureRange(null);
     }, [pointWindowKey]);
 
-    const width = 760;
-    const height = 270;
-    const padLeft = 52;
-    const padRight = 18;
-    const padTop = 20;
-    const padBottom = 32;
+    const width = 900;
+    const height = 340;
+    const padLeft = 58;
+    const padRight = 74;
+    const padTop = 18;
+    const padBottom = 34;
     const plotW = width - padLeft - padRight;
     const plotH = height - padTop - padBottom;
 
@@ -1638,30 +1689,33 @@ function ModelPortfolioPerformanceChart({
     if (allVals.length === 0) allVals.push(100);
     const rawMin = Math.min(...allVals, 100);
     const rawMax = Math.max(...allVals, 100);
-    const span = Math.max(4, rawMax - rawMin);
-    const minVal = rawMin - span * 0.08;
-    const maxVal = rawMax + span * 0.08;
+    const niceStep = niceAxisStep(Math.max(2, rawMax - rawMin) / 4);
+    const minVal = Math.floor((rawMin - niceStep * 0.15) / niceStep) * niceStep;
+    const maxVal = Math.ceil((rawMax + niceStep * 0.15) / niceStep) * niceStep;
+    const tickDecimals = niceStep < 1 ? 1 : 0;
 
     const toX = (i: number) => padLeft + (i / Math.max(1, points.length - 1)) * plotW;
     const toY = (v: number) => padTop + ((maxVal - v) / Math.max(1e-6, maxVal - minVal)) * plotH;
 
-    const portPath = points
-        .map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(p.portfolio_value).toFixed(1)}`)
-        .join(' ');
+    const portCoords = points.map((p, i): [number, number] => [toX(i), toY(p.portfolio_value)]);
+    const portPath = smoothLinePath(portCoords);
     const portArea = `${portPath} L${toX(points.length - 1).toFixed(1)},${(padTop + plotH).toFixed(1)} L${padLeft.toFixed(1)},${(padTop + plotH).toFixed(1)} Z`;
+    const xuPath = smoothLinePath(points.map((p, i): [number, number] => [toX(i), toY(p.xu100_value)]));
+    const xu030Path = smoothLinePath(points.map((p, i): [number, number] => [toX(i), toY(p.xu030_value)]));
 
-    const xuPath = points
-        .map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(p.xu100_value).toFixed(1)}`)
-        .join(' ');
-    const xu030Path = points
-        .map((p, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(p.xu030_value).toFixed(1)}`)
-        .join(' ');
+    const ticks: Array<{ y: number; val: number }> = [];
+    for (let v = minVal; v <= maxVal + niceStep / 2; v += niceStep) {
+        ticks.push({ y: toY(v), val: v });
+    }
 
-    const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => {
-        const val = maxVal - t * (maxVal - minVal);
-        return { y: padTop + t * plotH, val };
-    });
-
+    const xLabelCount = Math.min(points.length, plotW >= 600 ? 5 : 3);
+    const xLabelIndexes = Array.from(
+        new Set(
+            Array.from({ length: xLabelCount }, (_, k) =>
+                Math.round((k / Math.max(1, xLabelCount - 1)) * (points.length - 1)),
+            ),
+        ),
+    );
     const activeIdx = hoverIndex != null && hoverIndex >= 0 && hoverIndex < points.length
         ? hoverIndex
         : points.length - 1;
@@ -1838,7 +1892,7 @@ function ModelPortfolioPerformanceChart({
                     onClick={() => toggleSeries('portfolio')}
                 >
                     <span className="mp-legend-swatch is-portfolio" />
-                    <span className="mp-legend-label">Model Portföy:</span>
+                    <span className="mp-legend-label">Model Portföy</span>
                     <strong className="mp-mono">{activePt.portfolio_value.toFixed(2)} ₺</strong>
                     <span className={`mp-mono ${toneClass(activePt.portfolio_return_pct)}`}>
                         ({formatPct(activePt.portfolio_return_pct)})
@@ -1852,7 +1906,7 @@ function ModelPortfolioPerformanceChart({
                     onClick={() => toggleSeries('xu100')}
                 >
                     <span className="mp-legend-swatch is-xu100" />
-                    <span className="mp-legend-label">BIST 100 (XU100):</span>
+                    <span className="mp-legend-label">BIST 100</span>
                     <strong className="mp-mono">{activePt.xu100_value.toFixed(2)} ₺</strong>
                     <span className={`mp-mono ${toneClass(activePt.xu100_return_pct)}`}>
                         ({formatPct(activePt.xu100_return_pct)})
@@ -1866,7 +1920,7 @@ function ModelPortfolioPerformanceChart({
                     onClick={() => toggleSeries('xu030')}
                 >
                     <span className="mp-legend-swatch is-xu030" />
-                    <span className="mp-legend-label">BIST 30 (XU030):</span>
+                    <span className="mp-legend-label">BIST 30</span>
                     <strong className="mp-mono">{activePt.xu030_value.toFixed(2)} ₺</strong>
                     <span className={`mp-mono ${toneClass(activePt.xu030_return_pct)}`}>
                         ({formatPct(activePt.xu030_return_pct)})
@@ -1874,13 +1928,13 @@ function ModelPortfolioPerformanceChart({
                 </button>
                 <div className="mp-legend-alpha-group">
                     <div className="mp-legend-item mp-legend-alpha">
-                        <span className="mp-legend-label">Alfa / XU100:</span>
+                        <span className="mp-legend-label">Alfa · XU100</span>
                         <strong className={`mp-mono ${toneClass(activePt.relative_return_pct)}`}>
                             {formatPct(activePt.relative_return_pct)}
                         </strong>
                     </div>
                     <div className="mp-legend-item mp-legend-alpha">
-                        <span className="mp-legend-label">Alfa / XU030:</span>
+                        <span className="mp-legend-label">Alfa · XU030</span>
                         <strong className={`mp-mono ${toneClass(activePt.relative_xu030_return_pct)}`}>
                             {formatPct(activePt.relative_xu030_return_pct)}
                         </strong>
@@ -1914,9 +1968,13 @@ function ModelPortfolioPerformanceChart({
                 <title>Model Portföy, BIST 100 ve BIST 30 performansı</title>
                 <defs>
                     <linearGradient id="mpPortFill" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.26" />
-                        <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.0" />
+                        <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.32" />
+                        <stop offset="70%" stopColor="#3b82f6" stopOpacity="0.05" />
+                        <stop offset="100%" stopColor="#3b82f6" stopOpacity="0" />
                     </linearGradient>
+                    <clipPath id="mpPlotClip">
+                        <rect x={padLeft} y={padTop - 2} width={plotW} height={plotH + 4} />
+                    </clipPath>
                 </defs>
 
                 {ticks.map((t, i) => (
@@ -1928,21 +1986,26 @@ function ModelPortfolioPerformanceChart({
                             y2={t.y}
                             className="mp-chart-grid"
                         />
-                        <text x={padLeft - 8} y={t.y + 4} textAnchor="end" className="mp-chart-axis-text">
-                            {t.val.toFixed(0)}₺
+                        <text x={padLeft - 10} y={t.y + 4} textAnchor="end" className="mp-chart-axis-text">
+                            {t.val.toLocaleString('tr-TR', { minimumFractionDigits: tickDecimals, maximumFractionDigits: tickDecimals })}
                         </text>
                     </g>
                 ))}
 
                 {/* 100 TL baseline */}
                 {minVal < 100 && maxVal > 100 && (
-                    <line
-                        x1={padLeft}
-                        y1={toY(100)}
-                        x2={width - padRight}
-                        y2={toY(100)}
-                        className="mp-chart-baseline"
-                    />
+                    <g>
+                        <line
+                            x1={padLeft}
+                            y1={toY(100)}
+                            x2={width - padRight}
+                            y2={toY(100)}
+                            className="mp-chart-baseline"
+                        />
+                        <text x={width - padRight + 8} y={toY(100) + 4} className="mp-chart-baseline-text">
+                            100 ₺
+                        </text>
+                    </g>
                 )}
 
                 {visibleMeasureRange && (
@@ -1955,9 +2018,13 @@ function ModelPortfolioPerformanceChart({
                     />
                 )}
 
-                {visibleSeries.portfolio && <path d={portArea} fill="url(#mpPortFill)" />}
-                {visibleSeries.xu100 && <path d={xuPath} fill="none" className="mp-line-xu100" />}
-                {visibleSeries.xu030 && <path d={xu030Path} fill="none" className="mp-line-xu030" />}
+                <g clipPath="url(#mpPlotClip)">
+                    {visibleSeries.portfolio && <path d={portArea} fill="url(#mpPortFill)" />}
+                    {visibleSeries.xu030 && <path d={xu030Path} fill="none" className="mp-line-xu030" />}
+                    {visibleSeries.xu100 && <path d={xuPath} fill="none" className="mp-line-xu100" />}
+                    {visibleSeries.portfolio && <path d={portPath} fill="none" className="mp-line-portfolio-glow" />}
+                    {visibleSeries.portfolio && <path d={portPath} fill="none" className="mp-line-portfolio" />}
+                </g>
                 {!hasVisibleSeries && (
                     <text x={width / 2} y={padTop + plotH / 2} textAnchor="middle" className="mp-chart-no-series">
                         Görmek için üstteki serilerden birine basın
@@ -1989,12 +2056,20 @@ function ModelPortfolioPerformanceChart({
                     />
                 )}
                 {visibleSeries.portfolio && (
-                    <circle
-                        cx={toX(activeIdx)}
-                        cy={toY(activePt.portfolio_value)}
-                        r="4.5"
-                        className="mp-dot-portfolio"
-                    />
+                    <>
+                        <circle
+                            cx={toX(activeIdx)}
+                            cy={toY(activePt.portfolio_value)}
+                            r="9"
+                            className="mp-dot-portfolio-halo"
+                        />
+                        <circle
+                            cx={toX(activeIdx)}
+                            cy={toY(activePt.portfolio_value)}
+                            r="4.5"
+                            className="mp-dot-portfolio"
+                        />
+                    </>
                 )}
 
                 {visibleMeasureRange && measureStartPt && measureEndPt && (
@@ -2010,17 +2085,18 @@ function ModelPortfolioPerformanceChart({
                     </g>
                 )}
 
-                {/* Start / Middle / End X labels */}
-                <text x={padLeft} y={height - 8} textAnchor="start" className="mp-chart-axis-text">
-                    {formatDateTR(points[0].date)}
-                </text>
-                <text x={padLeft + plotW / 2} y={height - 8} textAnchor="middle" className="mp-chart-axis-text">
-                    {formatDateTR(points[Math.floor(points.length / 2)].date)}
-                </text>
-                <text x={width - padRight} y={height - 8} textAnchor="end" className="mp-chart-axis-text">
-                    {formatDateTR(points[points.length - 1].date)}
-                </text>
-            </svg>
+                {/* X axis date labels */}
+                {xLabelIndexes.map((idx, k) => (
+                    <text
+                        key={idx}
+                        x={toX(idx)}
+                        y={height - 10}
+                        textAnchor={k === 0 ? 'start' : k === xLabelIndexes.length - 1 ? 'end' : 'middle'}
+                        className="mp-chart-axis-text"
+                    >
+                        {formatDateTR(points[idx].date)}
+                    </text>
+                ))}            </svg>
                 {visibleMeasureRange && hasVisibleSeries && measureStartPt && measureEndPt && (
                     <div className="mp-chart-measure-tooltip" style={measureTooltipStyle} role="status" aria-live="polite">
                         <div className="mp-chart-measure-tooltip-header">
