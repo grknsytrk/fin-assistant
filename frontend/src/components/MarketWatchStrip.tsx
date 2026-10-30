@@ -239,67 +239,148 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
         [lookup],
     );
 
-    const tickerItems = useMemo(() => {
-        const priorityOrder: Record<string, number> = {
-            'XU100': 1,
-            'USD/TRY': 2,
-            'USDTRY': 2,
-            'EUR/TRY': 3,
-            'EURTRY': 3,
-            'XU030': 4,
-            'ALTIN': 5,
-            'BRENT': 6,
-            'XUTUM': 7,
-            'GBP/TRY': 8,
-            'GBPTRY': 8,
-            'EUR/USD': 9,
-            'EURUSD': 9,
-            'GUMUS': 10,
-            'DOGALGAZ': 11,
+    type TickerSegment =
+        | { type: 'badge'; category: 'indices' | 'fx' | 'commodities'; label: string }
+        | { type: 'item'; item: MarketWatchItem };
+
+    const groupedSegments = useMemo(() => {
+        const indexOrder: Record<string, number> = {
+            XU100: 1,
+            XU030: 2,
+            XUTUM: 3,
         };
 
-        const defaultOrder = ['XU100', 'USD/TRY', 'EUR/TRY', 'XU030', 'ALTIN', 'BRENT', 'XUTUM', 'GUMUS'];
-        const seen = new Set<string>();
-        const list: MarketWatchItem[] = [];
+        const fxOrder: Record<string, number> = {
+            'USD/TRY': 1,
+            USDTRY: 1,
+            'EUR/TRY': 2,
+            EURTRY: 2,
+            'GBP/TRY': 3,
+            GBPTRY: 3,
+            'EUR/USD': 4,
+            EURUSD: 4,
+            DXY: 5,
+        };
 
-        if (payload?.sections) {
-            const all = [
-                ...(payload.sections.indices || []),
-                ...(payload.sections.fx || []),
-                ...(payload.sections.commodities || []),
-            ];
-            for (const item of all) {
+        const commodityOrder: Record<string, number> = {
+            ALTIN: 1,
+            GUMUS: 2,
+            BRENT: 3,
+            DOGALGAZ: 4,
+        };
+
+        // 1. Indices (BIST)
+        const indices: MarketWatchItem[] = [];
+        const seenIndices = new Set<string>();
+        if (payload?.sections?.indices) {
+            for (const item of payload.sections.indices) {
                 const norm = normalizeSymbol(item.symbol);
-                if (norm && !seen.has(norm)) {
-                    seen.add(norm);
-                    list.push(item);
+                if (norm && !seenIndices.has(norm)) {
+                    seenIndices.add(norm);
+                    indices.push(item);
                 }
             }
         }
-
-        for (const sym of defaultOrder) {
+        for (const sym of ['XU100', 'XU030', 'XUTUM']) {
             const norm = normalizeSymbol(sym);
-            if (!seen.has(norm)) {
-                seen.add(norm);
-                list.push(lookup.get(norm) || placeholderItem(sym));
+            if (!seenIndices.has(norm)) {
+                seenIndices.add(norm);
+                indices.push(lookup.get(norm) || placeholderItem(sym));
             }
         }
-
-        list.sort((a, b) => {
-            const pA = priorityOrder[normalizeSymbol(a.symbol)] ?? 99;
-            const pB = priorityOrder[normalizeSymbol(b.symbol)] ?? 99;
+        indices.sort((a, b) => {
+            const pA = indexOrder[normalizeSymbol(a.symbol)] ?? 99;
+            const pB = indexOrder[normalizeSymbol(b.symbol)] ?? 99;
             return pA - pB;
         });
 
-        return list;
+        // 2. Forex / Currencies
+        const fx: MarketWatchItem[] = [];
+        const seenFx = new Set<string>();
+        if (payload?.sections?.fx) {
+            for (const item of payload.sections.fx) {
+                const norm = normalizeSymbol(item.symbol);
+                if (norm && !seenFx.has(norm)) {
+                    seenFx.add(norm);
+                    fx.push(item);
+                }
+            }
+        }
+        for (const sym of ['USD/TRY', 'EUR/TRY', 'GBP/TRY', 'EUR/USD']) {
+            const norm = normalizeSymbol(sym);
+            if (!seenFx.has(norm)) {
+                seenFx.add(norm);
+                fx.push(lookup.get(norm) || placeholderItem(sym));
+            }
+        }
+        fx.sort((a, b) => {
+            const pA = fxOrder[normalizeSymbol(a.symbol)] ?? 99;
+            const pB = fxOrder[normalizeSymbol(b.symbol)] ?? 99;
+            return pA - pB;
+        });
+
+        // 3. Commodities
+        const commodities: MarketWatchItem[] = [];
+        const seenCommodities = new Set<string>();
+        if (payload?.sections?.commodities) {
+            for (const item of payload.sections.commodities) {
+                const norm = normalizeSymbol(item.symbol);
+                if (norm && !seenCommodities.has(norm)) {
+                    seenCommodities.add(norm);
+                    commodities.push(item);
+                }
+            }
+        }
+        for (const sym of ['ALTIN', 'GUMUS', 'BRENT', 'DOGALGAZ']) {
+            const norm = normalizeSymbol(sym);
+            if (!seenCommodities.has(norm)) {
+                seenCommodities.add(norm);
+                commodities.push(lookup.get(norm) || placeholderItem(sym));
+            }
+        }
+        commodities.sort((a, b) => {
+            const pA = commodityOrder[normalizeSymbol(a.symbol)] ?? 99;
+            const pB = commodityOrder[normalizeSymbol(b.symbol)] ?? 99;
+            return pA - pB;
+        });
+
+        const singleSequence: TickerSegment[] = [];
+
+        if (indices.length > 0) {
+            singleSequence.push({ type: 'badge', category: 'indices', label: 'ENDEKS' });
+            for (const item of indices) {
+                singleSequence.push({ type: 'item', item });
+            }
+        }
+
+        if (fx.length > 0) {
+            singleSequence.push({ type: 'badge', category: 'fx', label: 'DÖVİZ' });
+            for (const item of fx) {
+                singleSequence.push({ type: 'item', item });
+            }
+        }
+
+        if (commodities.length > 0) {
+            singleSequence.push({ type: 'badge', category: 'commodities', label: 'EMTİA' });
+            for (const item of commodities) {
+                singleSequence.push({ type: 'item', item });
+            }
+        }
+
+        return singleSequence;
     }, [payload, lookup]);
 
-    const marqueeItems = useMemo(() => {
-        if (tickerItems.length === 0) return [];
-        const repeatCount = Math.max(2, Math.ceil(14 / tickerItems.length));
-        const oneHalf = Array.from({ length: repeatCount }, () => tickerItems).flat();
+    const marqueeSegments = useMemo(() => {
+        if (groupedSegments.length === 0) return [];
+        const repeatCount = Math.max(2, Math.ceil(24 / groupedSegments.length));
+        const oneHalf: TickerSegment[] = [];
+        for (let i = 0; i < repeatCount; i++) {
+            for (const seg of groupedSegments) {
+                oneHalf.push(seg);
+            }
+        }
         return [...oneHalf, ...oneHalf];
-    }, [tickerItems]);
+    }, [groupedSegments]);
 
     const isInitialLoading = loading && !payload;
     const delayNote = payload?.delay_note || DEFAULT_DELAY_NOTE;
@@ -329,12 +410,26 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
                         aria-label="Canlı borsa ve döviz akış bandı. İmleç ile durdurabilirsiniz."
                     >
                         <div className="mw-ticker-track">
-                            {marqueeItems.map((item, index) => {
+                            {marqueeSegments.map((seg, index) => {
+                                if (seg.type === 'badge') {
+                                    return (
+                                        <div
+                                            key={`seg-badge-${seg.category}-${index}`}
+                                            className={`mw-ticker-badge mw-badge-${seg.category}`}
+                                            aria-hidden="true"
+                                        >
+                                            <span className="mw-badge-dot" />
+                                            <span>{seg.label}</span>
+                                        </div>
+                                    );
+                                }
+
+                                const item = seg.item;
                                 const isPositive = item.change_pct != null && item.change_pct > 0;
                                 const isNegative = item.change_pct != null && item.change_pct < 0;
                                 return (
                                     <div
-                                        key={`${item.symbol}-${index}`}
+                                        key={`seg-item-${item.symbol}-${index}`}
                                         className={`mw-ticker-item ${item.price == null ? 'is-muted' : ''}`}
                                         title={`${item.label} · Son güncelleme: ${itemMetaLabel(item)}`}
                                     >
@@ -347,10 +442,10 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
                                                 size="xs"
                                                 className="mw-ticker-logo"
                                             />
-                                            <span className="mw-ticker-symbol mp-mono">{compactSymbol(item.symbol)}</span>
+                                            <span className="mw-ticker-symbol">{compactSymbol(item.symbol)}</span>
                                         </div>
-                                        <span className="mw-ticker-price mp-mono">{formatPrice(item)}</span>
-                                        <span className={`mw-ticker-change mp-mono ${changeClass(item.change_pct)}`}>
+                                        <span className="mw-ticker-price">{formatPrice(item)}</span>
+                                        <span className={`mw-ticker-change ${changeClass(item.change_pct)}`}>
                                             {isPositive ? '▲ ' : isNegative ? '▼ ' : ''}
                                             {formatPct(item.change_pct)}
                                         </span>

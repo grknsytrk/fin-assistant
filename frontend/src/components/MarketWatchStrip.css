@@ -316,6 +316,61 @@
     }
 }
 
+.mw-ticker-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.38rem;
+    height: 22px;
+    padding: 0 0.6rem;
+    margin: 0 0.75rem;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    user-select: none;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.mw-badge-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    flex-shrink: 0;
+}
+
+.mw-badge-indices {
+    background: rgba(59, 130, 246, 0.12);
+    border: 1px solid rgba(59, 130, 246, 0.28);
+    color: #93c5fd;
+}
+.mw-badge-indices .mw-badge-dot {
+    background: #60a5fa;
+    box-shadow: 0 0 6px rgba(96, 165, 250, 0.6);
+}
+
+.mw-badge-fx {
+    background: rgba(16, 185, 129, 0.12);
+    border: 1px solid rgba(16, 185, 129, 0.28);
+    color: #6ee7b7;
+}
+.mw-badge-fx .mw-badge-dot {
+    background: #34d399;
+    box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+}
+
+.mw-badge-commodities {
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    color: #fcd34d;
+}
+.mw-badge-commodities .mw-badge-dot {
+    background: #fbbf24;
+    box-shadow: 0 0 6px rgba(251, 191, 36, 0.6);
+}
+
 .mw-ticker-item {
     display: inline-flex;
     align-items: center;
