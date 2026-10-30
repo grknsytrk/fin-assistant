@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent } from 'react';
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { ArrowLeft, BarChart3, BookOpen, ChevronRight, FileText, Info, Star } from 'lucide-react';
 import './StockDetailPage.css';
 import { apiClient, cachedKapSnapshot } from '../api/client';
@@ -17,7 +18,7 @@ import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavig
 import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useMobileChartLayout } from '../hooks/useMobileChartLayout';
 import { useWatchlist } from '../hooks/useWatchlist';
-import type { StockTab } from '../routing/routes';
+import { toStockDetail, type StockTab } from '../routing/routes';
 
 import StockOverview from './stock/sections/StockOverview';
 import StockFinancials from './stock/sections/StockFinancials';
@@ -970,15 +971,27 @@ export default function StockDetailPage({
                             {STOCK_DETAIL_TABS.map((tab) => {
                                 const Icon = tab.icon;
                                 return (
-                                    <button
+                                    <Link
                                         key={tab.key}
-                                        type="button"
+                                        to={toStockDetail(normalizedTicker, tab.key)}
                                         className={selectedTab === tab.key ? 'active' : ''}
-                                        onClick={() => handleTabChange(tab.key)}
+                                        onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => {
+                                            if (
+                                                event.button !== 0
+                                                || event.metaKey
+                                                || event.ctrlKey
+                                                || event.shiftKey
+                                                || event.altKey
+                                            ) {
+                                                return;
+                                            }
+                                            event.preventDefault();
+                                            handleTabChange(tab.key);
+                                        }}
                                     >
                                         <Icon size={16} aria-hidden="true" />
                                         {tab.label}
-                                    </button>
+                                    </Link>
                                 );
                             })}
                         </nav>

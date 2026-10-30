@@ -36,6 +36,7 @@ import {
     Trophy,
     X,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { apiClient } from '../api/client';
 import { useMobileChartLayout } from '../hooks/useMobileChartLayout';
 import { useBackgroundRefresh } from '../hooks/useBackgroundRefresh';
@@ -67,7 +68,7 @@ import FundRequestState from '../components/FundRequestState';
 import { STOCK_LOGO_DOMAIN_MAP } from '../components/symbolLogoMaps';
 import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useWatchlist } from '../hooks/useWatchlist';
-import { toFundDetail } from '../routing/routes';
+import { toFundDetail, toStockDetail } from '../routing/routes';
 import {
     canonicalFundPrice,
     buildFundHistoryDiagnosticLines,
@@ -3336,23 +3337,21 @@ function FundHoldingsPanel({
                                             {statusIcon}
                                         </span>
                                         {canOpenStock ? (
-                                            <button
-                                                type="button"
+                                            <Link
+                                                to={toStockDetail(stockTicker)}
                                                 className="fund-holdings-rank-symbol fund-holdings-rank-symbol-link"
-                                                onClick={() => onOpenTicker?.(stockTicker)}
                                                 aria-label={`${stockTicker} hisse sayfasını aç`}
                                             >
                                                 {rankSymbolContent}
-                                            </button>
+                                            </Link>
                                         ) : canOpenFund ? (
-                                            <button
-                                                type="button"
+                                            <Link
+                                                to={toFundDetail(fundCode, 'overview')}
                                                 className="fund-holdings-rank-symbol fund-holdings-rank-symbol-link"
-                                                onClick={() => onOpenFund?.(fundCode, 'overview')}
                                                 aria-label={`${fundCode} fonunu aç`}
                                             >
                                                 {rankSymbolContent}
-                                            </button>
+                                            </Link>
                                         ) : (
                                             <div className="fund-holdings-rank-symbol">{rankSymbolContent}</div>
                                         )}
@@ -3489,23 +3488,21 @@ function FundHoldingsPanel({
                                                 <tr key={rowKey}>
                                                     <td>
                                                         {canOpenStock ? (
-                                                            <button
-                                                                type="button"
+                                                            <Link
+                                                                to={toStockDetail(stockTicker)}
                                                                 className="fund-holding-asset fund-holding-asset-link"
-                                                                onClick={() => onOpenTicker?.(stockTicker)}
                                                                 aria-label={`${stockTicker} hisse sayfasını aç`}
                                                             >
                                                                 {assetContent}
-                                                            </button>
+                                                            </Link>
                                                         ) : canOpenFund ? (
-                                                            <button
-                                                                type="button"
+                                                            <Link
+                                                                to={toFundDetail(fundCode, 'overview')}
                                                                 className="fund-holding-asset fund-holding-asset-link"
-                                                                onClick={() => onOpenFund?.(fundCode, 'overview')}
                                                                 aria-label={`${fundCode} fonunu aç`}
                                                             >
                                                                 {assetContent}
-                                                            </button>
+                                                            </Link>
                                                         ) : (
                                                             <div className="fund-holding-asset">{assetContent}</div>
                                                         )}
@@ -4179,12 +4176,10 @@ function FundComparisonPage({
     funds,
     loading,
     error,
-    onOpenFund,
 }: {
     funds: FundsResponse | null;
     loading: boolean;
     error: string | null;
-    onOpenFund: (fundCode: string, tab?: FundTab) => void;
 }) {
     const rows = funds?.rows || [];
     const [selectedCodes, setSelectedCodes] = useState<string[]>([]);
@@ -4636,15 +4631,14 @@ function FundComparisonPage({
                                     <X size={14} aria-hidden="true" />
                                 </button>
                                 <div className="fund-compare-card-main">
-                                    <button
-                                        type="button"
+                                    <Link
+                                        to={toFundDetail(fund.fund_code, 'overview')}
                                         className="fund-compare-card-fund"
-                                        onClick={() => onOpenFund(fund.fund_code, 'overview')}
                                         aria-label={`${fund.fund_code} fonunu aç`}
                                     >
                                         <SymbolLogo symbol={fund.fund_code} name={fund.founder_company || fund.manager_company || fund.name} kind="fund" size="sm" />
                                         <strong>{fund.fund_code}</strong>
-                                    </button>
+                                    </Link>
                                     <button
                                         type="button"
                                         className={`fund-compare-card-swap ${swapping ? 'is-active' : ''}`}
@@ -6448,7 +6442,6 @@ export default function FundsPage({
                             funds={funds}
                             loading={loading}
                             error={error}
-                            onOpenFund={onOpenFund}
                         />
                     ) : !fundCode ? (
                         <>
@@ -6640,15 +6633,27 @@ export default function FundsPage({
                                             {FUND_TABS.map((tab) => {
                                                 const Icon = tab.icon;
                                                 return (
-                                                    <button
+                                                    <Link
                                                         key={tab.key}
-                                                        type="button"
+                                                        to={toFundDetail(selectedFund.fund_code, tab.key)}
                                                         className={activeTab === tab.key ? 'active' : ''}
-                                                        onClick={() => onTabChange(tab.key)}
+                                                        onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => {
+                                                            if (
+                                                                event.button !== 0
+                                                                || event.metaKey
+                                                                || event.ctrlKey
+                                                                || event.shiftKey
+                                                                || event.altKey
+                                                            ) {
+                                                                return;
+                                                            }
+                                                            event.preventDefault();
+                                                            onTabChange(tab.key);
+                                                        }}
                                                     >
                                                         <Icon size={16} aria-hidden="true" />
                                                         {tab.label}
-                                                    </button>
+                                                    </Link>
                                                 );
                                             })}
                                         </nav>

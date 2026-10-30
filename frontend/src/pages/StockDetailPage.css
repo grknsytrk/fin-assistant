@@ -274,7 +274,7 @@
     overflow-x: auto;
 }
 
-.stock-tabs button {
+.stock-tabs :is(a, button) {
     position: relative;
     display: inline-flex;
     align-items: center;
@@ -289,18 +289,19 @@
     font-weight: 850;
     white-space: nowrap;
     cursor: pointer;
+    text-decoration: none;
 }
 
-.stock-tabs button:hover,
-.stock-tabs button:focus-visible {
+.stock-tabs :is(a, button):hover,
+.stock-tabs :is(a, button):focus-visible {
     color: var(--text-primary);
 }
 
-.stock-tabs button.active {
+.stock-tabs :is(a, button).active {
     color: var(--text-primary);
 }
 
-.stock-tabs button.active::after {
+.stock-tabs :is(a, button).active::after {
     position: absolute;
     right: 0;
     bottom: 0;

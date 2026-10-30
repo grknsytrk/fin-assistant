@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import { Activity, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Clock, BarChart3, Wallet, Star, FolderPlus, Search, X, Pencil, Trash2, GripVertical } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { apiClient } from '../api/client';
 import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
 import type {
@@ -18,6 +20,7 @@ import { normalizeWatchlistSymbol, useWatchlist, watchlistItemKey, type Watchlis
 import { cacheWatchlistFund, fetchWatchlistFund, getCachedWatchlistFund, searchWatchlistFunds } from '../utils/watchlistData';
 import MarketFlowPanel from './MarketFlowPanel';
 import { getAdaptiveRefreshMs, isBistTradingHours } from '../utils/marketHours';
+import { toFundDetail, toStockDetail } from '../routing/routes';
 import './MarketWatchRail.css';
 
 type RailTab = 'global' | 'commodities' | 'fx' | 'xutum' | 'xu100' | 'xu030';
@@ -225,9 +228,10 @@ function fallbackWatchlistRow(item: WatchlistItem): RailRow {
 
 function FlashRailRow({
     row,
-    onClick,
+    to,
+    onNavigate,
     children,
-}: React.PropsWithChildren<{ row: RailRow; onClick?: () => void }>) {
+}: React.PropsWithChildren<{ row: RailRow; to?: string; onNavigate?: () => void }>) {
     const previousRef = useRef<{ price: number | null; changePct: number | null }>({
         price: row.price,
         changePct: row.changePct,
@@ -258,18 +262,35 @@ function FlashRailRow({
 
     const className = [
         'mwr-row',
-        onClick ? 'mwr-row-clickable' : '',
+        to ? 'mwr-row-clickable' : '',
         row.error ? 'mwr-row-muted' : '',
         flashClass,
     ]
         .filter(Boolean)
         .join(' ');
 
-    if (onClick) {
+    if (to) {
         return (
-            <button type="button" className={className} onClick={onClick}>
+            <Link
+                to={to}
+                className={className}
+                onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => {
+                    if (
+                        !onNavigate
+                        || event.button !== 0
+                        || event.metaKey
+                        || event.ctrlKey
+                        || event.shiftKey
+                        || event.altKey
+                    ) {
+                        return;
+                    }
+                    event.preventDefault();
+                    onNavigate();
+                }}
+            >
                 {children}
-            </button>
+            </Link>
         );
     }
 
@@ -1094,7 +1115,10 @@ export default function MarketWatchRail({
                                             <FlashRailRow
                                                 key={`wl-${row.kind}-${row.symbol}`}
                                                 row={row}
-                                                onClick={() => {
+                                                to={row.kind === 'fund'
+                                                    ? toFundDetail(row.symbol)
+                                                    : toStockDetail(row.symbol)}
+                                                onNavigate={() => {
                                                     if (row.kind === 'fund') onSelectFund(row.symbol);
                                                     else onSelectTicker(row.symbol);
                                                 }}
@@ -1216,11 +1240,8 @@ export default function MarketWatchRail({
                                     <FlashRailRow
                                         key={`${activeTab}-${row.symbol}`}
                                         row={row}
-                                        onClick={
-                                            row.clickable
-                                                ? () => onSelectTicker(row.symbol)
-                                                : undefined
-                                        }
+                                        to={row.clickable ? toStockDetail(row.symbol) : undefined}
+                                        onNavigate={row.clickable ? () => onSelectTicker(row.symbol) : undefined}
                                     >
                                         {content}
                                     </FlashRailRow>

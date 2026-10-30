@@ -210,6 +210,7 @@
     background: transparent;
     color: var(--text-primary);
     text-align: left;
+    text-decoration: none;
     transition: background-color 0.14s ease;
 }
 
@@ -918,8 +919,12 @@
     background: transparent;
     color: var(--text-primary);
     text-align: left;
-    cursor: pointer;
+    text-decoration: none;
     transition: background-color 0.14s ease;
+}
+
+.mwr-flow-item.is-clickable {
+    cursor: pointer;
 }
 
 .mwr-flow-item.is-new {

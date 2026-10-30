@@ -223,7 +223,7 @@
 .funds-sort-order,
 .fund-detail-actions a,
 .fund-back-button,
-.fund-tabs button {
+.fund-tabs :is(a, button) {
     height: 38px;
     border: 1px solid color-mix(in srgb, var(--surface-border) 88%, transparent);
     border-radius: 7px;
@@ -239,7 +239,7 @@
 
 .funds-sort-order,
 .fund-back-button,
-.fund-tabs button {
+.fund-tabs :is(a, button) {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -626,7 +626,7 @@
     overflow-x: auto;
 }
 
-.fund-tabs button {
+.fund-tabs :is(a, button) {
     position: relative;
     height: auto;
     padding: 0;
@@ -637,20 +637,21 @@
     font-size: 0.9rem;
     font-weight: 850;
     white-space: nowrap;
+    text-decoration: none;
 }
 
-.fund-tabs button:hover,
-.fund-tabs button:focus-visible {
+.fund-tabs :is(a, button):hover,
+.fund-tabs :is(a, button):focus-visible {
     color: var(--text-primary);
 }
 
-.fund-tabs button.active {
+.fund-tabs :is(a, button).active {
     border-color: transparent;
     background: transparent;
     color: var(--text-primary);
 }
 
-.fund-tabs button.active::after {
+.fund-tabs :is(a, button).active::after {
     position: absolute;
     right: 0;
     bottom: 0;
@@ -2752,6 +2753,7 @@
     font: inherit;
     padding: 0;
     text-align: left;
+    text-decoration: none;
 }
 
 .fund-holdings-rank-symbol-link:hover strong,
@@ -3123,6 +3125,7 @@
     font: inherit;
     padding: 0;
     text-align: left;
+    text-decoration: none;
 }
 
 .fund-holding-asset-link:hover strong,
@@ -3404,6 +3407,7 @@
     color: var(--text-primary);
     font: inherit;
     cursor: pointer;
+    text-decoration: none;
 }
 
 .fund-compare-card-fund strong {

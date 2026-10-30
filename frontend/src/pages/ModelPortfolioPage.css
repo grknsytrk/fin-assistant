@@ -105,6 +105,7 @@
     font-size: 0.78rem;
     font-weight: 600;
     cursor: pointer;
+    text-decoration: none;
     transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
     white-space: nowrap;
 }
@@ -1093,6 +1094,13 @@
     font-weight: 700;
     font-size: 0.85rem;
     color: var(--text-primary);
+    text-decoration: none;
+}
+
+.mp-ticker:hover,
+.mp-ticker:focus-visible {
+    color: #60a5fa;
+    text-decoration: underline;
 }
 
 .mp-sector-tag {
@@ -1456,6 +1464,7 @@
     font-weight: 700;
     color: var(--text-primary);
     cursor: pointer;
+    text-decoration: none;
     transition: color 0.12s ease;
 }
 

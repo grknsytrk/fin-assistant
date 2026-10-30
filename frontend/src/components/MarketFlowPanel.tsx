@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { UIEvent } from 'react';
+import type { MouseEvent as ReactMouseEvent, UIEvent } from 'react';
 import { ChevronRight } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { apiClient } from '../api/client';
 import type { MarketFlowItem } from '../api/types';
 import { normalizeWatchlistSymbol, useWatchlist } from '../hooks/useWatchlist';
+import { toStockDetail } from '../routing/routes';
 
 export type FlowFilter = 'all' | 'watchlist' | 'model_portfolio' | 'ozel_durum' | 'finansal_rapor' | 'kar_payi' | 'genel_kurul' | 'diger';
 
@@ -357,14 +359,6 @@ export default function MarketFlowPanel({
         if (remaining < 220) loadMore();
     };
 
-    const handleItemClick = (item: MarketFlowItem) => {
-        if (item.kap_url) {
-            window.open(item.kap_url, '_blank', 'noopener,noreferrer');
-            return;
-        }
-        if (item.symbol) onSelectTicker?.(item.symbol);
-    };
-
     const visibleItems = useMemo(
         () => filteredItems.slice(0, visibleLimit),
         [filteredItems, visibleLimit],
@@ -411,35 +405,77 @@ export default function MarketFlowPanel({
             )}
 
             <div className="mwr-flow-list" onScroll={handleFlowScroll}>
-                {visibleItems.map((item) => (
-                    <button
-                        key={item.id}
-                        type="button"
-                        className={`mwr-flow-item${highlightedItemIds.has(item.id) ? ' is-new' : ''}`}
-                        onClick={() => handleItemClick(item)}
-                        title={`${item.title} · ${formatFlowDate(item.published_at)}`}
-                    >
-                        <div className="mwr-flow-item-meta">
-                            <span className="mwr-flow-source">KAP</span>
-                            {formatFlowCodes(item, activeSymbolSet
-                                ? getMatchingFavoriteSymbols(item, activeSymbolSet)
-                                : undefined) && (
-                                <>
-                                    <span className="mwr-flow-dot" aria-hidden="true">·</span>
-                                    <span className="mwr-flow-codes">
-                                        {formatFlowCodes(item, activeSymbolSet
-                                            ? getMatchingFavoriteSymbols(item, activeSymbolSet)
-                                            : undefined)}
-                                    </span>
-                                </>
-                            )}
-                            <time dateTime={item.published_at}>
-                                {formatFlowDate(item.published_at)} · {formatFlowTime(item.published_at)}
-                            </time>
-                        </div>
-                        <div className="mwr-flow-item-title">{item.title}</div>
-                    </button>
-                ))}
+                {visibleItems.map((item) => {
+                    const className = `mwr-flow-item${highlightedItemIds.has(item.id) ? ' is-new' : ''}${item.kap_url || item.symbol ? ' is-clickable' : ''}`;
+                    const content = (
+                        <>
+                            <div className="mwr-flow-item-meta">
+                                <span className="mwr-flow-source">KAP</span>
+                                {formatFlowCodes(item, activeSymbolSet
+                                    ? getMatchingFavoriteSymbols(item, activeSymbolSet)
+                                    : undefined) && (
+                                    <>
+                                        <span className="mwr-flow-dot" aria-hidden="true">·</span>
+                                        <span className="mwr-flow-codes">
+                                            {formatFlowCodes(item, activeSymbolSet
+                                                ? getMatchingFavoriteSymbols(item, activeSymbolSet)
+                                                : undefined)}
+                                        </span>
+                                    </>
+                                )}
+                                <time dateTime={item.published_at}>
+                                    {formatFlowDate(item.published_at)} · {formatFlowTime(item.published_at)}
+                                </time>
+                            </div>
+                            <div className="mwr-flow-item-title">{item.title}</div>
+                        </>
+                    );
+                    const title = `${item.title} · ${formatFlowDate(item.published_at)}`;
+
+                    if (item.kap_url) {
+                        return (
+                            <a
+                                key={item.id}
+                                href={item.kap_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={className}
+                                title={title}
+                            >
+                                {content}
+                            </a>
+                        );
+                    }
+
+                    if (item.symbol) {
+                        return (
+                            <Link
+                                key={item.id}
+                                to={toStockDetail(item.symbol)}
+                                className={className}
+                                title={title}
+                                onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => {
+                                    if (
+                                        !onSelectTicker
+                                        || event.button !== 0
+                                        || event.metaKey
+                                        || event.ctrlKey
+                                        || event.shiftKey
+                                        || event.altKey
+                                    ) {
+                                        return;
+                                    }
+                                    event.preventDefault();
+                                    onSelectTicker(item.symbol!);
+                                }}
+                            >
+                                {content}
+                            </Link>
+                        );
+                    }
+
+                    return <div key={item.id} className={className} title={title}>{content}</div>;
+                })}
                 {loadingMore && <div className="mwr-flow-load-state">Daha fazla bildirim yükleniyor…</div>}
                 {!loadingMore && !hasMore && filteredItems.length > 0 && (
                     <div className="mwr-flow-load-state">Akışın sonu</div>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import type { MouseEvent as ReactMouseEvent } from 'react';
+import { Link, NavLink, useLocation } from 'react-router-dom';
 import { 
     Calendar, 
     Layers, 
@@ -12,7 +13,16 @@ import {
     PanelLeftClose,
 } from 'lucide-react';
 import GlobalTickerSearch from './GlobalTickerSearch';
-import { ROUTE_PATHS, toModelPortfolio } from '../routing/routes';
+import {
+    DEFAULT_MARKET_INDEX,
+    ROUTE_PATHS,
+    toFundComparison,
+    toFunds,
+    toMarketsIndices,
+    toMarketsOverview,
+    toMarketsStocks,
+    toModelPortfolio,
+} from '../routing/routes';
 import './MarketsNavigation.css';
 
 export type MarketsNavigationSection = 'markets' | 'stocks' | 'funds' | 'indices';
@@ -40,7 +50,26 @@ export default function MarketsNavigation({
     onSelectFund,
 }: MarketsNavigationProps) {
     const [fundsExpanded, setFundsExpanded] = useState<boolean>(activeSection === 'funds');
-    const isModelPortfolioPage = useLocation().pathname === ROUTE_PATHS.modelPortfolio;
+    const location = useLocation();
+    const isModelPortfolioPage = location.pathname === ROUTE_PATHS.modelPortfolio;
+    const stockHref = activeSection === 'stocks' && location.pathname.startsWith(ROUTE_PATHS.marketsStocks)
+        ? `${location.pathname}${location.search}`
+        : toMarketsStocks(DEFAULT_MARKET_INDEX);
+
+    const handleLinkClick = (event: ReactMouseEvent<HTMLAnchorElement>, action?: () => void) => {
+        if (
+            !action
+            || event.button !== 0
+            || event.metaKey
+            || event.ctrlKey
+            || event.shiftKey
+            || event.altKey
+        ) {
+            return;
+        }
+        event.preventDefault();
+        action();
+    };
 
     // Auto-open the submenu whenever the user is already on the funds section
     // (e.g. arriving via a fund detail URL), but allow manual collapse afterwards.
@@ -64,87 +93,97 @@ export default function MarketsNavigation({
         <>
             {/* Group 1 */}
             <div className="mn-menu-group">
-                <button
-                    type="button"
+                <Link
+                    to={toMarketsOverview()}
                     className={`mn-menu-item ${activeSection === 'markets' && !isModelPortfolioPage ? 'active' : ''}`}
                     title="Piyasalar"
-                    onClick={() => onSectionChange('markets')}
+                    onClick={(event) => handleLinkClick(event, () => onSectionChange('markets'))}
                 >
                     <div className="mn-item-main">
                         <Calendar size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Piyasalar</span>}
                     </div>
-                </button>
-                <button
-                    type="button"
+                </Link>
+                <Link
+                    to={stockHref}
                     className={`mn-menu-item ${activeSection === 'stocks' && !isModelPortfolioPage ? 'active' : ''}`}
                     title="Hisseler"
-                    onClick={() => onSectionChange('stocks')}
+                    onClick={(event) => handleLinkClick(event, () => onSectionChange('stocks'))}
                 >
                     <div className="mn-item-main">
                         <Layers size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Hisseler</span>}
                     </div>
-                </button>
+                </Link>
                 <div className={`mn-menu-subtree ${fundsExpanded ? 'is-open' : ''}`}>
-                    <button
-                        type="button"
-                        className={`mn-menu-item has-submenu ${activeSection === 'funds' && !isModelPortfolioPage ? 'active' : ''}`}
-                        title="Fonlar"
-                        aria-expanded={!collapsed && fundsExpanded}
-                        onClick={() => {
-                            if (collapsed) {
-                                onCollapsedChange(false);
-                                setFundsExpanded(true);
-                                return;
-                            }
-                            if (window.matchMedia('(max-width: 760px)').matches) {
-                                if (onFundSectionChange) {
-                                    onFundSectionChange('investment');
-                                } else {
-                                    onSectionChange('funds');
+                    <div className="mn-submenu-head">
+                        <Link
+                            to={toFunds()}
+                            className={`mn-menu-item mn-submenu-link ${activeSection === 'funds' && !isModelPortfolioPage ? 'active' : ''}`}
+                            title="Fonlar"
+                            onClick={(event) => {
+                                if (collapsed && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+                                    event.preventDefault();
+                                    onCollapsedChange(false);
+                                    setFundsExpanded(true);
+                                    return;
                                 }
-                                return;
-                            }
-                            setFundsExpanded((prev) => !prev);
-                        }}
-                    >
-                        <div className="mn-item-main">
-                            <Coins size={18} className="mn-icon" />
-                            {!collapsed && <span className="mn-text">Fonlar</span>}
-                        </div>
-                        {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
-                    </button>
+                                handleLinkClick(event, onFundSectionChange
+                                    ? () => onFundSectionChange('investment')
+                                    : () => onSectionChange('funds'));
+                            }}
+                        >
+                            <div className="mn-item-main">
+                                <Coins size={18} className="mn-icon" />
+                                {!collapsed && <span className="mn-text">Fonlar</span>}
+                            </div>
+                        </Link>
+                        {!collapsed && (
+                            <button
+                                type="button"
+                                className="mn-submenu-toggle"
+                                aria-label={fundsExpanded ? 'Fonlar alt menüsünü daralt' : 'Fonlar alt menüsünü genişlet'}
+                                aria-expanded={fundsExpanded}
+                                onClick={() => setFundsExpanded((prev) => !prev)}
+                            >
+                                <ChevronRight size={14} className="mn-chevron" />
+                            </button>
+                        )}
+                    </div>
                     {!collapsed && fundsExpanded && (
                         <div className="mn-submenu" aria-label="Fonlar alt menüsü">
-                            <button
-                                type="button"
+                            <Link
+                                to={toFunds()}
                                 className={`mn-submenu-item ${activeSection === 'funds' && activeFundSection === 'investment' ? 'active' : ''}`}
-                                onClick={() => (onFundSectionChange ? onFundSectionChange('investment') : onSectionChange('funds'))}
+                                onClick={(event) => handleLinkClick(event, onFundSectionChange
+                                    ? () => onFundSectionChange('investment')
+                                    : () => onSectionChange('funds'))}
                             >
                                 Yatırım Fonları
-                            </button>
-                            <button
-                                type="button"
+                            </Link>
+                            <Link
+                                to={toFundComparison()}
                                 className={`mn-submenu-item ${activeSection === 'funds' && activeFundSection === 'compare' ? 'active' : ''}`}
-                                onClick={() => (onFundSectionChange ? onFundSectionChange('compare') : onSectionChange('funds'))}
+                                onClick={(event) => handleLinkClick(event, onFundSectionChange
+                                    ? () => onFundSectionChange('compare')
+                                    : undefined)}
                             >
                                 Fon Karşılaştırma
-                            </button>
+                            </Link>
                         </div>
                     )}
                 </div>
-                <button
-                    type="button"
+                <Link
+                    to={toMarketsIndices()}
                     className={`mn-menu-item ${activeSection === 'indices' && !isModelPortfolioPage ? 'active' : ''}`}
                     title="Endeksler"
-                    onClick={() => onSectionChange('indices')}
+                    onClick={(event) => handleLinkClick(event, () => onSectionChange('indices'))}
                 >
                     <div className="mn-item-main">
                         <ListOrdered size={18} className="mn-icon" />
                         {!collapsed && <span className="mn-text">Endeksler</span>}
                     </div>
-                </button>
+                </Link>
                 <NavLink
                     to={toModelPortfolio()}
                     className={({ isActive }) => `mn-menu-item ${isActive ? 'active' : ''}`}

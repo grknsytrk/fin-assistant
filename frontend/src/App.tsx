@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { Sun, Moon } from 'lucide-react';
-import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import GlobalTickerSearch from './components/GlobalTickerSearch';
 import type { MarketsNavigationSection } from './components/MarketsNavigation';
 import {
@@ -453,20 +453,21 @@ function App() {
       {!isLandingPage && !isMarketsView && !isFundsView && !isStocksView && !isModelPortfolioView && (
         <header className="app-header">
           <div className="header-content">
-            <div
+            <Link
+              to={toMarketsOverview()}
               className="header-brand"
-              onClick={() => navigate(toMarketsOverview())}
-              style={{ cursor: 'pointer' }}
+              aria-label="Piyasa görünümüne git"
+              style={{ cursor: 'pointer', textDecoration: 'none' }}
             >
               <div className="logo-area">
                 {/* Removed RAG-Fin Terminal text as requested */}
               </div>
-            </div>
+            </Link>
 
             <div className="header-actions">
-              <button
+              <Link
+                to={toMarketsOverview()}
                 className="nav-tab"
-                onClick={() => navigate(toMarketsOverview())}
                 style={{
                   marginRight: '0.5rem',
                   padding: '0.4rem 1.2rem',
@@ -474,10 +475,11 @@ function App() {
                   border: '1px solid var(--surface-border)',
                   borderRadius: '99px',
                   cursor: 'pointer',
+                  textDecoration: 'none',
                 }}
               >
                 Piyasalar
-              </button>
+              </Link>
               <GlobalTickerSearch
                 currentTicker={currentTicker}
                 onSelectTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}

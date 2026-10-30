@@ -23,7 +23,7 @@ import {
     Trash2,
     X,
 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { apiClient } from '../api/client';
 import type {
     MarketStockRow,
@@ -1136,7 +1136,13 @@ export default function ModelPortfolioPage() {
                                                                     size="sm"
                                                                 />
                                                                 <div className="mp-stock-meta">
-                                                                    <span className="mp-ticker">{pos.symbol}</span>
+                                                                    <Link
+                                                                        to={toStockDetail(pos.symbol, DEFAULT_STOCK_TAB)}
+                                                                        className="mp-ticker"
+                                                                        onClick={(event) => event.stopPropagation()}
+                                                                    >
+                                                                        {pos.symbol}
+                                                                    </Link>
                                                                     <span className="mp-company-name" title={pos.sector ? `${pos.company_name} · ${pos.sector}` : pos.company_name}>
                                                                         {pos.company_name}
                                                                     </span>
@@ -1334,7 +1340,13 @@ export default function ModelPortfolioPage() {
                                                                     size="sm"
                                                                 />
                                                                 <div className="mp-stock-meta">
-                                                                    <span className="mp-ticker">{pos.symbol}</span>
+                                                                    <Link
+                                                                        to={toStockDetail(pos.symbol, DEFAULT_STOCK_TAB)}
+                                                                        className="mp-ticker"
+                                                                        onClick={(event) => event.stopPropagation()}
+                                                                    >
+                                                                        {pos.symbol}
+                                                                    </Link>
                                                                     <span className="mp-company-name">{pos.company_name}</span>
                                                                 </div>
                                                             </div>
@@ -1431,13 +1443,12 @@ export default function ModelPortfolioPage() {
                                                     />
                                                     <div className="mp-changelog-content">
                                                         <div className="mp-changelog-top">
-                                                            <button
-                                                                type="button"
+                                                            <Link
+                                                                to={toStockDetail(entry.symbol, DEFAULT_STOCK_TAB)}
                                                                 className="mp-changelog-ticker mp-mono"
-                                                                onClick={() => navigate(toStockDetail(entry.symbol, DEFAULT_STOCK_TAB))}
                                                             >
                                                                 {entry.symbol}
-                                                            </button>
+                                                            </Link>
                                                             {entry.company_name && (
                                                                 <span className="mp-changelog-company" title={entry.company_name}>
                                                                     {entry.company_name}
@@ -1470,7 +1481,6 @@ export default function ModelPortfolioPage() {
                     position={selectedPosition}
                     isAdmin={isAdminVerified}
                     onClose={() => setSelectedPositionId(null)}
-                    onOpenStockDetail={(sym) => navigate(toStockDetail(sym, DEFAULT_STOCK_TAB))}
                     onEdit={(pos) => {
                         document.querySelector<HTMLElement>('[data-dialog-return-focus]')?.focus();
                         setSelectedPositionId(null);
@@ -2223,7 +2233,6 @@ function ModelPortfolioThesisDrawer({
     position,
     isAdmin,
     onClose,
-    onOpenStockDetail,
     onEdit,
     onClosePosition,
     onDeletePosition,
@@ -2231,7 +2240,6 @@ function ModelPortfolioThesisDrawer({
     position: ModelPortfolioPosition;
     isAdmin: boolean;
     onClose: () => void;
-    onOpenStockDetail: (symbol: string) => void;
     onEdit: (pos: ModelPortfolioPosition) => void;
     onClosePosition: (pos: ModelPortfolioPosition) => void;
     onDeletePosition: (pos: ModelPortfolioPosition) => void;
@@ -2300,14 +2308,13 @@ function ModelPortfolioThesisDrawer({
                         </div>
                     </div>
                     <div className="mp-drawer-header-btns">
-                        <button
-                            type="button"
+                        <Link
+                            to={toStockDetail(position.symbol, DEFAULT_STOCK_TAB)}
                             className="mp-btn mp-btn-subtle"
-                            onClick={() => onOpenStockDetail(position.symbol)}
                         >
                             <span>Hisse Detayı</span>
                             <ExternalLink size={13} />
-                        </button>
+                        </Link>
                         <button type="button" className="mp-icon-btn" onClick={onClose} aria-label="Detay penceresini kapat">
                             <X size={18} />
                         </button>
