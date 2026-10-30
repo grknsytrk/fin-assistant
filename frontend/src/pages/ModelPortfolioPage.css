@@ -1150,13 +1150,18 @@
 .mp-active-table td:first-child {
     position: sticky;
     left: 0;
-    z-index: 1;
-    background: var(--surface-color);
+    z-index: 2;
+    background: #12141A;
     padding-left: 1rem;
 }
 
+.mp-active-table th:first-child {
+    z-index: 3;
+    background: #12141A;
+}
+
 .mp-active-table td:first-child {
-    box-shadow: 1px 0 0 var(--surface-border);
+    box-shadow: 2px 0 4px rgba(0, 0, 0, 0.4);
 }
 
 .mp-active-table tr:last-child td {
@@ -1164,11 +1169,21 @@
 }
 
 .mp-active-table .mp-row:hover td {
-    background: var(--surface-hover);
+    background: #181c24;
+}
+
+.mp-active-table .mp-row:hover td:first-child {
+    background: #181c24;
+    z-index: 2;
 }
 
 .mp-active-table .mp-row.is-selected td {
-    background: color-mix(in srgb, var(--accent-color) 10%, var(--surface-color));
+    background: #182236;
+}
+
+.mp-active-table .mp-row.is-selected td:first-child {
+    background: #182236;
+    z-index: 2;
 }
 
 /* Target price column */
@@ -1352,13 +1367,18 @@
 .mp-closed-table td:first-child {
     position: sticky;
     left: 0;
-    z-index: 1;
-    background: var(--surface-color);
+    z-index: 2;
+    background: #12141A;
     padding-left: 1rem;
 }
 
+.mp-closed-table th:first-child {
+    z-index: 3;
+    background: #12141A;
+}
+
 .mp-closed-table td:first-child {
-    box-shadow: 1px 0 0 var(--surface-border);
+    box-shadow: 2px 0 4px rgba(0, 0, 0, 0.4);
 }
 
 .mp-closed-table tr:last-child td {
@@ -1366,7 +1386,12 @@
 }
 
 .mp-closed-table .mp-row:hover td {
-    background: var(--surface-hover);
+    background: #181c24;
+}
+
+.mp-closed-table .mp-row:hover td:first-child {
+    background: #181c24;
+    z-index: 2;
 }
 
 /* Tab 3: Changelog Timeline */
@@ -2566,13 +2591,23 @@
     .mp-table td:first-child {
         position: sticky;
         left: 0;
-        z-index: 1;
-        background: var(--surface-color);
+        z-index: 2;
+        background: var(--surface-color, #12141A);
     }
 
     .mp-table th:first-child {
-        z-index: 2;
+        z-index: 3;
         background: #0a0c0f;
+    }
+
+    .mp-table .mp-row:hover td:first-child {
+        background: #181c24;
+        z-index: 2;
+    }
+
+    .mp-table .mp-row.is-selected td:first-child {
+        background: #182236;
+        z-index: 2;
     }
 }
 
