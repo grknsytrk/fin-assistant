@@ -40,6 +40,22 @@ const DEFAULT_ORDER: Partial<Record<RailTab, string[]>> = {
     fx: ['USD/TRY', 'EUR/TRY', 'GBP/TRY', 'CHF/TRY', 'AUD/TRY', 'CAD/TRY', 'JPY/TRY', 'EUR/USD', 'GBP/USD', 'USD/JPY']
 };
 
+// Panel her bölüm/menü değişiminde route ile birlikte yeniden mount oluyor.
+// Son başarılı yanıtları modül seviyesinde tutup ilk render'da kullanıyoruz;
+// böylece dönüşte iskelet yerine veri anında görünüyor ve canlı yenileme
+// döngüsü aynı veriyi arka planda sessizce tazeliyor.
+const railCache: {
+    global: MarketWatchGlobalResponse | null;
+    commodities: CommodityQuote[] | null;
+    fx: FxQuote[] | null;
+    stocks: Partial<Record<StockRailTab, MarketStocksResponse>>;
+} = {
+    global: null,
+    commodities: null,
+    fx: null,
+    stocks: {},
+};
+
 interface RailRow {
     symbol: string;
     label: string;
@@ -262,12 +278,12 @@ export default function MarketWatchRail({
         key: null,
         direction: null,
     });
-    const [globalPayload, setGlobalPayload] = useState<MarketWatchGlobalResponse | null>(null);
-    const [commodityRows, setCommodityRows] = useState<CommodityQuote[] | null>(null);
-    const [fxRows, setFxRows] = useState<FxQuote[] | null>(null);
-    const [xutumPayload, setXutumPayload] = useState<MarketStocksResponse | null>(null);
-    const [xu100Payload, setXu100Payload] = useState<MarketStocksResponse | null>(null);
-    const [xu030Payload, setXu030Payload] = useState<MarketStocksResponse | null>(null);
+    const [globalPayload, setGlobalPayload] = useState<MarketWatchGlobalResponse | null>(() => railCache.global);
+    const [commodityRows, setCommodityRows] = useState<CommodityQuote[] | null>(() => railCache.commodities);
+    const [fxRows, setFxRows] = useState<FxQuote[] | null>(() => railCache.fx);
+    const [xutumPayload, setXutumPayload] = useState<MarketStocksResponse | null>(() => railCache.stocks.xutum ?? null);
+    const [xu100Payload, setXu100Payload] = useState<MarketStocksResponse | null>(() => railCache.stocks.xu100 ?? null);
+    const [xu030Payload, setXu030Payload] = useState<MarketStocksResponse | null>(() => railCache.stocks.xu030 ?? null);
     const [loading, setLoading] = useState<Partial<Record<RailTab, boolean>>>({});
     const [errors, setErrors] = useState<Partial<Record<RailTab, string | null>>>({});
     const inFlightRef = useRef<Partial<Record<RailTab, boolean>>>({});
@@ -540,6 +556,7 @@ export default function MarketWatchRail({
         apiClient
             .marketWatchGlobal()
             .then((payload) => {
+                railCache.global = payload;
                 setGlobalPayload(payload);
                 setTabError('global', null);
             })
@@ -565,6 +582,7 @@ export default function MarketWatchRail({
         apiClient
             .marketCommodities()
             .then((payload) => {
+                railCache.commodities = payload.items || [];
                 setCommodityRows(payload.items || []);
                 setTabError('commodities', null);
             })
@@ -589,6 +607,7 @@ export default function MarketWatchRail({
         apiClient
             .marketFx()
             .then((payload) => {
+                railCache.fx = payload.items || [];
                 setFxRows(payload.items || []);
                 setTabError('fx', null);
             })
@@ -613,6 +632,7 @@ export default function MarketWatchRail({
         apiClient
             .marketStocks({ index: STOCK_TAB_TO_INDEX[tab], refresh: options?.refresh })
             .then((payload) => {
+                railCache.stocks[tab] = payload;
                 if (tab === 'xutum') setXutumPayload(payload);
                 else if (tab === 'xu100') setXu100Payload(payload);
                 else setXu030Payload(payload);
@@ -685,9 +705,16 @@ export default function MarketWatchRail({
     // Paylaşımlı bellek önbelleği / SSE delta güncellemelerini dinle
     useEffect(() => {
         return apiClient.subscribeMarketStocks((index, payload) => {
-            if (index === 'XUTUM') setXutumPayload(payload);
-            else if (index === 'XU100') setXu100Payload(payload);
-            else if (index === 'XU030') setXu030Payload(payload);
+            if (index === 'XUTUM') {
+                railCache.stocks.xutum = payload;
+                setXutumPayload(payload);
+            } else if (index === 'XU100') {
+                railCache.stocks.xu100 = payload;
+                setXu100Payload(payload);
+            } else if (index === 'XU030') {
+                railCache.stocks.xu030 = payload;
+                setXu030Payload(payload);
+            }
         });
     }, []);
 
