@@ -429,11 +429,43 @@ export default function MarketWatchRail({
 
     const stockQuoteRowsBySymbol = useMemo(() => {
         const rows = new Map<string, MarketStockRow>();
-        for (const row of stockQuoteRows) {
-            rows.set(normalizeWatchlistSymbol(row.symbol || row.company), row);
+        const consider = (row: MarketStockRow) => {
+            const symbol = normalizeWatchlistSymbol(row.symbol || row.company);
+            if (!symbol) return;
+
+            const current = rows.get(symbol);
+            if (!current) {
+                rows.set(symbol, row);
+                return;
+            }
+
+            const rowHasPrice = row.price != null && Number.isFinite(row.price) && row.price > 0;
+            const currentHasPrice = current.price != null && Number.isFinite(current.price) && current.price > 0;
+            const rowAsOf = Date.parse(row.price_as_of || '') || 0;
+            const currentAsOf = Date.parse(current.price_as_of || '') || 0;
+            if (rowHasPrice && (!currentHasPrice || rowAsOf >= currentAsOf)) {
+                rows.set(symbol, row);
+            } else if (!currentHasPrice && !rowHasPrice && row.change_pct != null && current.change_pct == null) {
+                rows.set(symbol, row);
+            }
+        };
+
+        // MarketWatchRail owns its live index snapshots. Reuse those quotes
+        // in the watchlist too; the parent page's table payload may not include
+        // the selected rail index (for example BIMAS in the XU030 tab).
+        for (const row of stockQuoteRows) consider(row);
+        for (const payload of [
+            railCache.stocks.xutum,
+            railCache.stocks.xu100,
+            railCache.stocks.xu030,
+            xutumPayload,
+            xu100Payload,
+            xu030Payload,
+        ]) {
+            for (const row of payload?.rows || []) consider(row);
         }
         return rows;
-    }, [stockQuoteRows]);
+    }, [stockQuoteRows, xutumPayload, xu100Payload, xu030Payload]);
 
     const stockCardItemsBySymbol = useMemo(() => {
         const rows = new Map<string, MarketStockCardItem>();
@@ -523,9 +555,10 @@ export default function MarketWatchRail({
             const normalizedSymbol = normalizeWatchlistSymbol(item.symbol);
             if (item.kind === 'stock') {
                 const stockRow = stockQuoteRowsBySymbol.get(normalizedSymbol);
-                if (stockRow?.price != null || stockRow?.change_pct != null) return fromStockRow(stockRow);
+                if (stockRow?.price != null) return fromStockRow(stockRow);
                 const stockCard = stockCardItemsBySymbol.get(normalizedSymbol);
                 if (stockCard?.price != null || stockCard?.change_pct != null) return fromStockCard(stockCard);
+                if (stockRow?.change_pct != null) return fromStockRow(stockRow);
                 const universeRow = stockRowsBySymbol.get(normalizedSymbol);
                 return universeRow ? fromStockRow(universeRow) : fallbackWatchlistRow(item);
             }

@@ -119,6 +119,11 @@ def _model_portfolio_comparison_series(
     start_date: date,
     end_date: date,
 ) -> List[Dict[str, Any]]:
+    # This request model is declared by the market router, not market_service.
+    # Import lazily so the router layer does not participate in module startup
+    # and create a circular import while the API routers are being registered.
+    from app.routers.market import MarketComparisonHistoryAsset
+
     handler = _index_comparison_history if kind == "index" else _stock_comparison_history
     asset = MarketComparisonHistoryAsset(
         id=f"{kind}:{symbol}",
