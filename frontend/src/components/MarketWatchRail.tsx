@@ -93,6 +93,23 @@ const RAIL_SORT_COLUMNS: Array<{ key: RailSortKey; label: string; align?: 'left'
     { key: 'changePct', label: 'Değişim', align: 'right' },
 ];
 
+// Sekme seçimi panelin mount ömründen uzun yaşamalı: menü/route değişiminde
+// ve sayfa yenilendiğinde son bakılan sekmeye dönülür. Oturum kapsamı
+// bilinçli; haftalar sonra eski bir sekmeye düşmek istemiyoruz.
+const RAIL_TAB_STORAGE_KEY = 'rag_fin_market_rail_tab';
+
+function readStoredRailTab(): RailTab {
+    try {
+        const raw = window.sessionStorage.getItem(RAIL_TAB_STORAGE_KEY);
+        if (raw && RAIL_TABS.some((tab) => tab.id === raw)) {
+            return raw as RailTab;
+        }
+    } catch {
+        // sessionStorage may be unavailable in private or restricted contexts.
+    }
+    return 'global';
+}
+
 function formatRailPrice(value: number | null): string {
     if (value == null || !Number.isFinite(value)) return '-';
     const abs = Math.abs(value);
@@ -273,7 +290,7 @@ export default function MarketWatchRail({
     ));
     const panelCollapsed = mobilePanelOpen === undefined ? isCollapsed : !mobilePanelOpen;
     const [activeTool, setActiveTool] = useState<'markets' | 'watchlist' | 'news' | 'history' | 'portfolio'>('markets');
-    const [activeTab, setActiveTab] = useState<RailTab>('global');
+    const [activeTab, setActiveTab] = useState<RailTab>(readStoredRailTab);
     const [sort, setSort] = useState<{ key: RailSortKey | null; direction: RailSortDirection | null }>({
         key: null,
         direction: null,
@@ -287,6 +304,14 @@ export default function MarketWatchRail({
     const [loading, setLoading] = useState<Partial<Record<RailTab, boolean>>>({});
     const [errors, setErrors] = useState<Partial<Record<RailTab, string | null>>>({});
     const inFlightRef = useRef<Partial<Record<RailTab, boolean>>>({});
+
+    useEffect(() => {
+        try {
+            window.sessionStorage.setItem(RAIL_TAB_STORAGE_KEY, activeTab);
+        } catch {
+            // Best-effort; the panel still works when storage is blocked.
+        }
+    }, [activeTab]);
 
     const [watchlistSearch, setWatchlistSearch] = useState('');
     const watchlist = useWatchlist();
