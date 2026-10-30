@@ -41,6 +41,7 @@ _CACHE_NAMESPACE_ENV = "RAGFIN_CACHE_NAMESPACE"
 _REDIS_COOLDOWN_SECONDS_ENV = "RAGFIN_REDIS_COOLDOWN_SECONDS"
 _DEFAULT_NAMESPACE = "ragfin"
 _DEFAULT_REDIS_COOLDOWN_SECONDS = 120
+_DEFAULT_REDIS_QUOTA_RETRY_SECONDS = 60 * 60
 
 _CACHE_METRIC_FAMILIES = (
     "kap_flow_store",
@@ -265,6 +266,8 @@ class RedisCache(CacheBackend):
         self._circuit_open = False
         self._cooldown_until = 0.0
         self._half_open_probe = False
+        self._quota_limited = False
+        self._quota_limit_logged = False
         # A small in-memory fallback handles transient Redis blips so call
         # sites still see useful data while we wait for the network to recover.
         self._fallback = InMemoryCache()
@@ -275,9 +278,8 @@ class RedisCache(CacheBackend):
             family: {field: 0 for field in _CACHE_METRIC_FIELDS}
             for family in _CACHE_METRIC_FAMILIES
         }
-        # Probe once up front. A transient outage or quota error should keep
-        # Redis configured but open the circuit, so the process can retry
-        # after cooldown instead of permanently switching to memory.
+        # Probe once up front. Transient errors retry after a short cooldown;
+        # Upstash plan-limit errors retry less often to avoid filling logs.
         self._record_metrics("redis-health:ping", other_remote_attempts=1)
         try:
             self._client.ping()
@@ -320,6 +322,8 @@ class RedisCache(CacheBackend):
                 "open": self._circuit_open,
                 "cooldown_remaining_seconds": int(math.ceil(remaining)),
                 "cooldown_seconds": self._cooldown_seconds,
+                "quota_limited": self._quota_limited,
+                "quota_retry_seconds": _DEFAULT_REDIS_QUOTA_RETRY_SECONDS,
                 "half_open_probe_in_flight": self._half_open_probe,
             }
 
@@ -336,15 +340,27 @@ class RedisCache(CacheBackend):
             self._half_open_probe = True
             return True
 
-    def _remember_error(self, exc: Exception) -> bool:
+    def _remember_error(self, exc: Exception) -> Tuple[bool, bool]:
         now = time.monotonic()
+        message = str(exc).casefold()
+        is_plan_limit = "fixed plan limits" in message
         with self._circuit_lock:
             already_cooling_down = self._circuit_open and now < self._cooldown_until
             self.last_error = str(exc)
+            if is_plan_limit:
+                self._quota_limited = True
+            if self._quota_limited:
+                retry_seconds = _DEFAULT_REDIS_QUOTA_RETRY_SECONDS
+            else:
+                retry_seconds = self._cooldown_seconds
             self._circuit_open = True
-            self._cooldown_until = now + self._cooldown_seconds
+            self._cooldown_until = now + retry_seconds
             self._half_open_probe = False
-        return not already_cooling_down
+            if self._quota_limited:
+                should_log = is_plan_limit and not self._quota_limit_logged
+                self._quota_limit_logged = True
+                return False, should_log
+        return not already_cooling_down, False
 
     def _remember_success(self) -> None:
         with self._circuit_lock:
@@ -352,9 +368,19 @@ class RedisCache(CacheBackend):
             self._circuit_open = False
             self._cooldown_until = 0.0
             self._half_open_probe = False
+            self._quota_limited = False
 
     def _log_remote_error(self, operation: str, key: str, exc: Exception) -> None:
-        if self._remember_error(exc):
+        should_warn, should_log_quota = self._remember_error(exc)
+        if should_log_quota:
+            logger.info(
+                "redis cache %s hit an Upstash plan limit for key_family=%s; "
+                "using in-memory fallback and retrying in %d seconds",
+                operation,
+                _cache_key_family(key),
+                _DEFAULT_REDIS_QUOTA_RETRY_SECONDS,
+            )
+        elif should_warn:
             logger.warning(
                 "redis cache %s failed for key_family=%s; cooldown_seconds=%d: %s",
                 operation,
