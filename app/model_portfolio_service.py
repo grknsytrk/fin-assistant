@@ -17,7 +17,7 @@ import secrets
 import threading
 import time
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -1076,15 +1076,15 @@ def build_model_portfolio_performance_payload(
         }
 
     entry_dates: List[date] = []
-    for pos in active_positions:
+    for pos in state["positions"]:
         try:
-            entry_dates.append(date.fromisoformat(str(pos.get("entry_date"))[:10]))
-        except ValueError:
+            raw_entry_date = pos.get("entry_date") or pos.get("created_at")
+            entry_dates.append(date.fromisoformat(str(raw_entry_date)[:10]))
+        except (TypeError, ValueError):
             continue
-    earliest_entry = min(entry_dates) if entry_dates else (today - timedelta(days=365))
-    canonical_start = min(earliest_entry, today - timedelta(days=365))
+    canonical_start = min(entry_dates) if entry_dates else today
 
-    cache_key = f"api:model-portfolio:performance:v1:ver={version}:day={today_iso}"
+    cache_key = f"api:model-portfolio:performance:v2:ver={version}:day={today_iso}"
     now_ts = time.time()
 
     mem_entry = _MODEL_PORTFOLIO_PERF_MEMORY_CACHE.get(cache_key)
@@ -1197,13 +1197,9 @@ def build_model_portfolio_performance_payload(
                 last_price[sym] = sym_val
             cur_sym = last_price.get(sym)
 
-            # A stock contributes from its entry_date onwards (or across the chart if already active)
-            if d_str >= entry_d and idx > 0 and prev_sym is not None and cur_sym is not None and prev_sym > 0:
-                stock_daily_ret = (cur_sym - prev_sym) / prev_sym
-                weighted_daily_ret += weight * stock_daily_ret
-                active_weight_sum += weight
-            elif d_str < entry_d and idx > 0 and prev_sym is not None and cur_sym is not None and prev_sym > 0:
-                # Before earliest entry date (e.g., 1Y lookback), show hypothetical current basket trajectory
+            # Start counting returns on the day after entry so the entry day's
+            # move from the previous close is not attributed to the portfolio.
+            if d_str > entry_d and idx > 0 and prev_sym is not None and cur_sym is not None and prev_sym > 0:
                 stock_daily_ret = (cur_sym - prev_sym) / prev_sym
                 weighted_daily_ret += weight * stock_daily_ret
                 active_weight_sum += weight

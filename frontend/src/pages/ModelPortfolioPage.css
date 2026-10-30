@@ -396,6 +396,59 @@
     font-size: 0.76rem;
 }
 
+.mp-chart-measure-hint {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    min-height: 1rem;
+    margin: -0.1rem 0 0.35rem;
+    color: var(--text-muted);
+    font-size: 0.67rem;
+}
+
+.mp-chart-measure-hint button {
+    flex: 0 0 auto;
+    border: 0;
+    padding: 0;
+    background: none;
+    color: var(--accent-color);
+    font: inherit;
+    cursor: pointer;
+}
+
+.mp-chart-measure-hint button:hover {
+    color: var(--text-primary);
+}
+
+.mp-chart-measure-summary {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.35rem 1rem;
+    margin: 0 0 0.45rem;
+    padding: 0.48rem 0.65rem;
+    border-left: 2px solid var(--accent-color);
+    border-radius: 0 var(--border-radius) var(--border-radius) 0;
+    background: color-mix(in srgb, var(--accent-color) 8%, transparent);
+    font-size: 0.72rem;
+}
+
+.mp-measure-result {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.38rem;
+}
+
+.mp-measure-result > span {
+    color: var(--text-muted);
+}
+
+.mp-measure-result strong {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+}
+
 .mp-legend-item {
     display: inline-flex;
     align-items: center;
@@ -438,6 +491,7 @@
     display: block;
     cursor: crosshair;
     user-select: none;
+    touch-action: none;
 }
 
 .mp-chart-grid {
@@ -473,6 +527,23 @@
     stroke: rgba(255, 255, 255, 0.18);
     stroke-width: 1;
     stroke-dasharray: 2 2;
+}
+
+.mp-chart-selection-band {
+    fill: var(--accent-color);
+    fill-opacity: 0.08;
+    pointer-events: none;
+}
+
+.mp-chart-measure-markers {
+    pointer-events: none;
+}
+
+.mp-chart-measure-markers > line {
+    stroke: color-mix(in srgb, var(--text-primary) 42%, transparent);
+    stroke-width: 1;
+    stroke-dasharray: 3 4;
+    vector-effect: non-scaling-stroke;
 }
 
 .mp-dot-portfolio {

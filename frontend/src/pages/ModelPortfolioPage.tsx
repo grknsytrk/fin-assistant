@@ -412,8 +412,9 @@ function sliceAndNormalizePerformance(
         cutoffIso = inceptionDate;
     }
 
-    const filtered = points.filter((p) => p.date >= cutoffIso);
-    const working = filtered.length >= 2 ? filtered : points;
+    if (inceptionDate && inceptionDate > cutoffIso) cutoffIso = inceptionDate;
+    const working = points.filter((p) => p.date >= cutoffIso);
+    if (!working.length) return [];
     const basePort = working[0].portfolio_value || 100;
     const baseXu = working[0].xu100_value || 100;
 
@@ -884,10 +885,10 @@ export default function ModelPortfolioPage() {
                             <div className="mp-panel mp-chart-panel">
                                 <div className="mp-panel-header">
                                     <div>
-                                        <span className="mp-panel-kicker">BUGÜNKÜ AKTİF SEPETİN GEÇMİŞ SİMÜLASYONU</span>
+                                        <span className="mp-panel-kicker">AKTİF MODEL PORTFÖYÜN GEÇMİŞ PERFORMANSI</span>
                                         <h2 className="mp-panel-title">Aktif Sepet vs. BIST 100 (100 ₺ Bazlı)</h2>
                                         <p className="mp-chart-note">
-                                            Bugünkü aktif hisseler ve ağırlıklarıyla hesaplanır; kapanmış pozisyonları ve geçmiş ağırlık değişikliklerini içermez. Başlangıç tarihi erişilebilir fiyat geçmişiyle sınırlıdır.
+                                            Bugünkü aktif hisseler ve ağırlıklarıyla hesaplanır; kapanmış pozisyonları ve geçmiş ağırlık değişikliklerini içermez. Grafik portföyün ilk giriş tarihinden başlar.
                                         </p>
                                     </div>
                                     <div className="mp-range-tabs" role="tablist" aria-label="Grafik periyodu">
@@ -1577,6 +1578,15 @@ function ModelPortfolioPerformanceChart({
     hoverIndex: number | null;
     onHoverIndexChange: (idx: number | null) => void;
 }) {
+    const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
+    const [selectedMeasureRange, setSelectedMeasureRange] = useState<{ start: number; end: number } | null>(null);
+    const pointWindowKey = `${points.length}:${points[0]?.date || ''}:${points[points.length - 1]?.date || ''}`;
+
+    useEffect(() => {
+        setMeasureAnchorIndex(null);
+        setSelectedMeasureRange(null);
+    }, [pointWindowKey]);
+
     const width = 760;
     const height = 270;
     const padLeft = 52;
@@ -1636,6 +1646,25 @@ function ModelPortfolioPerformanceChart({
         : points.length - 1;
     const activePt = points[activeIdx];
 
+    const dragMeasureRange = measureAnchorIndex != null && activeIdx !== measureAnchorIndex
+        ? { start: Math.min(measureAnchorIndex, activeIdx), end: Math.max(measureAnchorIndex, activeIdx) }
+        : null;
+    const visibleMeasureRange = dragMeasureRange || selectedMeasureRange;
+    const measureStartPt = visibleMeasureRange ? points[visibleMeasureRange.start] : null;
+    const measureEndPt = visibleMeasureRange ? points[visibleMeasureRange.end] : null;
+    const measurePortfolioReturn = measureStartPt && measureEndPt && measureStartPt.portfolio_value !== 0
+        ? ((measureEndPt.portfolio_value / measureStartPt.portfolio_value) - 1) * 100
+        : null;
+    const measureXu100Return = measureStartPt && measureEndPt && measureStartPt.xu100_value !== 0
+        ? ((measureEndPt.xu100_value / measureStartPt.xu100_value) - 1) * 100
+        : null;
+    const measureRelativeReturn = compoundAlpha(measurePortfolioReturn, measureXu100Return);
+    const formatMeasureDelta = (end: number, start: number) => {
+        const delta = end - start;
+        const sign = delta > 0 ? '+' : '';
+        return `${sign}${delta.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₺`;
+    };
+
     const handlePointerMove = (e: ReactPointerEvent<SVGSVGElement>) => {
         const rect = e.currentTarget.getBoundingClientRect();
         if (rect.width <= 0) return;
@@ -1645,7 +1674,68 @@ function ModelPortfolioPerformanceChart({
         onHoverIndexChange(idx);
     };
 
+    const handlePointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        e.preventDefault();
+        const rect = e.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0) return;
+        const relX = ((e.clientX - rect.left) / rect.width) * width;
+        const ratio = Math.max(0, Math.min(1, (relX - padLeft) / plotW));
+        const idx = Math.round(ratio * (points.length - 1));
+        setSelectedMeasureRange(null);
+        setMeasureAnchorIndex(idx);
+        onHoverIndexChange(idx);
+        e.currentTarget.setPointerCapture?.(e.pointerId);
+    };
+
+    const finishPointerMeasure = (e: ReactPointerEvent<SVGSVGElement>, commit: boolean) => {
+        if (commit && measureAnchorIndex != null) {
+            const rect = e.currentTarget.getBoundingClientRect();
+            if (rect.width > 0) {
+                const relX = ((e.clientX - rect.left) / rect.width) * width;
+                const ratio = Math.max(0, Math.min(1, (relX - padLeft) / plotW));
+                const endIndex = Math.round(ratio * (points.length - 1));
+                onHoverIndexChange(endIndex);
+                if (endIndex !== measureAnchorIndex) {
+                    setSelectedMeasureRange({
+                        start: Math.min(measureAnchorIndex, endIndex),
+                        end: Math.max(measureAnchorIndex, endIndex),
+                    });
+                }
+            }
+        }
+        setMeasureAnchorIndex(null);
+        try {
+            if (e.currentTarget.hasPointerCapture?.(e.pointerId)) {
+                e.currentTarget.releasePointerCapture(e.pointerId);
+            }
+        } catch {
+            // Ignore release errors when capture has already ended.
+        }
+    };
+
     const handleChartKeyDown = (e: ReactKeyboardEvent<SVGSVGElement>) => {
+        if (e.key === 'Escape') {
+            setMeasureAnchorIndex(null);
+            setSelectedMeasureRange(null);
+            return;
+        }
+        if (e.key === ' ' || e.key === 'Enter') {
+            e.preventDefault();
+            if (measureAnchorIndex == null) {
+                setSelectedMeasureRange(null);
+                setMeasureAnchorIndex(activeIdx);
+            } else {
+                if (activeIdx !== measureAnchorIndex) {
+                    setSelectedMeasureRange({
+                        start: Math.min(measureAnchorIndex, activeIdx),
+                        end: Math.max(measureAnchorIndex, activeIdx),
+                    });
+                }
+                setMeasureAnchorIndex(null);
+            }
+            return;
+        }
         if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
             e.preventDefault();
             const current = hoverIndex ?? points.length - 1;
@@ -1686,14 +1776,53 @@ function ModelPortfolioPerformanceChart({
                 </div>
             </div>
 
+            <div className="mp-chart-measure-hint">
+                <span>
+                    {visibleMeasureRange && measureStartPt && measureEndPt
+                        ? `${formatDateTR(measureStartPt.date)} → ${formatDateTR(measureEndPt.date)}`
+                        : 'İki nokta arasındaki değişimi görmek için grafikte sürükleyin.'}
+                </span>
+                {selectedMeasureRange && (
+                    <button type="button" onClick={() => setSelectedMeasureRange(null)}>
+                        Ölçümü temizle
+                    </button>
+                )}
+            </div>
+
+            {visibleMeasureRange && measureStartPt && measureEndPt && (
+                <div className="mp-chart-measure-summary" role="status" aria-live="polite">
+                    <span className="mp-measure-result">
+                        <span>Sepet</span>
+                        <strong className={toneClass(measurePortfolioReturn)}>
+                            {formatMeasureDelta(measureEndPt.portfolio_value, measureStartPt.portfolio_value)} · {formatPct(measurePortfolioReturn)}
+                        </strong>
+                    </span>
+                    <span className="mp-measure-result">
+                        <span>XU100</span>
+                        <strong className={toneClass(measureXu100Return)}>
+                            {formatMeasureDelta(measureEndPt.xu100_value, measureStartPt.xu100_value)} · {formatPct(measureXu100Return)}
+                        </strong>
+                    </span>
+                    <span className="mp-measure-result">
+                        <span>Rölatif alfa</span>
+                        <strong className={toneClass(measureRelativeReturn)}>{formatPct(measureRelativeReturn)}</strong>
+                    </span>
+                </div>
+            )}
+
             <svg
                 className="mp-perf-svg"
                 viewBox={`0 0 ${width} ${height}`}
                 role="group"
-                aria-label="Portföy ve XU100 performans grafiği. Ok tuşlarıyla tarihler arasında gezinin."
+                aria-label="Portföy ve XU100 performans grafiği. İki tarih arasındaki değişimi görmek için grafikte sürükleyin; klavyede ok tuşlarıyla ilerleyip boşluk veya Enter ile başlangıç ve bitiş noktalarını seçin. Escape ölçümü temizler."
                 tabIndex={0}
                 onPointerMove={handlePointerMove}
-                onPointerLeave={() => onHoverIndexChange(null)}
+                onPointerDown={handlePointerDown}
+                onPointerUp={(e) => finishPointerMeasure(e, true)}
+                onPointerCancel={(e) => finishPointerMeasure(e, false)}
+                onPointerLeave={() => {
+                    if (measureAnchorIndex == null) onHoverIndexChange(null);
+                }}
                 onKeyDown={handleChartKeyDown}
             >
                 <title>Portföy ve BIST 100 performansı</title>
@@ -1730,6 +1859,16 @@ function ModelPortfolioPerformanceChart({
                     />
                 )}
 
+                {visibleMeasureRange && (
+                    <rect
+                        x={toX(visibleMeasureRange.start)}
+                        y={padTop}
+                        width={Math.max(1, toX(visibleMeasureRange.end) - toX(visibleMeasureRange.start))}
+                        height={plotH}
+                        className="mp-chart-selection-band"
+                    />
+                )}
+
                 <path d={portArea} fill="url(#mpPortFill)" />
                 <path d={xuPath} fill="none" className="mp-line-xu100" />
                 <path d={portPath} fill="none" className="mp-line-portfolio" />
@@ -1754,6 +1893,17 @@ function ModelPortfolioPerformanceChart({
                     r="4.5"
                     className="mp-dot-portfolio"
                 />
+
+                {visibleMeasureRange && measureStartPt && measureEndPt && (
+                    <g className="mp-chart-measure-markers">
+                        <line x1={toX(visibleMeasureRange.start)} y1={padTop} x2={toX(visibleMeasureRange.start)} y2={padTop + plotH} />
+                        <line x1={toX(visibleMeasureRange.end)} y1={padTop} x2={toX(visibleMeasureRange.end)} y2={padTop + plotH} />
+                        <circle cx={toX(visibleMeasureRange.start)} cy={toY(measureStartPt.portfolio_value)} r="4" className="mp-dot-portfolio" />
+                        <circle cx={toX(visibleMeasureRange.end)} cy={toY(measureEndPt.portfolio_value)} r="4" className="mp-dot-portfolio" />
+                        <circle cx={toX(visibleMeasureRange.start)} cy={toY(measureStartPt.xu100_value)} r="3.5" className="mp-dot-xu100" />
+                        <circle cx={toX(visibleMeasureRange.end)} cy={toY(measureEndPt.xu100_value)} r="3.5" className="mp-dot-xu100" />
+                    </g>
+                )}
 
                 {/* Start / Middle / End X labels */}
                 <text x={padLeft} y={height - 8} textAnchor="start" className="mp-chart-axis-text">
