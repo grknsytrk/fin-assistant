@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import threading
+
 from app.api_runtime import *
 from app.kap_financials import *
 from app.kap_service import *
@@ -400,6 +404,7 @@ _MARKET_STOCK_CARD_CHART_CACHE: Dict[str, Any] = {}
 _MARKET_STOCK_CARD_CHART_CACHE_TTL = 45
 
 _MARKET_STOCK_CARD_LIMIT = 12
+_MARKET_STOCK_CARD_CHART_MAX_WORKERS = 6
 
 _MARKET_STOCK_CARDS_QUICK_RESPONSE_CACHE_TTL = int(
     os.getenv("RAGFIN_MARKET_STOCK_CARDS_QUICK_RESPONSE_CACHE_TTL_SECONDS", "3")
@@ -441,6 +446,8 @@ _ISYATIRIM_CACHE_TTL = 900
 _ISYATIRIM_BASIC_SUMMARY_CACHE: Dict[str, Any] = {}
 
 _ISYATIRIM_BASIC_SUMMARY_CACHE_TTL = 60
+_ISYATIRIM_BASIC_SUMMARY_PERSIST_LOCK = threading.Lock()
+_ISYATIRIM_BASIC_SUMMARY_PERSISTED_SIGNATURES: Dict[str, str] = {}
 
 _MARKET_STOCK_INDEX_ORDER = ["XUTUM", "XU100", "XU030"]
 
@@ -2437,10 +2444,23 @@ def _market_stock_cards_payload(
     return_base_map = _fetch_stock_return_bases_bulk(normalized_symbols)
     instrument_map = get_instruments(CONFIG.paths.processed_dir, "stock", normalized_symbols)
 
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(
+        max_workers=min(_MARKET_STOCK_CARD_CHART_MAX_WORKERS, len(normalized_symbols))
+    ) as pool:
+        intraday_results = list(
+            pool.map(
+                lambda symbol: _fetch_stock_card_intraday(symbol, force_refresh=force_refresh),
+                normalized_symbols,
+            )
+        )
+    intraday_by_symbol = dict(zip(normalized_symbols, intraday_results))
+
     items: List[Dict[str, Any]] = []
     for symbol in normalized_symbols:
         quote = price_map.get(symbol, {})
-        intraday = _fetch_stock_card_intraday(symbol, force_refresh=force_refresh)
+        intraday = intraday_by_symbol[symbol]
         cached_meta = _load_cached_kap_market_metadata(cache_dir, symbol)
         instrument = instrument_map.get(symbol)
         company_name = str((instrument or {}).get("name") or cached_meta.get("company_title") or "").strip() or symbol
@@ -2669,7 +2689,7 @@ def _fetch_isyatirim_basic_summary_map() -> Dict[str, Dict[str, Any]]:
         items = dict(shared_cached.get("items") or {})
         _ISYATIRIM_BASIC_SUMMARY_CACHE["payload"] = {"_ts": now, "items": items}
         try:
-            upsert_provider_fundamentals_bulk(CONFIG.paths.processed_dir, items)
+            _persist_isyatirim_basic_summary_if_changed(items)
         except Exception:
             LOGGER.exception("shared İş Yatırım fundamentals could not be persisted")
         return items
@@ -2692,10 +2712,30 @@ def _fetch_isyatirim_basic_summary_map() -> Dict[str, Dict[str, Any]]:
     _ISYATIRIM_BASIC_SUMMARY_CACHE["payload"] = {"_ts": now, "items": items}
     _shared_cache_set("api:isyatirim-basic-summary:v2", {"items": items}, _ISYATIRIM_BASIC_SUMMARY_CACHE_TTL)
     try:
-        upsert_provider_fundamentals_bulk(CONFIG.paths.processed_dir, items)
+        _persist_isyatirim_basic_summary_if_changed(items)
     except Exception:
         LOGGER.exception("İş Yatırım fundamentals could not be persisted")
     return items
+
+def _persist_isyatirim_basic_summary_if_changed(items: Dict[str, Dict[str, Any]]) -> None:
+    """Persist each distinct provider summary once per process and data directory."""
+
+    signature_payload = json.dumps(
+        items,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    signature = hashlib.sha256(signature_payload.encode("utf-8")).hexdigest()
+    processed_dir = CONFIG.paths.processed_dir
+    persistence_scope = str(processed_dir.resolve())
+
+    with _ISYATIRIM_BASIC_SUMMARY_PERSIST_LOCK:
+        if _ISYATIRIM_BASIC_SUMMARY_PERSISTED_SIGNATURES.get(persistence_scope) == signature:
+            return
+        upsert_provider_fundamentals_bulk(processed_dir, items)
+        _ISYATIRIM_BASIC_SUMMARY_PERSISTED_SIGNATURES[persistence_scope] = signature
 
 def _extract_isyatirim_historical_averages(html_text: str, symbol: str) -> Dict[str, Any]:
     table_match = re.search(

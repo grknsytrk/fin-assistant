@@ -52,6 +52,7 @@ def _reset_flow_state(monkeypatch: pytest.MonkeyPatch) -> None:
     api_module._STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE.clear()
     api_module._FUND_HOLDING_SECTOR_MAP_CACHE.clear()
     api_module._ISYATIRIM_BASIC_SUMMARY_CACHE.clear()
+    api_module._ISYATIRIM_BASIC_SUMMARY_PERSISTED_SIGNATURES.clear()
     api_module._GEFAS_GYF_QUOTE_CACHE.clear()
     api_module._FOREIGN_HOLDING_QUOTE_CACHE.clear()
     api_module._FUND_SNAPSHOT_ROW_MAP_CACHE.clear()
@@ -5193,6 +5194,76 @@ def test_extract_isyatirim_basic_summary_map_parses_market_caps() -> None:
     ) == 20.0
 
 
+def test_isyatirim_summary_persists_once_per_distinct_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    current_payload = [{"AAA": {"market_cap": 100.0, "sector": "Enerji"}}]
+    persisted = []
+    monkeypatch.setattr(api_module, "_shared_cache_get_dict", lambda _key: {"items": current_payload[0]})
+    monkeypatch.setattr(api_module, "_shared_cache_set", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        api_module,
+        "upsert_provider_fundamentals_bulk",
+        lambda _processed_dir, items: persisted.append(dict(items)),
+    )
+
+    first = api_module._fetch_isyatirim_basic_summary_map()
+    api_module._ISYATIRIM_BASIC_SUMMARY_CACHE.clear()
+    second = api_module._fetch_isyatirim_basic_summary_map()
+    current_payload[0] = {"AAA": {"market_cap": 110.0, "sector": "Enerji"}}
+    api_module._ISYATIRIM_BASIC_SUMMARY_CACHE.clear()
+    changed = api_module._fetch_isyatirim_basic_summary_map()
+
+    assert first == second == {"AAA": {"market_cap": 100.0, "sector": "Enerji"}}
+    assert changed == {"AAA": {"market_cap": 110.0, "sector": "Enerji"}}
+    assert persisted == [first, changed]
+
+
+def test_isyatirim_summary_persistence_retries_after_database_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    items = {"AAA": {"market_cap": 100.0}}
+    upsert_attempts = []
+    monkeypatch.setattr(api_module, "_shared_cache_get_dict", lambda _key: {"items": items})
+    monkeypatch.setattr(api_module, "_shared_cache_set", lambda *_args, **_kwargs: None)
+
+    def flaky_upsert(_processed_dir, _items):
+        upsert_attempts.append(True)
+        if len(upsert_attempts) == 1:
+            raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(api_module, "upsert_provider_fundamentals_bulk", flaky_upsert)
+
+    assert api_module._fetch_isyatirim_basic_summary_map() == items
+    api_module._ISYATIRIM_BASIC_SUMMARY_CACHE.clear()
+    assert api_module._fetch_isyatirim_basic_summary_map() == items
+
+    assert len(upsert_attempts) == 2
+
+
+def test_isyatirim_summary_concurrent_persistence_is_deduplicated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    items = {"AAA": {"market_cap": 100.0}}
+    upsert_attempts = []
+    attempts_lock = threading.Lock()
+    start_barrier = threading.Barrier(8)
+
+    def slow_upsert(_processed_dir, _items):
+        with attempts_lock:
+            upsert_attempts.append(True)
+        time.sleep(0.02)
+
+    monkeypatch.setattr(api_module, "upsert_provider_fundamentals_bulk", slow_upsert)
+
+    def persist_once(_index: int) -> None:
+        start_barrier.wait(timeout=2)
+        api_module._persist_isyatirim_basic_summary_if_changed(items)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(persist_once, range(8)))
+
+    assert len(upsert_attempts) == 1
+
+
 def test_index_weight_inputs_use_isyatirim_fdpo_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api_module, "_latest_share_count_from_kap_cache", lambda _symbol: None)
     monkeypatch.setattr(
@@ -5720,6 +5791,65 @@ def test_market_stock_cards_returns_quotes_and_line_points(monkeypatch: pytest.M
     assert payload["items"][0]["return_1w_pct"] == -0.65
     assert payload["items"][0]["return_1m_pct"] == 11.76
     assert payload["items"][0]["line_points"][1]["close"] == 760.0
+
+
+def test_full_stock_cards_fetch_charts_concurrently_with_bounded_workers_and_stable_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    symbols = [f"S{index:02d}" for index in range(12)]
+    barrier = threading.Barrier(6)
+    active = 0
+    max_active = 0
+    active_lock = threading.Lock()
+    calls = []
+    refresh_values = []
+
+    monkeypatch.setattr(api_module, "_shared_cache_get_dict", lambda _key: None)
+    monkeypatch.setattr(api_module, "_shared_cache_set", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api_module, "_fetch_market_price_map", lambda requested: {symbol: {} for symbol in requested})
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: {})
+    monkeypatch.setattr(api_module, "_fetch_stock_return_bases_bulk", lambda _requested: {})
+    monkeypatch.setattr(api_module, "get_instruments", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(api_module, "_load_cached_kap_market_metadata", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(api_module, "_resolve_market_card_valuation", lambda *_args, **_kwargs: {})
+
+    def fake_intraday(symbol: str, *, force_refresh: bool = False) -> Dict[str, Any]:
+        nonlocal active, max_active
+        with active_lock:
+            active += 1
+            max_active = max(max_active, active)
+            calls.append(symbol)
+            refresh_values.append(force_refresh)
+        try:
+            barrier.wait(timeout=2)
+        finally:
+            with active_lock:
+                active -= 1
+        if symbol == "S03":
+            return {"line_points": [], "error": "chart_unavailable", "yahoo_symbol": f"{symbol}.IS"}
+        return {
+            "line_points": [{"time": "2026-10-31T10:00:00+00:00", "close": 100.0}],
+            "price": 100.0,
+            "error": None,
+            "yahoo_symbol": f"{symbol}.IS",
+            "session_status": "closed",
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_stock_card_intraday", fake_intraday)
+
+    payload = api_module._market_stock_cards_payload(
+        symbols=",".join(symbols),
+        force_refresh=True,
+        tier="full",
+    )
+
+    assert [item["symbol"] for item in payload["items"]] == symbols
+    assert sorted(calls) == symbols
+    assert len(calls) == len(symbols)
+    assert set(refresh_values) == {True}
+    assert 2 <= max_active <= 6
+    assert payload["items"][3]["error"] == "chart_unavailable"
+    assert payload["items"][4]["error"] is None
 
 
 def test_market_stock_cards_quick_returns_quote_before_detail_enrichment(
