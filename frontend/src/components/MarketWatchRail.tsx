@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { Activity, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Clock, BarChart3, Wallet, Star, FolderPlus, Search, X, Pencil, Trash2, GripVertical } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -325,6 +325,43 @@ export default function MarketWatchRail({
     const [loading, setLoading] = useState<Partial<Record<RailTab, boolean>>>({});
     const [errors, setErrors] = useState<Partial<Record<RailTab, string | null>>>({});
     const inFlightRef = useRef<Partial<Record<RailTab, boolean>>>({});
+
+    const [highlightStyle, setHighlightStyle] = useState<{ left: number; width: number }>({ left: 0, width: 0 });
+    const [highlightReady, setHighlightReady] = useState(false);
+    const tabRefs = useRef<Map<RailTab, HTMLButtonElement>>(new Map());
+    const tabsContainerRef = useRef<HTMLDivElement>(null);
+
+    useLayoutEffect(() => {
+        if (activeTool !== 'markets' || panelCollapsed) return;
+
+        const updateHighlight = () => {
+            const activeEl = tabRefs.current.get(activeTab);
+            if (activeEl) {
+                setHighlightStyle({
+                    left: activeEl.offsetLeft,
+                    width: activeEl.offsetWidth,
+                });
+                setHighlightReady(true);
+            }
+        };
+
+        updateHighlight();
+
+        const container = tabsContainerRef.current;
+        if (container && typeof ResizeObserver !== 'undefined') {
+            const observer = new ResizeObserver(updateHighlight);
+            observer.observe(container);
+            return () => observer.disconnect();
+        }
+    }, [activeTab, activeTool, panelCollapsed]);
+
+    const handleTabClick = (tabId: RailTab) => {
+        setActiveTab(tabId);
+        const el = tabRefs.current.get(tabId);
+        if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        }
+    };
 
     useEffect(() => {
         try {
@@ -930,15 +967,28 @@ export default function MarketWatchRail({
                             )}
                         </div>
                         {activeTool === 'markets' && (
-                            <div className="mwr-tabs" role="tablist" aria-label="İzleme sekmeleri">
+                            <div className="mwr-tabs" role="tablist" aria-label="İzleme sekmeleri" ref={tabsContainerRef}>
+                                <div
+                                    className={`mwr-tab-highlight${highlightReady ? ' is-ready' : ''}`}
+                                    style={{
+                                        transform: `translateX(${highlightStyle.left}px)`,
+                                        width: `${highlightStyle.width}px`,
+                                        opacity: highlightReady ? 1 : 0,
+                                    }}
+                                    aria-hidden="true"
+                                />
                                 {RAIL_TABS.map((tab) => (
                                     <button
                                         key={tab.id}
+                                        ref={(el) => {
+                                            if (el) tabRefs.current.set(tab.id, el);
+                                            else tabRefs.current.delete(tab.id);
+                                        }}
                                         type="button"
                                         role="tab"
                                         aria-selected={activeTab === tab.id}
                                         className={`mwr-tab${activeTab === tab.id ? ' is-active' : ''}`}
-                                        onClick={() => setActiveTab(tab.id)}
+                                        onClick={() => handleTabClick(tab.id)}
                                     >
                                         {tab.label}
                                     </button>
