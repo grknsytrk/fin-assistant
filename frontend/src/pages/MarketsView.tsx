@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
-import { GripHorizontal, Plus, Search, Trash2, X } from 'lucide-react';
+import { Building2, Check, Coins, GripHorizontal, Plus, RotateCcw, Search, SlidersHorizontal, Sparkles, Trash2, TrendingUp, X } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type {
     MarketIndexCode,
@@ -2819,6 +2819,44 @@ export default function MarketsView({
     const [stockTableMode, setStockTableMode] = useState<StockTableMode>('performance');
     const [screenerFilters, setScreenerFilters] = useState<StockScreenerFilterState>({ ...EMPTY_STOCK_SCREENER_FILTERS });
     const [activeScreenerPreset, setActiveScreenerPreset] = useState<StockScreenerPresetId | null>(null);
+    const [screenerModalOpen, setScreenerModalOpen] = useState(false);
+
+    const activeFilterCount = useMemo(() => {
+        let count = 0;
+        if (screenerFilters.sector) count++;
+        if (screenerFilters.positive_net_profit) count++;
+        if (screenerFilters.positive_free_cash_flow) count++;
+        if (screenerFilters.net_cash_only) count++;
+        const rangeKeys: Array<keyof StockScreenerFilterState> = [
+            'min_fk', 'max_fk',
+            'min_pd_dd', 'max_pd_dd',
+            'min_fd_favok', 'max_fd_favok',
+            'min_fd_satis', 'max_fd_satis',
+            'min_net_borc_favok', 'max_net_borc_favok',
+            'min_ttm_net_kar', 'max_ttm_net_kar',
+            'min_ttm_fcf', 'max_ttm_fcf',
+            'min_ttm_satis', 'max_ttm_satis',
+            'min_ttm_favok', 'max_ttm_favok',
+            'min_roe_pct', 'max_roe_pct',
+            'min_net_borc', 'max_net_borc',
+            'min_ozkaynaklar', 'max_ozkaynaklar',
+        ];
+        for (const key of rangeKeys) {
+            if (screenerFilters[key] !== '') count++;
+        }
+        return count;
+    }, [screenerFilters]);
+
+    const isScreenerActive = activeFilterCount > 0;
+
+    useEffect(() => {
+        if (!screenerModalOpen) return;
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setScreenerModalOpen(false);
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [screenerModalOpen]);
     const [terminalNow, setTerminalNow] = useState(() => new Date());
     const [stockCardSymbols, setStockCardSymbols] = useState<string[]>(readStoredStockCards);
     const [stockCards, setStockCards] = useState<MarketStockCardsResponse | null>(() => {
@@ -3464,9 +3502,9 @@ export default function MarketsView({
     }, [stocks?.rows, screenerFilters]);
 
     const stockRowsForMode = useMemo(() => {
-        if (stockTableMode === 'performance') return stocks?.rows || [];
-        return screenerData.rows;
-    }, [stockTableMode, screenerData.rows, stocks?.rows]);
+        if (isScreenerActive) return screenerData.rows;
+        return stocks?.rows || [];
+    }, [isScreenerActive, screenerData.rows, stocks?.rows]);
 
     const filteredStocks = useMemo(
         () =>
@@ -4136,6 +4174,21 @@ export default function MarketsView({
                                     <span className="stocks-count-badge">
                                         {stockIndex} · {sortedStocks.length} hisse
                                     </span>
+                                    {isScreenerActive && (
+                                        <span className="stocks-screener-active-pill">
+                                            <SlidersHorizontal size={11} aria-hidden="true" />
+                                            <span>{activeFilterCount} filtre aktif</span>
+                                            <button
+                                                type="button"
+                                                className="stocks-screener-clear-inline"
+                                                onClick={clearScreenerFilters}
+                                                title="Filtreleri temizle"
+                                                aria-label="Filtreleri temizle"
+                                            >
+                                                <X size={11} aria-hidden="true" />
+                                            </button>
+                                        </span>
+                                    )}
                                 </div>
                                 <div className="stocks-search-wrap">
                                     <Search size={14} className="stocks-search-icon" aria-hidden="true" />
@@ -4189,7 +4242,7 @@ export default function MarketsView({
                                             '--active-index': stockTableMode === 'performance' ? 0 : 1,
                                         } as React.CSSProperties}
                                     >
-                                        {([['performance', 'Getiri Tablosu'], ['fundamentals', 'Hisse Tarayıcısı']] as const).map(([mode, label]) => (
+                                        {([['performance', 'Getiri'], ['fundamentals', 'Temel Analiz']] as const).map(([mode, label]) => (
                                             <button
                                                 key={mode}
                                                 type="button"
@@ -4202,8 +4255,8 @@ export default function MarketsView({
                                         ))}
                                     </div>
                                 </div>
-                                {stockTableMode === 'performance' && (
-                                    <div className="stocks-toolbar-right">
+                                <div className="stocks-toolbar-right">
+                                    {stockTableMode === 'performance' && (
                                         <div
                                             className="stocks-segment stocks-return-segment"
                                             aria-label="Getiri modu"
@@ -4220,128 +4273,258 @@ export default function MarketsView({
                                                     aria-pressed={returnMode === option.id}
                                                     onClick={() => handleReturnModeChange(option.id)}
                                                 >
-                                                    {option.label}
+                                                    {option.id === 'absolute' ? 'Mutlak' : option.id === 'relative_xu100' ? 'XU100' : 'XU030'}
                                                 </button>
                                             ))}
                                         </div>
-                                    </div>
-                                )}
+                                    )}
+                                    <button
+                                        type="button"
+                                        className={`stocks-screener-trigger-btn${isScreenerActive ? ' is-active' : ''}`}
+                                        onClick={() => setScreenerModalOpen(true)}
+                                        aria-label="Hisse Tarayıcısı ve Filtreler"
+                                    >
+                                        <SlidersHorizontal size={13} aria-hidden="true" />
+                                        <span>Hisse Tarayıcısı</span>
+                                        {activeFilterCount > 0 && (
+                                            <span className="screener-count-badge">{activeFilterCount}</span>
+                                        )}
+                                    </button>
+                                </div>
                             </div>
                         </div>
 
-                        {stockTableMode === 'fundamentals' && (
-                            <section className="stock-screener" aria-label="Temel analiz tarayıcı filtreleri">
-                                <div className="stock-screener-topline">
-                                    <div>
-                                        <strong>Hisse Tarayıcısı</strong>
-                                        <span>Filtreler seçili hisse evreninde çalışır. Fiyatlar güncel, finansallar son açıklanan dönemdendir.</span>
-                                    </div>
-                                    <button type="button" className="stock-screener-clear" onClick={clearScreenerFilters}>
-                                        Filtreleri temizle
-                                    </button>
-                                </div>
-                                <div className="stock-screener-presets" aria-label="Hazır taramalar">
-                                    {STOCK_SCREENER_PRESETS.map((preset) => (
-                                        <button
-                                            key={preset.id}
-                                            type="button"
-                                            className={`stock-screener-chip${activeScreenerPreset === preset.id ? ' active' : ''}`}
-                                            aria-pressed={activeScreenerPreset === preset.id}
-                                            onClick={() => applyScreenerPreset(preset.id)}
-                                        >
-                                            {preset.label}
-                                        </button>
-                                    ))}
-                                </div>
-                                <div className="stock-screener-filter-layout">
-                                    <label className="stock-screener-sector">
-                                        <span>Sektör</span>
-                                        <select
-                                            value={screenerFilters.sector}
-                                            onChange={(event) => handleScreenerFilterChange('sector', event.currentTarget.value)}
-                                        >
-                                            <option value="">Tüm sektörler</option>
-                                            {screenerData.sectors.map((sector) => (
-                                                <option key={sector} value={sector}>{sector}</option>
-                                            ))}
-                                        </select>
-                                    </label>
-                                    <div className="stock-screener-group">
-                                        <strong>Değerleme çarpanları</strong>
-                                        <div className="stock-screener-range-grid">
-                                            {([
-                                                { min: 'min_fk', max: 'max_fk', label: 'F/K' },
-                                                { min: 'min_pd_dd', max: 'max_pd_dd', label: 'PD/DD' },
-                                                { min: 'min_fd_favok', max: 'max_fd_favok', label: 'FD/FAVÖK' },
-                                                { min: 'min_fd_satis', max: 'max_fd_satis', label: 'FD/Satış' },
-                                            ] as const).map(({ min, max, label }) => (
-                                                <div className="stock-screener-range" key={min}>
-                                                    <span>{label}</span>
-                                                    <input aria-label={`${label} minimum`} type="number" step="any" inputMode="decimal" placeholder="Min" value={screenerFilters[min]} onChange={(event) => handleScreenerFilterChange(min, event.currentTarget.value)} />
-                                                    <input aria-label={`${label} maksimum`} type="number" step="any" inputMode="decimal" placeholder="Maks" value={screenerFilters[max]} onChange={(event) => handleScreenerFilterChange(max, event.currentTarget.value)} />
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                    <div className="stock-screener-group">
-                                        <strong>Kârlılık ve nakit akışı</strong>
-                                        <div className="stock-screener-range-grid">
-                                            {([
-                                                { min: 'min_ttm_net_kar', max: 'max_ttm_net_kar', label: 'TTM net kâr (mn TL)' },
-                                                { min: 'min_ttm_fcf', max: 'max_ttm_fcf', label: 'TTM serbest nakit akışı (mn TL)' },
-                                                { min: 'min_ttm_satis', max: 'max_ttm_satis', label: 'TTM satışlar (mn TL)' },
-                                                { min: 'min_ttm_favok', max: 'max_ttm_favok', label: 'TTM FAVÖK (mn TL)' },
-                                                { min: 'min_roe_pct', max: 'max_roe_pct', label: 'ROE %' },
-                                            ] as const).map(({ min, max, label }) => (
-                                                <div className="stock-screener-range" key={min}>
-                                                    <span>{label}</span>
-                                                    <input aria-label={`${label} minimum`} type="number" step="any" inputMode="decimal" placeholder="Min" value={screenerFilters[min]} onChange={(event) => handleScreenerFilterChange(min, event.currentTarget.value)} />
-                                                    <input aria-label={`${label} maksimum`} type="number" step="any" inputMode="decimal" placeholder="Maks" value={screenerFilters[max]} onChange={(event) => handleScreenerFilterChange(max, event.currentTarget.value)} />
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                    <div className="stock-screener-group">
-                                        <strong>Bilanço</strong>
-                                        <div className="stock-screener-range-grid">
-                                            {([
-                                                { min: 'min_net_borc_favok', max: 'max_net_borc_favok', label: 'Net Borç/FAVÖK' },
-                                                { min: 'min_net_borc', max: 'max_net_borc', label: 'Net borç (mn TL)' },
-                                                { min: 'min_ozkaynaklar', max: 'max_ozkaynaklar', label: 'Özkaynaklar (mn TL)' },
-                                            ] as const).map(({ min, max, label }) => (
-                                                <div className="stock-screener-range" key={min}>
-                                                    <span>{label}</span>
-                                                    <input aria-label={`${label} minimum`} type="number" step="any" inputMode="decimal" placeholder="Min" value={screenerFilters[min]} onChange={(event) => handleScreenerFilterChange(min, event.currentTarget.value)} />
-                                                    <input aria-label={`${label} maksimum`} type="number" step="any" inputMode="decimal" placeholder="Maks" value={screenerFilters[max]} onChange={(event) => handleScreenerFilterChange(max, event.currentTarget.value)} />
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                    <div className="stock-screener-toggles">
-                                        {([
-                                            ['positive_net_profit', 'Pozitif net kâr'],
-                                            ['positive_free_cash_flow', 'Pozitif serbest nakit akışı'],
-                                            ['net_cash_only', 'Net nakit şirketler'],
-                                        ] as const).map(([key, label]) => (
-                                            <label className="stock-screener-check" key={key}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={screenerFilters[key]}
-                                                    onChange={(event) => handleScreenerFilterChange(key, event.currentTarget.checked)}
-                                                />
-                                                <span>{label}</span>
-                                            </label>
-                                        ))}
-                                    </div>
-                                </div>
-                                <div className="stock-screener-status" aria-live="polite">
+                        {isScreenerActive && (
+                            <div className="stocks-screener-active-banner">
+                                <div className="stocks-screener-active-banner-left">
+                                    <SlidersHorizontal size={13} aria-hidden="true" />
                                     <span>
-                                        {screenerData.rows.length} sonuç · {screenerData.totalCount} hisselik evren · {screenerData.financialCount} hissede finansal veri mevcut
-                                        {screenerData.financialCount < screenerData.totalCount && ` · ${screenerData.totalCount - screenerData.financialCount} hissede finansal veri eksik`}
-                                        {' · Filtreler cihazınızda uygulanıyor'}
+                                        <strong>{activeFilterCount} filtre devrede:</strong> {screenerData.rows.length} / {screenerData.totalCount} hisse gösteriliyor
                                     </span>
                                 </div>
-                            </section>
+                                <div className="stocks-screener-active-banner-actions">
+                                    <button
+                                        type="button"
+                                        className="stocks-screener-banner-btn"
+                                        onClick={() => setScreenerModalOpen(true)}
+                                    >
+                                        Filtreleri Düzenle
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="stocks-screener-banner-btn stocks-screener-banner-clear"
+                                        onClick={clearScreenerFilters}
+                                    >
+                                        <X size={12} aria-hidden="true" /> Temizle
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {screenerModalOpen && createPortal(
+                            <div
+                                className="screener-modal-backdrop"
+                                role="dialog"
+                                aria-modal="true"
+                                aria-labelledby="screener-modal-title"
+                                onClick={() => setScreenerModalOpen(false)}
+                            >
+                                <div className="screener-modal" onClick={(e) => e.stopPropagation()}>
+                                    <div className="screener-modal-header">
+                                        <div className="screener-modal-title-group">
+                                            <div className="screener-modal-icon-badge">
+                                                <SlidersHorizontal size={18} aria-hidden="true" />
+                                            </div>
+                                            <div>
+                                                <h3 id="screener-modal-title">Hisse Tarayıcısı</h3>
+                                                <p>BIST hisselerini temel analiz çarpanları ve bilanço rasyolarına göre filtreleyin</p>
+                                            </div>
+                                        </div>
+                                        <div className="screener-modal-header-actions">
+                                            <div className="screener-modal-matches">
+                                                <Check size={13} aria-hidden="true" />
+                                                <span><strong>{screenerData.rows.length}</strong> hisse eşleşti</span>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                className="screener-modal-close-btn"
+                                                onClick={() => setScreenerModalOpen(false)}
+                                                aria-label="Kapat"
+                                            >
+                                                <X size={18} aria-hidden="true" />
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div className="screener-modal-body">
+                                        <div className="screener-modal-presets-section">
+                                            <div className="screener-modal-section-label">
+                                                <Sparkles size={13} aria-hidden="true" />
+                                                <span>Hazır Stratejiler</span>
+                                            </div>
+                                            <div className="screener-modal-presets-row">
+                                                {STOCK_SCREENER_PRESETS.map((preset) => (
+                                                    <button
+                                                        key={preset.id}
+                                                        type="button"
+                                                        className={`screener-preset-chip${activeScreenerPreset === preset.id ? ' is-active' : ''}`}
+                                                        onClick={() => applyScreenerPreset(preset.id)}
+                                                    >
+                                                        {preset.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        <div className="screener-modal-grid">
+                                            <div className="screener-modal-card">
+                                                <div className="screener-card-header">
+                                                    <Building2 size={15} aria-hidden="true" />
+                                                    <span>Sektör & Nitelik</span>
+                                                </div>
+                                                <div className="screener-card-content">
+                                                    <div className="screener-field">
+                                                        <label className="screener-field-label">Sektör</label>
+                                                        <select
+                                                            className="screener-select"
+                                                            value={screenerFilters.sector}
+                                                            onChange={(e) => handleScreenerFilterChange('sector', e.currentTarget.value)}
+                                                        >
+                                                            <option value="">Tüm Sektörler ({screenerData.totalCount} hisse)</option>
+                                                            {screenerData.sectors.map((s) => (
+                                                                <option key={s} value={s}>{s}</option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                                    <div className="screener-toggles-list">
+                                                        {([
+                                                            ['positive_net_profit', 'Pozitif net kâr'],
+                                                            ['positive_free_cash_flow', 'Pozitif serbest nakit akışı'],
+                                                            ['net_cash_only', 'Net nakit şirketler (Borçsuz)'],
+                                                        ] as const).map(([key, label]) => (
+                                                            <label key={key} className={`screener-toggle-item${screenerFilters[key] ? ' is-checked' : ''}`}>
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={screenerFilters[key]}
+                                                                    onChange={(e) => handleScreenerFilterChange(key, e.currentTarget.checked)}
+                                                                />
+                                                                <span>{label}</span>
+                                                            </label>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div className="screener-modal-card">
+                                                <div className="screener-card-header">
+                                                    <TrendingUp size={15} aria-hidden="true" />
+                                                    <span>Değerleme Çarpanları</span>
+                                                </div>
+                                                <div className="screener-card-content">
+                                                    {([
+                                                        { min: 'min_fk', max: 'max_fk', label: 'F/K', hint: 'Fiyat / Kazanç' },
+                                                        { min: 'min_pd_dd', max: 'max_pd_dd', label: 'PD/DD', hint: 'Piyasa / Defter' },
+                                                        { min: 'min_fd_favok', max: 'max_fd_favok', label: 'FD/FAVÖK', hint: 'Firma / FAVÖK' },
+                                                        { min: 'min_fd_satis', max: 'max_fd_satis', label: 'FD/Satış', hint: 'Firma / Satış' },
+                                                    ] as const).map(({ min, max, label, hint }) => (
+                                                        <div className="screener-range-row" key={min}>
+                                                            <div className="screener-range-label">
+                                                                <strong>{label}</strong>
+                                                                <small>{hint}</small>
+                                                            </div>
+                                                            <div className="screener-range-inputs">
+                                                                <input
+                                                                    type="number"
+                                                                    step="any"
+                                                                    inputMode="decimal"
+                                                                    placeholder="Min"
+                                                                    value={screenerFilters[min]}
+                                                                    onChange={(e) => handleScreenerFilterChange(min, e.currentTarget.value)}
+                                                                />
+                                                                <span className="screener-range-sep">—</span>
+                                                                <input
+                                                                    type="number"
+                                                                    step="any"
+                                                                    inputMode="decimal"
+                                                                    placeholder="Maks"
+                                                                    value={screenerFilters[max]}
+                                                                    onChange={(e) => handleScreenerFilterChange(max, e.currentTarget.value)}
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+
+                                            <div className="screener-modal-card">
+                                                <div className="screener-card-header">
+                                                    <Coins size={15} aria-hidden="true" />
+                                                    <span>Kârlılık ve Bilanço</span>
+                                                </div>
+                                                <div className="screener-card-content">
+                                                    {([
+                                                        { min: 'min_roe_pct', max: 'max_roe_pct', label: 'ROE %', hint: 'Özsermaye Kâr.' },
+                                                        { min: 'min_net_borc_favok', max: 'max_net_borc_favok', label: 'Net Borç/FAVÖK', hint: 'Kaldıraç Oranı' },
+                                                        { min: 'min_ttm_net_kar', max: 'max_ttm_net_kar', label: 'Net Kâr', hint: 'mn TL' },
+                                                        { min: 'min_ttm_fcf', max: 'max_ttm_fcf', label: 'Serbest Nakit', hint: 'mn TL' },
+                                                    ] as const).map(({ min, max, label, hint }) => (
+                                                        <div className="screener-range-row" key={min}>
+                                                            <div className="screener-range-label">
+                                                                <strong>{label}</strong>
+                                                                <small>{hint}</small>
+                                                            </div>
+                                                            <div className="screener-range-inputs">
+                                                                <input
+                                                                    type="number"
+                                                                    step="any"
+                                                                    inputMode="decimal"
+                                                                    placeholder="Min"
+                                                                    value={screenerFilters[min]}
+                                                                    onChange={(e) => handleScreenerFilterChange(min, e.currentTarget.value)}
+                                                                />
+                                                                <span className="screener-range-sep">—</span>
+                                                                <input
+                                                                    type="number"
+                                                                    step="any"
+                                                                    inputMode="decimal"
+                                                                    placeholder="Maks"
+                                                                    value={screenerFilters[max]}
+                                                                    onChange={(e) => handleScreenerFilterChange(max, e.currentTarget.value)}
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="screener-modal-footer">
+                                        <button
+                                            type="button"
+                                            className="screener-modal-clear-btn"
+                                            onClick={clearScreenerFilters}
+                                            disabled={!isScreenerActive}
+                                        >
+                                            <RotateCcw size={13} aria-hidden="true" />
+                                            <span>Filtreleri Sıfırla</span>
+                                        </button>
+                                        <div className="screener-modal-footer-right">
+                                            <span className="screener-modal-footer-info">
+                                                <strong>{screenerData.rows.length}</strong> / {screenerData.totalCount} hisse eşleşti
+                                            </span>
+                                            <button
+                                                type="button"
+                                                className="screener-modal-apply-btn"
+                                                onClick={() => setScreenerModalOpen(false)}
+                                            >
+                                                Sonuçları Göster ({screenerData.rows.length})
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>,
+                            document.body
                         )}
 
                         {stocksLoading && !stocks && (
