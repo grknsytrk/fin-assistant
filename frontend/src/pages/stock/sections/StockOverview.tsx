@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { Check, ChevronDown, RefreshCw, RotateCcw, Sparkles } from 'lucide-react';
 import type {
     KapSnapshotResponse,
     KapQuarter,
@@ -29,6 +30,27 @@ import { OverviewAiLoadingIllustration } from './OverviewAiLoadingIllustration';
 import './StockOverview.css';
 
 const OVERVIEW_AI_PROVIDER_LABEL = 'IFM';
+
+const REASONING_OPTIONS = [
+    {
+        key: 'low' as const,
+        label: 'IFM Low',
+        tag: 'Düşük',
+        description: 'Hızlı yanıt ve temel rasyo analizi',
+    },
+    {
+        key: 'medium' as const,
+        label: 'IFM Medium',
+        tag: 'Orta',
+        description: 'Dengeli çeyreklik analiz ve kıyas',
+    },
+    {
+        key: 'high' as const,
+        label: 'IFM High',
+        tag: 'Yüksek',
+        description: 'Derin düşünme zinciri (Chain-of-Thought)',
+    },
+];
 
 const CHART_QUARTER_WINDOW_STORAGE_KEY = 'ragfin_chart_quarter_window';
 const OVERVIEW_AI_REASONING_STORAGE_KEY = 'ragfin_overview_ai_reasoning_effort';
@@ -625,6 +647,27 @@ export default function StockOverview({
     const valuationHash = useMemo(() => overviewPayloadHash(overviewValuationContext), [overviewValuationContext]);
     const commentaryBaseKey = `${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::${payloadHash}::${historyHash}`;
     const [reasoningEffort, setReasoningEffort] = useState<'low' | 'medium' | 'high'>(readStoredReasoningEffort);
+    const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+    const modelDropdownRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (!modelDropdownOpen) return;
+        const handleClickOutside = (e: globalThis.MouseEvent) => {
+            if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+                setModelDropdownOpen(false);
+            }
+        };
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setModelDropdownOpen(false);
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        document.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [modelDropdownOpen]);
+
     const handleReasoningEffortChange = (level: 'low' | 'medium' | 'high') => {
         setReasoningEffort(level);
         try {
@@ -1068,48 +1111,89 @@ export default function StockOverview({
             {canRequestAi && (
                 <section className="overview-ai-panel panel">
                     <div className="overview-ai-head">
-                        <div>
+                        <div className="overview-ai-head-titles">
                             <h3>AI Finansal Yorum</h3>
                             <p>Son açıklanan dönem, geçmiş çeyrekler ve erişilebilen değerleme çarpanları birlikte değerlendirilir.</p>
                         </div>
                         <div className="overview-ai-controls">
-                            <div className="overview-ai-meta-group">
-                                <span className="overview-ai-model-badge">{OVERVIEW_AI_PROVIDER_LABEL}</span>
-                                <div className="overview-ai-reasoning-toggle" role="group" aria-label="Muhakeme Seviyesi">
-                                    {(['low', 'medium', 'high'] as const).map((level) => (
-                                        <button
-                                            key={level}
-                                            type="button"
-                                            className={`overview-ai-reasoning-btn${reasoningEffort === level ? ' is-active' : ''}`}
-                                            onClick={() => handleReasoningEffortChange(level)}
-                                            disabled={aiLoading}
-                                            title={
-                                                level === 'low'
-                                                    ? 'Düşük muhakeme (Low): Hızlı yanıt (varsayılan)'
-                                                    : level === 'medium'
-                                                        ? 'Orta muhakeme (Medium): Dengeli analiz'
-                                                        : 'Yüksek muhakeme (High): Derin düşünme zinciri (Chain-of-Thought)'
-                                            }
-                                        >
-                                            {level === 'low' ? 'Low' : level === 'medium' ? 'Med' : 'High'}
-                                        </button>
-                                    ))}
-                                </div>
+                            <div className="overview-ai-model-picker-wrap" ref={modelDropdownRef}>
+                                <button
+                                    type="button"
+                                    className="overview-ai-model-trigger"
+                                    onClick={() => setModelDropdownOpen((prev) => !prev)}
+                                    disabled={aiLoading}
+                                    aria-expanded={modelDropdownOpen}
+                                    title="AI Modeli ve Muhakeme Seviyesini Seçin"
+                                >
+                                    <Sparkles size={13} className="overview-ai-sparkle-icon" aria-hidden="true" />
+                                    <span className="overview-ai-model-name">{OVERVIEW_AI_PROVIDER_LABEL}</span>
+                                    <span className="overview-ai-model-sep">·</span>
+                                    <span className="overview-ai-model-effort">
+                                        {reasoningEffort === 'low' ? 'Low' : reasoningEffort === 'medium' ? 'Med' : 'High'}
+                                    </span>
+                                    <ChevronDown size={13} className={`overview-ai-model-chevron${modelDropdownOpen ? ' is-open' : ''}`} aria-hidden="true" />
+                                </button>
+
+                                {modelDropdownOpen && (
+                                    <div className="overview-ai-model-dropdown" role="menu">
+                                        <div className="overview-ai-dropdown-header">
+                                            <span>Muhakeme Seviyesi</span>
+                                        </div>
+                                        {REASONING_OPTIONS.map((opt) => (
+                                            <button
+                                                key={opt.key}
+                                                type="button"
+                                                className={`overview-ai-dropdown-item${reasoningEffort === opt.key ? ' is-selected' : ''}`}
+                                                onClick={() => {
+                                                    handleReasoningEffortChange(opt.key);
+                                                    setModelDropdownOpen(false);
+                                                }}
+                                            >
+                                                <div className="overview-ai-dropdown-item-info">
+                                                    <div className="overview-ai-dropdown-item-top">
+                                                        <strong>{opt.label}</strong>
+                                                        <span className="overview-ai-dropdown-item-tag">{opt.tag}</span>
+                                                    </div>
+                                                    <span className="overview-ai-dropdown-item-desc">{opt.description}</span>
+                                                </div>
+                                                {reasoningEffort === opt.key && (
+                                                    <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />
+                                                )}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
+
                             <button
                                 className="overview-ai-button"
                                 type="button"
                                 onClick={() => void requestAiCommentary(Boolean(aiCommentary?.ok))}
                                 disabled={aiLoading}
                             >
-                                {aiLoading ? 'Analiz hazırlanıyor...' : aiCommentary?.ok ? 'Analizi Yenile' : 'AI Analiz ve Puan'}
+                                {aiLoading ? (
+                                    <>
+                                        <RefreshCw size={13} className="overview-ai-spin" aria-hidden="true" />
+                                        <span>Düşünüyor...</span>
+                                    </>
+                                ) : aiCommentary?.ok ? (
+                                    <>
+                                        <RotateCcw size={13} aria-hidden="true" />
+                                        <span>Analizi Yenile</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Sparkles size={13} aria-hidden="true" />
+                                        <span>AI Analiz ve Puan</span>
+                                    </>
+                                )}
                             </button>
                         </div>
                     </div>
 
                     {aiLoading ? (
                         <div className="overview-ai-loading">
-                            <OverviewAiLoadingIllustration />
+                            <OverviewAiLoadingIllustration reasoningEffort={reasoningEffort} />
                         </div>
                     ) : null}
 
