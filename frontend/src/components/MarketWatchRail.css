@@ -106,125 +106,25 @@
     display: none;
 }
 
-/* ── Slime Gooey Canvas ── */
-.mwr-slime-canvas {
+/* ── Active Tab Highlight (Clean Flat 2D) ── */
+.mwr-tab-highlight {
     position: absolute;
     top: 3px;
     bottom: 3px;
     left: 0;
-    right: 0;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.10);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: none;
     pointer-events: none;
     z-index: 1;
-    overflow: visible;
-}
-
-/* ── Sticky Origin Tail Droplet (Stretches & Dissolves) ── */
-.mwr-slime-tail {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    border-radius: 8px;
-    background: color-mix(in srgb, #22c55e 20%, rgba(255, 255, 255, 0.10));
-    border: 1px solid color-mix(in srgb, #22c55e 25%, rgba(255, 255, 255, 0.08));
-    box-shadow: none;
-    animation: mwr-slime-tail-shrink 0.16s ease-out forwards;
-    transform-origin: center center;
-}
-
-@keyframes mwr-slime-tail-shrink {
-    0% {
-        transform: scale(1);
-        opacity: 0.85;
-    }
-    100% {
-        transform: scale(0.3, 0.45);
-        opacity: 0;
-    }
-}
-
-/* ── Main Slime Highlight (Liquid Meniscus & Morph) ── */
-.mwr-tab-highlight {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    border-radius: 6px;
-    background: color-mix(in srgb, #22c55e 14%, rgba(255, 255, 255, 0.10));
-    border: 1px solid color-mix(in srgb, #22c55e 22%, rgba(255, 255, 255, 0.06));
-    box-shadow: none;
-    pointer-events: none;
-    transform-origin: center center;
-    transition: transform 0.24s cubic-bezier(0.34, 1.4, 0.64, 1),
-                width 0.22s cubic-bezier(0.34, 1.2, 0.64, 1),
-                border-radius 0.2s ease,
+    transition: transform 0.22s cubic-bezier(0.25, 1, 0.5, 1),
+                width 0.22s cubic-bezier(0.25, 1, 0.5, 1),
                 opacity 0.15s ease;
 }
 
 .mwr-tab-highlight:not(.is-ready) {
     transition: none;
-}
-
-/* Phase 1: Stretching (Viscous Liquid Meniscus / Chewing Gum Stretch) */
-.mwr-tab-highlight.is-stretching {
-    transition: transform 0.11s cubic-bezier(0.2, 0.9, 0.3, 1),
-                width 0.11s cubic-bezier(0.2, 0.9, 0.3, 1),
-                border-radius 0.11s ease,
-                background-color 0.1s ease;
-    background: color-mix(in srgb, #22c55e 20%, rgba(255, 255, 255, 0.14));
-    box-shadow: none;
-}
-
-.mwr-tab-highlight.is-stretching.dir-right {
-    transform: scaleY(0.72) skewX(-4deg);
-    border-radius: 10px 24px 24px 10px / 12px 50% 50% 12px;
-}
-
-.mwr-tab-highlight.is-stretching.dir-left {
-    transform: scaleY(0.72) skewX(4deg);
-    border-radius: 24px 10px 10px 24px / 50% 12px 12px 50%;
-}
-
-/* Phase 2: Snapping (Tail snaps forward with overshoot bounce) */
-.mwr-tab-highlight.is-snapping {
-    transition: transform 0.24s cubic-bezier(0.34, 1.5, 0.64, 1),
-                width 0.24s cubic-bezier(0.34, 1.5, 0.64, 1),
-                border-radius 0.24s ease;
-    background: color-mix(in srgb, #22c55e 20%, rgba(255, 255, 255, 0.14));
-}
-
-.mwr-tab-highlight.is-snapping.dir-right {
-    transform: scaleY(1.08) scaleX(0.96) skewX(2deg);
-    border-radius: 6px 14px 14px 6px / 6px 12px 12px 6px;
-}
-
-.mwr-tab-highlight.is-snapping.dir-left {
-    transform: scaleY(1.08) scaleX(0.96) skewX(-2deg);
-    border-radius: 14px 6px 6px 14px / 12px 6px 6px 12px;
-}
-
-/* Phase 3: Wobble / Splat Bounce on Impact */
-.mwr-tab-highlight.is-wobbling {
-    animation: mwr-slime-splat 0.22s cubic-bezier(0.34, 1.4, 0.64, 1) forwards;
-}
-
-@keyframes mwr-slime-splat {
-    0% {
-        transform: scale(1.18, 0.84) rotate(-0.8deg);
-        border-radius: 40% 60% 65% 35% / 40% 45% 55% 60%;
-    }
-    40% {
-        transform: scale(0.94, 1.1) rotate(0.6deg);
-        border-radius: 55% 45% 40% 60% / 50% 55% 45% 50%;
-    }
-    75% {
-        transform: scale(1.03, 0.98) rotate(-0.2deg);
-        border-radius: 48% 52% 52% 48% / 48% 50% 50% 52%;
-    }
-    100% {
-        transform: scale(1, 1) rotate(0deg);
-        border-radius: 6px;
-    }
 }
 
 .mwr-tab {
@@ -235,25 +135,28 @@
     padding: 0 0.55rem;
     border: 0;
     border-radius: 6px;
-    background: transparent;
-    color: var(--text-secondary);
+    background: transparent !important;
+    box-shadow: none !important;
+    color: #71717a;
     font-size: 0.72rem;
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0.01em;
     white-space: nowrap;
     cursor: pointer;
-    transition: color 0.16s ease;
+    transition: color 0.15s ease, text-shadow 0.15s ease;
 }
 
 .mwr-tab:hover {
-    color: var(--text-primary);
+    color: #ffffff;
+    text-shadow: 0 0 8px rgba(255, 255, 255, 0.45);
 }
 
 .mwr-tab.is-active {
     color: #ffffff;
     font-weight: 600;
-    background: transparent;
-    box-shadow: none;
+    background: transparent !important;
+    box-shadow: none !important;
+    text-shadow: none;
 }
 
 .mwr-table-head,
