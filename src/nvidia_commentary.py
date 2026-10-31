@@ -208,25 +208,35 @@ def _is_valid_model_name_syntax(model: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}", model))
 
 
+ALLOWED_EVREN_OVERVIEW_KEYWORDS = ("qwen3.8", "deepseek", "glm", "mimo")
+EXCLUDED_EVREN_OVERVIEW_KEYWORDS = ("ocr", "asr", "embed", "rerank", "guard", "vox", "laya", "clef", "auto")
+
+
+def _is_allowed_evren_overview_model(model_id: str) -> bool:
+    mid = model_id.lower()
+    if any(k in mid for k in EXCLUDED_EVREN_OVERVIEW_KEYWORDS):
+        return False
+    return any(k in mid for k in ALLOWED_EVREN_OVERVIEW_KEYWORDS)
+
+
 KNOWN_EVREN_MODELS = {
     DEFAULT_EVREN_MODEL,
     "qwen3.8-flash-next",
     "glm-5.3",
     "mimo-v2.6-pro",
-    "gemma-4-31b",
-    "auto",
 }
 EVREN_REASONING_EFFORT_MODELS = {
     "qwen3.8-flash-next",
     "glm-5.3",
     "mimo-v2.6-pro",
     "deepseek-v4.1-flash",
-    "gemma-4-31b",
 }
 
 
 def _is_valid_evren_model(model: str) -> bool:
     if not _is_valid_model_name_syntax(model):
+        return False
+    if not _is_allowed_evren_overview_model(model):
         return False
     cached = _EVREN_MODELS_CACHE.get("models")
     if cached:
@@ -257,7 +267,9 @@ async def _fetch_evren_model_ids(*, force_refresh: bool = False) -> List[str]:
         model_ids = sorted({
             str(item.get("id") or item.get("name") or "").strip()
             for item in raw_models
-            if isinstance(item, dict) and _is_valid_model_name_syntax(str(item.get("id") or item.get("name") or "").strip())
+            if isinstance(item, dict)
+            and _is_valid_model_name_syntax(str(item.get("id") or item.get("name") or "").strip())
+            and _is_allowed_evren_overview_model(str(item.get("id") or item.get("name") or "").strip())
         }) if isinstance(raw_models, list) else []
         _EVREN_MODELS_CACHE.update({"_ts": now, "models": model_ids})
         return model_ids
@@ -359,6 +371,11 @@ def _ifm_retry_count() -> int:
 
 def _ifm_debug_enabled() -> bool:
     raw = os.getenv("IFM_DEBUG", "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "debug"}
+
+
+def _debug_trace_exposure_enabled() -> bool:
+    raw = os.getenv("OVERVIEW_AI_EXPOSE_DEBUG_TRACE", "").strip().lower()
     return raw in {"1", "true", "yes", "on", "debug"}
 
 
@@ -1116,7 +1133,7 @@ def _build_success_response(
         "scorecard": scorecard,
         "error": error,
     }
-    if debug_trace:
+    if debug_trace and _debug_trace_exposure_enabled():
         response["debug_trace"] = debug_trace[:MAX_DEBUG_TRACE_ITEMS]
     return response
 

@@ -31,6 +31,15 @@ import './StockOverview.css';
 
 const DEFAULT_OVERVIEW_AI_MODEL = 'IFM/K2-Horizon-375B-A23B';
 
+const ALLOWED_EVREN_KEYWORDS = ['qwen3.8', 'deepseek', 'glm', 'mimo'];
+const EXCLUDED_EVREN_KEYWORDS = ['ocr', 'asr', 'embed', 'rerank', 'guard', 'vox', 'laya', 'clef', 'auto'];
+
+function isAllowedEvrenModel(id: string): boolean {
+    const mid = id.toLowerCase();
+    if (EXCLUDED_EVREN_KEYWORDS.some((kw) => mid.includes(kw))) return false;
+    return ALLOWED_EVREN_KEYWORDS.some((kw) => mid.includes(kw));
+}
+
 const REASONING_OPTIONS = [
     { key: 'low' as const, label: 'Low' },
     { key: 'medium' as const, label: 'Medium' },
@@ -663,12 +672,21 @@ export default function StockOverview({
     const [modelListError, setModelListError] = useState('');
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [reasoningSubmenuModelId, setReasoningSubmenuModelId] = useState<string | null>(null);
+    const [submenuPos, setSubmenuPos] = useState<{ top: number; side: 'right' | 'left' }>({ top: 0, side: 'right' });
     const modelDropdownRef = useRef<HTMLDivElement>(null);
+    const modelDropdownListRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         const controller = new AbortController();
         void apiClient.kapOverviewModels(controller.signal).then((response) => {
-            const providers = response.providers || [];
+            const rawProviders = response.providers || [];
+            const providers = rawProviders.map((provider) => {
+                if (provider.id !== 'evren') return provider;
+                return {
+                    ...provider,
+                    models: provider.models.filter((m) => isAllowedEvrenModel(m.id)),
+                };
+            });
             const availableModels = providers.flatMap((provider) => provider.models);
             setOverviewModelProviders(providers);
             setModelListError('');
@@ -688,6 +706,26 @@ export default function StockOverview({
         });
         return () => controller.abort();
     }, []);
+
+    const handleRowHover = (modelId: string, canSetEffort: boolean, e: React.MouseEvent<HTMLDivElement>) => {
+        if (!canSetEffort) {
+            setReasoningSubmenuModelId(null);
+            return;
+        }
+        const rowEl = e.currentTarget;
+        const listEl = modelDropdownListRef.current;
+        if (listEl) {
+            const rowRect = rowEl.getBoundingClientRect();
+            const listRect = listEl.getBoundingClientRect();
+            const spaceOnRight = window.innerWidth - listRect.right;
+            const side = spaceOnRight < 150 ? 'left' : 'right';
+            const rawTop = rowRect.top - listRect.top;
+            const maxTop = Math.max(0, listRect.height - 110);
+            const top = Math.max(0, Math.min(rawTop, maxTop));
+            setSubmenuPos({ top, side });
+        }
+        setReasoningSubmenuModelId(modelId);
+    };
 
     const selectedModelProvider = overviewModelProviders.find((provider) =>
         provider.models.some((model) => model.id === selectedModel),
@@ -1206,7 +1244,7 @@ export default function StockOverview({
 
                                 {modelDropdownOpen && (
                                     <div className="overview-ai-model-menu">
-                                        <div className="overview-ai-model-dropdown" role="menu">
+                                        <div className="overview-ai-model-dropdown" role="menu" ref={modelDropdownListRef}>
                                             <div className="overview-ai-dropdown-header">Model</div>
                                             {overviewModelProviders.map((provider) => (
                                                 <div className="overview-ai-provider-group" key={provider.id}>
@@ -1224,22 +1262,16 @@ export default function StockOverview({
                                                             <div
                                                                 key={`${provider.id}:${model.id}`}
                                                                 className={`overview-ai-model-row${isSelected ? ' is-selected' : ''}${isSubmenuOpen ? ' is-active' : ''}`}
-                                                                onClick={() => {
+                                                                onClick={(e) => {
                                                                     handleOverviewModelChange(model.id);
                                                                     if (canSetEffort) {
-                                                                        setReasoningSubmenuModelId((current) => current === model.id ? null : model.id);
+                                                                        handleRowHover(model.id, canSetEffort, e);
                                                                     } else {
                                                                         setModelDropdownOpen(false);
                                                                         setReasoningSubmenuModelId(null);
                                                                     }
                                                                 }}
-                                                                onMouseEnter={() => {
-                                                                    if (canSetEffort) {
-                                                                        setReasoningSubmenuModelId(model.id);
-                                                                    } else {
-                                                                        setReasoningSubmenuModelId(null);
-                                                                    }
-                                                                }}
+                                                                onMouseEnter={(e) => handleRowHover(model.id, canSetEffort, e)}
                                                                 role="menuitemradio"
                                                                 aria-checked={isSelected}
                                                             >
@@ -1268,7 +1300,8 @@ export default function StockOverview({
 
                                         {reasoningSubmenuModelId && reasoningSubmenuModel && (
                                             <div
-                                                className="overview-ai-reasoning-dropdown"
+                                                className={`overview-ai-reasoning-dropdown is-${submenuPos.side}`}
+                                                style={{ top: `${submenuPos.top}px` }}
                                                 role="menu"
                                                 aria-label={`${reasoningSubmenuModel.label} düşünce seviyesi`}
                                             >
