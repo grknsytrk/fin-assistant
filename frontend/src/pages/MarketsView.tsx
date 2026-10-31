@@ -146,12 +146,12 @@ const STOCK_COLUMNS: StockTableColumn[] = [
     { key: 'change_pct', label: 'Gün %', align: 'right' },
     { key: 'volume', label: 'Hacim', align: 'right' },
     { key: 'market_cap', label: 'Piyasa Değeri', align: 'right' },
-    { key: 'return_1w_pct', label: 'Getiri %', sublabel: 'Son 1 hafta', align: 'right' },
-    { key: 'return_1m_pct', label: 'Getiri %', sublabel: 'Son 1 ay', align: 'right' },
-    { key: 'return_3m_pct', label: 'Getiri %', sublabel: 'Son 3 ay', align: 'right' },
-    { key: 'return_6m_pct', label: 'Getiri %', sublabel: 'Son 6 ay', align: 'right' },
-    { key: 'return_ytd_pct', label: 'Getiri %', sublabel: 'YTA', align: 'right' },
-    { key: 'return_1y_pct', label: 'Getiri %', sublabel: 'Son 1 yıl', align: 'right' },
+    { key: 'return_1w_pct', label: '1 Hafta', align: 'right' },
+    { key: 'return_1m_pct', label: '1 Ay', align: 'right' },
+    { key: 'return_3m_pct', label: '3 Ay', align: 'right' },
+    { key: 'return_6m_pct', label: '6 Ay', align: 'right' },
+    { key: 'return_ytd_pct', label: 'Yılbaşı', align: 'right' },
+    { key: 'return_1y_pct', label: '1 Yıl', align: 'right' },
 ];
 const STOCK_FUNDAMENTAL_COLUMNS: StockTableColumn[] = [
     { key: 'company', label: 'Hisse', align: 'left' },
@@ -1213,11 +1213,8 @@ function getReturnValue(
     return Math.round((rawValue - benchmarkValue) * 100) / 100;
 }
 
-function getColumnLabel(key: StockSortKey, returnMode: StockReturnMode): string {
-    if (!isReturnKey(key)) {
-        return STOCK_COLUMNS.find((column) => column.key === key)?.label || '';
-    }
-    return returnMode === 'absolute' ? 'Getiri %' : 'Relatif %';
+function getColumnLabel(key: StockSortKey, _returnMode: StockReturnMode): string {
+    return STOCK_COLUMNS.find((column) => column.key === key)?.label || '';
 }
 
 function stockSortValue(
@@ -4132,84 +4129,102 @@ export default function MarketsView({
                 <div className="stocks-view">
                     <div className="panel stocks-table-panel">
                         <div className="panel-header stocks-panel-header">
-                            <div>
-                                <h2>Hisseler</h2>
-                                <span className="panel-kicker">
-                                    {stockIndex} · {sortedStocks.length} hisse
-                                </span>
-                            </div>
-                            <div className="stocks-panel-actions">
-                                <div
-                                    className="stocks-segment"
-                                    aria-label="Endeks seçimi"
-                                    style={{
-                                        '--item-count': STOCK_INDEX_OPTIONS.length,
-                                        '--active-index': STOCK_INDEX_OPTIONS.indexOf(stockIndex)
-                                    } as React.CSSProperties}
-                                >
-                                    {STOCK_INDEX_OPTIONS.map((option) => (
-                                        <button
-                                            key={option}
-                                            type="button"
-                                            className={stockIndex === option ? 'active' : ''}
-                                            aria-pressed={stockIndex === option}
-                                            onClick={() => handleStockIndexChange(option)}
-                                        >
-                                            {option}
-                                        </button>
-                                    ))}
+                            <div className="stocks-panel-header-top">
+                                <div className="stocks-panel-title-group">
+                                    <h2>Hisseler</h2>
+                                    <span className="stocks-count-badge">
+                                        {stockIndex} · {sortedStocks.length} hisse
+                                    </span>
                                 </div>
-                                <div
-                                    className="stocks-segment stocks-table-mode-segment"
-                                    aria-label="Tablo görünümü"
-                                    style={{
-                                        '--item-count': 2,
-                                        '--active-index': stockTableMode === 'performance' ? 0 : 1,
-                                    } as React.CSSProperties}
-                                >
-                                    {([['performance', 'Getiri %'], ['fundamentals', 'Hisse Tarayıcı']] as const).map(([mode, label]) => (
-                                        <button
-                                            key={mode}
-                                            type="button"
-                                            className={stockTableMode === mode ? 'active' : ''}
-                                            aria-pressed={stockTableMode === mode}
-                                            onClick={() => handleStockTableModeChange(mode)}
-                                        >
-                                            {label}
-                                        </button>
-                                    ))}
-                                </div>
-                                {stockTableMode === 'performance' && (
-                                    <div
-                                        className="stocks-segment stocks-return-segment"
-                                        aria-label="Getiri modu"
-                                        style={{
-                                            '--item-count': RETURN_MODE_OPTIONS.length,
-                                            '--active-index': RETURN_MODE_OPTIONS.findIndex(o => o.id === returnMode),
-                                        } as React.CSSProperties}
-                                    >
-                                        {RETURN_MODE_OPTIONS.map((option) => (
-                                            <button
-                                                key={option.id}
-                                                type="button"
-                                                className={returnMode === option.id ? 'active' : ''}
-                                                aria-pressed={returnMode === option.id}
-                                                onClick={() => handleReturnModeChange(option.id)}
-                                            >
-                                                {option.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                )}
-                                <div className="search-box">
+                                <div className="stocks-search-wrap">
+                                    <Search size={14} className="stocks-search-icon" aria-hidden="true" />
                                     <input
                                         type="text"
                                         placeholder="Hisse kodu ile ara..."
                                         value={searchTerm}
                                         onChange={(e) => setSearchTerm(e.target.value)}
-                                        className="input-field"
+                                        className="stocks-search-input"
                                     />
+                                    {searchTerm && (
+                                        <button
+                                            type="button"
+                                            className="stocks-search-clear"
+                                            onClick={() => setSearchTerm('')}
+                                            aria-label="Aramayı temizle"
+                                        >
+                                            <X size={12} aria-hidden="true" />
+                                        </button>
+                                    )}
                                 </div>
+                            </div>
+                            <div className="stocks-panel-toolbar">
+                                <div className="stocks-toolbar-left">
+                                    <div
+                                        className="stocks-segment"
+                                        aria-label="Endeks seçimi"
+                                        style={{
+                                            '--item-count': STOCK_INDEX_OPTIONS.length,
+                                            '--active-index': STOCK_INDEX_OPTIONS.indexOf(stockIndex)
+                                        } as React.CSSProperties}
+                                    >
+                                        {STOCK_INDEX_OPTIONS.map((option) => (
+                                            <button
+                                                key={option}
+                                                type="button"
+                                                className={stockIndex === option ? 'active' : ''}
+                                                aria-pressed={stockIndex === option}
+                                                onClick={() => handleStockIndexChange(option)}
+                                            >
+                                                {option}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    <div className="stocks-toolbar-divider" aria-hidden="true" />
+                                    <div
+                                        className="stocks-segment stocks-table-mode-segment"
+                                        aria-label="Tablo görünümü"
+                                        style={{
+                                            '--item-count': 2,
+                                            '--active-index': stockTableMode === 'performance' ? 0 : 1,
+                                        } as React.CSSProperties}
+                                    >
+                                        {([['performance', 'Getiri Tablosu'], ['fundamentals', 'Hisse Tarayıcısı']] as const).map(([mode, label]) => (
+                                            <button
+                                                key={mode}
+                                                type="button"
+                                                className={stockTableMode === mode ? 'active' : ''}
+                                                aria-pressed={stockTableMode === mode}
+                                                onClick={() => handleStockTableModeChange(mode)}
+                                            >
+                                                {label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                {stockTableMode === 'performance' && (
+                                    <div className="stocks-toolbar-right">
+                                        <div
+                                            className="stocks-segment stocks-return-segment"
+                                            aria-label="Getiri modu"
+                                            style={{
+                                                '--item-count': RETURN_MODE_OPTIONS.length,
+                                                '--active-index': RETURN_MODE_OPTIONS.findIndex(o => o.id === returnMode),
+                                            } as React.CSSProperties}
+                                        >
+                                            {RETURN_MODE_OPTIONS.map((option) => (
+                                                <button
+                                                    key={option.id}
+                                                    type="button"
+                                                    className={returnMode === option.id ? 'active' : ''}
+                                                    aria-pressed={returnMode === option.id}
+                                                    onClick={() => handleReturnModeChange(option.id)}
+                                                >
+                                                    {option.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         </div>
 
@@ -4349,11 +4364,12 @@ export default function MarketsView({
                             <>
                                 <div className="stocks-table-meta">
                                     <span>Son güncelleme: {formatUpdateTime(stocks.as_of)}</span>
-                                    {stockTableMode === 'performance' && <span>Getiri: {activeReturnModeLabel}</span>}
+                                    {stockTableMode === 'performance' && returnMode !== 'absolute' && (
+                                        <span>· Getiri: {activeReturnModeLabel}</span>
+                                    )}
                                     {stockTableMode === 'performance' && activeBenchmarkIndex && (
                                         <span>
-                                            Benchmark: {activeBenchmarkIndex} ·{' '}
-                                            {formatUpdateTime(stocks.benchmarks?.[activeBenchmarkIndex]?.as_of)}
+                                            · Benchmark: {activeBenchmarkIndex} ({formatUpdateTime(stocks.benchmarks?.[activeBenchmarkIndex]?.as_of)})
                                         </span>
                                     )}
                                     {stocksError && <span className="stocks-soft-error">Son yenileme başarısız oldu.</span>}
