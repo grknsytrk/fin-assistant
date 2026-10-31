@@ -142,7 +142,7 @@ const EMPTY_STOCK_SCREENER_FILTERS: StockScreenerFilterState = {
 
 const STOCK_COLUMNS: StockTableColumn[] = [
     { key: 'company', label: 'Hisse', align: 'left' },
-    { key: 'price', label: 'Fiyat', align: 'right' },
+    { key: 'price', label: 'Fiyat (₺)', align: 'right' },
     { key: 'change_pct', label: 'Gün %', align: 'right' },
     { key: 'volume', label: 'Hacim', align: 'right' },
     { key: 'market_cap', label: 'Piyasa Değeri', align: 'right' },
@@ -253,8 +253,8 @@ const DETAIL_RETURN_KEYS: Array<{ key: keyof MarketIndexListRow; label: string }
 ];
 
 function formatStockPrice(row: MarketStockRow): string {
-    if (row.price == null) return '-';
-    const currencyPrefix = row.price_currency && row.price_currency !== 'TRY' ? `${row.price_currency} ` : '₺';
+    if (row.price == null) return '—';
+    const currencyPrefix = row.price_currency && row.price_currency !== 'TRY' ? `${row.price_currency} ` : '';
     return `${currencyPrefix}${row.price.toLocaleString('tr-TR', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
@@ -262,7 +262,7 @@ function formatStockPrice(row: MarketStockRow): string {
 }
 
 function formatIndexPrice(value: number | null): string {
-    if (value == null) return '-';
+    if (value == null) return '—';
     return value.toLocaleString('tr-TR', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
@@ -270,8 +270,8 @@ function formatIndexPrice(value: number | null): string {
 }
 
 function formatMaybeCurrency(value: number | null, currency?: string | null): string {
-    if (value == null) return '-';
-    const prefix = currency && currency !== 'TRY' ? `${currency} ` : '₺';
+    if (value == null) return '—';
+    const prefix = currency && currency !== 'TRY' ? `${currency} ` : '';
     return `${prefix}${value.toLocaleString('tr-TR', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
@@ -279,7 +279,7 @@ function formatMaybeCurrency(value: number | null, currency?: string | null): st
 }
 
 function formatTablePct(value: number | null): string {
-    if (value == null) return 'N/A';
+    if (value == null) return '—';
     const sign = value > 0 ? '+' : '';
     return `%${sign}${value.toLocaleString('tr-TR', {
         minimumFractionDigits: 2,
@@ -288,7 +288,7 @@ function formatTablePct(value: number | null): string {
 }
 
 function formatVolume(value: number | null): string {
-    if (value == null) return '-';
+    if (value == null) return '—';
     const abs = Math.abs(value);
     if (abs >= 1_000_000_000) {
         return `${(value / 1_000_000_000).toLocaleString('tr-TR', {
@@ -306,8 +306,8 @@ function formatVolume(value: number | null): string {
 }
 
 function formatMarketCap(value: number | null): string {
-    if (value == null) return '-';
-    return `₺${formatVolume(value)}`;
+    if (value == null) return '—';
+    return formatVolume(value);
 }
 
 function formatFundamentalRatio(value: number | null | undefined): string {
@@ -3874,8 +3874,9 @@ export default function MarketsView({
 
     const renderReturnCell = (row: MarketStockRow, key: StockReturnKey) => {
         const value = getReturnValue(row, key, stocks?.benchmarks, returnMode);
+        const isNull = value == null || !Number.isFinite(value);
         return (
-            <td className={`stocks-cell-right ${getTableChangeClass(value)}`}>
+            <td className={`stocks-cell-right ${isNull ? 'stocks-cell-muted' : getTableChangeClass(value)}`}>
                 {formatTablePct(value)}
             </td>
         );
@@ -4477,7 +4478,7 @@ export default function MarketsView({
                                                         ) : (
                                                             <>
                                                                 <td className="stocks-cell-right stocks-price-cell">{formatStockPrice(row)}</td>
-                                                                <td className={`stocks-cell-right ${getTableChangeClass(row.change_pct)}`}>
+                                                                <td className={`stocks-cell-right ${row.change_pct == null ? 'stocks-cell-muted' : getTableChangeClass(row.change_pct)}`}>
                                                                     {formatTablePct(row.change_pct)}
                                                                 </td>
                                                                 <td className="stocks-cell-right stocks-volume-cell">{formatVolume(row.volume)}</td>
