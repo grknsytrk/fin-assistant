@@ -1065,6 +1065,16 @@ export interface KapOverviewCommentaryRequest {
   };
 }
 
+export interface KapOverviewModelProvider {
+  id: 'ifm' | 'nvidia' | 'evren';
+  label: string;
+  models: Array<{ id: string; label: string }>;
+}
+
+export interface KapOverviewModelsResponse {
+  providers: KapOverviewModelProvider[];
+}
+
 export interface KapOverviewValuationPeriod {
   year: number;
   period: number;

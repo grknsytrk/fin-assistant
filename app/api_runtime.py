@@ -52,7 +52,12 @@ from pydantic import BaseModel, Field
 
 from src.config import load_config
 
-from src.nvidia_commentary import MAX_REQUEST_BYTES, PayloadValidationError, generate_overview_commentary
+from src.nvidia_commentary import (
+    MAX_REQUEST_BYTES,
+    PayloadValidationError,
+    generate_overview_commentary,
+    list_overview_models,
+)
 
 from app.cache import cache_status as _cache_status
 

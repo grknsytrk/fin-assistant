@@ -45,6 +45,7 @@ import type {
     FundsResponse,
     KapOverviewCommentaryRequest,
     KapOverviewCommentaryResponse,
+    KapOverviewModelsResponse,
 } from './types';
 
 const rawApiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
@@ -1130,6 +1131,9 @@ export const apiClient = {
             timeoutMs: OVERVIEW_COMMENTARY_TIMEOUT_MS,
             debugLabel: 'kap-overview-commentary',
         }),
+
+    kapOverviewModels: (signal?: AbortSignal) =>
+        fetchApi<KapOverviewModelsResponse>('/kap/overview-models', { signal }),
 
     kapPrice: (symbol: string) =>
         fetchApi<{

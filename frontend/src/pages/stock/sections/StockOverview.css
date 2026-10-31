@@ -676,6 +676,10 @@
     color: #a1a1aa;
     font-size: 0.73rem;
     font-weight: 500;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .overview-ai-model-chevron {
@@ -704,6 +708,8 @@
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
+    max-height: min(70vh, 480px);
+    overflow-y: auto;
 }
 
 .overview-ai-dropdown-header {
@@ -713,6 +719,23 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+}
+
+.overview-ai-dropdown-provider-label {
+    padding: 0.45rem 0.6rem 0.1rem;
+    color: #60a5fa;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.overview-ai-dropdown-empty {
+    display: block;
+    padding: 0.5rem 0.65rem;
+    color: #a1a1aa;
+    font-size: 0.72rem;
+    line-height: 1.4;
 }
 
 .overview-ai-dropdown-item {

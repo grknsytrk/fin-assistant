@@ -3929,6 +3929,15 @@ def _overview_commentary_payload() -> Dict[str, Any]:
     }
 
 
+def test_kap_overview_models_endpoint() -> None:
+    client = TestClient(app)
+    response = client.get("/kap/overview-models")
+    assert response.status_code == 200
+    data = response.json()
+    assert "providers" in data
+    assert isinstance(data["providers"], list)
+
+
 def test_kap_overview_commentary_success(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_call(
         normalized_payload: Dict[str, Any],

@@ -9,6 +9,11 @@ from app.kap_service import *
 
 router = APIRouter()
 
+
+@router.get("/kap/overview-models")
+async def kap_overview_models() -> Dict[str, Any]:
+    return await list_overview_models()
+
 class KapValuationHistoryRequest(BaseModel):
     company: str = Field(..., min_length=1, max_length=16)
     quarters: List[Dict[str, Any]] = Field(..., max_length=44)

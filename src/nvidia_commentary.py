@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from statistics import median
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,11 @@ DEFAULT_IFM_BASE_URL = "https://api.ifm.ai/v1"
 DEFAULT_IFM_TIMEOUT_S = 300.0
 DEFAULT_IFM_MAX_TOKENS = 32000
 DEFAULT_IFM_RETRIES = 1
+DEFAULT_EVREN_MODEL = "deepseek-v4.1-flash"
+DEFAULT_EVREN_BASE_URL = "https://evren-llmapi.ssyz.org.tr/v1"
+DEFAULT_EVREN_TIMEOUT_S = 300.0
+DEFAULT_EVREN_MAX_TOKENS = 32000
+DEFAULT_EVREN_RETRIES = 1
 
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_SUMMARY_ROWS = 8
@@ -121,6 +127,8 @@ OVERVIEW_MODEL_ALIASES = {
 }
 
 LOGGER = logging.getLogger("uvicorn.error")
+_EVREN_MODELS_CACHE: Dict[str, Any] = {"_ts": 0.0, "models": []}
+_EVREN_MODELS_CACHE_TTL_S = 300.0
 
 
 class PayloadValidationError(ValueError):
@@ -166,6 +174,104 @@ def _nvidia_base_url() -> str:
 
 def _ifm_base_url() -> str:
     return (os.getenv("IFM_BASE_URL", "").strip() or DEFAULT_IFM_BASE_URL).rstrip("/")
+
+
+def _evren_base_url() -> str:
+    return (os.getenv("EVREN_BASE_URL", "").strip() or DEFAULT_EVREN_BASE_URL).rstrip("/")
+
+
+def _evren_timeout_s() -> float:
+    raw = os.getenv("EVREN_TIMEOUT_S", "").strip()
+    try:
+        return max(5.0, min(float(raw), 900.0)) if raw else DEFAULT_EVREN_TIMEOUT_S
+    except ValueError:
+        return DEFAULT_EVREN_TIMEOUT_S
+
+
+def _evren_max_tokens() -> int:
+    raw = os.getenv("EVREN_MAX_TOKENS", "").strip()
+    try:
+        return max(2048, min(int(raw), DEFAULT_EVREN_MAX_TOKENS)) if raw else DEFAULT_EVREN_MAX_TOKENS
+    except ValueError:
+        return DEFAULT_EVREN_MAX_TOKENS
+
+
+def _evren_retry_count() -> int:
+    raw = os.getenv("EVREN_MAX_RETRIES", "").strip()
+    try:
+        return max(0, min(int(raw), 3)) if raw else DEFAULT_EVREN_RETRIES
+    except ValueError:
+        return DEFAULT_EVREN_RETRIES
+
+
+def _is_valid_model_name_syntax(model: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}", model))
+
+
+KNOWN_EVREN_MODELS = {
+    DEFAULT_EVREN_MODEL,
+    "qwen3.8-flash-next",
+    "glm-5.3",
+    "mimo-v2.6-pro",
+    "gemma-4-31b",
+    "auto",
+}
+
+
+def _is_valid_evren_model(model: str) -> bool:
+    if not _is_valid_model_name_syntax(model):
+        return False
+    cached = _EVREN_MODELS_CACHE.get("models")
+    if cached:
+        return model in cached or model == DEFAULT_EVREN_MODEL
+    return model in KNOWN_EVREN_MODELS
+
+
+async def _fetch_evren_model_ids(*, force_refresh: bool = False) -> List[str]:
+    api_key = os.getenv("EVREN_API_KEY", "").strip()
+    if not api_key:
+        return []
+    now = time.monotonic()
+    if (
+        not force_refresh
+        and _EVREN_MODELS_CACHE.get("models")
+        and now - float(_EVREN_MODELS_CACHE.get("_ts", 0.0)) < _EVREN_MODELS_CACHE_TTL_S
+    ):
+        return list(_EVREN_MODELS_CACHE["models"])
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=5.0)) as client:
+            response = await client.get(
+                f"{_evren_base_url()}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        raw_models = payload.get("data", payload.get("models", [])) if isinstance(payload, dict) else []
+        model_ids = sorted({
+            str(item.get("id") or item.get("name") or "").strip()
+            for item in raw_models
+            if isinstance(item, dict) and _is_valid_model_name_syntax(str(item.get("id") or item.get("name") or "").strip())
+        }) if isinstance(raw_models, list) else []
+        _EVREN_MODELS_CACHE.update({"_ts": now, "models": model_ids})
+        return model_ids
+    except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
+        LOGGER.warning("[overview_ai] EVREN model list request failed | error=%s", _trim_text(exc))
+        if _EVREN_MODELS_CACHE.get("models"):
+            return list(_EVREN_MODELS_CACHE["models"])
+        return [DEFAULT_EVREN_MODEL]
+
+
+async def list_overview_models() -> Dict[str, Any]:
+    providers: List[Dict[str, Any]] = []
+    if os.getenv("IFM_API_KEY", "").strip():
+        providers.append({"id": "ifm", "label": "IFM", "models": [{"id": _ifm_model(), "label": _ifm_model()}]})
+    if os.getenv("NVIDIA_API_KEY", "").strip():
+        models = sorted(SUPPORTED_NVIDIA_MODELS)
+        providers.append({"id": "nvidia", "label": "NVIDIA", "models": [{"id": item, "label": item} for item in models]})
+    if os.getenv("EVREN_API_KEY", "").strip():
+        models = await _fetch_evren_model_ids()
+        providers.append({"id": "evren", "label": "EVREN", "models": [{"id": item, "label": item} for item in models]})
+    return {"providers": providers}
 
 
 def _nvidia_timeout_s() -> float:
@@ -352,7 +458,11 @@ def _normalize_requested_model(value: Any, path: str) -> Optional[str]:
     if not raw:
         return None
     resolved = OVERVIEW_MODEL_ALIASES.get(raw.lower(), raw)
-    if resolved not in SUPPORTED_OVERVIEW_MODELS:
+    if (
+        resolved not in SUPPORTED_OVERVIEW_MODELS
+        and resolved not in {_ifm_model(), _nvidia_model()}
+        and not (os.getenv("EVREN_API_KEY", "").strip() and _is_valid_evren_model(resolved))
+    ):
         allowed = ", ".join(sorted(SUPPORTED_OVERVIEW_MODELS))
         raise PayloadValidationError(f"{path} desteklenmeyen model. Desteklenen modeller: {allowed}")
     return resolved
@@ -708,9 +818,11 @@ def _system_prompt() -> str:
         "- Güncel çarpan kendi tarihsel ortalamasının üzerindeyse tarihine göre primli, altındaysa iskontolu olduğunu söyle; bunu tek başına ucuzluk/pahalılık veya al/sat hükmü sayma. Kâr kalitesi, büyüme ve marjlarla birlikte yorumla. Negatif/sıfır F/K'yı karşılaştırma; sektör/rakip kıyası veya hedef fiyat üretme.\n\n"
         "Kar Kalitesi ve FAVOK/Operasyon Desteği (Earnings Quality):\n"
         "- Net kar artisinda (ornegin 2 milyardan 8.5 milyara cikis gibi) precomputed_facts.earnings_quality degerini kontrol et:\n"
+        "- Karlilik puaninda 'Esas faaliyet kârı değişimi (YTD)' veya 'FAVÖK değişimi (YTD)' sinyali varsa birikimli yil-basindan-bu-yana sonucu ayri degerlendir; tek ceyrekteki faaliyet/net kar artis payi YTD operasyonel iyilesmeyi bastirmasin.\n"
         "  1) 'faaliyet_destekli': Net kar artisini buyuk olcude FAVOK veya esas faaliyet kari acikliyorsa kâr kalitesi yuksektir. Sektorel kar marji yuzdesel olarak dusuk olsa dahi (perakende/toptan gibi), marj genislemesini ve operasyonel kaldiraci takdir et.\n"
-        "  2) 'faaliyet_disi_kar_artisi' veya 'net_kar_favoku_asiyor': Net kar artisini ana faaliyet gostergeleri aciklamiyorsa bunu belirt; alt kalem dokumu verilmiyorsa finansman geliri, vergi, parasal kazanc veya tek seferlik satis gibi nedenler tahmin etme. Buyume ve karlilik adjustment'larini sisirme.\n"
-        "  3) 'faaliyet_guclu_net_zayif': Operasyonel kar artarken net kar dusmusse operasyonel basariyi teslim et; nedenini finansal kalemlerden veriyle gosteremiyorsan kaynagini belirsiz birak.\n\n"
+        "  2) 'kismen_faaliyet_destekli': FAVOK/esas faaliyet kari anlamli bicimde artmissa, bu artis net kar artisinin %60'inin altinda kalsa bile faaliyet performansi olumlu kanittir. Net karin daha hizli artmasi veya diger faaliyetlerden de gelir elde edilmesi tek basina karlilik puanina eksi adjustment gerekcesi degildir. Verilmeyen alt kalemlerin kaynagini tahmin etme; yalnizca net karin ek artisinin niteligini belirsiz olarak belirt.\n"
+        "  3) 'faaliyet_disi_kar_artisi' veya 'net_kar_favoku_asiyor': Faaliyet kari yatay/geriliyor ya da net kâr FAVÖK'u asiyorsa bunu kâr kalitesi icin ayri ve olculu bir ihtiyat sinyali olarak belirt; bu sinyal guclu faaliyet kâri artisinin degerini silmesin. Alt kalem dokumu verilmiyorsa finansman geliri, vergi, parasal kazanc veya tek seferlik satis gibi nedenler tahmin etme.\n"
+        "  4) 'faaliyet_guclu_net_zayif': Operasyonel kar artarken net kar dusmusse operasyonel basariyi teslim et; nedenini finansal kalemlerden veriyle gosteremiyorsan kaynagini belirsiz birak.\n\n"
         "Karin Nakde Donusumu (Accrual vs. Cash Quality):\n"
         "- Nakit donusumu zayifsa bunu verilen nakit akis verisiyle sinirli anlat; isletme sermayesi, tahsilat, nakit disi gelir veya baska bir nedeni alt kalemler gosterilmedikce ileri surme.\n"
         "- Faaliyet nakit akisi pozitifken serbest nakit akisinin negatif oldugu ('faaliyet_pozitif_fcf_negatif' bayragi) durumda bu iki olcumu belirt; yatirim harcamalarinin tutari/verisi yoksa CapEx veya buyume yatirimi nedeni uydurma.\n\n"
@@ -1093,7 +1205,7 @@ async def _call_chat_completion(
     if provider == "IFM":
         body["chat_template_kwargs"] = {"reasoning_effort": reasoning_effort}
         body["response_format"] = {"type": "json_object"}
-    else:
+    elif provider == "NVIDIA":
         body["chat_template_kwargs"] = {"thinking": False}
     body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {
@@ -1271,6 +1383,30 @@ async def _call_ifm_chat(
     )
 
 
+async def _call_evren_chat(
+    normalized_payload: Dict[str, Any],
+    base_analysis: Dict[str, Any],
+    api_key: str,
+    model: str,
+    *,
+    reasoning_effort: str = "low",
+    debug_trace: Optional[List[str]] = None,
+) -> str:
+    return await _call_chat_completion(
+        normalized_payload,
+        base_analysis,
+        api_key,
+        model,
+        provider="EVREN",
+        base_url=_evren_base_url(),
+        timeout_s=_evren_timeout_s(),
+        max_tokens=_evren_max_tokens(),
+        retry_count=_evren_retry_count(),
+        reasoning_effort=reasoning_effort,
+        debug_trace=debug_trace,
+    )
+
+
 async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any]:
     debug_trace: List[str] = []
     ifm_api_key = os.getenv("IFM_API_KEY", "").strip()
@@ -1279,16 +1415,21 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
     requested_model = normalized_payload.get("model")
     reasoning_effort = normalized_payload.get("reasoning_effort", "low")
 
-    if requested_model in SUPPORTED_NVIDIA_MODELS:
+    if requested_model in SUPPORTED_NVIDIA_MODELS or (requested_model and requested_model == _nvidia_model() and legacy_nvidia_api_key):
         provider = "NVIDIA"
         model = requested_model
         api_key = legacy_nvidia_api_key
         missing_key_error = "NVIDIA_API_KEY bulunamadi"
-    elif requested_model in SUPPORTED_IFM_MODELS:
+    elif requested_model in SUPPORTED_IFM_MODELS or (requested_model and requested_model == _ifm_model() and ifm_api_key):
         provider = "IFM"
         model = requested_model
         api_key = ifm_api_key
         missing_key_error = "IFM_API_KEY bulunamadi"
+    elif requested_model and os.getenv("EVREN_API_KEY", "").strip():
+        provider = "EVREN"
+        model = requested_model
+        api_key = os.getenv("EVREN_API_KEY", "").strip()
+        missing_key_error = "EVREN_API_KEY bulunamadi"
     elif ifm_api_key:
         provider = "IFM"
         model = _resolve_ifm_model(requested_model)
@@ -1299,6 +1440,11 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
         model = _resolve_nvidia_model(requested_model)
         api_key = legacy_nvidia_api_key
         missing_key_error = "NVIDIA_API_KEY bulunamadi"
+    elif os.getenv("EVREN_API_KEY", "").strip():
+        provider = "EVREN"
+        model = DEFAULT_EVREN_MODEL
+        api_key = os.getenv("EVREN_API_KEY", "").strip()
+        missing_key_error = "EVREN_API_KEY bulunamadi"
     else:
         provider = "IFM"
         model = _ifm_model()
@@ -1348,7 +1494,11 @@ async def generate_overview_commentary(payload: Dict[str, Any]) -> Dict[str, Any
         )
 
     try:
-        chat_call = _call_ifm_chat if provider == "IFM" else _call_nvidia_chat
+        chat_call = {
+            "IFM": _call_ifm_chat,
+            "NVIDIA": _call_nvidia_chat,
+            "EVREN": _call_evren_chat,
+        }[provider]
         try:
             maybe_response_text = chat_call(
                 normalized_payload,

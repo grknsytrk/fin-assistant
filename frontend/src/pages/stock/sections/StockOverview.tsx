@@ -6,7 +6,7 @@ import type {
     KapInsurancePremiumDisclosure,
     MarketStockCardItem,
 } from '../../../api/types';
-import type { KapOverviewCommentaryResponse, KapValuationHistoryResponse } from '../../../api/types';
+import type { KapOverviewCommentaryResponse, KapOverviewModelsResponse, KapValuationHistoryResponse } from '../../../api/types';
 import { apiClient } from '../../../api/client';
 import { BarChartCard } from '../../../components/charts/BarChartCard';
 import { MultiplesRow } from '../../../components/stock/MultiplesRow';
@@ -29,7 +29,7 @@ import StockCharts from './StockCharts';
 import { OverviewAiLoadingIllustration } from './OverviewAiLoadingIllustration';
 import './StockOverview.css';
 
-const OVERVIEW_AI_PROVIDER_LABEL = 'IFM';
+const DEFAULT_OVERVIEW_AI_MODEL = 'IFM/K2-Horizon-375B-A23B';
 
 const REASONING_OPTIONS = [
     {
@@ -57,6 +57,14 @@ const REASONING_OPTIONS = [
 
 const CHART_QUARTER_WINDOW_STORAGE_KEY = 'ragfin_chart_quarter_window';
 const OVERVIEW_AI_REASONING_STORAGE_KEY = 'ragfin_overview_ai_reasoning_effort';
+const OVERVIEW_AI_MODEL_STORAGE_KEY = 'ragfin_overview_ai_model';
+
+function readStoredOverviewModel(): string {
+    try {
+        return window.localStorage.getItem(OVERVIEW_AI_MODEL_STORAGE_KEY) || DEFAULT_OVERVIEW_AI_MODEL;
+    } catch { /* ignore */ }
+    return DEFAULT_OVERVIEW_AI_MODEL;
+}
 
 function readStoredReasoningEffort(): 'low' | 'medium' | 'high' {
     try {
@@ -656,8 +664,42 @@ export default function StockOverview({
     const valuationHash = useMemo(() => overviewPayloadHash(overviewValuationContext), [overviewValuationContext]);
     const commentaryBaseKey = `${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::${payloadHash}::${historyHash}`;
     const [reasoningEffort, setReasoningEffort] = useState<'low' | 'medium' | 'high'>(readStoredReasoningEffort);
+    const [selectedModel, setSelectedModel] = useState(readStoredOverviewModel);
+    const [overviewModelProviders, setOverviewModelProviders] = useState<KapOverviewModelsResponse['providers']>([]);
+    const [modelListError, setModelListError] = useState('');
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const modelDropdownRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        void apiClient.kapOverviewModels(controller.signal).then((response) => {
+            const providers = response.providers || [];
+            const availableModels = providers.flatMap((provider) => provider.models);
+            setOverviewModelProviders(providers);
+            setModelListError('');
+            setSelectedModel((current) => {
+                if (availableModels.some((model) => model.id === current)) return current;
+                const preferred = providers.find((provider) => provider.id === 'ifm')?.models[0]
+                    || providers.find((provider) => provider.id === 'evren')?.models[0]
+                    || providers[0]?.models[0];
+                const next = preferred?.id || DEFAULT_OVERVIEW_AI_MODEL;
+                try { window.localStorage.setItem(OVERVIEW_AI_MODEL_STORAGE_KEY, next); } catch { /* ignore */ }
+                return next;
+            });
+        }).catch((error) => {
+            if (controller.signal.aborted) return;
+            console.warn('[overview-ai] model list failed', error);
+            setModelListError(error instanceof Error ? error.message : 'Modeller yüklenemedi.');
+        });
+        return () => controller.abort();
+    }, []);
+
+    const selectedModelProvider = overviewModelProviders.find((provider) =>
+        provider.models.some((model) => model.id === selectedModel),
+    );
+    const selectedModelLabel = selectedModelProvider?.models.find((model) => model.id === selectedModel)?.label || selectedModel;
+    const selectedModelProviderLabel = selectedModelProvider?.label || 'AI';
+    const supportsReasoningEffort = selectedModelProvider?.id === 'ifm';
 
     useEffect(() => {
         if (!modelDropdownOpen) return;
@@ -683,9 +725,13 @@ export default function StockOverview({
             window.localStorage.setItem(OVERVIEW_AI_REASONING_STORAGE_KEY, level);
         } catch { /* ignore */ }
     };
+    const handleOverviewModelChange = (model: string) => {
+        setSelectedModel(model);
+        try { window.localStorage.setItem(OVERVIEW_AI_MODEL_STORAGE_KEY, model); } catch { /* ignore */ }
+    };
     const commentaryCacheKey = useMemo(
-        () => `kapOverviewAi::readable-comment-v3::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::ifm::${reasoningEffort}::${payloadHash}::${historyHash}::${valuationHash}`,
-        [snapshot.stock_code, snapshot.company, latestPeriod, reasoningEffort, payloadHash, historyHash, valuationHash],
+        () => `kapOverviewAi::readable-comment-v4::${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::${selectedModel}::${reasoningEffort}::${payloadHash}::${historyHash}::${valuationHash}`,
+        [snapshot.stock_code, snapshot.company, latestPeriod, selectedModel, reasoningEffort, payloadHash, historyHash, valuationHash],
     );
     const [aiLoading, setAiLoading] = useState(false);
     const [aiError, setAiError] = useState('');
@@ -805,7 +851,8 @@ export default function StockOverview({
         console.debug('[overview-ai] request started', {
             company: snapshot.stock_code || snapshot.company,
             latestPeriod,
-            provider: OVERVIEW_AI_PROVIDER_LABEL,
+            provider: selectedModelProviderLabel,
+            model: selectedModel,
             forceRefresh,
             incomeRows: overviewAiPayload.income_summary.length,
             balanceRows: overviewAiPayload.balance_summary.length,
@@ -836,6 +883,7 @@ export default function StockOverview({
                 company: snapshot.stock_code || snapshot.company,
                 company_title: snapshot.company_title || snapshot.company,
                 latest_period: latestPeriod,
+                model: selectedModel,
                 reasoning_effort: reasoningEffort,
                 history_context: overviewHistoryContext,
                 valuation_context: overviewValuationContext,
@@ -1132,13 +1180,14 @@ export default function StockOverview({
                                     onClick={() => setModelDropdownOpen((prev) => !prev)}
                                     disabled={aiLoading}
                                     aria-expanded={modelDropdownOpen}
-                                    title="AI Düşünce Seviyesini Seçin"
+                                    title="AI modeli ve düşünce seviyesini seçin"
                                 >
                                     <Sparkles size={13} className="overview-ai-sparkle-icon" aria-hidden="true" />
-                                    <span className="overview-ai-model-name">{OVERVIEW_AI_PROVIDER_LABEL}</span>
+                                    <span className="overview-ai-model-name">{selectedModelProviderLabel}</span>
                                     <span className="overview-ai-model-sep">·</span>
                                     <span className="overview-ai-model-effort">
-                                        {reasoningEffort === 'low' ? 'Low' : reasoningEffort === 'medium' ? 'Medium' : 'High'}
+                                        {selectedModelLabel}
+                                        {supportsReasoningEffort ? ` · ${reasoningEffort}` : ''}
                                     </span>
                                     <ChevronUp size={13} className={`overview-ai-model-chevron${modelDropdownOpen ? ' is-open' : ''}`} aria-hidden="true" />
                                 </button>
@@ -1146,30 +1195,62 @@ export default function StockOverview({
                                 {modelDropdownOpen && (
                                     <div className="overview-ai-model-dropdown" role="menu">
                                         <div className="overview-ai-dropdown-header">
-                                            <span>Düşünce Seviyesi</span>
+                                            <span>Model</span>
                                         </div>
-                                        {REASONING_OPTIONS.map((opt) => (
-                                            <button
-                                                key={opt.key}
-                                                type="button"
-                                                className={`overview-ai-dropdown-item${reasoningEffort === opt.key ? ' is-selected' : ''}`}
-                                                onClick={() => {
-                                                    handleReasoningEffortChange(opt.key);
-                                                    setModelDropdownOpen(false);
-                                                }}
-                                            >
-                                                <div className="overview-ai-dropdown-item-info">
-                                                    <div className="overview-ai-dropdown-item-top">
-                                                        <strong>{opt.label}</strong>
-                                                        <span className="overview-ai-dropdown-item-tag">{opt.tag}</span>
-                                                    </div>
-                                                    <span className="overview-ai-dropdown-item-desc">{opt.description}</span>
-                                                </div>
-                                                {reasoningEffort === opt.key && (
-                                                    <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />
-                                                )}
-                                            </button>
+                                        {overviewModelProviders.map((provider) => (
+                                            <div className="overview-ai-provider-group" key={provider.id}>
+                                                <div className="overview-ai-dropdown-provider-label">{provider.label}</div>
+                                                {provider.models.map((model) => (
+                                                    <button
+                                                        key={`${provider.id}:${model.id}`}
+                                                        type="button"
+                                                        className={`overview-ai-dropdown-item${selectedModel === model.id ? ' is-selected' : ''}`}
+                                                        onClick={() => handleOverviewModelChange(model.id)}
+                                                        role="menuitemradio"
+                                                        aria-checked={selectedModel === model.id}
+                                                    >
+                                                        <div className="overview-ai-dropdown-item-info">
+                                                            <div className="overview-ai-dropdown-item-top">
+                                                                <strong>{model.label}</strong>
+                                                            </div>
+                                                        </div>
+                                                        {selectedModel === model.id && (
+                                                            <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />
+                                                        )}
+                                                    </button>
+                                                ))}
+                                            </div>
                                         ))}
+                                        {overviewModelProviders.length === 0 && (
+                                            <span className="overview-ai-dropdown-empty">Yapılandırılmış model bulunamadı.</span>
+                                        )}
+                                        {modelListError && <span className="overview-ai-dropdown-empty">{modelListError}</span>}
+                                        {supportsReasoningEffort && (
+                                            <>
+                                                <div className="overview-ai-dropdown-header">Düşünce seviyesi</div>
+                                                {REASONING_OPTIONS.map((opt) => (
+                                                    <button
+                                                        key={opt.key}
+                                                        type="button"
+                                                        className={`overview-ai-dropdown-item${reasoningEffort === opt.key ? ' is-selected' : ''}`}
+                                                        onClick={() => handleReasoningEffortChange(opt.key)}
+                                                        role="menuitemradio"
+                                                        aria-checked={reasoningEffort === opt.key}
+                                                    >
+                                                        <div className="overview-ai-dropdown-item-info">
+                                                            <div className="overview-ai-dropdown-item-top">
+                                                                <strong>{opt.label}</strong>
+                                                                <span className="overview-ai-dropdown-item-tag">{opt.tag}</span>
+                                                            </div>
+                                                            <span className="overview-ai-dropdown-item-desc">{opt.description}</span>
+                                                        </div>
+                                                        {reasoningEffort === opt.key && (
+                                                            <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />
+                                                        )}
+                                                    </button>
+                                                ))}
+                                            </>
+                                        )}
                                     </div>
                                 )}
                             </div>

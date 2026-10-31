@@ -548,10 +548,17 @@ def _earnings_quality(
         elif net_delta > 0:
             explained = op_delta / net_delta
             result["explained_share"] = explained
-            if explained >= 0.6:
+            if reference_current is not None and reference_current > 0:
+                op_material = abs(op_delta) / reference_current * 100.0 >= materiality_pp
+            else:
+                op_material = abs(op_delta) >= 0.05 * max(abs(op_ly or 0.0), 1.0)
+            # A material increase in operating profit is positive evidence
+            # even when net profit rises faster because of other items. Treat
+            # its share as context, not as an automatic quality penalty.
+            if op_delta > 0 and op_material and explained >= 0.6:
                 score, code = 9.0, "faaliyet_destekli"
-            elif explained >= 0.25:
-                score, code = 6.5, "kismen_faaliyet_destekli"
+            elif op_delta > 0 and op_material:
+                score, code = 7.5, "kismen_faaliyet_destekli"
             elif op_delta >= 0:
                 score, code = 4.0, "faaliyet_disi_kar_artisi"
             else:
@@ -567,10 +574,10 @@ def _earnings_quality(
         score, code = 2.5, "faaliyet_zarari_net_kar"
     if ebitda_current is not None and ebitda_current > 0 and net_cur > ebitda_current:
         # Net profit above EBITDA means the current level leans on
-        # non-operating items. If the change itself was operational, the
-        # discount is milder (e.g. holdings with recurring financial income).
+        # non-operating items. Keep this as a quality caution, but do not let
+        # it erase a material improvement in operating profit.
         result["net_exceeds_ebitda"] = True
-        ceiling = 5.5 if code == "faaliyet_destekli" else 4.0
+        ceiling = 7.5 if code == "faaliyet_destekli" else 6.5 if code == "kismen_faaliyet_destekli" else 4.0
         score = min(score if score is not None else 5.0, ceiling)
         if code is None:
             code = "net_kar_favoku_asiyor"
@@ -705,9 +712,10 @@ def _quality_flags(quality: Dict[str, Any], *, operating_label: str, period_labe
             "karlilik",
         ))
     elif code == "kismen_faaliyet_destekli":
+        share = f" ({operating_label} artışı net kâr artışının yaklaşık %{min(explained, 9.99) * 100:.0f}'ine denk geliyor)" if explained is not None else ""
         flags.append(_flag(
-            "kismen_faaliyet_destekli", "neutral", "Kâr artışı kısmen faaliyet kaynaklı",
-            f"{delta_text} Faaliyet kârı net kâr artışının tamamını açıklamıyor; kalan kısmın kaynağı bu veriden belirlenemiyor.".strip(),
+            "kismen_faaliyet_destekli", "neutral", f"{operating_label.capitalize()} arttı",
+            f"{delta_text} {operating_label.capitalize()} artışı net kâr artışına katkı sağlıyor{share}. Net kârdaki ek artışın niteliği alt kalem dökümü olmadan değerlendirilemez; bu fark tek başına faaliyet performansına eksi yazılmaz.".strip(),
             "karlilik",
         ))
     elif code == "faaliyet_disi_kar_artisi":
@@ -807,6 +815,12 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
     op_change_score, _ = _score_profit_change(
         op_metric["cur"], op_metric["ly"], sales["cur"], sales["ly"], pct_scale=45.0, delta_scale=3.0, materiality=4.0,
     )
+    op_ytd_metric = efk if efk["ytd"] is not None and efk["ytd_ly"] is not None else favok
+    op_ytd_label = "Esas faaliyet kârı" if op_ytd_metric is efk else "FAVÖK"
+    op_ytd_change_score, _ = _score_profit_change(
+        op_ytd_metric["ytd"], op_ytd_metric["ytd_ly"], sales["ytd"], sales["ytd_ly"],
+        pct_scale=45.0, delta_scale=3.0, materiality=4.0,
+    )
     # Unbacked net profit growth counts less in both growth and profitability.
     net_growth_for_growth_bucket = _shrink(net_change_score, 0.5) if non_operating else net_change_score
     net_ttm_growth_for_growth_bucket = _shrink(net_ttm_score, 0.5) if non_operating else net_ttm_score
@@ -840,6 +854,7 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
         _spec("Net kâr marjı (çeyreklik değişim)" + (" · kalite indirimi" if non_operating else ""), _score_growth(net_margin_qoq_pp, 2.0), 0.2 if non_operating else 0.35, _fmt_pp(net_margin_qoq_pp)),
         _spec("ROE (son 12 ay)", _score_higher(roe, 4.0, 24.0), 0.8, _fmt_level_pct(roe)),
         _spec("Net kâr değişimi (aynı çeyrek)" + (" · kalite indirimi" if non_operating else ""), net_growth_for_profitability, 0.6, _fmt_change(net["cur"], net["ly"])),
+        _spec(f"{op_ytd_label} değişimi (YTD)", op_ytd_change_score, 0.7, _fmt_change(op_ytd_metric["ytd"], op_ytd_metric["ytd_ly"])),
         _spec(f"Kâr kalitesi ({operating_label} desteği)", quality["score"], 1.0, str(quality["code"] or "-")),
     ]
 
@@ -923,6 +938,17 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
         base_margin=net_base_margin, low_base_threshold=1.5,
     ))
     flags.extend(_quality_flags(quality, operating_label=operating_label, period_label=period_label))
+    if (
+        op_ytd_metric["ytd"] is not None
+        and op_ytd_metric["ytd"] > 0
+        and op_ytd_metric["ytd_ly"] is not None
+        and op_ytd_metric["ytd"] > op_ytd_metric["ytd_ly"]
+    ):
+        flags.append(_flag(
+            "faaliyet_kar_ytd_artisi", "positive", f"{op_ytd_label} YTD arttı",
+            f"{period_label} YTD {op_ytd_label.lower()} {_fmt_change(op_ytd_metric['ytd'], op_ytd_metric['ytd_ly'])}; yıl başından beri faaliyet kârlılığı geçen yılın aynı döneminin üzerinde.",
+            "karlilik",
+        ))
     if favok_margin_yoy_pp is not None and favok_margin_yoy_pp >= 2.0:
         flags.append(_flag("marj_genislemesi", "positive", "FAVÖK marjı genişledi", f"FAVÖK marjı yıllık {_fmt_pp(favok_margin_yoy_pp)} değişimle {_fmt_level_pct(favok_margin)} oldu.", "karlilik"))
     elif favok_margin_yoy_pp is not None and favok_margin_yoy_pp <= -2.0:
