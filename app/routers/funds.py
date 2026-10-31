@@ -326,7 +326,9 @@ def admin_refresh_fund_performance(
         )
     except FundUpstreamError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    _invalidate_single_fund_response_cache(normalized)
+    cache_invalidation_status = _invalidate_single_fund_response_cache(normalized)
+    result = dict(result)
+    result["cache_invalidation_status"] = cache_invalidation_status
     return result
 
 @router.post("/admin/funds/{fund_code}/refresh-allocations")
@@ -344,7 +346,9 @@ def admin_refresh_fund_allocations(
         result = refresh_fund_allocations(CONFIG.paths.processed_dir, normalized, as_of=as_of)
     except FundUpstreamError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    _invalidate_single_fund_response_cache(normalized)
+    cache_invalidation_status = _invalidate_single_fund_response_cache(normalized)
+    result = dict(result)
+    result["cache_invalidation_status"] = cache_invalidation_status
     return result
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -70,6 +70,10 @@ def test_api_health() -> None:
     assert payload["status"] == "ok"
     assert payload["cache_backend"] in {"memory", "redis"}
     assert payload["cache_namespace"]
+    assert "cache_redis_fallback" in payload
+    assert "cache_last_error" in payload
+    if payload["cache_backend"] == "redis":
+        assert "cache_redis_circuit" in payload
     assert "supabase_json_cache_metrics" in payload
     assert "totals" in payload["supabase_json_cache_metrics"]
 
@@ -488,7 +492,7 @@ def test_market_stocks_serves_stale_quote_when_upstream_fails(monkeypatch: pytes
         "stale_until": time.time() + 120,
     }
     backend = cache_module.get_cache()
-    backend.set("api:market:stocks:XUTUM:v3", stale_entry, ttl_seconds=120)
+    backend.set("api:market:stocks:XUTUM:v4", stale_entry, ttl_seconds=120)
     monkeypatch.setattr(api_module, "_build_market_stocks_payload", lambda **_kwargs: {
         "index": "XUTUM",
         "rows": [{"company": "YKBNK", "price": None}],
@@ -496,11 +500,113 @@ def test_market_stocks_serves_stale_quote_when_upstream_fails(monkeypatch: pytes
         "as_of": "new",
     })
 
-    payload = api_module._market_stocks_payload(index_name="XUTUM", force_refresh=True)
+    payload = api_module._market_stocks_payload(index_name="XUTUM")
 
     assert payload["stale"] is True
     assert payload["quote_status"] == "stale"
     assert payload["rows"][0]["price"] == 25.0
+    assert backend.get("api:market:stocks:XUTUM:v4") == stale_entry
+
+
+def test_market_stocks_caches_no_quote_result_for_three_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def no_quote_build(**_kwargs: Any) -> Dict[str, Any]:
+        calls.append("build")
+        return {
+            "index": "XUTUM",
+            "rows": [{"company": "YKBNK", "symbol": "YKBNK", "price": None}],
+            "benchmarks": {},
+            "as_of": "new",
+        }
+
+    monkeypatch.setattr(api_module, "_MARKET_QUOTES_NOQUOTE_TTL_SECONDS", 1)
+    monkeypatch.setattr(api_module, "_build_market_stocks_payload", no_quote_build)
+    monkeypatch.setattr(
+        api_module,
+        "_market_unavailable_stocks_payload",
+        lambda index_name: {"index": index_name, "rows": [], "benchmarks": {}},
+    )
+
+    first = api_module._market_stocks_payload(index_name="XUTUM")
+    second = api_module._market_stocks_payload(index_name="XUTUM")
+
+    assert first["quote_status"] == "unavailable"
+    assert second["quote_status"] == "unavailable"
+    assert len(calls) == 1
+
+    time.sleep(1.05)
+    third = api_module._market_stocks_payload(index_name="XUTUM")
+    assert third["quote_status"] == "unavailable"
+    assert len(calls) == 2
+
+
+def test_market_stocks_does_not_negative_cache_empty_universe(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def empty_universe_build(**_kwargs: Any) -> Dict[str, Any]:
+        calls.append("build")
+        return {"index": "XUTUM", "rows": [], "benchmarks": {}, "as_of": "now"}
+
+    monkeypatch.setattr(api_module, "_build_market_stocks_payload", empty_universe_build)
+
+    payload = api_module._market_stocks_payload(index_name="XUTUM")
+
+    assert payload["quote_status"] == "fresh"
+    assert cache_module.get_cache().get("api:market:stocks:XUTUM:no-quote:v1") is None
+    assert calls == ["build"]
+
+
+def test_market_stocks_success_clears_no_quote_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = cache_module.get_cache()
+    no_quote_key = "api:market:stocks:XUTUM:no-quote:v1"
+
+    def successful_build(**_kwargs: Any) -> Dict[str, Any]:
+        # Model a marker written by a concurrent failed build before this
+        # successful result is stored.
+        backend.set(no_quote_key, {"status": "no_quote"}, ttl_seconds=3)
+        return {
+            "index": "XUTUM",
+            "rows": [{"company": "YKBNK", "symbol": "YKBNK", "price": 25.0}],
+            "benchmarks": {},
+            "as_of": "now",
+        }
+
+    monkeypatch.setattr(api_module, "_build_market_stocks_payload", successful_build)
+
+    payload = api_module._market_stocks_payload(index_name="XUTUM")
+
+    assert payload["quote_status"] == "fresh"
+    assert backend.get(no_quote_key) is None
+
+
+def test_market_stocks_force_refresh_skips_build_during_negative_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = cache_module.get_cache()
+    backend.set(
+        "api:market:stocks:XUTUM:no-quote:v1",
+        {"status": "no_quote"},
+        ttl_seconds=3,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_schedule_swr_revalidation",
+        lambda **_kwargs: pytest.fail("negative cache should suppress revalidation"),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_build_market_stocks_payload",
+        lambda **_kwargs: pytest.fail("negative cache should suppress a new build"),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_market_unavailable_stocks_payload",
+        lambda index_name: {"index": index_name, "rows": [], "benchmarks": {}},
+    )
+
+    payload = api_module._market_stocks_payload(index_name="XUTUM", force_refresh=True)
+
+    assert payload["quote_status"] == "unavailable"
+    assert payload["refresh_pending"] is False
 
 
 def test_market_indices_use_shared_stale_while_revalidate_cache(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1242,6 +1348,7 @@ def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.Mon
             "lookback_days": lookback_days,
         },
     )
+    monkeypatch.setattr(fund_service_module, "commit_funds_snapshot", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         fund_service_module,
         "get_funds_payload",
@@ -1288,6 +1395,9 @@ def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.Mon
 
     api_module._run_fund_refresh_job("test-refresh-job", 1)
 
+    completed_job = api_module._get_fund_refresh_job("test-refresh-job")
+    assert completed_job["status"] == "succeeded"
+    assert completed_job["cache_invalidation_status"] == "complete"
     assert backend.get("api:funds:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc") is None
     assert backend.get("api:funds:v2:q=|type=|founder=|manager=|risk=|sort=fund_code|order=asc") is None
     assert backend.get("api:funds-search:q=") is None
@@ -1295,6 +1405,124 @@ def test_admin_funds_refresh_invalidates_response_caches(monkeypatch: pytest.Mon
     assert backend.get("api:funds-categories:v2") is None
     assert backend.get("api:fund-yield-summary:TLY") is None
     assert backend.get("api:fund-holdings:TLY") is None
+def test_admin_snapshot_refresh_job_reports_deferred_cache_invalidation(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = cache_module.get_cache()
+    job = {
+        "job_id": "deferred-refresh-job",
+        "status": "queued",
+        "requested_at": "2026-05-20T09:00:00+00:00",
+        "started_at": None,
+        "finished_at": None,
+        "as_of": None,
+        "row_count": None,
+        "cache_invalidation_status": None,
+        "error": None,
+        "owner_token": "deferred-refresh-owner",
+        "generation": 0,
+    }
+    api_module._set_fund_refresh_job(job)
+    backend.set(api_module._FUND_REFRESH_ACTIVE_KEY, job["job_id"], ttl_seconds=600)
+    monkeypatch.setattr(
+        fund_service_module,
+        "refresh_funds_snapshot",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "rows": [{"fund_code": "TLY"}],
+            "resolution_status": "available",
+            "as_of": "2026-05-20",
+            "source_metadata": {"snapshot_action": "updated"},
+        },
+    )
+    monkeypatch.setattr(fund_service_module, "commit_funds_snapshot", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(api_module, "_invalidate_fund_response_cache", lambda: "deferred")
+
+    api_module._run_fund_refresh_job(job["job_id"], 1)
+
+    completed_job = api_module._get_fund_refresh_job(job["job_id"])
+    assert completed_job["status"] == "succeeded"
+    assert completed_job["cache_invalidation_status"] == "deferred"
+
+
+def test_fund_response_invalidation_reports_deferred_when_redis_fell_back_to_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = cache_module.InMemoryCache()
+    backend.set("api:funds:stale", {"old": True}, ttl_seconds=60)
+    monkeypatch.setattr(api_module, "_get_cache", lambda: backend)
+    monkeypatch.setattr(api_module, "_cache_status", lambda: {"cache_redis_fallback": True})
+
+    status = api_module._invalidate_fund_response_cache()
+
+    assert status == "deferred"
+    assert backend.get("api:funds:stale") is None
+
+
+def test_nested_fund_maps_are_invalidated_by_the_parent_prefix_without_extra_scans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TrackingCache(cache_module.InMemoryCache):
+        def __init__(self) -> None:
+            super().__init__()
+            self.deleted_prefixes: List[str] = []
+
+        def delete_prefix_with_status(self, prefix: str):
+            self.deleted_prefixes.append(prefix)
+            return super().delete_prefix_with_status(prefix)
+
+    backend = _TrackingCache()
+    backend.set("api:funds:snapshot-row-map:mtime=1:v1", {"stale": True}, ttl_seconds=60)
+    backend.set("api:funds:holding-sector-map:v1", {"stale": True}, ttl_seconds=60)
+    monkeypatch.setattr(api_module, "_get_cache", lambda: backend)
+    monkeypatch.setattr(api_module, "_cache_status", lambda: {"cache_redis_fallback": False})
+
+    status = api_module._invalidate_fund_response_cache()
+
+    assert status == "complete"
+    assert backend.get("api:funds:snapshot-row-map:mtime=1:v1") is None
+    assert backend.get("api:funds:holding-sector-map:v1") is None
+    assert backend.deleted_prefixes.count("api:funds:") == 1
+    assert "api:funds:snapshot-row-map:" not in backend.deleted_prefixes
+    assert "api:funds:holding-sector-map:" not in backend.deleted_prefixes
+
+
+@pytest.mark.parametrize(
+    ("path", "params", "service_name"),
+    [
+        (
+            "/admin/funds/THF/refresh-performance",
+            {"start_date": "2026-01-01", "end_date": "2026-01-02"},
+            "refresh_fund_performance",
+        ),
+        (
+            "/admin/funds/THF/refresh-allocations",
+            {},
+            "refresh_fund_allocations",
+        ),
+    ],
+)
+def test_single_fund_refresh_responses_report_cache_invalidation_status(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    params: Dict[str, str],
+    service_name: str,
+) -> None:
+    monkeypatch.setattr(funds_router, "_require_known_fund_code", lambda fund_code: fund_code)
+    monkeypatch.setattr(
+        fund_service_module,
+        service_name,
+        lambda *_args, **_kwargs: {"status": "ok"},
+    )
+    monkeypatch.setattr(funds_router, "_invalidate_single_fund_response_cache", lambda _code: "deferred")
+
+    response = TestClient(app).post(
+        path,
+        params=params,
+        headers={"Authorization": "Bearer test-admin-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["cache_invalidation_status"] == "deferred"
 
 
 def test_truncated_fund_refresh_is_failed_without_committing(monkeypatch: pytest.MonkeyPatch) -> None:

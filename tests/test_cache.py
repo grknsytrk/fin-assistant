@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import time
+import sys
 import threading
+import time
 
 import pytest
 
@@ -159,6 +160,171 @@ def test_delete_prefix_invalidates_matching_keys() -> None:
     assert backend.get("api:other") == 3
 
 
+def _redis_backend_for_test(monkeypatch, client):
+    class _FakeRedisModule:
+        class Redis:
+            @staticmethod
+            def from_url(*_args, **_kwargs):
+                return client
+
+    monkeypatch.setitem(sys.modules, "redis", _FakeRedisModule)
+    return cache_module.RedisCache(url="redis://test", namespace="test")
+
+
+def test_redis_invalidation_reports_confirmed_deletes_and_preserves_legacy_contracts(monkeypatch) -> None:
+    class _Client:
+        delete_calls = []
+
+        def ping(self):
+            return True
+
+        def delete(self, *keys):
+            self.delete_calls.append(keys)
+            return len(keys)
+
+        def scan_iter(self, *, match, count):
+            assert match == "test:api:funds:*"
+            assert count == 200
+            return iter(["test:api:funds:shared"])
+
+    client = _Client()
+    backend = _redis_backend_for_test(monkeypatch, client)
+
+    key_result = backend.delete_with_status("api:funds:single")
+    prefix_result = backend.delete_prefix_with_status("api:funds:")
+
+    assert key_result.complete is True
+    assert prefix_result.complete is True
+    assert prefix_result.deleted_count == 1
+    assert backend.delete("api:funds:legacy") is None
+    assert backend.delete_prefix("api:funds:") == 1
+
+
+def test_redis_invalidation_reports_deferred_during_circuit_cooldown_and_clears_local_fallback(monkeypatch) -> None:
+    class _Client:
+        delete_calls = []
+
+        def ping(self):
+            return True
+
+        def delete(self, *keys):
+            self.delete_calls.append(keys)
+            return len(keys)
+
+        def scan_iter(self, *, match, count):
+            assert count == 200
+            return iter(["test:api:funds:shared"])
+
+    client = _Client()
+    backend = _redis_backend_for_test(monkeypatch, client)
+    backend._circuit_open = True
+    backend._cooldown_until = time.monotonic() + 30
+    backend._fallback.set("api:funds:single", "stale", ttl_seconds=60)
+    backend._fallback.set("api:funds:row", "stale", ttl_seconds=60)
+
+    key_result = backend.delete_with_status("api:funds:single")
+    prefix_result = backend.delete_prefix_with_status("api:funds:")
+
+    assert key_result.complete is False
+    assert prefix_result.complete is False
+    assert backend._fallback.get("api:funds:single") is None
+    assert backend._fallback.get("api:funds:row") is None
+    assert client.delete_calls == []
+
+
+def test_redis_invalidation_reports_deferred_after_remote_delete_errors(monkeypatch) -> None:
+    class _Client:
+        def ping(self):
+            return True
+
+        def delete(self, *_keys):
+            raise RuntimeError("redis unavailable")
+
+        def scan_iter(self, *, match, count):
+            assert match == "test:api:funds:*"
+            assert count == 200
+            return iter(["test:api:funds:shared"])
+
+    backend = _redis_backend_for_test(monkeypatch, _Client())
+    backend._fallback.set("api:funds:single", "stale", ttl_seconds=60)
+    backend._fallback.set("api:funds:row", "stale", ttl_seconds=60)
+
+    key_result = backend.delete_with_status("api:funds:single")
+    assert key_result.complete is False
+    assert backend._fallback.get("api:funds:single") is None
+
+    backend._circuit_open = False
+    backend._cooldown_until = 0.0
+    backend._half_open_probe = False
+    prefix_result = backend.delete_prefix_with_status("api:funds:")
+    assert prefix_result.complete is False
+    assert backend._fallback.get("api:funds:row") is None
+
+
+def test_redis_prefix_invalidation_streams_matches_in_bounded_delete_batches(monkeypatch) -> None:
+    keys = [f"test:api:funds:{index}" for index in range(450)]
+
+    class _Client:
+        def __init__(self) -> None:
+            self.delete_batches = []
+            self.scan_counts = []
+
+        def ping(self):
+            return True
+
+        def scan_iter(self, *, match, count):
+            assert match == "test:api:funds:*"
+            self.scan_counts.append(count)
+            return iter(keys)
+
+        def delete(self, *batch):
+            self.delete_batches.append(batch)
+            return len(batch)
+
+    client = _Client()
+    backend = _redis_backend_for_test(monkeypatch, client)
+
+    result = backend.delete_prefix_with_status("api:funds:")
+
+    assert result.complete is True
+    assert result.deleted_count == 450
+    assert client.scan_counts == [200]
+    assert [len(batch) for batch in client.delete_batches] == [200, 200, 50]
+
+
+def test_redis_prefix_invalidation_stays_deferred_after_a_late_batch_error(monkeypatch) -> None:
+    keys = [f"test:api:funds:{index}" for index in range(450)]
+
+    class _Client:
+        def __init__(self) -> None:
+            self.delete_batches = []
+
+        def ping(self):
+            return True
+
+        def scan_iter(self, *, match, count):
+            assert match == "test:api:funds:*"
+            assert count == 200
+            return iter(keys)
+
+        def delete(self, *batch):
+            self.delete_batches.append(batch)
+            if len(self.delete_batches) == 2:
+                raise RuntimeError("redis delete failed")
+            return len(batch)
+
+    client = _Client()
+    backend = _redis_backend_for_test(monkeypatch, client)
+    backend._fallback.set("api:funds:local", "stale", ttl_seconds=60)
+
+    result = backend.delete_prefix_with_status("api:funds:")
+
+    assert result.complete is False
+    assert result.deleted_count == 201
+    assert [len(batch) for batch in client.delete_batches] == [200, 200]
+    assert backend._fallback.get("api:funds:local") is None
+
+
 def test_json_helpers_ignore_non_dict_values() -> None:
     backend = cache_module.get_cache()
     backend.set("json:bad", ["not", "a", "dict"], ttl_seconds=60)
@@ -273,6 +439,152 @@ def test_cached_decorator_single_flight_shares_one_miss() -> None:
     assert len(results) == 6
     assert results == [{"echo": "same", "call": 1}] * 6
     assert calls["n"] == 1
+
+
+def test_single_flight_waiter_uses_bounded_backoff_and_returns_before_timeout(monkeypatch) -> None:
+    clock = [0.0]
+    sleeps = []
+
+    class _Backend:
+        reads = 0
+
+        def get(self, _key):
+            self.reads += 1
+            return {"value": "ready"} if self.reads == 3 else None
+
+        def set_if_absent(self, *_args, **_kwargs):
+            return False
+
+    backend = _Backend()
+    monkeypatch.setattr(cache_module, "_BACKEND", backend)
+    monkeypatch.setattr(cache_module.time, "time", lambda: clock[0])
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(cache_module.time, "sleep", fake_sleep)
+
+    value, status = cache_module.get_or_set_single_flight(
+        "test:single-flight:waiter",
+        ttl_seconds=30,
+        factory=lambda: pytest.fail("a waiter must not run the factory"),
+        lock_ttl_seconds=30,
+        wait_timeout_seconds=1,
+        allow_cached=False,
+    )
+
+    assert value == {"value": "ready"}
+    assert status == "coalesced"
+    assert sleeps == pytest.approx([0.05, 0.075, 0.1125])
+    assert backend.reads == 3
+
+
+def test_single_flight_eight_second_wait_uses_at_most_35_cache_polls(monkeypatch) -> None:
+    clock = [0.0]
+    sleeps = []
+
+    class _Backend:
+        reads = 0
+
+        def get(self, _key):
+            self.reads += 1
+            return None
+
+        def set_if_absent(self, *_args, **_kwargs):
+            return False
+
+    backend = _Backend()
+    monkeypatch.setattr(cache_module, "_BACKEND", backend)
+    monkeypatch.setattr(cache_module.time, "time", lambda: clock[0])
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(cache_module.time, "sleep", fake_sleep)
+
+    value, status = cache_module.get_or_set_single_flight(
+        "test:single-flight:timeout",
+        ttl_seconds=30,
+        factory=lambda: pytest.fail("a pending waiter must not run the factory"),
+        lock_ttl_seconds=30,
+        wait_timeout_seconds=8,
+        allow_cached=False,
+    )
+
+    assert value is None
+    assert status == "pending"
+    assert clock[0] == 8.0
+    assert sleeps[:4] == pytest.approx([0.05, 0.075, 0.1125, 0.16875])
+    assert max(sleeps) <= 0.25
+    assert backend.reads <= 35
+    assert backend.reads == len(sleeps)
+
+
+def test_cached_decorator_waiter_returns_value_and_keeps_timeout_factory_fallback(monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    clock = [0.0]
+
+    class _Backend:
+        def __init__(self, ready_after: int | None) -> None:
+            self.ready_after = ready_after
+            self.reads = 0
+            self.values = {}
+
+        def get(self, key):
+            self.reads += 1
+            if self.ready_after is not None and self.reads >= self.ready_after:
+                return {"value": "ready"}
+            return self.values.get(key)
+
+        def set(self, key, value, *, ttl_seconds):
+            self.values[key] = value
+            return True
+
+        @contextmanager
+        def lock(self, _key, *, timeout=30.0):
+            yield False
+
+    monkeypatch.setattr(cache_module.time, "time", lambda: clock[0])
+    monkeypatch.setattr(cache_module.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    ready_backend = _Backend(ready_after=3)
+    monkeypatch.setattr(cache_module, "_BACKEND", ready_backend)
+    ready_factory_calls = []
+
+    @cache_module.cached(
+        key_fn=lambda: "test:decorator:ready",
+        ttl_seconds=30,
+        single_flight=True,
+        lock_timeout=1,
+    )
+    def ready_factory():
+        ready_factory_calls.append(True)
+        return {"value": "factory"}
+
+    assert ready_factory() == {"value": "ready"}
+    assert ready_factory_calls == []
+
+    clock[0] = 0.0
+    timeout_backend = _Backend(ready_after=None)
+    monkeypatch.setattr(cache_module, "_BACKEND", timeout_backend)
+    timeout_factory_calls = []
+
+    @cache_module.cached(
+        key_fn=lambda: "test:decorator:timeout",
+        ttl_seconds=30,
+        single_flight=True,
+        lock_timeout=0.1,
+    )
+    def timeout_factory():
+        timeout_factory_calls.append(True)
+        return {"value": "factory"}
+
+    assert timeout_factory() == {"value": "factory"}
+    assert timeout_factory_calls == [True]
+    assert timeout_backend.values["test:decorator:timeout"] == {"value": "factory"}
 
 
 def test_memory_lock_serialises_concurrent_callers() -> None:

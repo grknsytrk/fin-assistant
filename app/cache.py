@@ -25,6 +25,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import wraps
 from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
@@ -42,6 +43,11 @@ _REDIS_COOLDOWN_SECONDS_ENV = "RAGFIN_REDIS_COOLDOWN_SECONDS"
 _DEFAULT_NAMESPACE = "ragfin"
 _DEFAULT_REDIS_COOLDOWN_SECONDS = 120
 _DEFAULT_REDIS_QUOTA_RETRY_SECONDS = 60 * 60
+_REDIS_SCAN_COUNT = 200
+_REDIS_DELETE_BATCH_SIZE = 200
+_SINGLE_FLIGHT_MIN_POLL_INTERVAL_SECONDS = 0.05
+_SINGLE_FLIGHT_MAX_POLL_INTERVAL_SECONDS = 0.25
+_SINGLE_FLIGHT_POLL_BACKOFF_FACTOR = 1.5
 
 _CACHE_METRIC_FAMILIES = (
     "kap_flow_store",
@@ -101,6 +107,14 @@ def _text_payload_bytes(value: Any) -> int:
     return len(str(value).encode("utf-8", errors="replace"))
 
 
+@dataclass(frozen=True)
+class CacheInvalidationResult:
+    """Report whether an invalidation reached the configured cache backend."""
+
+    complete: bool
+    deleted_count: int = 0
+
+
 class CacheBackend:
     """Common interface every backend must implement.
 
@@ -126,6 +140,12 @@ class CacheBackend:
     def delete(self, key: str) -> None:
         return None
 
+    def delete_with_status(self, key: str) -> CacheInvalidationResult:
+        """Delete a key and report whether the configured backend confirmed it."""
+
+        self.delete(key)
+        return CacheInvalidationResult(complete=True)
+
     def renew_if_owner(self, key: str, owner: Any, *, ttl_seconds: int) -> bool:
         return False
 
@@ -134,6 +154,12 @@ class CacheBackend:
 
     def delete_prefix(self, prefix: str) -> int:
         return 0
+
+    def delete_prefix_with_status(self, prefix: str) -> CacheInvalidationResult:
+        """Delete a prefix and report whether the configured backend confirmed it."""
+
+        deleted_count = self.delete_prefix(prefix)
+        return CacheInvalidationResult(complete=True, deleted_count=deleted_count)
 
     @contextmanager
     def lock(self, key: str, *, timeout: float = 30.0) -> Iterator[bool]:
@@ -487,19 +513,25 @@ class RedisCache(CacheBackend):
         return inserted
 
     def delete(self, key: str) -> None:
+        self.delete_with_status(key)
+
+    def delete_with_status(self, key: str) -> CacheInvalidationResult:
         if not self._should_attempt_redis():
             self._record_metrics(key, other_fallbacks=1, cooldown_skips=1)
             self._fallback.delete(key)
-            return
+            return CacheInvalidationResult(complete=False)
         self._record_metrics(key, other_remote_attempts=1)
         try:
-            self._client.delete(self._prefixed(key))
+            deleted_count = int(self._client.delete(self._prefixed(key)) or 0)
         except Exception as exc:  # pragma: no cover - depends on Redis
             self._record_metrics(key, other_remote_errors=1, other_fallbacks=1)
             self._log_remote_error("delete", key, exc)
+            complete = False
         else:
             self._remember_success()
+            complete = True
         self._fallback.delete(key)
+        return CacheInvalidationResult(complete=complete, deleted_count=deleted_count if complete else 0)
 
     def renew_if_owner(self, key: str, owner: Any, *, ttl_seconds: int) -> bool:
         if not self._should_attempt_redis():
@@ -549,22 +581,36 @@ class RedisCache(CacheBackend):
             return self._fallback.release_if_owner(key, owner)
 
     def delete_prefix(self, prefix: str) -> int:
+        result = self.delete_prefix_with_status(prefix)
+        return result.deleted_count
+
+    def delete_prefix_with_status(self, prefix: str) -> CacheInvalidationResult:
         deleted = self._fallback.delete_prefix(prefix)
         if not self._should_attempt_redis():
             self._record_metrics(prefix, other_fallbacks=1, cooldown_skips=1)
-            return deleted
+            return CacheInvalidationResult(complete=False, deleted_count=deleted)
         self._record_metrics(prefix, other_remote_attempts=1)
         try:
             full_prefix = self._prefixed(prefix)
-            keys = list(self._client.scan_iter(match=f"{full_prefix}*"))
-            if keys:
-                deleted += int(self._client.delete(*keys) or 0)
+            batch = []
+            for key in self._client.scan_iter(
+                match=f"{full_prefix}*",
+                count=_REDIS_SCAN_COUNT,
+            ):
+                batch.append(key)
+                if len(batch) >= _REDIS_DELETE_BATCH_SIZE:
+                    deleted += int(self._client.delete(*batch) or 0)
+                    batch.clear()
+            if batch:
+                deleted += int(self._client.delete(*batch) or 0)
         except Exception as exc:  # pragma: no cover - depends on Redis
             self._record_metrics(prefix, other_remote_errors=1, other_fallbacks=1)
             self._log_remote_error("delete_prefix", prefix, exc)
+            complete = False
         else:
             self._remember_success()
-        return deleted
+            complete = True
+        return CacheInvalidationResult(complete=complete, deleted_count=deleted)
 
     @contextmanager
     def lock(self, key: str, *, timeout: float = 30.0) -> Iterator[bool]:
@@ -707,6 +753,33 @@ def set_json(key: str, value: Dict[str, Any], ttl_seconds: int) -> bool:
     except Exception:
         return False
     return True
+
+
+def _wait_for_cache_value(
+    read_value: Callable[[], Any],
+    *,
+    deadline: float,
+    initial_poll_interval_seconds: float,
+) -> Any:
+    """Poll a cache read with bounded, increasing waits until a deadline."""
+
+    poll_seconds = min(
+        _SINGLE_FLIGHT_MAX_POLL_INTERVAL_SECONDS,
+        max(_SINGLE_FLIGHT_MIN_POLL_INTERVAL_SECONDS, float(initial_poll_interval_seconds)),
+    )
+    while time.time() < deadline:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_seconds, remaining))
+        cached_value = read_value()
+        if cached_value is not None:
+            return cached_value
+        poll_seconds = min(
+            poll_seconds * _SINGLE_FLIGHT_POLL_BACKOFF_FACTOR,
+            _SINGLE_FLIGHT_MAX_POLL_INTERVAL_SECONDS,
+        )
+    return None
 
 
 def get_or_set(
@@ -875,12 +948,13 @@ def get_or_set_single_flight(
                 logger.debug("single-flight unlock failed for %s", actual_lock_key)
 
     deadline = time.time() + max(0.0, float(wait_timeout_seconds))
-    poll_seconds = max(0.01, float(poll_interval_seconds))
-    while time.time() < deadline:
-        time.sleep(poll_seconds)
-        cached_value = read_usable()
-        if cached_value is not None:
-            return cached_value, "coalesced"
+    cached_value = _wait_for_cache_value(
+        read_usable,
+        deadline=deadline,
+        initial_poll_interval_seconds=poll_interval_seconds,
+    )
+    if cached_value is not None:
+        return cached_value, "coalesced"
     return None, "pending"
 
 
@@ -1037,11 +1111,13 @@ def cached(
                         return result
                     else:
                         deadline = time.time() + max(0.05, lock_timeout)
-                        while time.time() < deadline:
-                            time.sleep(0.05)
-                            cached_value = backend.get(key)
-                            if cached_value is not None:
-                                return cached_value
+                        cached_value = _wait_for_cache_value(
+                            lambda: backend.get(key),
+                            deadline=deadline,
+                            initial_poll_interval_seconds=0.05,
+                        )
+                        if cached_value is not None:
+                            return cached_value
                         result = func(*args, **kwargs)
             else:
                 result = func(*args, **kwargs)

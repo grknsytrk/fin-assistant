@@ -24,6 +24,8 @@ _MARKET_QUOTES_POLL_INTERVAL_SECONDS = float(
     os.getenv("RAGFIN_MARKET_QUOTES_POLL_INTERVAL_SECONDS", "0.05")
 )
 
+_MARKET_QUOTES_NOQUOTE_TTL_SECONDS = 3
+
 def _log_market_cache_event(
     *,
     endpoint: str,
@@ -1264,6 +1266,52 @@ def _market_quote_entry_is_fresh(entry: Any) -> bool:
     except (TypeError, ValueError):
         return False
 
+
+def _market_no_quote_cache_key(index_name: str) -> str:
+    return f"api:market:stocks:{index_name}:no-quote:v1"
+
+
+def _market_no_quote_cache_active(index_name: str) -> bool:
+    entry = _shared_cache_get_dict(_market_no_quote_cache_key(index_name))
+    return isinstance(entry, dict) and entry.get("status") == "no_quote"
+
+
+def _store_market_no_quote_cache(index_name: str) -> None:
+    _shared_cache_set(
+        _market_no_quote_cache_key(index_name),
+        {"status": "no_quote"},
+        _MARKET_QUOTES_NOQUOTE_TTL_SECONDS,
+    )
+
+
+def _clear_market_no_quote_cache(index_name: str) -> None:
+    _get_cache().delete(_market_no_quote_cache_key(index_name))
+
+
+def _market_payload_has_symbol_rows(payload: Dict[str, Any]) -> bool:
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    return any(
+        isinstance(row, dict)
+        and str(row.get("company") or row.get("symbol") or "").strip()
+        for row in rows
+    )
+
+
+def _market_payload_has_quote(payload: Dict[str, Any]) -> bool:
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    if not rows:
+        return True
+    return any(
+        isinstance(row, dict)
+        and str(row.get("company") or row.get("symbol") or "").strip()
+        and row.get("price") is not None
+        for row in rows
+    )
+
+
+def _market_payload_is_no_quote(payload: Dict[str, Any]) -> bool:
+    return _market_payload_has_symbol_rows(payload) and not _market_payload_has_quote(payload)
+
 def _market_quote_entry_is_stale(entry: Any) -> bool:
     if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
         return False
@@ -1406,23 +1454,31 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
     started_at = time.perf_counter()
     local_key = f"payload:{normalized_index}"
     shared_key = f"api:market:stocks:{normalized_index}:v4"
+    no_quote_cached = _market_no_quote_cache_active(normalized_index)
     effective_fresh_ttl = _effective_market_quotes_fresh_ttl()
     effective_stale_ttl = max(effective_fresh_ttl, _MARKET_QUOTES_STALE_TTL)
 
     def revalidate_factory() -> Optional[Dict[str, Any]]:
+        if _market_no_quote_cache_active(normalized_index):
+            return None
         built = _build_market_stocks_payload(index_name=normalized_index, force_refresh=True)
-        rows = built.get("rows") if isinstance(built.get("rows"), list) else []
-        has_quote = not rows or any(row.get("price") is not None for row in rows if isinstance(row, dict))
-        return built if has_quote else None
+        if _market_payload_is_no_quote(built):
+            _store_market_no_quote_cache(normalized_index)
+            return None
+        if not _market_payload_has_quote(built):
+            return None
+        _clear_market_no_quote_cache(normalized_index)
+        return built
 
     refresh_pending = False
     if force_refresh:
-        refresh_pending = _schedule_swr_revalidation(
-            cache_key=shared_key,
-            fresh_ttl_seconds=effective_fresh_ttl,
-            stale_ttl_seconds=effective_stale_ttl,
-            factory=revalidate_factory,
-        )
+        if not no_quote_cached:
+            refresh_pending = _schedule_swr_revalidation(
+                cache_key=shared_key,
+                fresh_ttl_seconds=effective_fresh_ttl,
+                stale_ttl_seconds=effective_stale_ttl,
+                factory=revalidate_factory,
+            )
         # A public refresh is a revalidation signal, never a cache bypass.
         force_refresh = False
     local_entry = _STOCKS_CACHE.get(local_key, {}).get("entry")
@@ -1476,10 +1532,12 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
         nonlocal latest_build
         built = _build_market_stocks_payload(index_name=normalized_index, force_refresh=force_refresh)
         latest_build = dict(built)
-        rows = built.get("rows") if isinstance(built.get("rows"), list) else []
-        has_quote = not rows or any(row.get("price") is not None for row in rows if isinstance(row, dict))
-        if not has_quote:
+        if _market_payload_is_no_quote(built):
+            _store_market_no_quote_cache(normalized_index)
             return None
+        if not _market_payload_has_quote(built):
+            return None
+        _clear_market_no_quote_cache(normalized_index)
         now = time.time()
         return {
             "payload": built,
@@ -1488,17 +1546,20 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
             "cached_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    entry, cache_status = _get_or_set_single_flight(
-        shared_key,
-        ttl_seconds=max(1, effective_stale_ttl),
-        factory=build_and_envelope,
-        lock_key=f"api:market:stocks:{normalized_index}:lock:v4",
-        lock_ttl_seconds=_MARKET_QUOTES_LOCK_TTL_SECONDS,
-        wait_timeout_seconds=_MARKET_QUOTES_WAIT_TIMEOUT_SECONDS,
-        poll_interval_seconds=_MARKET_QUOTES_POLL_INTERVAL_SECONDS,
-        cache_usable=_market_quote_entry_is_fresh,
-        allow_cached=not force_refresh,
-    )
+    if no_quote_cached:
+        entry, cache_status = None, "unavailable"
+    else:
+        entry, cache_status = _get_or_set_single_flight(
+            shared_key,
+            ttl_seconds=max(1, effective_stale_ttl),
+            factory=build_and_envelope,
+            lock_key=f"api:market:stocks:{normalized_index}:lock:v4",
+            lock_ttl_seconds=_MARKET_QUOTES_LOCK_TTL_SECONDS,
+            wait_timeout_seconds=_MARKET_QUOTES_WAIT_TIMEOUT_SECONDS,
+            poll_interval_seconds=_MARKET_QUOTES_POLL_INTERVAL_SECONDS,
+            cache_usable=_market_quote_entry_is_fresh,
+            allow_cached=not force_refresh,
+        )
 
     if _market_quote_entry_is_fresh(entry):
         _STOCKS_CACHE[local_key] = {"_ts": time.time(), "entry": entry}

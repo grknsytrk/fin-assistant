@@ -332,6 +332,7 @@ def _active_fund_refresh_job() -> Optional[Dict[str, Any]]:
             "finished_at": None,
             "as_of": None,
             "row_count": None,
+            "cache_invalidation_status": None,
             "error": "Yenileme worker'ı yeniden başlatıldı; mevcut lease bekleniyor.",
             "resolution_status": None,
             "snapshot_action": None,
@@ -513,13 +514,14 @@ def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
                 error="Snapshot commit'i lease/generation kontrolünden geçmedi.",
             )
             return
-        _invalidate_fund_response_cache()
+        cache_invalidation_status = _invalidate_fund_response_cache()
         _update_fund_refresh_job(
             job_id,
             status="succeeded",
             finished_at=_fund_refresh_now_iso(),
             as_of=result.get("as_of"),
             row_count=len(rows),
+            cache_invalidation_status=cache_invalidation_status,
             resolution_status=resolution_status,
             resolved_as_of=(result.get("source_metadata") or {}).get("resolved_as_of"),
             snapshot_action=(result.get("source_metadata") or {}).get("snapshot_action") or result.get("snapshot_action"),
@@ -554,6 +556,7 @@ def _start_fund_refresh_job(lookback_days: int) -> Dict[str, Any]:
         "finished_at": None,
         "as_of": None,
         "row_count": None,
+        "cache_invalidation_status": None,
         "error": None,
         "resolution_status": None,
         "snapshot_action": None,
@@ -2321,10 +2324,29 @@ def _require_known_fund_code(fund_code: str) -> str:
         raise HTTPException(status_code=404, detail=f"Fon bulunamadi: {normalized}") from exc
     return normalized
 
-def _invalidate_fund_response_cache() -> None:
-    """Drop cached fund responses after a snapshot refresh."""
+def _finish_fund_cache_invalidation(outcomes: List[bool], *, scope: str) -> str:
+    """Summarize best-effort cache invalidation without failing the data refresh."""
+
+    try:
+        redis_fallback = bool(_cache_status().get("cache_redis_fallback"))
+    except Exception:
+        redis_fallback = True
+    complete = bool(outcomes) and all(outcomes) and not redis_fallback
+    status = "complete" if complete else "deferred"
+    if not complete:
+        logging.getLogger("uvicorn.error").warning(
+            "fund_response_cache_invalidation status=%s scope=%s",
+            status,
+            scope,
+        )
+    return status
+
+
+def _invalidate_fund_response_cache() -> str:
+    """Drop cached fund responses and report whether shared invalidation completed."""
 
     backend = _get_cache()
+    outcomes: List[bool] = []
     for prefix in (
         "api:funds:",
         "api:funds-search:",
@@ -2332,24 +2354,30 @@ def _invalidate_fund_response_cache() -> None:
         "api:fund-detail:",
         "api:fund-yield-summary:",
         "api:fund-holdings:",
-        "api:funds:snapshot-row-map:",
-        "api:funds:holding-sector-map:",
     ):
         try:
-            backend.delete_prefix(prefix)
+            result = backend.delete_prefix_with_status(prefix)
+            outcomes.append(bool(result.complete))
         except Exception:
-            continue
+            outcomes.append(False)
     try:
-        backend.delete("api:funds-categories")
+        result = backend.delete_with_status("api:funds-categories")
+        outcomes.append(bool(result.complete))
     except Exception:
-        pass
+        outcomes.append(False)
     try:
-        backend.delete("api:funds-categories:v2")
+        result = backend.delete_with_status("api:funds-categories:v2")
+        outcomes.append(bool(result.complete))
     except Exception:
-        pass
+        outcomes.append(False)
+    return _finish_fund_cache_invalidation(outcomes, scope="snapshot")
 
-def _invalidate_single_fund_response_cache(normalized: str) -> None:
+
+def _invalidate_single_fund_response_cache(normalized: str) -> str:
+    """Drop one fund's cached responses and report shared invalidation status."""
+
     backend = _get_cache()
+    outcomes: List[bool] = []
     for key_or_prefix in (
         f"api:fund-performance:{normalized}:",
         f"api:fund-performance:v{_FUND_HISTORY_KEY_VERSION}:{normalized}:",
@@ -2359,12 +2387,18 @@ def _invalidate_single_fund_response_cache(normalized: str) -> None:
     ):
         try:
             if key_or_prefix.endswith(":"):
-                backend.delete_prefix(key_or_prefix)
+                result = backend.delete_prefix_with_status(key_or_prefix)
+                outcomes.append(bool(result.complete))
             else:
-                backend.delete(key_or_prefix)
-                backend.delete(f"{key_or_prefix}:stale")
-                backend.delete(f"{key_or_prefix}:retry")
+                for key in (
+                    key_or_prefix,
+                    f"{key_or_prefix}:stale",
+                    f"{key_or_prefix}:retry",
+                ):
+                    result = backend.delete_with_status(key)
+                    outcomes.append(bool(result.complete))
         except Exception:
-            continue
+            outcomes.append(False)
+    return _finish_fund_cache_invalidation(outcomes, scope="single_fund")
 
 __all__ = [name for name in globals() if not name.startswith("__")]
