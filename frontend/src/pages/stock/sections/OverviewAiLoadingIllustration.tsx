@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 
 const THINKING_STEPS = [
-    'Finansal tablolar ve son çeyrek verileri taranıyor...',
-    'Çeyreklik kârlılık, marj trendleri ve nakit akışı analiz ediliyor...',
-    'Değerleme çarpanları ve sektörel rasyo dengesi inceleniyor...',
-    'Borçluluk, likidite ve bilanço yapısı değerlendiriliyor...',
-    'Finansal bulgular ve skor kartı sentezleniyor...',
+    'Mali tablolar ve son dönem finansalları inceleniyor...',
+    'Kârlılık, marj trendleri ve nakit akışı analiz ediliyor...',
+    'Değerleme çarpanları ve bilanço dengesi kontrol ediliyor...',
+    'Şirket performansı ve finansal göstergeler değerlendiriliyor...',
+    'Analiz özeti ve finansal skor kartı hazırlanıyor...',
 ];
 
 interface OverviewAiLoadingIllustrationProps {
@@ -33,10 +33,10 @@ export function OverviewAiLoadingIllustration({
 
     const effortLabel =
         reasoningEffort === 'high'
-            ? 'Derin Muhakeme'
+            ? 'Kapsamlı İnceleme'
             : reasoningEffort === 'medium'
-                ? 'Dengeli'
-                : 'Hızlı';
+                ? 'Standart Analiz'
+                : 'Hızlı Özet';
 
     return (
         <div className="overview-ai-thinking-card" role="status" aria-live="polite">

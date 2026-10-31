@@ -34,21 +34,24 @@ const OVERVIEW_AI_PROVIDER_LABEL = 'IFM';
 const REASONING_OPTIONS = [
     {
         key: 'low' as const,
-        label: 'IFM Low',
-        tag: 'Düşük',
-        description: 'Hızlı yanıt ve temel rasyo analizi',
+        label: 'Hızlı Özet',
+        tag: 'Hızlı',
+        shortTag: 'Hızlı',
+        description: 'Temel finansal veriler ve özet şirket puanı',
     },
     {
         key: 'medium' as const,
-        label: 'IFM Medium',
-        tag: 'Orta',
-        description: 'Dengeli çeyreklik analiz ve kıyas',
+        label: 'Standart Analiz',
+        tag: 'Dengeli',
+        shortTag: 'Standart',
+        description: 'Çeyreklik marjlar, kârlılık ve bilanço dengesi',
     },
     {
         key: 'high' as const,
-        label: 'IFM High',
-        tag: 'Yüksek',
-        description: 'Derin düşünme zinciri (Chain-of-Thought)',
+        label: 'Kapsamlı İnceleme',
+        tag: 'Detaylı',
+        shortTag: 'Kapsamlı',
+        description: 'Tüm mali tablolar, nakit akışı ve çarpanların detaylı analizi',
     },
 ];
 
@@ -1123,13 +1126,13 @@ export default function StockOverview({
                                     onClick={() => setModelDropdownOpen((prev) => !prev)}
                                     disabled={aiLoading}
                                     aria-expanded={modelDropdownOpen}
-                                    title="AI Modeli ve Muhakeme Seviyesini Seçin"
+                                    title="Analiz Kapsamını Seçin"
                                 >
                                     <Sparkles size={13} className="overview-ai-sparkle-icon" aria-hidden="true" />
                                     <span className="overview-ai-model-name">{OVERVIEW_AI_PROVIDER_LABEL}</span>
                                     <span className="overview-ai-model-sep">·</span>
                                     <span className="overview-ai-model-effort">
-                                        {reasoningEffort === 'low' ? 'Low' : reasoningEffort === 'medium' ? 'Med' : 'High'}
+                                        {reasoningEffort === 'low' ? 'Hızlı' : reasoningEffort === 'medium' ? 'Standart' : 'Kapsamlı'}
                                     </span>
                                     <ChevronDown size={13} className={`overview-ai-model-chevron${modelDropdownOpen ? ' is-open' : ''}`} aria-hidden="true" />
                                 </button>
@@ -1137,7 +1140,7 @@ export default function StockOverview({
                                 {modelDropdownOpen && (
                                     <div className="overview-ai-model-dropdown" role="menu">
                                         <div className="overview-ai-dropdown-header">
-                                            <span>Muhakeme Seviyesi</span>
+                                            <span>Analiz Kapsamı</span>
                                         </div>
                                         {REASONING_OPTIONS.map((opt) => (
                                             <button

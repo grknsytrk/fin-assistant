@@ -643,8 +643,8 @@
     height: 32px;
     padding: 0 0.75rem;
     border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(255, 255, 255, 0.04);
+    border: none;
+    background: rgba(255, 255, 255, 0.05);
     color: #e4e4e7;
     font-size: 0.75rem;
     font-weight: 500;
@@ -654,8 +654,7 @@
 }
 
 .overview-ai-model-trigger:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.09);
     color: #ffffff;
 }
 
