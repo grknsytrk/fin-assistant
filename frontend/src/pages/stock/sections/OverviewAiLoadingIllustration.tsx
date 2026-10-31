@@ -33,10 +33,10 @@ export function OverviewAiLoadingIllustration({
 
     const effortLabel =
         reasoningEffort === 'high'
-            ? 'Kapsamlı İnceleme'
+            ? 'High'
             : reasoningEffort === 'medium'
-                ? 'Standart Analiz'
-                : 'Hızlı Özet';
+                ? 'Medium'
+                : 'Low';
 
     return (
         <div className="overview-ai-thinking-card" role="status" aria-live="polite">

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
-import { Check, ChevronDown, RefreshCw, RotateCcw, Sparkles } from 'lucide-react';
+import { Check, ChevronUp, RefreshCw, RotateCcw, Sparkles } from 'lucide-react';
 import type {
     KapSnapshotResponse,
     KapQuarter,
@@ -34,24 +34,24 @@ const OVERVIEW_AI_PROVIDER_LABEL = 'IFM';
 const REASONING_OPTIONS = [
     {
         key: 'low' as const,
-        label: 'Düşük Düşünce (Low)',
+        label: 'Low',
         tag: 'Hızlı',
-        shortTag: 'Düşük Düşünce',
-        description: 'Düşük düşünce seviyesi: Kısa düşünme süresiyle temel finansal verileri ve şirket puanını hızlıca üretir.',
+        shortTag: 'Low',
+        description: 'Hızlı yanıt verir, temel finansallara bakar.',
     },
     {
         key: 'medium' as const,
-        label: 'Orta Düşünce (Medium)',
+        label: 'Medium',
         tag: 'Dengeli',
-        shortTag: 'Orta Düşünce',
-        description: 'Orta düşünce seviyesi: Dengeli akıl yürütmeyle çeyreklik marjları, kârlılık trendlerini ve bilanço dengesini tartar.',
+        shortTag: 'Medium',
+        description: 'Dengeli düşünür, marj ve büyüme trendlerini tartar.',
     },
     {
         key: 'high' as const,
-        label: 'Yüksek Düşünce (High)',
+        label: 'High',
         tag: 'Derin',
-        shortTag: 'Yüksek Düşünce',
-        description: 'Yüksek düşünce seviyesi: Derin akıl yürütmeyle tüm mali tabloları, nakit akışını ve riskleri kapsamlı şekilde irdeler.',
+        shortTag: 'High',
+        description: 'Daha detaylı düşünür, tüm tabloları ve riskleri irdeler.',
     },
 ];
 
@@ -169,9 +169,15 @@ function readStoredChartQuarterWindow(): number {
 }
 
 function scoreSourceLabel(source: KapOverviewCommentaryResponse['scorecard']['score_source']) {
-    if (source === 'ai_adjusted') return 'AI düzeltmeli skor';
-    if (source === 'ai_failed_fallback') return 'Deterministic fallback';
-    return 'Deterministic skor';
+    if (source === 'ai_adjusted') return 'AI Analizli Skor';
+    if (source === 'ai_failed_fallback') return 'Temel Skor (Fallback)';
+    return 'Temel Skor';
+}
+
+function getScoreColorClass(score: number): 'is-good' | 'is-mid' | 'is-bad' {
+    if (score >= 6.5) return 'is-good';
+    if (score >= 4.0) return 'is-mid';
+    return 'is-bad';
 }
 
 function previousQuarterWindowOption(option: number): number {
@@ -1132,9 +1138,9 @@ export default function StockOverview({
                                     <span className="overview-ai-model-name">{OVERVIEW_AI_PROVIDER_LABEL}</span>
                                     <span className="overview-ai-model-sep">·</span>
                                     <span className="overview-ai-model-effort">
-                                        {reasoningEffort === 'low' ? 'Düşük' : reasoningEffort === 'medium' ? 'Orta' : 'Yüksek'} Düşünce
+                                        {reasoningEffort === 'low' ? 'Low' : reasoningEffort === 'medium' ? 'Medium' : 'High'}
                                     </span>
-                                    <ChevronDown size={13} className={`overview-ai-model-chevron${modelDropdownOpen ? ' is-open' : ''}`} aria-hidden="true" />
+                                    <ChevronUp size={13} className={`overview-ai-model-chevron${modelDropdownOpen ? ' is-open' : ''}`} aria-hidden="true" />
                                 </button>
 
                                 {modelDropdownOpen && (
@@ -1221,7 +1227,7 @@ export default function StockOverview({
                         <div className="overview-ai-body">
                             <div className="overview-ai-scorecard">
                                 <div className="overview-ai-scorecard-main">
-                                    <div className="overview-ai-score-badge">
+                                    <div className={`overview-ai-score-badge ${getScoreColorClass(aiCommentary.scorecard.overall_score)}`}>
                                         <strong>{aiCommentary.scorecard.overall_score.toFixed(1)}</strong>
                                         <span>/10</span>
                                     </div>
@@ -1231,19 +1237,32 @@ export default function StockOverview({
                                             <small>{scoreSourceLabel(aiCommentary.scorecard.score_source)}</small>
                                         </div>
                                         <p>{aiCommentary.scorecard.summary}</p>
-                                        <p className="overview-ai-seasonality">{aiCommentary.scorecard.seasonality_note}</p>
+                                        {aiCommentary.scorecard.seasonality_note ? (
+                                            <div className="overview-ai-seasonality">
+                                                <span>{aiCommentary.scorecard.seasonality_note}</span>
+                                            </div>
+                                        ) : null}
                                     </div>
                                 </div>
                                 <div className="overview-ai-score-grid">
-                                    {aiCommentary.scorecard.subscores.map((item) => (
-                                        <article key={item.key} className="overview-ai-score-item">
-                                            <div className="overview-ai-score-item-head">
-                                                <span>{item.label}</span>
-                                                <strong>{item.score.toFixed(1)}</strong>
-                                            </div>
-                                            <p>{item.summary}</p>
-                                        </article>
-                                    ))}
+                                    {aiCommentary.scorecard.subscores.map((item) => {
+                                        const scoreClass = getScoreColorClass(item.score);
+                                        return (
+                                            <article key={item.key} className="overview-ai-score-item">
+                                                <div className="overview-ai-score-item-head">
+                                                    <span>{item.label}</span>
+                                                    <strong className={scoreClass}>{item.score.toFixed(1)}</strong>
+                                                </div>
+                                                <div className="overview-ai-score-bar-track" aria-hidden="true">
+                                                    <div
+                                                        className={`overview-ai-score-bar-fill ${scoreClass}`}
+                                                        style={{ width: `${Math.min(100, Math.max(0, item.score * 10))}%` }}
+                                                    />
+                                                </div>
+                                                <p>{item.summary}</p>
+                                            </article>
+                                        );
+                                    })}
                                 </div>
                             </div>
                             {aiCommentary.error ? (
@@ -1251,10 +1270,16 @@ export default function StockOverview({
                                     <span>{aiCommentary.error}</span>
                                 </div>
                             ) : null}
-                            {aiCommentary.headline ? <h4>{aiCommentary.headline}</h4> : null}
+                            {aiCommentary.headline ? (
+                                <div className="overview-ai-headline">
+                                    <p>{aiCommentary.headline}</p>
+                                </div>
+                            ) : null}
                             {aiCommentary.overall_comment ? (
-                                <section className="overview-ai-overall-comment" aria-label="Genel objektif değerlendirme">
-                                    <h5>Genel değerlendirme</h5>
+                                <section className="overview-ai-overall-comment" aria-label="Genel değerlendirme">
+                                    <div className="overview-ai-overall-head">
+                                        <h5>Genel Değerlendirme</h5>
+                                    </div>
                                     <div className="overview-ai-overall-grid">
                                         {formatOverviewComment(aiCommentary.overall_comment).map((section, idx) => (
                                             <article className="overview-ai-overall-item" key={`${idx}-${section.heading}`}>
