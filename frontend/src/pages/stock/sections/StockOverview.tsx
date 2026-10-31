@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
-import { Check, ChevronUp, RefreshCw, RotateCcw, Sparkles } from 'lucide-react';
+import { Check, ChevronRight, ChevronUp, RefreshCw, RotateCcw, Sparkles } from 'lucide-react';
 import type {
     KapSnapshotResponse,
     KapQuarter,
@@ -32,27 +32,9 @@ import './StockOverview.css';
 const DEFAULT_OVERVIEW_AI_MODEL = 'IFM/K2-Horizon-375B-A23B';
 
 const REASONING_OPTIONS = [
-    {
-        key: 'low' as const,
-        label: 'Low',
-        tag: 'Hızlı',
-        shortTag: 'Low',
-        description: 'Hızlı yanıt verir, temel finansallara bakar.',
-    },
-    {
-        key: 'medium' as const,
-        label: 'Medium',
-        tag: 'Dengeli',
-        shortTag: 'Medium',
-        description: 'Dengeli düşünür, marj ve büyüme trendlerini tartar.',
-    },
-    {
-        key: 'high' as const,
-        label: 'High',
-        tag: 'Derin',
-        shortTag: 'High',
-        description: 'Daha detaylı düşünür, tüm tabloları ve riskleri irdeler.',
-    },
+    { key: 'low' as const, label: 'Low' },
+    { key: 'medium' as const, label: 'Medium' },
+    { key: 'high' as const, label: 'High' },
 ];
 
 const CHART_QUARTER_WINDOW_STORAGE_KEY = 'ragfin_chart_quarter_window';
@@ -66,12 +48,24 @@ function readStoredOverviewModel(): string {
     return DEFAULT_OVERVIEW_AI_MODEL;
 }
 
-function readStoredReasoningEffort(): 'low' | 'medium' | 'high' {
+type ReasoningEffort = 'low' | 'medium' | 'high';
+
+function readStoredReasoningEfforts(): Record<string, ReasoningEffort> {
     try {
         const raw = window.localStorage.getItem(OVERVIEW_AI_REASONING_STORAGE_KEY);
-        if (raw === 'low' || raw === 'medium' || raw === 'high') return raw;
+        if (raw === 'low' || raw === 'medium' || raw === 'high') {
+            return { [readStoredOverviewModel()]: raw };
+        }
+        if (raw) {
+            const parsed = JSON.parse(raw) as Record<string, unknown>;
+            return Object.fromEntries(
+                Object.entries(parsed).filter((entry): entry is [string, ReasoningEffort] =>
+                    entry[1] === 'low' || entry[1] === 'medium' || entry[1] === 'high',
+                ),
+            );
+        }
     } catch { /* ignore */ }
-    return 'low';
+    return {};
 }
 const QUARTER_WINDOW_OPTIONS = [5, 10, 15, 20] as const;
 const DEFAULT_CHART_QUARTER_WINDOW = 20;
@@ -663,11 +657,12 @@ export default function StockOverview({
     const historyHash = useMemo(() => overviewPayloadHash(overviewHistoryContext), [overviewHistoryContext]);
     const valuationHash = useMemo(() => overviewPayloadHash(overviewValuationContext), [overviewValuationContext]);
     const commentaryBaseKey = `${snapshot.stock_code || snapshot.company}::${latestPeriod || 'unknown'}::${payloadHash}::${historyHash}`;
-    const [reasoningEffort, setReasoningEffort] = useState<'low' | 'medium' | 'high'>(readStoredReasoningEffort);
     const [selectedModel, setSelectedModel] = useState(readStoredOverviewModel);
+    const [reasoningEfforts, setReasoningEfforts] = useState<Record<string, ReasoningEffort>>(readStoredReasoningEfforts);
     const [overviewModelProviders, setOverviewModelProviders] = useState<KapOverviewModelsResponse['providers']>([]);
     const [modelListError, setModelListError] = useState('');
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+    const [reasoningSubmenuModelId, setReasoningSubmenuModelId] = useState<string | null>(null);
     const modelDropdownRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -697,19 +692,28 @@ export default function StockOverview({
     const selectedModelProvider = overviewModelProviders.find((provider) =>
         provider.models.some((model) => model.id === selectedModel),
     );
-    const selectedModelLabel = selectedModelProvider?.models.find((model) => model.id === selectedModel)?.label || selectedModel;
+    const selectedModelDetails = selectedModelProvider?.models.find((model) => model.id === selectedModel);
+    const selectedModelLabel = selectedModelDetails?.label || selectedModel;
     const selectedModelProviderLabel = selectedModelProvider?.label || 'AI';
-    const supportsReasoningEffort = selectedModelProvider?.id === 'ifm';
+    const supportsReasoningEffort = selectedModelProvider?.id === 'ifm' || selectedModelDetails?.supports_reasoning_effort === true;
+    const reasoningEffort = reasoningEfforts[selectedModel] || 'low';
+    const reasoningSubmenuModel = overviewModelProviders
+        .flatMap((provider) => provider.models)
+        .find((model) => model.id === reasoningSubmenuModelId);
 
     useEffect(() => {
         if (!modelDropdownOpen) return;
         const handleClickOutside = (e: globalThis.MouseEvent) => {
             if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
                 setModelDropdownOpen(false);
+                setReasoningSubmenuModelId(null);
             }
         };
         const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') setModelDropdownOpen(false);
+            if (e.key === 'Escape') {
+                if (reasoningSubmenuModelId) setReasoningSubmenuModelId(null);
+                else setModelDropdownOpen(false);
+            }
         };
         document.addEventListener('mousedown', handleClickOutside);
         document.addEventListener('keydown', handleKeyDown);
@@ -717,13 +721,15 @@ export default function StockOverview({
             document.removeEventListener('mousedown', handleClickOutside);
             document.removeEventListener('keydown', handleKeyDown);
         };
-    }, [modelDropdownOpen]);
+    }, [modelDropdownOpen, reasoningSubmenuModelId]);
 
-    const handleReasoningEffortChange = (level: 'low' | 'medium' | 'high') => {
-        setReasoningEffort(level);
+    const handleReasoningEffortChange = (model: string, level: ReasoningEffort) => {
+        const next = { ...reasoningEfforts, [model]: level };
+        setReasoningEfforts(next);
         try {
-            window.localStorage.setItem(OVERVIEW_AI_REASONING_STORAGE_KEY, level);
+            window.localStorage.setItem(OVERVIEW_AI_REASONING_STORAGE_KEY, JSON.stringify(next));
         } catch { /* ignore */ }
+        setReasoningSubmenuModelId(null);
     };
     const handleOverviewModelChange = (model: string) => {
         setSelectedModel(model);
@@ -1177,7 +1183,10 @@ export default function StockOverview({
                                 <button
                                     type="button"
                                     className="overview-ai-model-trigger"
-                                    onClick={() => setModelDropdownOpen((prev) => !prev)}
+                                    onClick={() => {
+                                        setModelDropdownOpen((prev) => !prev);
+                                        setReasoningSubmenuModelId(null);
+                                    }}
                                     disabled={aiLoading}
                                     aria-expanded={modelDropdownOpen}
                                     title="AI modeli ve düşünce seviyesini seçin"
@@ -1187,69 +1196,82 @@ export default function StockOverview({
                                     <span className="overview-ai-model-sep">·</span>
                                     <span className="overview-ai-model-effort">
                                         {selectedModelLabel}
-                                        {supportsReasoningEffort ? ` · ${reasoningEffort}` : ''}
+                                        {supportsReasoningEffort ? ` · ${reasoningEffort.toUpperCase()}` : ''}
                                     </span>
                                     <ChevronUp size={13} className={`overview-ai-model-chevron${modelDropdownOpen ? ' is-open' : ''}`} aria-hidden="true" />
                                 </button>
 
                                 {modelDropdownOpen && (
-                                    <div className="overview-ai-model-dropdown" role="menu">
-                                        <div className="overview-ai-dropdown-header">
-                                            <span>Model</span>
+                                    <div className="overview-ai-model-menu">
+                                        <div className="overview-ai-model-dropdown" role="menu">
+                                            <div className="overview-ai-dropdown-header">Model</div>
+                                            {overviewModelProviders.map((provider) => (
+                                                <div className="overview-ai-provider-group" key={provider.id}>
+                                                    <div className="overview-ai-dropdown-provider-label">{provider.label}</div>
+                                                    {provider.models.map((model) => {
+                                                        const canSetEffort = provider.id === 'ifm' || model.supports_reasoning_effort === true;
+                                                        const isSelected = selectedModel === model.id;
+                                                        const effort = reasoningEfforts[model.id] || 'low';
+                                                        const effortMenuOpen = reasoningSubmenuModelId === model.id;
+                                                        return (
+                                                            <div className="overview-ai-model-row" key={`${provider.id}:${model.id}`}>
+                                                                <button
+                                                                    type="button"
+                                                                    className={`overview-ai-dropdown-item${isSelected ? ' is-selected' : ''}`}
+                                                                    onClick={() => handleOverviewModelChange(model.id)}
+                                                                    role="menuitemradio"
+                                                                    aria-checked={isSelected}
+                                                                >
+                                                                    <span className="overview-ai-model-option-name">{model.label}</span>
+                                                                    {isSelected && <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />}
+                                                                </button>
+                                                                {canSetEffort && (
+                                                                    <button
+                                                                        type="button"
+                                                                        className={`overview-ai-model-effort-trigger${effortMenuOpen ? ' is-open' : ''}`}
+                                                                        onClick={() => {
+                                                                            handleOverviewModelChange(model.id);
+                                                                            setReasoningSubmenuModelId((current) => current === model.id ? null : model.id);
+                                                                        }}
+                                                                        role="menuitem"
+                                                                        aria-label={`${model.label} thinking seviyesi: ${effort}`}
+                                                                        aria-expanded={effortMenuOpen}
+                                                                    >
+                                                                        <span>{effort[0].toUpperCase() + effort.slice(1)}</span>
+                                                                        <ChevronRight size={14} aria-hidden="true" />
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            ))}
+                                            {overviewModelProviders.length === 0 && (
+                                                <span className="overview-ai-dropdown-empty">Yapılandırılmış model bulunamadı.</span>
+                                            )}
+                                            {modelListError && <span className="overview-ai-dropdown-empty">{modelListError}</span>}
                                         </div>
-                                        {overviewModelProviders.map((provider) => (
-                                            <div className="overview-ai-provider-group" key={provider.id}>
-                                                <div className="overview-ai-dropdown-provider-label">{provider.label}</div>
-                                                {provider.models.map((model) => (
-                                                    <button
-                                                        key={`${provider.id}:${model.id}`}
-                                                        type="button"
-                                                        className={`overview-ai-dropdown-item${selectedModel === model.id ? ' is-selected' : ''}`}
-                                                        onClick={() => handleOverviewModelChange(model.id)}
-                                                        role="menuitemradio"
-                                                        aria-checked={selectedModel === model.id}
-                                                    >
-                                                        <div className="overview-ai-dropdown-item-info">
-                                                            <div className="overview-ai-dropdown-item-top">
-                                                                <strong>{model.label}</strong>
-                                                            </div>
-                                                        </div>
-                                                        {selectedModel === model.id && (
-                                                            <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />
-                                                        )}
-                                                    </button>
-                                                ))}
+
+                                        {reasoningSubmenuModelId && reasoningSubmenuModel && (
+                                            <div className="overview-ai-reasoning-dropdown" role="menu" aria-label={`${reasoningSubmenuModel.label} thinking seviyesi`}>
+                                                <div className="overview-ai-dropdown-header">Thinking</div>
+                                                {REASONING_OPTIONS.map((opt) => {
+                                                    const isSelected = (reasoningEfforts[reasoningSubmenuModelId] || 'low') === opt.key;
+                                                    return (
+                                                        <button
+                                                            key={opt.key}
+                                                            type="button"
+                                                            className={`overview-ai-reasoning-option${isSelected ? ' is-selected' : ''}`}
+                                                            onClick={() => handleReasoningEffortChange(reasoningSubmenuModelId, opt.key)}
+                                                            role="menuitemradio"
+                                                            aria-checked={isSelected}
+                                                        >
+                                                            <span>{opt.label}</span>
+                                                            {isSelected && <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />}
+                                                        </button>
+                                                    );
+                                                })}
                                             </div>
-                                        ))}
-                                        {overviewModelProviders.length === 0 && (
-                                            <span className="overview-ai-dropdown-empty">Yapılandırılmış model bulunamadı.</span>
-                                        )}
-                                        {modelListError && <span className="overview-ai-dropdown-empty">{modelListError}</span>}
-                                        {supportsReasoningEffort && (
-                                            <>
-                                                <div className="overview-ai-dropdown-header">Düşünce seviyesi</div>
-                                                {REASONING_OPTIONS.map((opt) => (
-                                                    <button
-                                                        key={opt.key}
-                                                        type="button"
-                                                        className={`overview-ai-dropdown-item${reasoningEffort === opt.key ? ' is-selected' : ''}`}
-                                                        onClick={() => handleReasoningEffortChange(opt.key)}
-                                                        role="menuitemradio"
-                                                        aria-checked={reasoningEffort === opt.key}
-                                                    >
-                                                        <div className="overview-ai-dropdown-item-info">
-                                                            <div className="overview-ai-dropdown-item-top">
-                                                                <strong>{opt.label}</strong>
-                                                                <span className="overview-ai-dropdown-item-tag">{opt.tag}</span>
-                                                            </div>
-                                                            <span className="overview-ai-dropdown-item-desc">{opt.description}</span>
-                                                        </div>
-                                                        {reasoningEffort === opt.key && (
-                                                            <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />
-                                                        )}
-                                                    </button>
-                                                ))}
-                                            </>
                                         )}
                                     </div>
                                 )}

@@ -216,6 +216,13 @@ KNOWN_EVREN_MODELS = {
     "gemma-4-31b",
     "auto",
 }
+EVREN_REASONING_EFFORT_MODELS = {
+    "qwen3.8-flash-next",
+    "glm-5.3",
+    "mimo-v2.6-pro",
+    "deepseek-v4.1-flash",
+    "gemma-4-31b",
+}
 
 
 def _is_valid_evren_model(model: str) -> bool:
@@ -270,7 +277,18 @@ async def list_overview_models() -> Dict[str, Any]:
         providers.append({"id": "nvidia", "label": "NVIDIA", "models": [{"id": item, "label": item} for item in models]})
     if os.getenv("EVREN_API_KEY", "").strip():
         models = await _fetch_evren_model_ids()
-        providers.append({"id": "evren", "label": "EVREN", "models": [{"id": item, "label": item} for item in models]})
+        providers.append({
+            "id": "evren",
+            "label": "EVREN",
+            "models": [
+                {
+                    "id": item,
+                    "label": item,
+                    "supports_reasoning_effort": item.lower() in EVREN_REASONING_EFFORT_MODELS,
+                }
+                for item in models
+            ],
+        })
     return {"providers": providers}
 
 
@@ -1207,6 +1225,8 @@ async def _call_chat_completion(
         body["response_format"] = {"type": "json_object"}
     elif provider == "NVIDIA":
         body["chat_template_kwargs"] = {"thinking": False}
+    elif provider == "EVREN" and model.lower() in EVREN_REASONING_EFFORT_MODELS:
+        body["reasoning_effort"] = reasoning_effort
     body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {
         "Authorization": f"Bearer {api_key}",

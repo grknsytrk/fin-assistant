@@ -1068,7 +1068,7 @@ export interface KapOverviewCommentaryRequest {
 export interface KapOverviewModelProvider {
   id: 'ifm' | 'nvidia' | 'evren';
   label: string;
-  models: Array<{ id: string; label: string }>;
+  models: Array<{ id: string; label: string; supports_reasoning_effort?: boolean }>;
 }
 
 export interface KapOverviewModelsResponse {
