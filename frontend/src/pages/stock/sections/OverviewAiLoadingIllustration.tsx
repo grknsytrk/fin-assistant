@@ -9,11 +9,17 @@ const THINKING_STEPS = [
 ];
 
 interface OverviewAiLoadingIllustrationProps {
+    providerLabel?: string;
+    modelLabel?: string;
     reasoningEffort?: 'low' | 'medium' | 'high';
+    supportsReasoningEffort?: boolean;
 }
 
 export function OverviewAiLoadingIllustration({
+    providerLabel,
+    modelLabel,
     reasoningEffort = 'low',
+    supportsReasoningEffort = true,
 }: OverviewAiLoadingIllustrationProps) {
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
@@ -38,6 +44,16 @@ export function OverviewAiLoadingIllustration({
                 ? 'Medium'
                 : 'Low';
 
+    const displayModel = modelLabel
+        ? (providerLabel && !modelLabel.toLowerCase().startsWith(providerLabel.toLowerCase())
+            ? `${providerLabel} · ${modelLabel}`
+            : modelLabel)
+        : (providerLabel || 'AI');
+
+    const badgeText = supportsReasoningEffort
+        ? `${displayModel} · ${effortLabel}`
+        : displayModel;
+
     return (
         <div className="overview-ai-thinking-card" role="status" aria-live="polite">
             <div className="overview-ai-thinking-meta">
@@ -49,7 +65,7 @@ export function OverviewAiLoadingIllustration({
                     {elapsedSeconds}sn süredir {elapsedSeconds >= 4 ? 'düşünüyor...' : 'çalışıyor...'}
                 </span>
                 <span className="overview-ai-thinking-badge">
-                    IFM · {effortLabel}
+                    {badgeText}
                 </span>
             </div>
             <div className="overview-ai-thinking-headline">

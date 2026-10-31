@@ -1359,7 +1359,12 @@ export default function StockOverview({
 
                     {aiLoading ? (
                         <div className="overview-ai-loading">
-                            <OverviewAiLoadingIllustration reasoningEffort={reasoningEffort} />
+                            <OverviewAiLoadingIllustration
+                                providerLabel={selectedModelProviderLabel}
+                                modelLabel={selectedModelLabel}
+                                reasoningEffort={reasoningEffort}
+                                supportsReasoningEffort={supportsReasoningEffort}
+                            />
                         </div>
                     ) : null}
 
