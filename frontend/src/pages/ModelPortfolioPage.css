@@ -2373,7 +2373,8 @@
 }
 
 .mp-sector-menu {
-    min-width: 290px;
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .mp-explained-option {
@@ -2494,7 +2495,9 @@
     position: absolute;
     top: calc(100% + 4px);
     left: 0;
-    width: max(100%, 360px);
+    right: 0;
+    width: 100%;
+    box-sizing: border-box;
     z-index: 100;
     background: #12151c;
     border: 1px solid #2a3140;
@@ -2511,8 +2514,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
-    padding: 0.48rem 0.75rem;
+    gap: 0.5rem;
+    padding: 0.45rem 0.65rem;
     border: none;
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     background: transparent;
@@ -2521,6 +2524,8 @@
     cursor: pointer;
     font-size: 0.78rem;
     transition: background-color 0.1s ease;
+    box-sizing: border-box;
+    min-width: 0;
 }
 
 .mp-symbol-option:last-child {
@@ -2534,7 +2539,7 @@
 .mp-symbol-option-left {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.45rem;
     flex-shrink: 0;
 }
 
