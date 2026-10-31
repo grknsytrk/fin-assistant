@@ -2076,6 +2076,26 @@
     min-height: 20px;
 }
 
+.mp-ai-refine-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    min-height: 25px;
+    padding: 0.2rem 0.45rem;
+    font-size: 0.68rem;
+    white-space: nowrap;
+}
+
+.mp-ai-refine-button svg {
+    color: #93c5fd;
+}
+
+.mp-ai-refine-error {
+    color: #fca5a5;
+    font-size: 0.7rem;
+    font-weight: 400;
+}
+
 .mp-field-micro-hint {
     font-size: 0.69rem;
     font-weight: 400;

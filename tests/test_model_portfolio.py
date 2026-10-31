@@ -166,7 +166,7 @@ def test_model_portfolio_lifecycle_and_cache_reuse(tmp_path: Path, monkeypatch: 
     assert perf1.status_code == 200
     assert perf1.json()["cache_status"] == "miss"
     first_call_count = upstream_history_calls["count"]
-    assert first_call_count == 2  # XU100 + THYAO
+    assert first_call_count == 3  # XU100 + XU030 + THYAO
 
     perf2 = client.get("/model-portfolio/performance")
     assert perf2.status_code == 200

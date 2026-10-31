@@ -50,6 +50,7 @@ EXPECTED_METHOD_PATHS = {
     ("GET", "/model-portfolio/performance"),
     ("POST", "/model-portfolio/admin/verify"),
     ("GET", "/model-portfolio/prefill"),
+    ("POST", "/model-portfolio/improve-text"),
     ("POST", "/model-portfolio/positions"),
     ("PUT", "/model-portfolio/positions/{position_id}"),
     ("POST", "/model-portfolio/positions/{position_id}/close"),

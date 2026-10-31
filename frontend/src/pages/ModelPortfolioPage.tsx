@@ -18,6 +18,7 @@ import {
     Plus,
     RefreshCw,
     Search,
+    Sparkles,
     SlidersHorizontal,
     Trash2,
     X,
@@ -2763,12 +2764,42 @@ function ModelPortfolioEditorModal({
 
     const [prefillLoading, setPrefillLoading] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [improvingField, setImprovingField] = useState<'thesis' | 'risk_note' | null>(null);
+    const [improveError, setImproveError] = useState<{ field: 'thesis' | 'risk_note'; message: string } | null>(null);
     const [formError, setFormError] = useState<string | null>(null);
     const [dropdownOpen, setDropdownOpen] = useState(false);
     const prefillAbortRef = useRef<AbortController | null>(null);
     const selectedSymbolRef = useRef((editingPosition?.symbol || '').toUpperCase());
     const sectorEditVersionRef = useRef(0);
     const dialogRef = useAccessibleDialog<HTMLDivElement>(true, onClose);
+
+    const improveText = useCallback(async (field: 'thesis' | 'risk_note') => {
+        const text = field === 'thesis' ? thesis : riskNote;
+        if (!text.trim() || improvingField) return;
+        setImprovingField(field);
+        setImproveError(null);
+        try {
+            const result = await apiClient.modelPortfolioImproveText(
+                {
+                    field,
+                    text,
+                    symbol,
+                    company_name: companyName,
+                    sector,
+                },
+                adminToken,
+            );
+            if (field === 'thesis') setThesis(result.text);
+            else setRiskNote(result.text);
+        } catch (error) {
+            setImproveError({
+                field,
+                message: error instanceof Error ? error.message : 'Metin şu anda iyileştirilemedi. Lütfen tekrar deneyin.',
+            });
+        } finally {
+            setImprovingField(null);
+        }
+    }, [adminToken, companyName, improvingField, riskNote, sector, symbol, thesis]);
 
     const matchingUniverse = useMemo(() => {
         const q = symbolQuery.trim().toUpperCase();
@@ -2884,6 +2915,7 @@ function ModelPortfolioEditorModal({
 
     const handleSubmit = async (e: FormEvent) => {
         e.preventDefault();
+        if (improvingField) return;
         setFormError(null);
         const ep = Number(entryPrice);
         const tp = Number(targetPrice);
@@ -3398,26 +3430,56 @@ function ModelPortfolioEditorModal({
                             </div>
 
                             <div className="mp-field">
-                                <span className="mp-field-label">Yatırım Gerekçesi (Opsiyonel)</span>
+                                <div className="mp-field-label-row">
+                                    <span className="mp-field-label">Yatırım Gerekçesi (Opsiyonel)</span>
+                                    <button
+                                        type="button"
+                                        className="mp-btn mp-btn-subtle mp-ai-refine-button"
+                                        onClick={() => void improveText('thesis')}
+                                        disabled={!thesis.trim() || improvingField !== null || saving}
+                                    >
+                                        <Sparkles size={13} />
+                                        {improvingField === 'thesis' ? 'Düzenleniyor...' : 'AI ile iyileştir'}
+                                    </button>
+                                </div>
                                 <textarea
                                     rows={3}
                                     aria-label="Yatırım gerekçesi"
                                     value={thesis}
                                     onChange={(e) => setThesis(e.target.value)}
                                     placeholder="Şirketi model portföye ekleme tezinizi ve temel beklentileri yazın..."
+                                    disabled={improvingField === 'thesis'}
                                 />
+                                {improveError?.field === 'thesis' && (
+                                    <span className="mp-ai-refine-error" role="alert">{improveError.message}</span>
+                                )}
                             </div>
 
-                            <label className="mp-field">
-                                <span className="mp-field-label">Takip Edilecek Temel Riskler (Opsiyonel)</span>
+                            <div className="mp-field">
+                                <div className="mp-field-label-row">
+                                    <span className="mp-field-label">Takip Edilecek Temel Riskler (Opsiyonel)</span>
+                                    <button
+                                        type="button"
+                                        className="mp-btn mp-btn-subtle mp-ai-refine-button"
+                                        onClick={() => void improveText('risk_note')}
+                                        disabled={!riskNote.trim() || improvingField !== null || saving}
+                                    >
+                                        <Sparkles size={13} />
+                                        {improvingField === 'risk_note' ? 'Düzenleniyor...' : 'AI ile iyileştir'}
+                                    </button>
+                                </div>
                                 <textarea
                                     rows={2}
                                     aria-label="Takip edeceğim risk"
                                     value={riskNote}
                                     onChange={(e) => setRiskNote(e.target.value)}
                                     placeholder="Olası marj baskısı, kur veya talep daralması riskleri..."
+                                    disabled={improvingField === 'risk_note'}
                                 />
-                            </label>
+                                {improveError?.field === 'risk_note' && (
+                                    <span className="mp-ai-refine-error" role="alert">{improveError.message}</span>
+                                )}
+                            </div>
 
                             {isEdit && (
                                 <label className="mp-field">
@@ -3456,7 +3518,7 @@ function ModelPortfolioEditorModal({
                             <button type="button" className="mp-btn mp-btn-ghost" onClick={onClose}>
                                 İptal
                             </button>
-                            <button type="submit" className="mp-btn mp-btn-primary" disabled={saving}>
+                            <button type="submit" className="mp-btn mp-btn-primary" disabled={saving || improvingField !== null}>
                                 {saving ? 'Kaydediliyor...' : isEdit ? 'Değişiklikleri Kaydet' : 'Model Portföye Ekle'}
                             </button>
                         </div>

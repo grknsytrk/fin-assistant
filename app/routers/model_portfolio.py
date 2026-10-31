@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+
 from fastapi import APIRouter
 
 from app.api_runtime import *
@@ -165,6 +168,57 @@ def prefill_model_portfolio_position(
             "period": valuation.get("valuation_financial_period"),
         },
     }
+
+@router.post("/model-portfolio/improve-text")
+async def improve_model_portfolio_text_endpoint(request: Request) -> Dict[str, Any]:
+    from src.nvidia_commentary import (
+        NvidiaCommentaryError,
+        PayloadValidationError,
+        improve_model_portfolio_text,
+    )
+
+    _require_model_portfolio_admin(request)
+    raw_body = await request.body()
+    if len(raw_body) > 24 * 1024:
+        raise HTTPException(status_code=413, detail="Metin en fazla 24 KB olabilir.")
+    try:
+        body = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Geçerli JSON gövdesi gerekli.") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Geçersiz istek formatı.")
+
+    field = str(body.get("field") or "").strip()
+    max_text_length = 4000 if field == "thesis" else 1500 if field == "risk_note" else 0
+    if max_text_length == 0:
+        raise HTTPException(status_code=422, detail="Düzenlenecek alan geçersiz.")
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=422, detail="Düzenlenecek metin boş olamaz.")
+    if len(text) > max_text_length:
+        raise HTTPException(status_code=422, detail=f"Metin en fazla {max_text_length} karakter olabilir.")
+
+    context = {
+        key: str(body.get(key) or "").strip()[:limit]
+        for key, limit in (("symbol", 16), ("company_name", 120), ("sector", 120))
+    }
+    try:
+        improved_text = await improve_model_portfolio_text(text.strip(), field, **context)
+    except PayloadValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except NvidiaCommentaryError as exc:
+        has_provider_key = bool(
+            str(os.getenv("IFM_API_KEY") or "").strip()
+            or str(os.getenv("NVIDIA_API_KEY") or "").strip()
+        )
+        status_code = 502 if has_provider_key else 503
+        if status_code == 503:
+            detail = "AI düzenleme servisi yapılandırılmamış. IFM_API_KEY ayarını kontrol edin."
+        else:
+            detail = str(exc)
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+    return {"text": improved_text}
 
 @router.post("/model-portfolio/positions")
 async def create_model_portfolio_position_endpoint(request: Request) -> Dict[str, Any]:

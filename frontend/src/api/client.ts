@@ -944,6 +944,22 @@ export const apiClient = {
             exposeErrorDetail: true,
         });
     },
+    modelPortfolioImproveText: (
+        payload: {
+            field: 'thesis' | 'risk_note';
+            text: string;
+            symbol?: string;
+            company_name?: string;
+            sector?: string;
+        },
+        token: string,
+    ) => fetchApi<{ text: string }>('/model-portfolio/improve-text', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token.trim()}` },
+        body: JSON.stringify(payload),
+        timeoutMs: 95000,
+        exposeErrorDetail: true,
+    }),
     modelPortfolioCreatePosition: (payload: ModelPortfolioPositionCreatePayload, token: string) =>
         fetchApi<ModelPortfolioResponse>('/model-portfolio/positions', {
             method: 'POST',
