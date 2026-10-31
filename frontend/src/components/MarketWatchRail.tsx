@@ -326,21 +326,29 @@ export default function MarketWatchRail({
     const [errors, setErrors] = useState<Partial<Record<RailTab, string | null>>>({});
     const inFlightRef = useRef<Partial<Record<RailTab, boolean>>>({});
 
-    const [highlightStyle, setHighlightStyle] = useState<{ left: number; width: number }>({ left: 0, width: 0 });
+    const [slimeState, setSlimeState] = useState<{
+        left: number;
+        width: number;
+        phase: 'idle' | 'stretching' | 'snapping' | 'wobbling';
+        direction: 'right' | 'left' | null;
+    }>({ left: 0, width: 0, phase: 'idle', direction: null });
+    const [slimeTail, setSlimeTail] = useState<{ left: number; width: number } | null>(null);
     const [highlightReady, setHighlightReady] = useState(false);
     const tabRefs = useRef<Map<RailTab, HTMLButtonElement>>(new Map());
     const tabsContainerRef = useRef<HTMLDivElement>(null);
+    const slimeTimersRef = useRef<number[]>([]);
 
     useLayoutEffect(() => {
         if (activeTool !== 'markets' || panelCollapsed) return;
 
         const updateHighlight = () => {
             const activeEl = tabRefs.current.get(activeTab);
-            if (activeEl) {
-                setHighlightStyle({
+            if (activeEl && slimeState.phase === 'idle') {
+                setSlimeState((prev) => ({
+                    ...prev,
                     left: activeEl.offsetLeft,
                     width: activeEl.offsetWidth,
-                });
+                }));
                 setHighlightReady(true);
             }
         };
@@ -353,13 +361,77 @@ export default function MarketWatchRail({
             observer.observe(container);
             return () => observer.disconnect();
         }
-    }, [activeTab, activeTool, panelCollapsed]);
+    }, [activeTab, activeTool, panelCollapsed, slimeState.phase]);
 
     const handleTabClick = (tabId: RailTab) => {
+        if (tabId === activeTab) return;
+
+        const currentEl = tabRefs.current.get(activeTab);
+        const targetEl = tabRefs.current.get(tabId);
+
+        // Clear any ongoing slime animation timers
+        slimeTimersRef.current.forEach(window.clearTimeout);
+        slimeTimersRef.current = [];
+
         setActiveTab(tabId);
-        const el = tabRefs.current.get(tabId);
-        if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+
+        if (targetEl) {
+            targetEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        }
+
+        if (currentEl && targetEl) {
+            const startLeft = currentEl.offsetLeft;
+            const startWidth = currentEl.offsetWidth;
+            const targetLeft = targetEl.offsetLeft;
+            const targetWidth = targetEl.offsetWidth;
+
+            const movingRight = targetLeft > startLeft;
+            const direction = movingRight ? 'right' : 'left';
+
+            // Phase 1: Immediately stretch across both tabs (liquid elongation)
+            const stretchLeft = movingRight ? startLeft : targetLeft;
+            const stretchWidth = movingRight
+                ? (targetLeft + targetWidth) - startLeft
+                : (startLeft + startWidth) - targetLeft;
+
+            setSlimeTail({ left: startLeft, width: startWidth });
+            setSlimeState({
+                left: stretchLeft,
+                width: stretchWidth,
+                phase: 'stretching',
+                direction,
+            });
+
+            // Phase 2: Snap the tail forward to target position (~90ms later)
+            const t1 = window.setTimeout(() => {
+                setSlimeTail(null);
+                setSlimeState({
+                    left: targetLeft,
+                    width: targetWidth,
+                    phase: 'snapping',
+                    direction,
+                });
+
+                // Phase 3: Splat wobble / squash on arrival (~220ms later)
+                const t2 = window.setTimeout(() => {
+                    setSlimeState((prev) => ({
+                        ...prev,
+                        phase: 'wobbling',
+                    }));
+
+                    // Phase 4: Settle to clean idle state (~200ms later)
+                    const t3 = window.setTimeout(() => {
+                        setSlimeState((prev) => ({
+                            ...prev,
+                            phase: 'idle',
+                            direction: null,
+                        }));
+                    }, 200);
+                    slimeTimersRef.current.push(t3);
+                }, 220);
+                slimeTimersRef.current.push(t2);
+            }, 90);
+            slimeTimersRef.current.push(t1);
         }
     };
 
@@ -968,15 +1040,32 @@ export default function MarketWatchRail({
                         </div>
                         {activeTool === 'markets' && (
                             <div className="mwr-tabs" role="tablist" aria-label="İzleme sekmeleri" ref={tabsContainerRef}>
-                                <div
-                                    className={`mwr-tab-highlight${highlightReady ? ' is-ready' : ''}`}
-                                    style={{
-                                        transform: `translateX(${highlightStyle.left}px)`,
-                                        width: `${highlightStyle.width}px`,
-                                        opacity: highlightReady ? 1 : 0,
-                                    }}
-                                    aria-hidden="true"
-                                />
+                                <div className="mwr-slime-canvas" aria-hidden="true">
+                                    {slimeTail && (
+                                        <div
+                                            className="mwr-slime-tail"
+                                            style={{
+                                                transform: `translateX(${slimeTail.left}px)`,
+                                                width: `${slimeTail.width}px`,
+                                            }}
+                                        />
+                                    )}
+                                    <div
+                                        className={[
+                                            'mwr-tab-highlight',
+                                            highlightReady ? 'is-ready' : '',
+                                            `is-${slimeState.phase}`,
+                                            slimeState.direction ? `dir-${slimeState.direction}` : '',
+                                        ]
+                                            .filter(Boolean)
+                                            .join(' ')}
+                                        style={{
+                                            transform: `translateX(${slimeState.left}px)`,
+                                            width: `${slimeState.width}px`,
+                                            opacity: highlightReady ? 1 : 0,
+                                        }}
+                                    />
+                                </div>
                                 {RAIL_TABS.map((tab) => (
                                     <button
                                         key={tab.id}
