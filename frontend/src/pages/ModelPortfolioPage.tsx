@@ -1509,11 +1509,16 @@ export default function ModelPortfolioPage() {
                     >
                         <div className="mp-modal-header">
                             <div className="mp-modal-title-row">
-                                <KeyRound size={17} className="mp-accent-icon" />
-                                <h3 id="mp-admin-dialog-title">Kurucu / Yönetici Girişi</h3>
+                                <div className="mp-modal-icon-badge is-lock">
+                                    <KeyRound size={15} />
+                                </div>
+                                <div>
+                                    <h3 id="mp-admin-dialog-title">Kurucu Girişi</h3>
+                                    <span className="mp-modal-subtitle">Model portföy yönetimi için yönetici erişim anahtarı</span>
+                                </div>
                             </div>
                             <button type="button" className="mp-icon-btn" aria-label="Giriş penceresini kapat" onClick={() => setAdminModalOpen(false)}>
-                                <X size={16} />
+                                <X size={15} />
                             </button>
                         </div>
                         <form onSubmit={handleAdminVerifySubmit} className="mp-modal-body">
@@ -2628,11 +2633,6 @@ function MpSectorDropdown({
     const [open, setOpen] = useState(false);
     const wrapRef = useRef<HTMLDivElement | null>(null);
 
-    const matchedPreset = useMemo(
-        () => SECTOR_OPTIONS.find((s) => s.value.toLowerCase() === value.trim().toLowerCase()),
-        [value],
-    );
-
     useEffect(() => {
         if (!open) return;
         const onDocClick = (e: MouseEvent) => {
@@ -2646,7 +2646,9 @@ function MpSectorDropdown({
 
     return (
         <div className="mp-field mp-explained-select-wrap" ref={wrapRef}>
-            <span className="mp-field-label">Sektör & Tema Etiketi</span>
+            <div className="mp-field-label-row">
+                <span className="mp-field-label">Sektör & Tema Etiketi</span>
+            </div>
             <div className="mp-sector-input-box">
                 <input
                     type="text"
@@ -2668,9 +2670,6 @@ function MpSectorDropdown({
                     <ChevronDown size={14} className={`mp-explained-chevron${open ? ' is-open' : ''}`} />
                 </button>
             </div>
-            {matchedPreset && (
-                <span className="mp-field-micro-hint">{matchedPreset.description}</span>
-            )}
 
             {open && (
                 <div className="mp-explained-menu mp-sector-menu" role="listbox">
@@ -2988,38 +2987,38 @@ function ModelPortfolioEditorModal({
                 {/* Sticky Header */}
                 <div className="mp-modal-header">
                     <div className="mp-modal-title-row">
-                        <BriefcaseBusiness size={18} className="mp-accent-icon" />
+                        <div className="mp-modal-icon-badge">
+                            <BriefcaseBusiness size={15} />
+                        </div>
                         <div>
                             <h3 id="mp-editor-dialog-title">
                                 {isEdit
                                     ? `${editingPosition?.symbol} Pozisyonunu Düzenle / Revize Et`
-                                    : 'Model Portföye Yeni Hisse Ekle'}
+                                    : 'Model Portföye Hisse Ekle'}
                             </h3>
                             <span className="mp-modal-subtitle">
-                                Hisse ve tarih seçtiğinizde fiyat, XU100 seviyesi ve çarpanlar otomatik gelir. Hedef fiyatı araştırma varsayımınıza göre belirleyin.
+                                Hisse ve giriş parametrelerini belirleyin; piyasa verileri otomatik çekilir.
                             </span>
                         </div>
                     </div>
                     <button type="button" className="mp-icon-btn" aria-label="Pozisyon formunu kapat" onClick={onClose}>
-                        <X size={17} />
+                        <X size={15} />
                     </button>
                 </div>
 
                 <form onSubmit={handleSubmit} className="mp-editor-shell">
                     <div className="mp-modal-body mp-editor-form">
                         {/* SECTION 1: Stock Selection, Date & Sector */}
-                        <div className="mp-editor-section-card">
-                            <div className="mp-editor-step-header">
-                                <span className="mp-step-pill">1</span>
-                                <div>
-                                    <h4>Hisse, Giriş Tarihi ve Sektör</h4>
-                                    <p>BIST hissesini aratıp seçin; veriler mevcut önbellekten anında çekilir.</p>
-                                </div>
+                        <div className="mp-editor-section">
+                            <div className="mp-editor-section-header">
+                                <h4>Hisse ve Giriş Parametreleri</h4>
                             </div>
 
                             <div className="mp-form-grid-3">
                                 <div className="mp-field mp-symbol-picker">
-                                    <span className="mp-field-label">Hisse Kodu *</span>
+                                    <div className="mp-field-label-row">
+                                        <span className="mp-field-label">Hisse Kodu *</span>
+                                    </div>
                                     <div className="mp-search-input-wrap">
                                         <Search size={14} className="mp-search-icon" />
                                         <input
@@ -3081,7 +3080,7 @@ function ModelPortfolioEditorModal({
                                                             />
                                                             <strong>{sym}</strong>
                                                         </div>
-                                                        <span>{row.name}</span>
+                                                        <span title={row.name || undefined}>{row.name}</span>
                                                     </button>
                                                 );
                                             })}
@@ -3092,19 +3091,17 @@ function ModelPortfolioEditorModal({
                                 <div className="mp-field">
                                     <div className="mp-field-label-row">
                                         <span className="mp-field-label">Portföye Giriş Tarihi *</span>
-                                        <div className="mp-mini-presets">
-                                            <button
-                                                type="button"
-                                                className="mp-mini-preset-btn"
-                                                onClick={() => {
-                                                    const d = todayIsoDate();
-                                                    setEntryDate(d);
-                                                    if (symbol.trim()) triggerPrefill(symbol, d);
-                                                }}
-                                            >
-                                                Bugün
-                                            </button>
-                                        </div>
+                                        <button
+                                            type="button"
+                                            className="mp-mini-preset-btn"
+                                            onClick={() => {
+                                                const d = todayIsoDate();
+                                                setEntryDate(d);
+                                                if (symbol.trim()) triggerPrefill(symbol, d);
+                                            }}
+                                        >
+                                            Bugün
+                                        </button>
                                     </div>
                                     <input
                                         type="date"
@@ -3215,14 +3212,10 @@ function ModelPortfolioEditorModal({
                             )}
                         </div>
 
-                        {/* SECTION 2: Price, Target Price & Weight with Quick Presets */}
-                        <div className="mp-editor-section-card">
-                            <div className="mp-editor-step-header">
-                                <span className="mp-step-pill">2</span>
-                                <div>
-                                    <h4>Giriş Fiyatı, Hedef Fiyat & Portföy Ağırlığı</h4>
-                                    <p>Hızlı yüzde butonlarıyla hedef fiyatınızı ve portföy ağırlığını tek tıkla belirleyin.</p>
-                                </div>
+                        {/* SECTION 2: Price, Target Price & Weight */}
+                        <div className="mp-editor-section">
+                            <div className="mp-editor-section-header">
+                                <h4>Fiyat ve Portföy Ağırlığı</h4>
                             </div>
 
                             <div className="mp-form-grid-3">
@@ -3239,9 +3232,6 @@ function ModelPortfolioEditorModal({
                                         onChange={(e) => setEntryPrice(e.target.value)}
                                         placeholder="0.00"
                                     />
-                                    <span className="mp-field-micro-hint">
-                                        Seçilen tarihteki kapanış/canlı fiyat otomatik gelir.
-                                    </span>
                                 </div>
 
                                 <div className="mp-field">
@@ -3275,16 +3265,13 @@ function ModelPortfolioEditorModal({
                                             </button>
                                         ))}
                                     </div>
-                                    <span className="mp-field-micro-hint">
-                                        Hızlı oranlar giriş fiyatına göre örnek hesaplamadır; seçilen hedefi ayrıca gözden geçirin.
-                                    </span>
                                 </div>
 
                                 <div className="mp-field">
                                     <div className="mp-field-label-row">
                                         <span className="mp-field-label">Portföy Ağırlığı (%) *</span>
                                         <span className="mp-field-micro-hint mp-mono">
-                                            Kalan Pay: %{remainingCashAfterWeight.toFixed(1)}
+                                            Kalan: %{remainingCashAfterWeight.toFixed(1)}
                                         </span>
                                     </div>
                                     <input
@@ -3316,22 +3303,18 @@ function ModelPortfolioEditorModal({
                                         </button>
                                     </div>
                                     {!isEdit && availableWeightPct <= 0 && (
-                                        <span className="mp-field-micro-hint">
-                                            Portföy %100 dolu; yeni hisse eklemek için mevcut ağırlıklardan pay açın.
+                                        <span className="mp-field-micro-hint mp-field-warning-text">
+                                            Portföy %100 dolu; yeni hisse için pay açın.
                                         </span>
                                     )}
                                 </div>
                             </div>
                         </div>
 
-                        {/* SECTION 3: Custom Explained Dropdowns for Rating & Horizon */}
-                        <div className="mp-editor-section-card">
-                            <div className="mp-editor-step-header">
-                                <span className="mp-step-pill">3</span>
-                                <div>
-                                    <h4>Tavsiye Derecesi ve Beklenen Vade Ufku</h4>
-                                    <p>Önerinizin stratejik sınıfını ve hedef fiyat vadesini açıklamalı menüden seçin.</p>
-                                </div>
+                        {/* SECTION 3: Strategy & Horizon */}
+                        <div className="mp-editor-section">
+                            <div className="mp-editor-section-header">
+                                <h4>Strateji ve Hedef Vade</h4>
                             </div>
 
                             <div className="mp-form-grid-2">
@@ -3350,19 +3333,14 @@ function ModelPortfolioEditorModal({
                             </div>
                         </div>
 
-                        {/* SECTION 4: Investment Thesis, Catalysts & Risk */}
-                        <div className="mp-editor-section-card">
-                            <div className="mp-editor-step-header">
-                                <span className="mp-step-pill">4</span>
-                                <div>
-                                    <h4>Yatırım gerekçesi ve beklenti</h4>
-                                    <p>Bu alanlar isteğe bağlı. Kısa bir not ve varsa beklentilerinizi ekleyin.</p>
-                                </div>
+                        {/* SECTION 4: Thesis & Catalysts */}
+                        <div className="mp-editor-section">
+                            <div className="mp-editor-section-header">
+                                <h4>Yatırım Tezi ve Beklentiler</h4>
                             </div>
 
                             <div className="mp-field">
-                                <span className="mp-field-label">Beklenti etiketleri</span>
-                                <small className="mp-field-micro-hint">Uygun olanları seçin; birden fazla seçebilirsiniz.</small>
+                                <span className="mp-field-label">Beklenti Etiketleri</span>
                                 <div className="mp-catalyst-choices" role="group" aria-label="Beklenti etiketleri">
                                     {CATALYST_OPTIONS.map((item) => {
                                         const active = catalysts.includes(item.value);
@@ -3374,7 +3352,7 @@ function ModelPortfolioEditorModal({
                                                 aria-pressed={active}
                                                 onClick={() => toggleCatalyst(item.value)}
                                             >
-                                                {active && <Check size={13} />}
+                                                {active && <Check size={12} />}
                                                 {item.label}
                                             </button>
                                         );
@@ -3389,7 +3367,7 @@ function ModelPortfolioEditorModal({
                                                 aria-pressed="true"
                                                 onClick={() => toggleCatalyst(item)}
                                             >
-                                                <Check size={13} />
+                                                <Check size={12} />
                                                 {item}
                                             </button>
                                         ))}
@@ -3400,7 +3378,7 @@ function ModelPortfolioEditorModal({
                                         aria-label="Başka bir beklenti etiketi ekle"
                                         value={customCatalyst}
                                         onChange={(e) => setCustomCatalyst(e.target.value)}
-                                        placeholder="Başka bir beklenti ekleyin (isteğe bağlı)"
+                                        placeholder="Özel beklenti etiketi yazın..."
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter') {
                                                 e.preventDefault();
@@ -3420,25 +3398,24 @@ function ModelPortfolioEditorModal({
                             </div>
 
                             <div className="mp-field">
-                                <span className="mp-field-label">Yatırım gerekçesi</span>
-                                <small className="mp-field-micro-hint">Bir iki cümleyle ana beklentinizi yazmanız yeterli.</small>
+                                <span className="mp-field-label">Yatırım Gerekçesi (Opsiyonel)</span>
                                 <textarea
                                     rows={3}
                                     aria-label="Yatırım gerekçesi"
                                     value={thesis}
                                     onChange={(e) => setThesis(e.target.value)}
-                                    placeholder="Bu hisseyi neden seçtiniz? (isteğe bağlı)"
+                                    placeholder="Şirketi model portföye ekleme tezinizi ve temel beklentileri yazın..."
                                 />
                             </div>
 
                             <label className="mp-field">
-                                <span className="mp-field-label">Takip edeceğim risk (isteğe bağlı)</span>
+                                <span className="mp-field-label">Takip Edilecek Temel Riskler (Opsiyonel)</span>
                                 <textarea
                                     rows={2}
                                     aria-label="Takip edeceğim risk"
                                     value={riskNote}
                                     onChange={(e) => setRiskNote(e.target.value)}
-                                    placeholder="Örn. maliyet artışı veya talep düşüşü"
+                                    placeholder="Olası marj baskısı, kur veya talep daralması riskleri..."
                                 />
                             </label>
 
@@ -3563,16 +3540,18 @@ function ModelPortfolioCloseModal({
             >
                 <div className="mp-modal-header">
                     <div className="mp-modal-title-row">
-                        <CheckCircle2 size={18} className="mp-accent-icon" />
+                        <div className="mp-modal-icon-badge is-close">
+                            <CheckCircle2 size={15} />
+                        </div>
                         <div>
                             <h3 id="mp-close-dialog-title">{position.symbol} Pozisyonunu Kapat</h3>
                             <span className="mp-modal-subtitle">
-                                Gerçekleşen getiri ve BIST 100 rölatif alfa karnesiyle geçmiş işlemlere arşivlenir.
+                                Gerçekleşen getiri ve BIST 100 rölatif alfa ile geçmiş işlemlere arşivlenir.
                             </span>
                         </div>
                     </div>
                     <button type="button" className="mp-icon-btn" aria-label="Kapatma penceresini kapat" onClick={onClose}>
-                        <X size={16} />
+                        <X size={15} />
                     </button>
                 </div>
                 <form onSubmit={handleSubmit} className="mp-editor-shell">
