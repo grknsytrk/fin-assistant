@@ -636,62 +636,85 @@
     position: relative;
 }
 
+/* Antigravity Model Picker Trigger */
 .overview-ai-model-trigger {
     display: inline-flex;
     align-items: center;
     gap: 0.45rem;
-    height: 32px;
-    padding: 0 0.75rem;
+    padding: 0.38rem 0.65rem;
     border-radius: 8px;
-    border: none;
-    background: rgba(255, 255, 255, 0.05);
-    color: #e4e4e7;
-    font-size: 0.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    color: #d4d4d8;
+    font-size: 0.76rem;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.15s ease;
     user-select: none;
 }
 
-.overview-ai-model-trigger:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.09);
+.overview-ai-model-trigger:hover:not(:disabled),
+.overview-ai-model-trigger.is-active {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.14);
     color: #ffffff;
 }
 
-.overview-ai-sparkle-icon {
-    color: #60a5fa;
-    flex-shrink: 0;
+.overview-ai-model-trigger-text {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.35rem;
 }
 
-.overview-ai-model-name {
+.overview-ai-model-provider-badge {
     font-weight: 600;
     color: #ffffff;
+    font-size: 0.74rem;
+    letter-spacing: 0.02em;
 }
 
 .overview-ai-model-sep {
     color: #52525b;
 }
 
-.overview-ai-model-effort {
+.overview-ai-model-title {
     color: #a1a1aa;
-    font-size: 0.73rem;
+    font-size: 0.74rem;
     font-weight: 500;
-    max-width: 200px;
+    max-width: 180px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    transition: color 0.15s ease;
+}
+
+.overview-ai-model-trigger:hover .overview-ai-model-title,
+.overview-ai-model-trigger.is-active .overview-ai-model-title {
+    color: #e4e4e7;
+}
+
+.overview-ai-model-effort-pill {
+    color: #a1a1aa;
+    font-size: 0.72rem;
+    font-weight: 500;
 }
 
 .overview-ai-model-chevron {
     color: #71717a;
-    transition: transform 0.18s ease;
+    transition: transform 0.18s ease, color 0.15s ease;
     flex-shrink: 0;
+}
+
+.overview-ai-model-trigger:hover .overview-ai-model-chevron,
+.overview-ai-model-trigger.is-active .overview-ai-model-chevron {
+    color: #d4d4d8;
 }
 
 .overview-ai-model-chevron.is-open {
     transform: rotate(180deg);
 }
 
+/* Antigravity Model Menu Surface */
 .overview-ai-model-menu {
     position: absolute;
     bottom: calc(100% + 6px);
@@ -699,149 +722,167 @@
     z-index: 100;
     display: flex;
     align-items: flex-end;
-    gap: 4px;
+    gap: 6px;
 }
 
 .overview-ai-model-dropdown,
 .overview-ai-reasoning-dropdown {
-    padding: 0.35rem;
-    border-radius: 10px;
-    background: #14171f;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.6);
+    padding: 5px;
+    border-radius: 12px;
+    background: #1e1e20;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.35);
     display: flex;
     flex-direction: column;
-    gap: 0.2rem;
+    gap: 2px;
+    backdrop-filter: blur(20px);
 }
 
 .overview-ai-model-dropdown {
     position: static;
-    min-width: 270px;
-    max-width: 320px;
-    max-height: min(70vh, 480px);
+    min-width: 250px;
+    max-width: 300px;
+    max-height: min(70vh, 460px);
     overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+
+.overview-ai-model-dropdown::-webkit-scrollbar {
+    width: 4px;
+}
+
+.overview-ai-model-dropdown::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.overview-ai-model-dropdown::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+}
+
+.overview-ai-model-dropdown::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.25);
 }
 
 .overview-ai-reasoning-dropdown {
-    min-width: 154px;
+    min-width: 140px;
 }
 
 .overview-ai-dropdown-header {
-    padding: 0.4rem 0.6rem 0.25rem;
+    padding: 6px 10px 4px;
     color: #71717a;
-    font-size: 0.68rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: 0.74rem;
+    font-weight: 500;
+    letter-spacing: normal;
 }
 
 .overview-ai-dropdown-provider-label {
-    padding: 0.45rem 0.6rem 0.1rem;
-    color: #60a5fa;
-    font-size: 0.68rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
+    padding: 8px 10px 3px;
+    color: #71717a;
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
 }
 
 .overview-ai-dropdown-empty {
     display: block;
     padding: 0.5rem 0.65rem;
-    color: #a1a1aa;
+    color: #71717a;
     font-size: 0.72rem;
     line-height: 1.4;
 }
 
-.overview-ai-dropdown-item {
-    display: flex;
-    flex: 1;
-    align-items: center;
-    justify-content: space-between;
-    min-width: 0;
-    gap: 0.75rem;
-    padding: 0.5rem 0.65rem;
-    border-radius: 7px;
-    border: 0;
-    background: transparent;
-    color: #d4d4d8;
-    text-align: left;
-    cursor: pointer;
-    transition: background 0.12s ease;
-}
-
-.overview-ai-dropdown-item:hover {
-    background: rgba(255, 255, 255, 0.06);
-    color: #ffffff;
-}
-
-.overview-ai-dropdown-item.is-selected {
-    background: rgba(59, 130, 246, 0.12);
-    color: #93c5fd;
-}
-
+/* Fluid Row (Antigravity Style) */
 .overview-ai-model-row {
     display: flex;
     align-items: center;
-    gap: 0.1rem;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 7px 10px;
+    border-radius: 8px;
+    color: #d4d4d8;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+    user-select: none;
+}
+
+.overview-ai-model-row:hover,
+.overview-ai-model-row.is-active {
+    background: rgba(255, 255, 255, 0.08);
+    color: #ffffff;
+}
+
+.overview-ai-model-row.is-selected {
+    color: #ffffff;
 }
 
 .overview-ai-model-option-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-weight: 450;
 }
 
-.overview-ai-model-effort-trigger {
-    display: inline-flex;
+.overview-ai-model-option-meta {
+    display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.35rem;
-    min-width: 82px;
-    padding: 0.46rem 0.5rem;
-    border: 0;
-    border-radius: 7px;
-    background: transparent;
+    gap: 5px;
+    flex-shrink: 0;
+}
+
+.overview-ai-model-effort-tag {
+    font-size: 0.74rem;
+    color: #71717a;
+    font-weight: 400;
+    transition: color 0.12s ease;
+}
+
+.overview-ai-model-row:hover .overview-ai-model-effort-tag,
+.overview-ai-model-row.is-active .overview-ai-model-effort-tag {
     color: #a1a1aa;
-    font-size: 0.7rem;
-    cursor: pointer;
-    transition: background 0.12s ease, color 0.12s ease;
 }
 
-.overview-ai-model-effort-trigger:hover,
-.overview-ai-model-effort-trigger.is-open {
-    background: rgba(255, 255, 255, 0.07);
+.overview-ai-row-chevron {
+    color: #71717a;
+    transition: color 0.12s ease;
+}
+
+.overview-ai-model-row:hover .overview-ai-row-chevron,
+.overview-ai-model-row.is-active .overview-ai-row-chevron {
+    color: #d4d4d8;
+}
+
+.overview-ai-check-icon {
     color: #ffffff;
+    flex-shrink: 0;
 }
 
+/* Reasoning Submenu Options */
 .overview-ai-reasoning-option {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    padding: 0.55rem 0.65rem;
-    border: 0;
-    border-radius: 7px;
-    background: transparent;
+    padding: 7px 12px;
+    border-radius: 8px;
     color: #d4d4d8;
-    font-size: 0.76rem;
-    text-align: left;
+    font-size: 0.8rem;
+    font-weight: 450;
     cursor: pointer;
     transition: background 0.12s ease, color 0.12s ease;
+    user-select: none;
 }
 
 .overview-ai-reasoning-option:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.08);
     color: #ffffff;
 }
 
 .overview-ai-reasoning-option.is-selected {
-    background: rgba(59, 130, 246, 0.12);
-    color: #93c5fd;
-}
-
-.overview-ai-check-icon {
-    color: #60a5fa;
-    flex-shrink: 0;
+    color: #ffffff;
 }
 
 /* Action Button */

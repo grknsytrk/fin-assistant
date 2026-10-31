@@ -1182,7 +1182,7 @@ export default function StockOverview({
                             <div className="overview-ai-model-picker-wrap" ref={modelDropdownRef}>
                                 <button
                                     type="button"
-                                    className="overview-ai-model-trigger"
+                                    className={`overview-ai-model-trigger${modelDropdownOpen ? ' is-active' : ''}`}
                                     onClick={() => {
                                         setModelDropdownOpen((prev) => !prev);
                                         setReasoningSubmenuModelId(null);
@@ -1191,12 +1191,15 @@ export default function StockOverview({
                                     aria-expanded={modelDropdownOpen}
                                     title="AI modeli ve düşünce seviyesini seçin"
                                 >
-                                    <Sparkles size={13} className="overview-ai-sparkle-icon" aria-hidden="true" />
-                                    <span className="overview-ai-model-name">{selectedModelProviderLabel}</span>
-                                    <span className="overview-ai-model-sep">·</span>
-                                    <span className="overview-ai-model-effort">
-                                        {selectedModelLabel}
-                                        {supportsReasoningEffort ? ` · ${reasoningEffort.toUpperCase()}` : ''}
+                                    <span className="overview-ai-model-trigger-text">
+                                        <strong className="overview-ai-model-provider-badge">{selectedModelProviderLabel}</strong>
+                                        <span className="overview-ai-model-sep">·</span>
+                                        <span className="overview-ai-model-title">{selectedModelLabel}</span>
+                                        {supportsReasoningEffort && (
+                                            <span className="overview-ai-model-effort-pill">
+                                                {reasoningEffort[0].toUpperCase() + reasoningEffort.slice(1)}
+                                            </span>
+                                        )}
                                     </span>
                                     <ChevronUp size={13} className={`overview-ai-model-chevron${modelDropdownOpen ? ' is-open' : ''}`} aria-hidden="true" />
                                 </button>
@@ -1207,40 +1210,51 @@ export default function StockOverview({
                                             <div className="overview-ai-dropdown-header">Model</div>
                                             {overviewModelProviders.map((provider) => (
                                                 <div className="overview-ai-provider-group" key={provider.id}>
-                                                    <div className="overview-ai-dropdown-provider-label">{provider.label}</div>
+                                                    {overviewModelProviders.length > 1 && (
+                                                        <div className="overview-ai-dropdown-provider-label">{provider.label}</div>
+                                                    )}
                                                     {provider.models.map((model) => {
                                                         const canSetEffort = provider.id === 'ifm' || model.supports_reasoning_effort === true;
                                                         const isSelected = selectedModel === model.id;
                                                         const effort = reasoningEfforts[model.id] || 'low';
-                                                        const effortMenuOpen = reasoningSubmenuModelId === model.id;
+                                                        const effortLabel = effort[0].toUpperCase() + effort.slice(1);
+                                                        const isSubmenuOpen = reasoningSubmenuModelId === model.id;
+
                                                         return (
-                                                            <div className="overview-ai-model-row" key={`${provider.id}:${model.id}`}>
-                                                                <button
-                                                                    type="button"
-                                                                    className={`overview-ai-dropdown-item${isSelected ? ' is-selected' : ''}`}
-                                                                    onClick={() => handleOverviewModelChange(model.id)}
-                                                                    role="menuitemradio"
-                                                                    aria-checked={isSelected}
-                                                                >
-                                                                    <span className="overview-ai-model-option-name">{model.label}</span>
-                                                                    {isSelected && <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />}
-                                                                </button>
-                                                                {canSetEffort && (
-                                                                    <button
-                                                                        type="button"
-                                                                        className={`overview-ai-model-effort-trigger${effortMenuOpen ? ' is-open' : ''}`}
-                                                                        onClick={() => {
-                                                                            handleOverviewModelChange(model.id);
-                                                                            setReasoningSubmenuModelId((current) => current === model.id ? null : model.id);
-                                                                        }}
-                                                                        role="menuitem"
-                                                                        aria-label={`${model.label} thinking seviyesi: ${effort}`}
-                                                                        aria-expanded={effortMenuOpen}
-                                                                    >
-                                                                        <span>{effort[0].toUpperCase() + effort.slice(1)}</span>
-                                                                        <ChevronRight size={14} aria-hidden="true" />
-                                                                    </button>
-                                                                )}
+                                                            <div
+                                                                key={`${provider.id}:${model.id}`}
+                                                                className={`overview-ai-model-row${isSelected ? ' is-selected' : ''}${isSubmenuOpen ? ' is-active' : ''}`}
+                                                                onClick={() => {
+                                                                    handleOverviewModelChange(model.id);
+                                                                    if (canSetEffort) {
+                                                                        setReasoningSubmenuModelId((current) => current === model.id ? null : model.id);
+                                                                    } else {
+                                                                        setModelDropdownOpen(false);
+                                                                        setReasoningSubmenuModelId(null);
+                                                                    }
+                                                                }}
+                                                                onMouseEnter={() => {
+                                                                    if (canSetEffort) {
+                                                                        setReasoningSubmenuModelId(model.id);
+                                                                    } else {
+                                                                        setReasoningSubmenuModelId(null);
+                                                                    }
+                                                                }}
+                                                                role="menuitemradio"
+                                                                aria-checked={isSelected}
+                                                            >
+                                                                <span className="overview-ai-model-option-name">{model.label}</span>
+                                                                <div className="overview-ai-model-option-meta">
+                                                                    {canSetEffort && (
+                                                                        <span className="overview-ai-model-effort-tag">{effortLabel}</span>
+                                                                    )}
+                                                                    {isSelected && (
+                                                                        <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />
+                                                                    )}
+                                                                    {canSetEffort && (
+                                                                        <ChevronRight size={13} className="overview-ai-row-chevron" aria-hidden="true" />
+                                                                    )}
+                                                                </div>
                                                             </div>
                                                         );
                                                     })}
@@ -1253,22 +1267,29 @@ export default function StockOverview({
                                         </div>
 
                                         {reasoningSubmenuModelId && reasoningSubmenuModel && (
-                                            <div className="overview-ai-reasoning-dropdown" role="menu" aria-label={`${reasoningSubmenuModel.label} thinking seviyesi`}>
-                                                <div className="overview-ai-dropdown-header">Thinking</div>
+                                            <div
+                                                className="overview-ai-reasoning-dropdown"
+                                                role="menu"
+                                                aria-label={`${reasoningSubmenuModel.label} düşünce seviyesi`}
+                                            >
                                                 {REASONING_OPTIONS.map((opt) => {
                                                     const isSelected = (reasoningEfforts[reasoningSubmenuModelId] || 'low') === opt.key;
                                                     return (
-                                                        <button
+                                                        <div
                                                             key={opt.key}
-                                                            type="button"
                                                             className={`overview-ai-reasoning-option${isSelected ? ' is-selected' : ''}`}
-                                                            onClick={() => handleReasoningEffortChange(reasoningSubmenuModelId, opt.key)}
+                                                            onClick={() => {
+                                                                handleOverviewModelChange(reasoningSubmenuModelId);
+                                                                handleReasoningEffortChange(reasoningSubmenuModelId, opt.key);
+                                                                setModelDropdownOpen(false);
+                                                                setReasoningSubmenuModelId(null);
+                                                            }}
                                                             role="menuitemradio"
                                                             aria-checked={isSelected}
                                                         >
                                                             <span>{opt.label}</span>
                                                             {isSelected && <Check size={14} className="overview-ai-check-icon" aria-hidden="true" />}
-                                                        </button>
+                                                        </div>
                                                     );
                                                 })}
                                             </div>
