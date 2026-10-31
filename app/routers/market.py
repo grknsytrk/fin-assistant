@@ -193,6 +193,7 @@ async def market_stream(
 
     async def event_generator():
         prev_snapshot: Dict[str, tuple[Any, ...]] = {}
+        last_rows: Optional[List[Dict[str, Any]]] = None
         last_heartbeat = time.monotonic()
         tick = 0
         while True:
@@ -202,7 +203,11 @@ async def market_stream(
             try:
                 payload = await asyncio.to_thread(_market_stocks_payload, index_name=normalized_index)
                 rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
-                changed, prev_snapshot = _compute_market_stocks_delta(prev_snapshot, rows)
+                if rows is last_rows:
+                    changed = []
+                else:
+                    changed, prev_snapshot = _compute_market_stocks_delta(prev_snapshot, rows)
+                    last_rows = rows
                 if changed or tick == 0:
                     data = {
                         "index": normalized_index,

@@ -22,6 +22,9 @@ def _isolated_read_state(monkeypatch):
     monkeypatch.setattr(json_cache, "JSON_CACHE_METRICS_FLUSH_SECONDS", 3600.0)
     with json_cache._JSON_CACHE_READ_STATE_LOCK:
         json_cache._JSON_CACHE_READ_STATE.clear()
+    with json_cache._JSON_CACHE_PAYLOAD_CACHE_LOCK:
+        json_cache._JSON_CACHE_PAYLOAD_CACHE.clear()
+        json_cache._JSON_CACHE_PAYLOAD_CACHE_BYTES = 0
     with json_cache._JSON_CACHE_METRICS_LOCK:
         for key in json_cache._JSON_CACHE_METRICS:
             json_cache._JSON_CACHE_METRICS[key] = 0
@@ -32,6 +35,9 @@ def _isolated_read_state(monkeypatch):
     finally:
         with json_cache._JSON_CACHE_READ_STATE_LOCK:
             json_cache._JSON_CACHE_READ_STATE.clear()
+        with json_cache._JSON_CACHE_PAYLOAD_CACHE_LOCK:
+            json_cache._JSON_CACHE_PAYLOAD_CACHE.clear()
+            json_cache._JSON_CACHE_PAYLOAD_CACHE_BYTES = 0
 
 
 def _metrics() -> dict[str, int]:
@@ -79,6 +85,33 @@ def test_read_json_serves_local_copy_without_remote_within_ttl(tmp_path, monkeyp
     assert second == first
     assert len(remote.calls) == 1
     assert json.loads(path.read_text(encoding="utf-8")) == first
+
+
+def test_read_json_skips_disk_parse_on_payload_lru_hit(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "cache" / "fund.json"
+    payload = {"status": "ok", "rows": ["cached"]}
+    _write_json_file(path, payload)
+    remote = _FakeRemoteCache(payload)
+    monkeypatch.setattr(fund_service, "read_json_cache", remote)
+
+    local_reads = []
+    original_read_local_json = json_cache.read_local_json
+
+    def counted_read_local_json(cache_path: Path):
+        local_reads.append(cache_path)
+        return original_read_local_json(cache_path)
+
+    monkeypatch.setattr(json_cache, "read_local_json", counted_read_local_json)
+
+    first = fund_service._read_json(path)
+    second = fund_service._read_json(path)
+    third = fund_service._read_json(path)
+
+    assert first == payload
+    assert second == payload
+    assert third is second
+    assert local_reads == [path, path]
+    assert len(remote.calls) == 1
 
 
 def test_read_json_revalidates_remotely_after_ttl(tmp_path, monkeypatch) -> None:
@@ -174,11 +207,20 @@ def test_write_local_json_makes_next_read_local_only(tmp_path, monkeypatch) -> N
     path = tmp_path / "cache" / "fund.json"
     remote = _FakeRemoteCache({"status": "ok", "source": "remote"})
     monkeypatch.setattr(fund_service, "read_json_cache", remote)
+    local_reads = []
+    original_read_local_json = json_cache.read_local_json
+
+    def counted_read_local_json(cache_path: Path):
+        local_reads.append(cache_path)
+        return original_read_local_json(cache_path)
+
+    monkeypatch.setattr(json_cache, "read_local_json", counted_read_local_json)
 
     fund_service._write_local_json(path, {"status": "ok", "source": "writer"})
 
     assert fund_service._read_json(path) == {"status": "ok", "source": "writer"}
     assert remote.calls == []
+    assert local_reads == []
 
 
 def test_read_json_coalesces_concurrent_remote_reads(tmp_path, monkeypatch) -> None:
@@ -401,3 +443,51 @@ def test_read_state_eviction_stays_bounded(tmp_path, monkeypatch) -> None:
     assert len(keys) == 3
     assert str(paths[0]) not in keys
     assert [str(path) for path in paths[1:]] == keys
+
+
+def test_payload_lru_evicts_least_recently_used_entry(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(json_cache, "JSON_CACHE_PAYLOAD_CACHE_MAX_ENTRIES", 2)
+    monkeypatch.setattr(json_cache, "JSON_CACHE_PAYLOAD_CACHE_MAX_BYTES", 1024)
+    payloads = {f"{name}.json": {"name": name} for name in ("a", "b", "c")}
+
+    def remote(path: Path):
+        return copy.deepcopy(payloads[path.name])
+
+    monkeypatch.setattr(fund_service, "read_json_cache", remote)
+    paths = [tmp_path / f"{name}.json" for name in ("a", "b", "c")]
+
+    assert fund_service._read_json(paths[0]) == {"name": "a"}
+    assert fund_service._read_json(paths[1]) == {"name": "b"}
+    assert fund_service._read_json(paths[0]) == {"name": "a"}  # Refresh A's LRU position.
+    assert fund_service._read_json(paths[2]) == {"name": "c"}
+
+    with json_cache._JSON_CACHE_PAYLOAD_CACHE_LOCK:
+        assert list(json_cache._JSON_CACHE_PAYLOAD_CACHE) == [str(paths[0]), str(paths[2])]
+        assert json_cache._JSON_CACHE_PAYLOAD_CACHE_BYTES == sum(
+            entry.file_bytes for entry in json_cache._JSON_CACHE_PAYLOAD_CACHE.values()
+        )
+
+
+def test_payload_lru_skips_files_over_byte_budget(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(json_cache, "JSON_CACHE_PAYLOAD_CACHE_MAX_BYTES", 16)
+    path = tmp_path / "oversized.json"
+    remote = _FakeRemoteCache({"body": "x" * 64})
+    monkeypatch.setattr(fund_service, "read_json_cache", remote)
+    local_reads = []
+    original_read_local_json = json_cache.read_local_json
+
+    def counted_read_local_json(cache_path: Path):
+        local_reads.append(cache_path)
+        return original_read_local_json(cache_path)
+
+    monkeypatch.setattr(json_cache, "read_local_json", counted_read_local_json)
+
+    assert fund_service._read_json(path) == remote.payload
+    reads_before_second = len(local_reads)
+    assert fund_service._read_json(path) == remote.payload
+
+    assert len(remote.calls) == 1
+    assert len(local_reads) == reads_before_second + 1
+    with json_cache._JSON_CACHE_PAYLOAD_CACHE_LOCK:
+        assert str(path) not in json_cache._JSON_CACHE_PAYLOAD_CACHE
+        assert json_cache._JSON_CACHE_PAYLOAD_CACHE_BYTES == 0

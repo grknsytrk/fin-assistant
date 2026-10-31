@@ -860,6 +860,10 @@ def test_fetch_snapshot_cached_fallback_refreshes_insurance_premiums(
         ),
         encoding="utf-8",
     )
+    monkeypatch.setattr(kap_fetcher, "read_json_cache", lambda _path: None)
+    shared_payload = kap_fetcher._read_cache(cache_file)
+    assert shared_payload is not None
+    assert "cache_hit" not in shared_payload
 
     def fail_resolve_member(*_args, **_kwargs):
         raise RuntimeError("live kap unavailable")
@@ -884,6 +888,8 @@ def test_fetch_snapshot_cached_fallback_refreshes_insurance_premiums(
     assert payload["insurance_premium_disclosures"] == [
         {"year": 2026, "month": 4, "monthly_gross_premium": 3.0}
     ]
+    assert "cache_hit" not in shared_payload
+    assert "insurance_premium_disclosures" not in shared_payload
     saved = json.loads(cache_file.read_text(encoding="utf-8"))
     assert saved["insurance_premium_disclosures_version"] == kap_fetcher.KAP_INSURANCE_PREMIUM_CACHE_VERSION
 

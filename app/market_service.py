@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import uuid
 
+from app import database as _market_database
 from app.api_runtime import *
 from app.kap_financials import *
 from app.kap_service import *
@@ -388,6 +390,18 @@ _MARKET_PRICE_CACHE: Dict[str, Any] = {}
 _MARKET_PRICE_CACHE_TTL = 3
 
 _MARKET_QUOTE_SOURCE_INDEX = "XUTUM"
+
+_MARKET_PRICE_SHARED_CACHE_KEY = "api:market:price-snapshot:XUTUM:v1"
+
+_MARKET_PRICE_DATABASE_CACHE_PATH = (
+    CONFIG.paths.processed_dir / "_shared" / "market_price_snapshot_xutum.json"
+)
+
+_MARKET_PRICE_DATABASE_RESOURCE_KEY = "market:price-snapshot:XUTUM:refresh:v1"
+
+_MARKET_PRICE_DATABASE_WAIT_TIMEOUT_SECONDS = 30.0
+
+_MARKET_PRICE_DATABASE_POLL_MAX_SECONDS = 0.25
 
 _INFOYATIRIM_STOCK_PAGE_CACHE: Dict[str, Any] = {}
 
@@ -782,51 +796,103 @@ def _market_price_source_url(index_name: str) -> str:
         return "https://infoyatirim.com/canli-borsa/xu100-bist-100-hisseleri"
     return "https://infoyatirim.com/canli-borsa/xu100-bist-100-hisseleri"
 
-def _fetch_market_price_map(
-    symbols: List[str],
-    *,
-    index_name: str = _MARKET_QUOTE_SOURCE_INDEX,
-) -> Dict[str, Dict[str, Any]]:
-    """Fetch one canonical InfoYatirim quote snapshot and project its symbols.
+def _market_price_snapshot_is_fresh(payload: Any, *, now: Optional[float] = None) -> bool:
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), dict):
+        return False
+    try:
+        expires_at = float(payload.get("expires_at") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return expires_at > (time.time() if now is None else now)
 
-    Market lists and stock cards must not receive different prices because they
-    requested different symbol subsets or index views.  The XUTUM live page
-    contains the complete BIST equity universe, so it is used as the single
-    quote source and cache snapshot for every consumer.
-    """
+
+def _market_price_snapshot_payload(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    created_at = time.time()
+    return {
+        "items": items,
+        "created_at": created_at,
+        "expires_at": created_at + _MARKET_PRICE_CACHE_TTL,
+    }
+
+
+def _remember_market_price_snapshot(payload: Dict[str, Any]) -> None:
+    items = payload.get("items")
+    if not isinstance(items, dict):
+        return
+    try:
+        cached_at = float(payload.get("created_at") or time.time())
+    except (TypeError, ValueError):
+        cached_at = time.time()
+    _MARKET_PRICE_CACHE[f"snapshot:{_MARKET_QUOTE_SOURCE_INDEX}"] = {
+        "_ts": cached_at,
+        "items": items,
+    }
+
+
+def _market_price_snapshot_database_read() -> Optional[Dict[str, Any]]:
+    if not _market_database.database_enabled():
+        return None
+    try:
+        payload = _market_database.read_json_cache(_MARKET_PRICE_DATABASE_CACHE_PATH)
+    except Exception:
+        return None
+    return payload if _market_price_snapshot_is_fresh(payload) else None
+
+
+def _market_price_snapshot_database_write(payload: Dict[str, Any]) -> None:
+    if not _market_database.database_enabled():
+        return
+    try:
+        _market_database.write_json_cache(_MARKET_PRICE_DATABASE_CACHE_PATH, payload)
+    except Exception:
+        LOGGER.warning("market price snapshot database write failed", exc_info=True)
+
+
+def _market_price_redis_available() -> bool:
+    try:
+        status = _cache_status()
+    except Exception:
+        return False
+    return status.get("cache_backend") == "redis" and not bool(status.get("cache_redis_fallback"))
+
+
+def _market_price_snapshot_remaining_ttl(payload: Dict[str, Any]) -> int:
+    try:
+        remaining = float(payload.get("expires_at") or 0.0) - time.time()
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int(math.ceil(remaining)))
+
+
+def _market_price_refresh_lease_is_active(lease: Any) -> bool:
+    if not isinstance(lease, dict):
+        return False
+    lease_until = lease.get("lease_until")
+    if isinstance(lease_until, str):
+        try:
+            lease_until = datetime.fromisoformat(lease_until.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    if not isinstance(lease_until, datetime):
+        return False
+    if lease_until.tzinfo is None:
+        lease_until = lease_until.replace(tzinfo=timezone.utc)
+    return lease_until > datetime.now(timezone.utc)
+
+
+def _build_market_price_snapshot(
+    normalized_symbols: List[str],
+) -> Optional[Dict[str, Dict[str, Any]]]:
     import urllib.error
     import urllib.request
 
-    normalized_symbols = sorted({str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()})
-    if not normalized_symbols:
-        return {}
-
-    # Keep the public argument for callers that select XU100/XU030 rows, but
-    # deliberately use the same upstream page and cache entry for all of them.
-    del index_name
-    source_index = _MARKET_QUOTE_SOURCE_INDEX
-    cache_key = f"snapshot:{source_index}"
-
-    def project_items(items: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        return {
-            symbol: dict(items[symbol])
-            for symbol in normalized_symbols
-            if symbol in items
-        }
-
-    now = time.time()
-    cached = _MARKET_PRICE_CACHE.get(cache_key)
-    if cached and now - cached.get("_ts", 0) < _MARKET_PRICE_CACHE_TTL:
-        return project_items(cached.get("items", {}))
-
-    url = _market_price_source_url(source_index)
-
+    url = _market_price_source_url(_MARKET_QUOTE_SOURCE_INDEX)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             html_text = resp.read().decode("utf-8", errors="ignore")
     except (urllib.error.URLError, Exception):
-        return {}
+        return None
 
     items: Dict[str, Dict[str, Any]] = {}
     try:
@@ -863,7 +929,7 @@ def _fetch_market_price_map(
                 "as_of": fetched_at,
             }
     except Exception:
-        return {}
+        return None
 
     missing_symbols = [
         symbol
@@ -882,8 +948,166 @@ def _fetch_market_price_map(
         for symbol, fallback in zip(fallback_symbols, fallback_rows):
             if fallback:
                 items[symbol] = _merge_market_price_fallback(items.get(symbol, {}), fallback)
+    return items
 
-    _MARKET_PRICE_CACHE[cache_key] = {"_ts": now, "items": items}
+
+def _market_price_snapshot_with_database_lease(
+    normalized_symbols: List[str],
+) -> tuple[Optional[Dict[str, Any]], bool]:
+    if not _market_database.database_enabled():
+        return None, False
+    cached = _market_price_snapshot_database_read()
+    if cached is not None:
+        return cached, False
+
+    owner_token = uuid.uuid4().hex
+    job_id = f"market-price-snapshot-{owner_token[:12]}"
+    try:
+        lease = _market_database.acquire_refresh_lease(
+            _MARKET_PRICE_DATABASE_RESOURCE_KEY,
+            job_id=job_id,
+            owner_token=owner_token,
+            ttl_seconds=max(1, int(math.ceil(_MARKET_QUOTES_LOCK_TTL_SECONDS))),
+        )
+    except Exception:
+        lease = None
+
+    if lease:
+        try:
+            cached = _market_price_snapshot_database_read()
+            if cached is not None:
+                return cached, False
+            items = _build_market_price_snapshot(normalized_symbols)
+            if items is None:
+                return None, True
+            snapshot = _market_price_snapshot_payload(items)
+            _market_price_snapshot_database_write(snapshot)
+            return snapshot, True
+        finally:
+            try:
+                _market_database.release_refresh_lease(
+                    _MARKET_PRICE_DATABASE_RESOURCE_KEY,
+                    job_id=job_id,
+                    owner_token=owner_token,
+                )
+            except Exception:
+                LOGGER.debug("market price snapshot lease release failed", exc_info=True)
+
+    try:
+        lease = _market_database.get_refresh_lease(_MARKET_PRICE_DATABASE_RESOURCE_KEY)
+    except Exception:
+        lease = None
+    if not _market_price_refresh_lease_is_active(lease):
+        return None, False
+
+    deadline = time.monotonic() + _MARKET_PRICE_DATABASE_WAIT_TIMEOUT_SECONDS
+    poll_interval = 0.05
+    while time.monotonic() < deadline:
+        cached = _market_price_snapshot_database_read()
+        if cached is not None:
+            return cached, False
+        try:
+            lease = _market_database.get_refresh_lease(_MARKET_PRICE_DATABASE_RESOURCE_KEY)
+        except Exception:
+            lease = None
+        if not _market_price_refresh_lease_is_active(lease):
+            return None, False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval, remaining))
+        poll_interval = min(poll_interval * 1.5, _MARKET_PRICE_DATABASE_POLL_MAX_SECONDS)
+    return None, False
+
+
+def _fetch_market_price_map(
+    symbols: List[str],
+    *,
+    index_name: str = _MARKET_QUOTE_SOURCE_INDEX,
+) -> Dict[str, Dict[str, Any]]:
+    """Fetch one canonical XUTUM quote snapshot and project the requested symbols."""
+    normalized_symbols = sorted({str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()})
+    if not normalized_symbols:
+        return {}
+
+    # Keep the public argument for callers that select XU100/XU030 rows, but
+    # deliberately use the same upstream page and cache entry for all of them.
+    del index_name
+    cache_key = _MARKET_PRICE_SHARED_CACHE_KEY
+
+    def project_items(items: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        return {
+            symbol: dict(items[symbol])
+            for symbol in normalized_symbols
+            if symbol in items
+        }
+
+    now = time.time()
+    local_cached = _MARKET_PRICE_CACHE.get(f"snapshot:{_MARKET_QUOTE_SOURCE_INDEX}")
+    if local_cached and now - local_cached.get("_ts", 0) < _MARKET_PRICE_CACHE_TTL:
+        return project_items(local_cached.get("items", {}))
+
+    redis_available = _market_price_redis_available()
+    if redis_available:
+        shared_cached = _shared_cache_get_dict(cache_key)
+        if _market_price_snapshot_is_fresh(shared_cached):
+            _remember_market_price_snapshot(shared_cached)
+            return project_items(shared_cached["items"])
+
+    database_cached = _market_price_snapshot_database_read()
+    if database_cached is not None:
+        _remember_market_price_snapshot(database_cached)
+        if redis_available:
+            remaining_ttl = _market_price_snapshot_remaining_ttl(database_cached)
+            if remaining_ttl > 0:
+                _shared_cache_set(cache_key, database_cached, ttl_seconds=remaining_ttl)
+        return project_items(database_cached["items"])
+
+    def refresh_snapshot() -> Optional[Dict[str, Any]]:
+        cached = _market_price_snapshot_database_read()
+        if cached is not None:
+            return cached
+        items = _build_market_price_snapshot(normalized_symbols)
+        if items is None:
+            return None
+        snapshot = _market_price_snapshot_payload(items)
+        _market_price_snapshot_database_write(snapshot)
+        return snapshot
+
+    if redis_available:
+        try:
+            snapshot, singleflight_status = _get_or_set_single_flight(
+                cache_key,
+                ttl_seconds=_MARKET_PRICE_CACHE_TTL,
+                factory=refresh_snapshot,
+                lock_key=f"{cache_key}:lock",
+                lock_ttl_seconds=_MARKET_QUOTES_LOCK_TTL_SECONDS,
+                wait_timeout_seconds=_MARKET_QUOTES_WAIT_TIMEOUT_SECONDS,
+                poll_interval_seconds=_MARKET_QUOTES_POLL_INTERVAL_SECONDS,
+                cache_usable=_market_price_snapshot_is_fresh,
+            )
+        except Exception:
+            snapshot, singleflight_status = None, "pending"
+        source_attempted = singleflight_status == "miss"
+    else:
+        snapshot, source_attempted = _market_price_snapshot_with_database_lease(normalized_symbols)
+
+    if _market_price_snapshot_is_fresh(snapshot):
+        _remember_market_price_snapshot(snapshot)
+        return project_items(snapshot["items"])
+    if source_attempted:
+        return {}
+
+    # A timed-out shared waiter must retain the previous fail-open behavior.
+    # Publish only the successful result; never replace a snapshot with a provider error.
+    items = _build_market_price_snapshot(normalized_symbols)
+    if items is None:
+        return {}
+    snapshot = _market_price_snapshot_payload(items)
+    _remember_market_price_snapshot(snapshot)
+    _market_price_snapshot_database_write(snapshot)
+    if redis_available:
+        _shared_cache_set(cache_key, snapshot, ttl_seconds=_MARKET_PRICE_CACHE_TTL)
     return project_items(items)
 
 def _pick_series_value_at_or_before(
@@ -1196,7 +1420,12 @@ def _market_stock_row(
         **_returns_from_bases(current_for_returns, return_bases),
     }
 
-def _build_market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
+def _build_market_stocks_payload(
+    *,
+    index_name: str = "XUTUM",
+    force_refresh: bool = False,
+    basic_summary_map: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     from app.kap_service import get_bist_index_universe
 
     normalized_index = _normalize_stock_index(index_name)
@@ -1228,7 +1457,8 @@ def _build_market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bo
         if normalized_index == "XUTUM"
         else _fetch_stock_return_bases_bulk(symbols)
     )
-    basic_summary_map = _fetch_isyatirim_basic_summary_map()
+    if basic_summary_map is None:
+        basic_summary_map = _fetch_isyatirim_basic_summary_map()
     try:
         financial_snapshot_map = get_financial_snapshots_map(CONFIG.paths.processed_dir, symbols)
     except Exception as exc:
@@ -1456,7 +1686,12 @@ def _compute_market_stocks_delta(
         changed.append(delta_item)
     return changed, next_snapshot
 
-def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
+def _market_stocks_payload(
+    *,
+    index_name: str = "XUTUM",
+    force_refresh: bool = False,
+    basic_summary_map: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     normalized_index = _normalize_stock_index(index_name)
     started_at = time.perf_counter()
     local_key = f"payload:{normalized_index}"
@@ -1468,7 +1703,11 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
     def revalidate_factory() -> Optional[Dict[str, Any]]:
         if _market_no_quote_cache_active(normalized_index):
             return None
-        built = _build_market_stocks_payload(index_name=normalized_index, force_refresh=True)
+        built = _build_market_stocks_payload(
+            index_name=normalized_index,
+            force_refresh=True,
+            basic_summary_map=basic_summary_map,
+        )
         if _market_payload_is_no_quote(built):
             _store_market_no_quote_cache(normalized_index)
             return None
@@ -1537,7 +1776,11 @@ def _market_stocks_payload(*, index_name: str = "XUTUM", force_refresh: bool = F
 
     def build_and_envelope() -> Optional[Dict[str, Any]]:
         nonlocal latest_build
-        built = _build_market_stocks_payload(index_name=normalized_index, force_refresh=force_refresh)
+        built = _build_market_stocks_payload(
+            index_name=normalized_index,
+            force_refresh=force_refresh,
+            basic_summary_map=basic_summary_map,
+        )
         latest_build = dict(built)
         if _market_payload_is_no_quote(built):
             _store_market_no_quote_cache(normalized_index)
@@ -3923,9 +4166,20 @@ def _latest_share_count_from_kap_cache(symbol: str) -> Optional[float]:
     metadata = _load_cached_kap_market_metadata(CONFIG.paths.processed_dir / "kap_cache", symbol)
     return _positive_float(metadata.get("shares_outstanding"))
 
-def _index_weight_inputs_for_symbol(symbol: str) -> Dict[str, Optional[float]]:
-    basic_summary = _fetch_isyatirim_basic_summary_map().get(str(symbol or "").strip().upper(), {})
-    shares = _latest_share_count_from_kap_cache(symbol)
+def _index_weight_inputs_for_symbol(
+    symbol: str,
+    *,
+    cached_metadata: Optional[Dict[str, Any]] = None,
+    basic_summary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Optional[float]]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    if basic_summary is None:
+        basic_summary = _fetch_isyatirim_basic_summary_map().get(normalized_symbol, {})
+    shares = (
+        _positive_float(cached_metadata.get("shares_outstanding"))
+        if cached_metadata is not None
+        else _latest_share_count_from_kap_cache(normalized_symbol)
+    )
     if shares is None:
         shares = _positive_float(basic_summary.get("shares_outstanding"))
     fdpo = _positive_float(basic_summary.get("fdpo"))
@@ -4013,10 +4267,21 @@ def _apply_index_weight_formula(
     )
     return calculated, "available"
 
-def _market_index_constituent_stock_rows(index_code: str) -> List[Dict[str, Any]]:
+def _market_index_constituent_stock_rows(
+    index_code: str,
+    *,
+    basic_summary_map: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     normalized = _normalize_market_index(index_code)
+    if basic_summary_map is None:
+        basic_summary_map = _fetch_isyatirim_basic_summary_map()
     if normalized in _MARKET_STOCK_INDEXES:
-        return list(_market_stocks_payload(index_name=normalized).get("rows", []))
+        return list(
+            _market_stocks_payload(
+                index_name=normalized,
+                basic_summary_map=basic_summary_map,
+            ).get("rows", [])
+        )
 
     from app.kap_service import get_bist_index_universe
 
@@ -4033,7 +4298,6 @@ def _market_index_constituent_stock_rows(index_code: str) -> List[Dict[str, Any]
         return []
 
     price_map = _fetch_market_price_map(symbols, index_name="XUTUM")
-    basic_summary_map = _fetch_isyatirim_basic_summary_map()
     cache_dir = CONFIG.paths.processed_dir / "kap_cache"
     rows: List[Dict[str, Any]] = []
     for symbol in symbols:
@@ -4048,6 +4312,7 @@ def _market_index_constituent_stock_rows(index_code: str) -> List[Dict[str, Any]
                 "change_pct": quote.get("change_pct"),
                 "volume": quote.get("volume"),
                 "market_cap": _market_cap_from_quote_and_meta(quote, cached_meta, basic_summary),
+                "_kap_market_metadata": cached_meta,
                 **_empty_logo_payload(),
             }
         )
@@ -4055,12 +4320,21 @@ def _market_index_constituent_stock_rows(index_code: str) -> List[Dict[str, Any]
 
 def _index_constituents(index_code: str, *, index_level: Any) -> tuple[List[Dict[str, Any]], str]:
     normalized = _normalize_market_index(index_code)
+    basic_summary_map = _fetch_isyatirim_basic_summary_map()
     rows: List[Dict[str, Any]] = []
-    for stock in _market_index_constituent_stock_rows(normalized):
+    for stock in _market_index_constituent_stock_rows(
+        normalized,
+        basic_summary_map=basic_summary_map,
+    ):
         symbol = str(stock.get("company") or "").strip().upper()
         if not symbol:
             continue
-        weight_inputs = _index_weight_inputs_for_symbol(symbol)
+        cached_metadata = stock.get("_kap_market_metadata")
+        weight_inputs = _index_weight_inputs_for_symbol(
+            symbol,
+            cached_metadata=cached_metadata if isinstance(cached_metadata, dict) else None,
+            basic_summary=basic_summary_map.get(symbol) or {},
+        )
         rows.append(
             {
                 "symbol": symbol,
@@ -4654,12 +4928,21 @@ def _market_watch_global_payload(*, force_refresh: bool = False) -> Dict[str, An
 
 def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
     def build() -> Dict[str, Any]:
+        from concurrent.futures import ThreadPoolExecutor
+
         fx_payload = _market_fx_payload()
         commodity_payload = _market_commodities_payload()
-        indices = [
-            _watch_index_item(symbol=symbol, label=label, yahoo_candidates=yahoo_candidates)
-            for symbol, label, yahoo_candidates in _WATCH_INDEX_CANDIDATES
-        ]
+
+        def _watch_index(entry: tuple[str, str, List[str]]) -> Dict[str, Any]:
+            symbol, label, yahoo_candidates = entry
+            return _watch_index_item(
+                symbol=symbol,
+                label=label,
+                yahoo_candidates=yahoo_candidates,
+            )
+
+        with ThreadPoolExecutor(max_workers=min(3, len(_WATCH_INDEX_CANDIDATES))) as pool:
+            indices = list(pool.map(_watch_index, _WATCH_INDEX_CANDIDATES))
         fx_items = _pick_watch_items(
             items=list(fx_payload.get("items") or []),
             symbols=_WATCH_FX_SYMBOLS,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import html
 import io
 import json
@@ -521,7 +522,9 @@ def _read_first_cache(processed_dir: Path, company: str) -> Tuple[Path, Optional
         path = _cache_file_for_company(processed_dir, key)
         cached = _read_cache(path)
         if cached and _cache_matches_requested_company(cached, company):
-            return path, cached
+            # Snapshot refresh paths annotate and merge this payload in place.
+            # Keep those changes out of the shared parsed-payload LRU.
+            return path, copy.deepcopy(cached)
     return primary_path, None
 
 

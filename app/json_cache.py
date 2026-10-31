@@ -1,18 +1,20 @@
 """Process-local L1 cache for JSON documents mirrored in Supabase.
 
-The helpers keep only a file signature and a read timestamp in memory; the
-payloads stay on disk. A short TTL prevents a hot cache document from issuing
-a Supabase read on every request, while callers keep their own freshness rules
-(for example KAP's ``fetched_at`` and live-disclosure checks).
+A bounded LRU keeps parsed payloads in memory while their file signature and
+read TTL remain valid. Callers keep their own data freshness rules (for
+example KAP's ``fetched_at`` and live-disclosure checks).
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
 import threading
 import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -29,6 +31,8 @@ JSON_CACHE_METRICS_FLUSH_SECONDS = max(
     float(os.getenv("RAGFIN_JSON_CACHE_METRICS_FLUSH_SECONDS", "300")),
 )
 JSON_CACHE_READ_STATE_MAX_ENTRIES = 4096
+JSON_CACHE_PAYLOAD_CACHE_MAX_ENTRIES = 256
+JSON_CACHE_PAYLOAD_CACHE_MAX_BYTES = 16 * 1024 * 1024
 _JSON_CACHE_TELEMETRY_FIELDS = (
     "local_hits",
     "coalesced_hits",
@@ -42,7 +46,20 @@ _JSON_CACHE_TELEMETRY_PREFIXES = ("funds_cache", "kap_cache", "other")
 
 _JSON_CACHE_READ_STATE: Dict[str, Tuple[float, Optional[Tuple[int, int]]]] = {}
 _JSON_CACHE_READ_STATE_LOCK = threading.RLock()
-_JSON_CACHE_REMOTE_READ_LOCKS = tuple(threading.Lock() for _ in range(16))
+
+
+@dataclass(frozen=True)
+class _JsonPayloadCacheEntry:
+    read_at: float
+    signature: Optional[Tuple[int, int]]
+    payload: Optional[Dict[str, Any]]
+    file_bytes: int
+
+
+_JSON_CACHE_PAYLOAD_CACHE: OrderedDict[str, _JsonPayloadCacheEntry] = OrderedDict()
+_JSON_CACHE_PAYLOAD_CACHE_BYTES = 0
+_JSON_CACHE_PAYLOAD_CACHE_LOCK = threading.RLock()
+_JSON_CACHE_REMOTE_READ_LOCKS = tuple(threading.RLock() for _ in range(16))
 _JSON_CACHE_METRICS_LOCK = threading.Lock()
 _JSON_CACHE_METRICS_SINCE = time.monotonic()
 _JSON_CACHE_METRICS: Dict[str, int] = {
@@ -126,21 +143,125 @@ def json_cache_read_is_fresh(path: Path, *, ttl_seconds: Optional[int] = None) -
     if ttl <= 0:
         return False
     key = str(path)
+    signature = json_cache_file_signature(path)
+    return _json_cache_read_timestamp(key, signature, ttl) is not None
+
+
+def _json_cache_read_timestamp(
+    key: str,
+    signature: Optional[Tuple[int, int]],
+    ttl_seconds: int,
+) -> Optional[float]:
+    if ttl_seconds <= 0:
+        return None
     with _JSON_CACHE_READ_STATE_LOCK:
         state = _JSON_CACHE_READ_STATE.get(key)
-    if state is None or time.monotonic() - state[0] > ttl:
-        return False
-    return state[1] == json_cache_file_signature(path)
+    if state is None or state[1] != signature:
+        return None
+    if time.monotonic() - state[0] > ttl_seconds:
+        return None
+    return state[0]
 
 
-def remember_json_cache_read(path: Path) -> None:
+def _remove_json_cache_payload_locked(key: str) -> None:
+    global _JSON_CACHE_PAYLOAD_CACHE_BYTES
+    entry = _JSON_CACHE_PAYLOAD_CACHE.pop(key, None)
+    if entry is not None:
+        _JSON_CACHE_PAYLOAD_CACHE_BYTES = max(0, _JSON_CACHE_PAYLOAD_CACHE_BYTES - entry.file_bytes)
+
+
+def _get_json_cache_payload(
+    key: str,
+    signature: Optional[Tuple[int, int]],
+    *,
+    ttl_seconds: int,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    if ttl_seconds <= 0:
+        return False, None
+    read_at = _json_cache_read_timestamp(key, signature, ttl_seconds)
+    with _JSON_CACHE_PAYLOAD_CACHE_LOCK:
+        entry = _JSON_CACHE_PAYLOAD_CACHE.get(key)
+        if entry is None:
+            return False, None
+        if (
+            read_at is None
+            or entry.signature != signature
+            or time.monotonic() - entry.read_at > ttl_seconds
+        ):
+            _remove_json_cache_payload_locked(key)
+            return False, None
+        _JSON_CACHE_PAYLOAD_CACHE.move_to_end(key)
+        return True, entry.payload
+
+
+def _remember_json_cache_payload(
+    key: str,
+    payload: Optional[Dict[str, Any]],
+    signature: Optional[Tuple[int, int]],
+    read_at: float,
+    *,
+    ttl_seconds: int,
+    copy_payload: bool = False,
+) -> None:
+    global _JSON_CACHE_PAYLOAD_CACHE_BYTES
+    max_entries = max(0, int(JSON_CACHE_PAYLOAD_CACHE_MAX_ENTRIES))
+    max_bytes = max(0, int(JSON_CACHE_PAYLOAD_CACHE_MAX_BYTES))
+    file_bytes = max(0, int(signature[1])) if signature is not None else 0
+    if (
+        ttl_seconds <= 0
+        or max_entries <= 0
+        or max_bytes <= 0
+        or file_bytes > max_bytes
+    ):
+        with _JSON_CACHE_PAYLOAD_CACHE_LOCK:
+            _remove_json_cache_payload_locked(key)
+        return
+
+    try:
+        stored_payload = copy.deepcopy(payload) if copy_payload and payload is not None else payload
+    except Exception:
+        LOGGER.debug("Could not retain JSON cache payload in memory: %s", key, exc_info=True)
+        with _JSON_CACHE_PAYLOAD_CACHE_LOCK:
+            _remove_json_cache_payload_locked(key)
+        return
+
+    with _JSON_CACHE_PAYLOAD_CACHE_LOCK:
+        _remove_json_cache_payload_locked(key)
+        _JSON_CACHE_PAYLOAD_CACHE[key] = _JsonPayloadCacheEntry(
+            read_at=read_at,
+            signature=signature,
+            payload=stored_payload,
+            file_bytes=file_bytes,
+        )
+        _JSON_CACHE_PAYLOAD_CACHE_BYTES += file_bytes
+        while (
+            len(_JSON_CACHE_PAYLOAD_CACHE) > max_entries
+            or _JSON_CACHE_PAYLOAD_CACHE_BYTES > max_bytes
+        ):
+            oldest_key = next(iter(_JSON_CACHE_PAYLOAD_CACHE))
+            _remove_json_cache_payload_locked(oldest_key)
+
+
+def _remember_json_cache_read_state(
+    path: Path,
+) -> Tuple[float, Optional[Tuple[int, int]]]:
     key = str(path)
     state = (time.monotonic(), json_cache_file_signature(path))
+    evicted_key: Optional[str] = None
     with _JSON_CACHE_READ_STATE_LOCK:
         _JSON_CACHE_READ_STATE.pop(key, None)
         if len(_JSON_CACHE_READ_STATE) >= JSON_CACHE_READ_STATE_MAX_ENTRIES:
-            _JSON_CACHE_READ_STATE.pop(next(iter(_JSON_CACHE_READ_STATE)))
+            evicted_key = next(iter(_JSON_CACHE_READ_STATE))
+            _JSON_CACHE_READ_STATE.pop(evicted_key, None)
         _JSON_CACHE_READ_STATE[key] = state
+    if evicted_key is not None:
+        with _JSON_CACHE_PAYLOAD_CACHE_LOCK:
+            _remove_json_cache_payload_locked(evicted_key)
+    return state
+
+
+def remember_json_cache_read(path: Path) -> None:
+    _remember_json_cache_read_state(path)
 
 
 def json_cache_metrics_snapshot_locked(
@@ -273,12 +394,23 @@ def read_local_json(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def write_local_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-    tmp.replace(path)
-    remember_json_cache_read(path)
+    key = str(path)
+    write_lock = _JSON_CACHE_REMOTE_READ_LOCKS[hash(key) % len(_JSON_CACHE_REMOTE_READ_LOCKS)]
+    with write_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        tmp.replace(path)
+        read_at, signature = _remember_json_cache_read_state(path)
+        _remember_json_cache_payload(
+            key,
+            payload,
+            signature,
+            read_at,
+            ttl_seconds=JSON_CACHE_LOCAL_READ_TTL_SECONDS,
+            copy_payload=True,
+        )
 
 
 def read_json_cache_local_first(
@@ -290,27 +422,49 @@ def read_json_cache_local_first(
 ) -> Optional[Dict[str, Any]]:
     """Read a local JSON mirror, revalidating it remotely only when stale.
 
-    Only timestamps and file signatures are kept per cache key; payloads stay
-    on disk so a cold container does not hydrate every document into memory.
+    Parsed payloads are held in a bounded process-local LRU. A hit is valid
+    only while both the existing read TTL and local file signature match.
+    Callers must treat returned payloads as read-only and copy before mutation.
     Concurrent revalidations for the same path are coalesced with a striped
-    lock, keeping bookkeeping bounded even when the cache contains one file
-    per fund.
+    lock.
     """
 
     ttl = JSON_CACHE_LOCAL_READ_TTL_SECONDS if ttl_seconds is None else max(0, int(ttl_seconds))
     read_remote = remote_reader or read_json_cache
     key_prefix = json_cache_key_prefix(path)
     metric_reader = "kap" if key_prefix == "kap_cache" else reader
+    key = str(path)
+    signature = json_cache_file_signature(path)
+    payload_hit, cached_payload = _get_json_cache_payload(key, signature, ttl_seconds=ttl)
+    if payload_hit:
+        record_json_cache_local_hit(coalesced=False, reader=metric_reader, prefix=key_prefix)
+        return cached_payload
+
     local_payload = read_local_json(path)
-    if json_cache_read_is_fresh(path, ttl_seconds=ttl):
+    signature = json_cache_file_signature(path)
+    read_at = _json_cache_read_timestamp(key, signature, ttl)
+    if read_at is not None:
+        _remember_json_cache_payload(
+            key, local_payload, signature, read_at, ttl_seconds=ttl
+        )
         record_json_cache_local_hit(coalesced=False, reader=metric_reader, prefix=key_prefix)
         return local_payload
 
-    key = str(path)
     read_lock = _JSON_CACHE_REMOTE_READ_LOCKS[hash(key) % len(_JSON_CACHE_REMOTE_READ_LOCKS)]
     with read_lock:
+        signature = json_cache_file_signature(path)
+        payload_hit, cached_payload = _get_json_cache_payload(key, signature, ttl_seconds=ttl)
+        if payload_hit:
+            record_json_cache_local_hit(coalesced=True, reader=metric_reader, prefix=key_prefix)
+            return cached_payload
+
         local_payload = read_local_json(path)
-        if json_cache_read_is_fresh(path, ttl_seconds=ttl):
+        signature = json_cache_file_signature(path)
+        read_at = _json_cache_read_timestamp(key, signature, ttl)
+        if read_at is not None:
+            _remember_json_cache_payload(
+                key, local_payload, signature, read_at, ttl_seconds=ttl
+            )
             record_json_cache_local_hit(coalesced=True, reader=metric_reader, prefix=key_prefix)
             return local_payload
 
@@ -325,7 +479,11 @@ def read_json_cache_local_first(
         if remote_payload is None:
             # Remember misses and temporary remote failures too, so a hot key
             # cannot turn into a Supabase query on every concurrent request.
-            remember_json_cache_read(path)
+            read_at, state_signature = _remember_json_cache_read_state(path)
+            if state_signature == signature:
+                _remember_json_cache_payload(
+                    key, local_payload, state_signature, read_at, ttl_seconds=ttl
+                )
             record_json_cache_remote_result(
                 hit=False,
                 fallback_local=local_payload is not None,
@@ -340,7 +498,11 @@ def read_json_cache_local_first(
             except OSError:
                 LOGGER.debug("Could not mirror remote JSON cache locally: %s", path, exc_info=True)
         else:
-            remember_json_cache_read(path)
+            read_at, state_signature = _remember_json_cache_read_state(path)
+            if state_signature == signature:
+                _remember_json_cache_payload(
+                    key, local_payload, state_signature, read_at, ttl_seconds=ttl
+                )
 
         # Compact JSON length estimates payload size without exposing content.
         # It is not the exact Postgres wire size and is used only for telemetry.

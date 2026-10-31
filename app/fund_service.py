@@ -6460,7 +6460,7 @@ def load_funds_snapshot(
         if cached and stat and cached.get("file_signature") == file_signature:
             payload = dict(cached["payload"])
         else:
-            payload = _read_json(path) or _empty_snapshot_payload("fund snapshot cache is empty")
+            payload = dict(_read_json(path) or _empty_snapshot_payload("fund snapshot cache is empty"))
             if stat:
                 _MEMORY_CACHE[cache_key] = {
                     "file_signature": file_signature,

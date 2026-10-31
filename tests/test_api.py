@@ -4986,6 +4986,7 @@ def test_parse_kap_api_disclosures_maps_criteria_rows() -> None:
 
 
 def test_fetch_market_price_map_parses_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(database_module, "database_enabled", lambda: False)
     html = """
     <table><tbody id="tableBody">
       <tr data-symbol="A1CAP">
@@ -5022,6 +5023,7 @@ def test_fetch_market_price_map_parses_volume(monkeypatch: pytest.MonkeyPatch) -
 def test_fetch_market_price_map_reuses_one_snapshot_across_market_views(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(database_module, "database_enabled", lambda: False)
     html = """
     <table><tbody id="tableBody">
       <tr data-symbol="A1CAP">
@@ -5070,6 +5072,269 @@ def test_fetch_market_price_map_reuses_one_snapshot_across_market_views(
     assert second["BIMAS"]["price"] == 760.0
 
 
+def test_fetch_market_price_map_uses_shared_redis_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot = api_module._market_price_snapshot_payload(
+        {
+            "A1CAP": {"price": 14.18, "currency": "TRY", "as_of": "2026-10-31T10:00:00+00:00"},
+            "BIMAS": {"price": 760.0, "currency": "TRY", "as_of": "2026-10-31T10:00:00+00:00"},
+        }
+    )
+    shared_keys: List[str] = []
+    monkeypatch.setattr(database_module, "database_enabled", lambda: False)
+    monkeypatch.setattr(
+        api_module,
+        "_cache_status",
+        lambda: {"cache_backend": "redis", "cache_redis_fallback": False},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_shared_cache_get_dict",
+        lambda key: shared_keys.append(key) or snapshot,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_build_market_price_snapshot",
+        lambda _symbols: pytest.fail("fresh shared snapshot should avoid upstream fetch"),
+    )
+
+    payload = api_module._fetch_market_price_map(["A1CAP"])
+
+    assert shared_keys == ["api:market:price-snapshot:XUTUM:v1"]
+    assert list(payload) == ["A1CAP"]
+    assert payload["A1CAP"]["price"] == 14.18
+
+
+def test_fetch_market_price_map_uses_postgres_snapshot_when_redis_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = api_module._market_price_snapshot_payload(
+        {"A1CAP": {"price": 14.18, "currency": "TRY", "as_of": "2026-10-31T10:00:00+00:00"}}
+    )
+    read_paths: List[Any] = []
+    writes: List[Any] = []
+
+    monkeypatch.setattr(database_module, "database_enabled", lambda: True)
+    monkeypatch.setattr(database_module, "read_json_cache", lambda path: read_paths.append(path) or snapshot)
+    monkeypatch.setattr(database_module, "write_json_cache", lambda path, value: writes.append((path, value)))
+    monkeypatch.setattr(
+        api_module,
+        "_cache_status",
+        lambda: {"cache_backend": "redis", "cache_redis_fallback": True},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_shared_cache_get_dict",
+        lambda _key: pytest.fail("Redis fallback should use the Postgres snapshot"),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_build_market_price_snapshot",
+        lambda _symbols: pytest.fail("fresh Postgres snapshot should avoid upstream fetch"),
+    )
+
+    payload = api_module._fetch_market_price_map(["A1CAP"])
+
+    assert read_paths == [api_module._MARKET_PRICE_DATABASE_CACHE_PATH]
+    assert writes == []
+    assert payload["A1CAP"]["price"] == 14.18
+
+
+def test_fetch_market_price_map_postgres_lease_shares_and_refreshes_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_store: Dict[str, Any] = {"payload": None, "owner": None, "lease_until": None, "writes": 0}
+    state_lock = threading.Lock()
+    first_read_barrier = threading.Barrier(2)
+    initial_reads = 0
+    build_calls: List[int] = []
+
+    def fake_database_read(path: Any) -> Optional[Dict[str, Any]]:
+        nonlocal initial_reads
+        assert path == api_module._MARKET_PRICE_DATABASE_CACHE_PATH
+        with state_lock:
+            synchronize = snapshot_store["payload"] is None and initial_reads < 2
+            if synchronize:
+                initial_reads += 1
+            payload = snapshot_store["payload"]
+        if synchronize:
+            first_read_barrier.wait(timeout=3)
+        return payload
+
+    def fake_database_write(path: Any, payload: Dict[str, Any]) -> None:
+        assert path == api_module._MARKET_PRICE_DATABASE_CACHE_PATH
+        with state_lock:
+            snapshot_store["payload"] = payload
+            snapshot_store["writes"] += 1
+
+    def fake_acquire_lease(
+        resource_key: str,
+        *,
+        job_id: str,
+        owner_token: str,
+        ttl_seconds: int,
+    ) -> Optional[Dict[str, Any]]:
+        assert resource_key == api_module._MARKET_PRICE_DATABASE_RESOURCE_KEY
+        assert ttl_seconds >= 1
+        with state_lock:
+            if snapshot_store["owner"] is not None:
+                return None
+            snapshot_store["owner"] = (job_id, owner_token)
+            snapshot_store["lease_until"] = datetime.now(timezone.utc) + timedelta(seconds=60)
+            return {"lease_until": snapshot_store["lease_until"]}
+
+    def fake_get_lease(_resource_key: str) -> Optional[Dict[str, Any]]:
+        with state_lock:
+            if snapshot_store["owner"] is None:
+                return None
+            return {"lease_until": snapshot_store["lease_until"]}
+
+    def fake_release_lease(
+        resource_key: str,
+        *,
+        job_id: str,
+        owner_token: str,
+    ) -> bool:
+        assert resource_key == api_module._MARKET_PRICE_DATABASE_RESOURCE_KEY
+        with state_lock:
+            if snapshot_store["owner"] != (job_id, owner_token):
+                return False
+            snapshot_store["owner"] = None
+            snapshot_store["lease_until"] = None
+            return True
+
+    def fake_build(_symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        with state_lock:
+            build_calls.append(1)
+        time.sleep(0.05)
+        return {"A1CAP": {"price": 14.18, "currency": "TRY", "as_of": "2026-10-31T10:00:00+00:00"}}
+
+    monkeypatch.setattr(database_module, "database_enabled", lambda: True)
+    monkeypatch.setattr(database_module, "read_json_cache", fake_database_read)
+    monkeypatch.setattr(database_module, "write_json_cache", fake_database_write)
+    monkeypatch.setattr(database_module, "acquire_refresh_lease", fake_acquire_lease)
+    monkeypatch.setattr(database_module, "get_refresh_lease", fake_get_lease)
+    monkeypatch.setattr(database_module, "release_refresh_lease", fake_release_lease)
+    monkeypatch.setattr(
+        api_module,
+        "_cache_status",
+        lambda: {"cache_backend": "redis", "cache_redis_fallback": True},
+    )
+    monkeypatch.setattr(api_module, "_build_market_price_snapshot", fake_build)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: api_module._fetch_market_price_map(["A1CAP"]), range(2)))
+
+    assert results == [results[0], results[0]]
+    assert results[0]["A1CAP"]["price"] == 14.18
+    assert len(build_calls) == 1
+    assert snapshot_store["writes"] == 1
+
+    api_module._MARKET_PRICE_CACHE.clear()
+    cached = api_module._fetch_market_price_map(["A1CAP"])
+    assert cached["A1CAP"]["price"] == 14.18
+    assert len(build_calls) == 1
+
+    snapshot_store["payload"]["expires_at"] = time.time() - 1
+    api_module._MARKET_PRICE_CACHE.clear()
+    refreshed = api_module._fetch_market_price_map(["A1CAP"])
+    assert refreshed["A1CAP"]["price"] == 14.18
+    assert len(build_calls) == 2
+    assert snapshot_store["writes"] == 2
+
+
+def test_fetch_market_price_map_falls_back_when_shared_stores_fail_and_does_not_cache_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_calls: List[int] = []
+    write_attempts: List[Any] = []
+
+    def unavailable_database_write(path: Any, payload: Dict[str, Any]) -> None:
+        write_attempts.append((path, payload))
+        raise OSError("db down")
+
+    monkeypatch.setattr(database_module, "database_enabled", lambda: True)
+    monkeypatch.setattr(database_module, "read_json_cache", lambda _path: (_ for _ in ()).throw(OSError("db down")))
+    monkeypatch.setattr(database_module, "write_json_cache", unavailable_database_write)
+    monkeypatch.setattr(database_module, "acquire_refresh_lease", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(database_module, "get_refresh_lease", lambda _key: None)
+    monkeypatch.setattr(
+        api_module,
+        "_cache_status",
+        lambda: {"cache_backend": "memory", "cache_redis_fallback": True},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_build_market_price_snapshot",
+        lambda _symbols: build_calls.append(1)
+        or {"A1CAP": {"price": 14.18, "currency": "TRY", "as_of": "2026-10-31T10:00:00+00:00"}},
+    )
+
+    payload = api_module._fetch_market_price_map(["A1CAP"])
+
+    assert payload["A1CAP"]["price"] == 14.18
+    assert len(build_calls) == 1
+    assert len(write_attempts) == 1
+
+    api_module._MARKET_PRICE_CACHE.clear()
+    monkeypatch.setattr(api_module, "_build_market_price_snapshot", lambda _symbols: None)
+    failed_payload = api_module._fetch_market_price_map(["A1CAP"])
+    assert failed_payload == {}
+    assert len(write_attempts) == 1
+
+
+def test_fetch_market_price_map_falls_back_after_postgres_lease_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease_until = datetime.now(timezone.utc) + timedelta(seconds=60)
+    builds: List[int] = []
+    monkeypatch.setattr(database_module, "database_enabled", lambda: True)
+    monkeypatch.setattr(database_module, "read_json_cache", lambda _path: None)
+    monkeypatch.setattr(database_module, "write_json_cache", lambda *_args: None)
+    monkeypatch.setattr(database_module, "acquire_refresh_lease", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(database_module, "get_refresh_lease", lambda _key: {"lease_until": lease_until})
+    monkeypatch.setattr(api_module, "_MARKET_PRICE_DATABASE_WAIT_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(
+        api_module,
+        "_cache_status",
+        lambda: {"cache_backend": "redis", "cache_redis_fallback": True},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_build_market_price_snapshot",
+        lambda _symbols: builds.append(1)
+        or {"A1CAP": {"price": 14.18, "currency": "TRY", "as_of": "2026-10-31T10:00:00+00:00"}},
+    )
+
+    payload = api_module._fetch_market_price_map(["A1CAP"])
+
+    assert payload["A1CAP"]["price"] == 14.18
+    assert len(builds) == 1
+
+
+def test_fetch_market_price_map_provider_failure_is_not_shared(monkeypatch: pytest.MonkeyPatch) -> None:
+    builds: List[int] = []
+    writes: List[Any] = []
+    monkeypatch.setattr(database_module, "database_enabled", lambda: False)
+    monkeypatch.setattr(
+        api_module,
+        "_cache_status",
+        lambda: {"cache_backend": "redis", "cache_redis_fallback": False},
+    )
+    monkeypatch.setattr(api_module, "_shared_cache_get_dict", lambda _key: None)
+    monkeypatch.setattr(api_module, "_shared_cache_set", lambda *args, **kwargs: writes.append((args, kwargs)))
+    monkeypatch.setattr(
+        api_module,
+        "_build_market_price_snapshot",
+        lambda _symbols: builds.append(1) or None,
+    )
+
+    payload = api_module._fetch_market_price_map(["A1CAP"])
+
+    assert payload == {}
+    assert len(builds) == 1
+    assert writes == []
+
+
 def test_extract_infoyatirim_stock_page_quote_parses_single_stock_page() -> None:
     html = """
     <section>
@@ -5103,6 +5368,7 @@ def test_extract_infoyatirim_stock_page_quote_parses_single_stock_page() -> None
 def test_fetch_market_price_map_uses_stock_page_fallback_for_missing_symbols(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(database_module, "database_enabled", lambda: False)
     html = """
     <table><tbody id="tableBody">
       <tr data-symbol="A1CAP">
@@ -6667,8 +6933,16 @@ def test_market_index_detail_returns_line_points_and_weighted_constituents(
     )
     monkeypatch.setattr(
         api_module,
+        "_fetch_isyatirim_basic_summary_map",
+        lambda: {
+            "AAA": {"fdpo": 0.5, "shares_outstanding": 100.0},
+            "BBB": {"fdpo": 0.5, "shares_outstanding": 100.0},
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
         "_index_weight_inputs_for_symbol",
-        lambda symbol: {
+        lambda symbol, **_kwargs: {
             "shares_outstanding": 100.0,
             "fdpo": 0.5,
             "weight_coefficient": 1.0,
@@ -6764,8 +7038,22 @@ def test_market_sector_index_detail_uses_bist_universe(
         }
 
     monkeypatch.setattr(api_module, "_fetch_market_price_map", fake_price_map)
-    monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: {})
-    monkeypatch.setattr(api_module, "_load_cached_kap_market_metadata", lambda _cache_dir, _symbol: {})
+    basic_summary_calls: List[int] = []
+    metadata_calls: List[str] = []
+
+    def fake_basic_summary_map() -> Dict[str, Dict[str, Any]]:
+        basic_summary_calls.append(1)
+        return {
+            "AAA": {"fdpo": 0.5, "shares_outstanding": 1000.0},
+            "BBB": {"fdpo": 0.5, "shares_outstanding": 50.0},
+        }
+
+    def fake_metadata(_cache_dir: Any, symbol: str) -> Dict[str, Any]:
+        metadata_calls.append(symbol)
+        return {"shares_outstanding": 100.0}
+
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", fake_basic_summary_map)
+    monkeypatch.setattr(api_module, "_load_cached_kap_market_metadata", fake_metadata)
     monkeypatch.setattr(
         api_module,
         "_market_stocks_payload",
@@ -6773,12 +7061,8 @@ def test_market_sector_index_detail_uses_bist_universe(
     )
     monkeypatch.setattr(
         api_module,
-        "_index_weight_inputs_for_symbol",
-        lambda symbol: {
-            "shares_outstanding": 100.0,
-            "fdpo": 0.5,
-            "weight_coefficient": 1.0,
-        },
+        "_latest_share_count_from_kap_cache",
+        lambda _symbol: pytest.fail("preloaded KAP metadata should be reused for index weights"),
     )
 
     client = TestClient(app)
@@ -6790,6 +7074,11 @@ def test_market_sector_index_detail_uses_bist_universe(
     assert payload["return_5y_pct"] == 100.0
     assert payload["weight_status"] == "available"
     assert [row["symbol"] for row in payload["constituents"]] == ["BBB", "AAA"]
+    weights = {row["symbol"]: row["weight_pct"] for row in payload["constituents"]}
+    assert weights == {"AAA": 25.0, "BBB": 75.0}
+    assert all("_kap_market_metadata" not in row for row in payload["constituents"])
+    assert basic_summary_calls == [1]
+    assert metadata_calls == ["AAA", "BBB"]
 
 
 def test_market_index_detail_leaves_weights_empty_when_inputs_missing(
@@ -6826,10 +7115,11 @@ def test_market_index_detail_leaves_weights_empty_when_inputs_missing(
             ]
         },
     )
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: {})
     monkeypatch.setattr(
         api_module,
         "_index_weight_inputs_for_symbol",
-        lambda _symbol: {"shares_outstanding": 100.0, "fdpo": None, "weight_coefficient": None},
+        lambda _symbol, **_kwargs: {"shares_outstanding": 100.0, "fdpo": None, "weight_coefficient": None},
     )
 
     client = TestClient(app)
@@ -7010,9 +7300,11 @@ def test_market_watch_success_payload(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_market_watch_index_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: List[str] = []
+    calls_lock = threading.Lock()
 
     def fake_quote(yahoo_symbol: str) -> Dict[str, Any]:
-        calls.append(yahoo_symbol)
+        with calls_lock:
+            calls.append(yahoo_symbol)
         if yahoo_symbol == "XUTUM.IS":
             return _watch_quote(price=10000.0, prev_close=9950.0)
         if yahoo_symbol == "XU100.IS":
@@ -7036,6 +7328,44 @@ def test_market_watch_index_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     assert indices["XU100"]["yahoo_symbol"] == "^XU100"
     assert "XU100.IS" in calls
     assert "^XU100" in calls
+    assert calls.index("XU100.IS") < calls.index("^XU100")
+
+
+def test_market_watch_index_quotes_run_concurrently_and_keep_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quote_barrier = threading.Barrier(3)
+    active_calls = 0
+    max_active_calls = 0
+    state_lock = threading.Lock()
+
+    def fake_quote(yahoo_symbol: str) -> Dict[str, Any]:
+        nonlocal active_calls, max_active_calls
+        with state_lock:
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+        try:
+            quote_barrier.wait(timeout=3)
+            index = yahoo_symbol.split(".", maxsplit=1)[0]
+            return _watch_quote(
+                price={"XUTUM": 10000.0, "XU100": 1000.0, "XU030": 3000.0}[index],
+                prev_close=99.0,
+            )
+        finally:
+            with state_lock:
+                active_calls -= 1
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_quote", fake_quote)
+    monkeypatch.setattr(api_module, "_market_fx_payload", lambda: _fx_payload_for_watch([]))
+    monkeypatch.setattr(api_module, "_market_commodities_payload", lambda: _commodity_payload_for_watch([]))
+
+    response = TestClient(app).get("/market/watch")
+
+    assert response.status_code == 200
+    indices = response.json()["sections"]["indices"]
+    assert [row["symbol"] for row in indices] == ["XUTUM", "XU100", "XU030"]
+    assert [row["price"] for row in indices] == [10000.0, 1000.0, 3000.0]
+    assert max_active_calls == 3
 
 
 def test_market_watch_reuses_cache(monkeypatch: pytest.MonkeyPatch) -> None:

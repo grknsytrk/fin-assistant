@@ -282,3 +282,74 @@ def test_bist_market_hours_and_sse_delta_stream(monkeypatch: pytest.MonkeyPatch)
     assert parsed["rows"][0]["company"] == "BIMAS"
 
 
+def test_market_stream_skips_delta_for_reused_rows_and_updates_new_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import json
+
+    from app.routers import market as market_router
+
+    rows_first = [
+        {"company": "BIMAS", "price": 510.0, "change_pct": 0.99, "volume": 1000.0},
+        {"company": "THYAO", "price": 310.0, "change_pct": 0.65, "volume": 2000.0},
+    ]
+    rows_updated = [
+        {"company": "BIMAS", "price": 512.5, "change_pct": 1.48, "volume": 1200.0},
+        {"company": "THYAO", "price": 310.0, "change_pct": 0.65, "volume": 2000.0},
+    ]
+    snapshot_rows = iter([rows_first, rows_first, rows_updated])
+    delta_calls: List[List[Dict[str, Any]]] = []
+    original_delta = market_router._compute_market_stocks_delta
+
+    def fake_market_stocks_payload(*, index_name: str = "XUTUM") -> Dict[str, Any]:
+        return {
+            "index": index_name,
+            "as_of": "2026-10-31T10:00:00+00:00",
+            "rows": next(snapshot_rows),
+        }
+
+    def count_delta_calls(
+        previous: Dict[str, tuple[Any, ...]],
+        rows: List[Dict[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], Dict[str, tuple[Any, ...]]]:
+        delta_calls.append(rows)
+        return original_delta(previous, rows)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    class FakeRequest:
+        checks = 0
+
+        async def is_disconnected(self) -> bool:
+            self.checks += 1
+            return self.checks > 3
+
+    monkeypatch.setattr(market_router, "_market_stocks_payload", fake_market_stocks_payload)
+    monkeypatch.setattr(market_router, "_compute_market_stocks_delta", count_delta_calls)
+    monkeypatch.setattr(market_router, "_is_bist_market_open", lambda: True)
+    monkeypatch.setattr(market_router.asyncio, "sleep", no_sleep)
+
+    async def collect_stream() -> str:
+        response = await market_router.market_stream(FakeRequest(), index="XUTUM", once=False)
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk))
+        return "".join(chunks)
+
+    body = asyncio.run(collect_stream())
+
+    assert delta_calls == [rows_first, rows_updated]
+    events = [part for part in body.split("event: stocks_delta\n") if part.strip()]
+    assert len(events) == 2
+    event_data = [
+        json.loads(next(line[6:] for line in event.splitlines() if line.startswith("data: ")))
+        for event in events
+    ]
+    assert event_data[0]["count"] == 2
+    assert event_data[1]["count"] == 1
+    assert event_data[1]["rows"][0]["company"] == "BIMAS"
+    assert event_data[1]["rows"][0]["price"] == 512.5
+
+
