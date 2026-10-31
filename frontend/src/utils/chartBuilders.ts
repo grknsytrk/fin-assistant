@@ -18,7 +18,7 @@ export const CHART_WINDOW_QUARTERS = 10;
 
 export function _buildMetricSeries(quarters: KapQuarter[], metricKey: string, asQuarterlyFlow: boolean): SeriesPoint[] {
     return quarters
-        .map((q, idx) => {
+        .map((q, idx): SeriesPoint | null => {
             const numeric = _resolveMetricValue(quarters, idx, metricKey, asQuarterlyFlow);
             if (numeric === null) {
                 return null;
@@ -41,7 +41,7 @@ export function _buildCustomSeries(
     displayFormatter: (val: number, currency: string) => string
 ): SeriesPoint[] {
     return quarters
-        .map((q, idx) => {
+        .map((q, idx): SeriesPoint | null => {
             const numeric = resolver(quarters, idx);
             if (numeric === null) {
                 return null;
@@ -74,7 +74,7 @@ export function _buildRatioSeries(
     suffixFormatter: (val: number) => string
 ): SeriesPoint[] {
     return quarters
-        .map((q, idx) => {
+        .map((q, idx): SeriesPoint | null => {
             const numerator = _resolveMetricValue(quarters, idx, numeratorKey, numeratorAsQuarterlyFlow);
             const denominator = _resolveMetricValue(quarters, idx, denominatorKey, denominatorAsQuarterlyFlow);
             if (numerator === null || denominator === null || denominator === 0) {
@@ -103,7 +103,7 @@ export function _buildAnnualizedRoeSeries(
     suffixFormatter: (val: number) => string,
 ): SeriesPoint[] {
     return quarters
-        .map((q, idx) => {
+        .map((q, idx): SeriesPoint | null => {
             const ttmFlow = ttmSum(quarters.slice(Math.max(0, idx - 3), idx + 1), numeratorKey);
             if (ttmFlow === null) return null;
 
