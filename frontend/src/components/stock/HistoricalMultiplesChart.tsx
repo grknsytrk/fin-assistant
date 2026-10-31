@@ -10,7 +10,7 @@ import type {
 } from '../../api/types';
 import { apiClient } from '../../api/client';
 import { LineChartCard } from '../charts/BarChartCard';
-import type { SeriesPoint } from '../../utils/chartBuilders';
+import { _quarterKey, type SeriesPoint } from '../../utils/chartBuilders';
 import './HistoricalMultiplesChart.css';
 
 type MultipleKey = 'fk' | 'pd_satis' | 'pd_dd' | 'fd_favok';
@@ -70,10 +70,14 @@ export default function HistoricalMultiplesChart({
     snapshot,
     historyLoading = false,
     onHistoryChange,
+    highlightedQuarterKey,
+    onHighlightQuarterKey,
 }: {
     snapshot: KapSnapshotResponse;
     historyLoading?: boolean;
     onHistoryChange?: (history: KapValuationHistoryResponse | null) => void;
+    highlightedQuarterKey?: string | null;
+    onHighlightQuarterKey?: (key: string | null) => void;
 }) {
     const company = snapshot.stock_code || snapshot.company;
     const compactQuarters = useMemo(
@@ -95,12 +99,19 @@ export default function HistoricalMultiplesChart({
     const [requestError, setRequestError] = useState('');
     const [selectedWindow, setSelectedWindow] = useState<HistoryWindow>('5y');
     const [expandedMultiple, setExpandedMultiple] = useState<MultipleKey | null>(null);
-    const [highlightedQuarterKey, setHighlightedQuarterKey] = useState<string | null>(null);
+    const [localHighlightedQuarterKey, setLocalHighlightedQuarterKey] = useState<string | null>(null);
+    const activeHighlightedQuarterKey = highlightedQuarterKey === undefined
+        ? localHighlightedQuarterKey
+        : highlightedQuarterKey;
+    const updateHighlightedQuarterKey = useCallback((key: string | null) => {
+        setLocalHighlightedQuarterKey(key);
+        onHighlightQuarterKey?.(key);
+    }, [onHighlightQuarterKey]);
     const currentCompany = useRef(company);
     const closeExpandedChart = useCallback(() => {
         setExpandedMultiple(null);
-        setHighlightedQuarterKey(null);
-    }, []);
+        updateHighlightedQuarterKey(null);
+    }, [updateHighlightedQuarterKey]);
 
     useEffect(() => {
         onHistoryChange?.(history);
@@ -115,7 +126,7 @@ export default function HistoricalMultiplesChart({
             setHistory(null);
             setSelectedWindow('5y');
             setExpandedMultiple(null);
-            setHighlightedQuarterKey(null);
+            updateHighlightedQuarterKey(null);
         }
         setRequestError('');
         setLoading(shouldRequestHistory);
@@ -161,7 +172,7 @@ export default function HistoricalMultiplesChart({
             controller.abort();
             if (timer !== undefined) window.clearTimeout(timer);
         };
-    }, [company, quarterCount, requestBody, shouldRequestHistory]);
+    }, [company, quarterCount, requestBody, shouldRequestHistory, updateHighlightedQuarterKey]);
 
     useEffect(() => {
         if (!expandedMultiple) return;
@@ -186,6 +197,7 @@ export default function HistoricalMultiplesChart({
                 if (value == null || !Number.isFinite(value) || value <= 0) return [];
                 return [{
                     key: String(point.year) + '-Q' + String(point.period),
+                    quarterKey: _quarterKey(point.year, point.period),
                     label: String(point.year) + 'Ç' + String(point.period),
                     value,
                     display: formatMultiple(value),
@@ -257,8 +269,8 @@ export default function HistoricalMultiplesChart({
                     series={expandedSeries}
                     averageSeries={expandedAverageSeries}
                     averageLabel={expandedAverage == null ? undefined : 'Ort. ' + formatMultiple(expandedAverage)}
-                    highlightedKey={highlightedQuarterKey}
-                    onHighlightKey={setHighlightedQuarterKey}
+                    highlightedQuarterKey={activeHighlightedQuarterKey}
+                    onHighlightQuarterKey={updateHighlightedQuarterKey}
                     className="kap-chart-card-expanded historical-multiples-chart"
                 />
             </div>
@@ -306,8 +318,8 @@ export default function HistoricalMultiplesChart({
                                 series={series}
                                 averageSeries={averageSeries}
                                 averageLabel={average == null ? undefined : 'Ort. ' + formatMultiple(average)}
-                                highlightedKey={highlightedQuarterKey}
-                                onHighlightKey={setHighlightedQuarterKey}
+                                highlightedQuarterKey={activeHighlightedQuarterKey}
+                                onHighlightQuarterKey={updateHighlightedQuarterKey}
                                 onOpen={() => setExpandedMultiple(option.key)}
                                 className="historical-multiples-chart"
                             />

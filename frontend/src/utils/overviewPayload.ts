@@ -270,6 +270,11 @@ export function buildOverviewChartGroups(snapshot: KapSnapshotResponse, quarters
                 series: _takeLastSeries(_buildMetricSeries(quarters, 'net_kar', true), window),
             },
             {
+                title: 'Çeyreklik Esas Faaliyet Kârı',
+                kind: 'bar' as const,
+                series: _takeLastSeries(_buildMetricSeries(quarters, 'esas_faaliyet_kari', true), window),
+            },
+            {
                 title: 'Çeyreklik Serbest Nakit Akışı',
                 kind: 'bar' as const,
                 series: _takeLastSeries(_buildMetricSeries(quarters, 'serbest_nakit_akisi', true), window),

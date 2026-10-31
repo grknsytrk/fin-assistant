@@ -51,14 +51,18 @@ export function BarChartCard({
     title,
     series,
     highlightedIndex,
+    highlightedQuarterKey,
     onHighlight,
+    onHighlightQuarterKey,
     onOpen,
     className,
 }: {
     title: string;
     series: SeriesPoint[];
     highlightedIndex?: number | null;
+    highlightedQuarterKey?: string | null;
     onHighlight?: (idx: number | null) => void;
+    onHighlightQuarterKey?: (key: string | null) => void;
     onOpen?: () => void;
     className?: string;
 }) {
@@ -103,10 +107,12 @@ export function BarChartCard({
             value: point.display,
         });
         if (onHighlight) onHighlight(idx);
+        if (onHighlightQuarterKey) onHighlightQuarterKey(point.quarterKey ?? null);
     };
 
     const clearHighlight = () => {
         if (onHighlight) onHighlight(null);
+        if (onHighlightQuarterKey) onHighlightQuarterKey(null);
     };
 
     const onChartMove = (event: MouseEvent<SVGSVGElement>) => {
@@ -190,8 +196,11 @@ export function BarChartCard({
                     const yVal = y(point.value);
                     const top = point.value >= 0 ? yVal : zeroY;
                     const h = Math.max(2, Math.abs(yVal - zeroY));
-                    const isFocus = highlightedIndex === idx;
-                    const isFaded = highlightedIndex !== null && highlightedIndex !== undefined && !isFocus;
+                    const hasHighlight = highlightedQuarterKey != null || (highlightedIndex !== null && highlightedIndex !== undefined);
+                    const isFocus = highlightedQuarterKey != null
+                        ? point.quarterKey === highlightedQuarterKey
+                        : highlightedIndex === idx;
+                    const isFaded = hasHighlight && !isFocus;
                     return (
                         <g key={point.key}>
                             <rect
@@ -230,8 +239,10 @@ export function LineChartCard({
     averageLabel,
     highlightedIndex,
     highlightedKey,
+    highlightedQuarterKey,
     onHighlight,
     onHighlightKey,
+    onHighlightQuarterKey,
     onOpen,
     className,
 }: {
@@ -241,8 +252,10 @@ export function LineChartCard({
     averageLabel?: string;
     highlightedIndex?: number | null;
     highlightedKey?: string | null;
+    highlightedQuarterKey?: string | null;
     onHighlight?: (idx: number | null) => void;
     onHighlightKey?: (key: string | null) => void;
+    onHighlightQuarterKey?: (key: string | null) => void;
     onOpen?: () => void;
     className?: string;
 }) {
@@ -289,12 +302,16 @@ export function LineChartCard({
     const averagePath = averagePoints
         .map((point, idx) => `${idx === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
         .join(' ');
-    const highlightedPoint = highlightedKey != null
+    const highlightedPoint = highlightedQuarterKey != null
+        ? points.find((point) => point.quarterKey === highlightedQuarterKey)
+        : highlightedKey != null
         ? points.find((point) => point.key === highlightedKey)
         : highlightedIndex != null
             ? points[highlightedIndex]
             : null;
-    const highlightedAveragePoint = highlightedKey != null
+    const highlightedAveragePoint = highlightedQuarterKey != null
+        ? averagePoints.find((point) => point.quarterKey === highlightedQuarterKey)
+        : highlightedKey != null
         ? averagePoints.find((point) => point.key === highlightedKey)
         : highlightedIndex != null
             ? averagePoints[highlightedIndex]
@@ -314,11 +331,13 @@ export function LineChartCard({
         });
         if (onHighlight) onHighlight(idx);
         if (onHighlightKey) onHighlightKey(point.key);
+        if (onHighlightQuarterKey) onHighlightQuarterKey(point.quarterKey ?? null);
     };
 
     const clearHighlight = () => {
         if (onHighlight) onHighlight(null);
         if (onHighlightKey) onHighlightKey(null);
+        if (onHighlightQuarterKey) onHighlightQuarterKey(null);
     };
 
     const onChartMove = (event: MouseEvent<SVGSVGElement>) => {
@@ -422,10 +441,12 @@ export function LineChartCard({
                 ) : null}
 
                 {points.map((point, idx) => {
-                    const isFocus = highlightedKey != null
-                        ? point.key === highlightedKey
-                        : highlightedIndex === idx;
-                    const hasHighlight = highlightedKey != null || (highlightedIndex !== null && highlightedIndex !== undefined);
+                    const isFocus = highlightedQuarterKey != null
+                        ? point.quarterKey === highlightedQuarterKey
+                        : highlightedKey != null
+                            ? point.key === highlightedKey
+                            : highlightedIndex === idx;
+                    const hasHighlight = highlightedQuarterKey != null || highlightedKey != null || (highlightedIndex !== null && highlightedIndex !== undefined);
                     const isFaded = hasHighlight && !isFocus;
                     return (
                         <g key={point.key}>

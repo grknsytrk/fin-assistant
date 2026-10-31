@@ -4,10 +4,15 @@ import { _resolveMetricValue, _resolveMetricDisplay, _periodLabel, intSafe } fro
 
 export type SeriesPoint = {
     key: string;
+    quarterKey?: string;
     label: string;
     value: number;
     display: string;
 };
+
+export function _quarterKey(year: number, period: number): string {
+    return `${intSafe(year)}-Q${intSafe(period)}`;
+}
 
 export const CHART_WINDOW_QUARTERS = 10;
 
@@ -20,6 +25,7 @@ export function _buildMetricSeries(quarters: KapQuarter[], metricKey: string, as
             }
             return {
                 key: `${q.quarter}-${metricKey}`,
+                quarterKey: _quarterKey(q.year, q.period),
                 label: _periodLabel(q.year, q.period, q.quarter),
                 value: numeric,
                 display: _resolveMetricDisplay(quarters, idx, metricKey, asQuarterlyFlow),
@@ -42,6 +48,7 @@ export function _buildCustomSeries(
             }
             return {
                 key: `${q.quarter}-${keySuffix}`,
+                quarterKey: _quarterKey(q.year, q.period),
                 label: _periodLabel(q.year, q.period, q.quarter),
                 value: numeric,
                 display: displayFormatter(numeric, q.currency || 'TL'),
@@ -76,6 +83,7 @@ export function _buildRatioSeries(
             const value = (numerator / denominator) * scale;
             return {
                 key: `${q.quarter}-${numeratorKey}-${denominatorKey}`,
+                quarterKey: _quarterKey(q.year, q.period),
                 label: _periodLabel(q.year, q.period, q.quarter),
                 value,
                 display: suffixFormatter(value),
@@ -114,6 +122,7 @@ export function _buildAnnualizedRoeSeries(
             const value = (ttmFlow / averageDenominator) * 100;
             return {
                 key: `${q.quarter}-${numeratorKey}-${denominatorKey}-ttm`,
+                quarterKey: _quarterKey(q.year, q.period),
                 label: _periodLabel(q.year, q.period, q.quarter),
                 value,
                 display: suffixFormatter(value),

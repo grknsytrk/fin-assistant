@@ -11,6 +11,8 @@ type StockChartsProps = {
     embedded?: boolean;
     chartWindowQuarters?: number;
     extraCharts?: OverviewChartGroup[];
+    highlightedQuarterKey?: string | null;
+    onHighlightQuarterKey?: (key: string | null) => void;
 };
 
 export default function StockCharts({
@@ -19,16 +21,17 @@ export default function StockCharts({
     embedded = false,
     chartWindowQuarters,
     extraCharts = [],
+    highlightedQuarterKey,
+    onHighlightQuarterKey,
 }: StockChartsProps) {
-    const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null);
     const [expandedChart, setExpandedChart] = useState<OverviewChartGroup | null>(null);
-    const handleHighlight = useCallback((idx: number | null) => {
-        setHighlightedIndex((prev) => (prev === idx ? prev : idx));
-    }, []);
+    const handleHighlight = useCallback((key: string | null) => {
+        onHighlightQuarterKey?.(key);
+    }, [onHighlightQuarterKey]);
     const closeExpandedChart = useCallback(() => {
         setExpandedChart(null);
-        setHighlightedIndex(null);
-    }, []);
+        handleHighlight(null);
+    }, [handleHighlight]);
 
     const chartGroups = useMemo(
         () => [...extraCharts, ...buildOverviewChartGroups(snapshot, quarters, chartWindowQuarters)],
@@ -66,16 +69,16 @@ export default function StockCharts({
                     <BarChartCard
                         title={expandedChart.title}
                         series={expandedChart.series}
-                        highlightedIndex={highlightedIndex}
-                        onHighlight={handleHighlight}
+                        highlightedQuarterKey={highlightedQuarterKey}
+                        onHighlightQuarterKey={handleHighlight}
                         className="kap-chart-card-expanded"
                     />
                 ) : (
                     <LineChartCard
                         title={expandedChart.title}
                         series={expandedChart.series}
-                        highlightedIndex={highlightedIndex}
-                        onHighlight={handleHighlight}
+                        highlightedQuarterKey={highlightedQuarterKey}
+                        onHighlightQuarterKey={handleHighlight}
                         className="kap-chart-card-expanded"
                     />
                 )}
@@ -92,8 +95,8 @@ export default function StockCharts({
                             key={chart.title}
                             title={chart.title}
                             series={chart.series}
-                            highlightedIndex={highlightedIndex}
-                            onHighlight={handleHighlight}
+                            highlightedQuarterKey={highlightedQuarterKey}
+                            onHighlightQuarterKey={handleHighlight}
                             onOpen={() => setExpandedChart(chart)}
                         />
                     ))}
@@ -107,8 +110,8 @@ export default function StockCharts({
                             key={ratio.title}
                             title={ratio.title}
                             series={ratio.series}
-                            highlightedIndex={highlightedIndex}
-                            onHighlight={handleHighlight}
+                            highlightedQuarterKey={highlightedQuarterKey}
+                            onHighlightQuarterKey={handleHighlight}
                             onOpen={() => setExpandedChart(ratio)}
                         />
                     ))}

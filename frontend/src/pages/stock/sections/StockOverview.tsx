@@ -274,6 +274,7 @@ function buildQuarterlyPremiumSeries(rows: KapInsurancePremiumDisclosure[]): Ser
         .sort((a, b) => (a.year * 10 + a.quarter) - (b.year * 10 + b.quarter))
         .map((item) => ({
             key: `${item.year}-Q${item.quarter}-quarterly-premium`,
+            quarterKey: `${item.year}-Q${item.quarter}`,
             label: `${item.year} Ç${item.quarter}`,
             value: item.value,
             display: _formatMetric(item.value, 'TL'),
@@ -781,6 +782,7 @@ export default function StockOverview({
     const [aiError, setAiError] = useState('');
     const [aiCommentary, setAiCommentary] = useState<KapOverviewCommentaryResponse | null>(null);
     const [premiumHighlightedIndex, setPremiumHighlightedIndex] = useState<number | null>(null);
+    const [highlightedQuarterKey, setHighlightedQuarterKey] = useState<string | null>(null);
     const aiAbortRef = useRef<AbortController | null>(null);
     const aiRequestIdRef = useRef(0);
     const hasRequestedAiRef = useRef(false);
@@ -788,6 +790,9 @@ export default function StockOverview({
     const lastRequestedValuationHashRef = useRef<string | null>(null);
     const autoRefreshedBaseKeyRef = useRef<string | null>(null);
     const requestAiCommentaryRef = useRef<((forceRefresh?: boolean) => Promise<void>) | null>(null);
+    useEffect(() => {
+        setHighlightedQuarterKey(null);
+    }, [snapshot.stock_code, snapshot.company]);
     const canRequestAi =
         Boolean(latestQuarter) &&
         overviewHistoryContext.quarters.length > 0 &&
@@ -1108,6 +1113,8 @@ export default function StockOverview({
                 snapshot={snapshot}
                 historyLoading={historyLoading}
                 onHistoryChange={setValuationHistory}
+                highlightedQuarterKey={highlightedQuarterKey}
+                onHighlightQuarterKey={setHighlightedQuarterKey}
             />
 
             {latestPremium && (
@@ -1205,6 +1212,8 @@ export default function StockOverview({
                         embedded
                         chartWindowQuarters={displayedChartQuarterWindow}
                         extraCharts={premiumOverviewCharts}
+                        highlightedQuarterKey={highlightedQuarterKey}
+                        onHighlightQuarterKey={setHighlightedQuarterKey}
                     />
                 </section>
             )}
