@@ -1251,7 +1251,10 @@ export default function StockOverview({
                                             <article key={item.key} className="overview-ai-score-item">
                                                 <div className="overview-ai-score-item-head">
                                                     <span>{item.label}</span>
-                                                    <strong className={scoreClass}>{item.score.toFixed(1)}</strong>
+                                                    <div className="overview-ai-subscore-value">
+                                                        <strong className={scoreClass}>{item.score.toFixed(1)}</strong>
+                                                        <span className="overview-ai-subscore-max">/10</span>
+                                                    </div>
                                                 </div>
                                                 <div className="overview-ai-score-bar-track" aria-hidden="true">
                                                     <div

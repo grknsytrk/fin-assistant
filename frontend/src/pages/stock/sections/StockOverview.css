@@ -1103,10 +1103,35 @@
     font-weight: 600;
 }
 
+.overview-ai-subscore-value {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.18rem;
+}
+
 .overview-ai-score-item-head strong {
     font-size: 1.05rem;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
+    background: transparent;
+}
+
+.overview-ai-score-item-head strong.is-good {
+    color: #10b981;
+}
+
+.overview-ai-score-item-head strong.is-mid {
+    color: #f59e0b;
+}
+
+.overview-ai-score-item-head strong.is-bad {
+    color: #f43f5e;
+}
+
+.overview-ai-subscore-max {
+    color: #71717a;
+    font-size: 0.72rem;
+    font-weight: 500;
 }
 
 .overview-ai-score-bar-track {
@@ -1124,22 +1149,16 @@
     transition: width 0.4s ease;
 }
 
-.overview-ai-score-bar-fill.is-good,
-.overview-ai-score-item-head strong.is-good {
+.overview-ai-score-bar-fill.is-good {
     background: #10b981;
-    color: #10b981;
 }
 
-.overview-ai-score-bar-fill.is-mid,
-.overview-ai-score-item-head strong.is-mid {
+.overview-ai-score-bar-fill.is-mid {
     background: #f59e0b;
-    color: #f59e0b;
 }
 
-.overview-ai-score-bar-fill.is-bad,
-.overview-ai-score-item-head strong.is-bad {
+.overview-ai-score-bar-fill.is-bad {
     background: #f43f5e;
-    color: #f43f5e;
 }
 
 .overview-ai-score-item p {
