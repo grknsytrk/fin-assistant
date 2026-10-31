@@ -19,7 +19,6 @@ import {
     RefreshCw,
     Search,
     SlidersHorizontal,
-    Sparkles,
     Trash2,
     X,
 } from 'lucide-react';
@@ -1022,24 +1021,24 @@ export default function ModelPortfolioPage() {
                                 <div className="mp-toolbar-actions">
                                     {isAdminVerified ? (
                                         <>
-                                            <span className="mp-admin-badge" title="Kurucu düzenleme modu açık">
-                                                <Sparkles size={12} />
-                                                Kurucu Modu
+                                            <span className="mp-admin-badge" title="Kurucu düzenleme modu aktif">
+                                                <span className="mp-admin-pulse-dot" aria-hidden="true" />
+                                                <span>Kurucu Modu</span>
                                             </span>
                                             <button
                                                 type="button"
-                                                className="mp-btn mp-btn-primary mp-btn-sm"
+                                                className="mp-admin-add-btn"
                                                 onClick={() => {
                                                     setEditingPosition(null);
                                                     setEditorModalOpen(true);
                                                 }}
                                             >
-                                                <Plus size={14} />
-                                                Hisse Ekle
+                                                <Plus size={13} />
+                                                <span>Hisse Ekle</span>
                                             </button>
                                             <button
                                                 type="button"
-                                                className="mp-btn mp-btn-subtle mp-btn-sm"
+                                                className="mp-admin-logout-btn"
                                                 onClick={handleAdminLogout}
                                                 title="Kurucu modundan çık"
                                             >
