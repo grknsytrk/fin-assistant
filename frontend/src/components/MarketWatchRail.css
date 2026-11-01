@@ -7,6 +7,8 @@
     height: 100%;
     min-height: 0;
     overflow: visible;
+    transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), flex-basis 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: width, flex-basis;
 }
 
 .mwr-shell.mwr-shell-collapsed {
@@ -19,6 +21,7 @@
     right: var(--mwr-dock-width);
     top: 0;
     bottom: 0;
+    z-index: 40;
     width: var(--mwr-panel-width);
     display: flex;
     flex-direction: column;
@@ -29,11 +32,12 @@
     transform: translateX(0);
     opacity: 1;
     pointer-events: auto;
-    transition: transform 0.24s ease, opacity 0.2s ease;
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: transform, opacity;
 }
 
 .mwr-panel.is-collapsed {
-    transform: translateX(104%);
+    transform: translateX(100%);
     opacity: 0;
     pointer-events: none;
 }
