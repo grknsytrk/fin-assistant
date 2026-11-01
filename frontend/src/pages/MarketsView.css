@@ -2408,9 +2408,9 @@
     max-height: min(68vh, 760px);
     scrollbar-width: thin;
     scrollbar-color: color-mix(in srgb, var(--surface-border) 70%, var(--text-secondary)) transparent;
-    contain: paint layout;
+    contain: layout;
     will-change: scroll-position;
-    transform: translateZ(0);
+    overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
 }
 
@@ -2479,7 +2479,6 @@
     box-sizing: border-box;
     color: var(--text-primary);
     cursor: pointer;
-    transition: background-color 0.12s ease;
 }
 
 .stocks-table tbody tr:hover {
@@ -2491,7 +2490,6 @@
     background: transparent !important;
     cursor: default;
     border: none !important;
-    height: auto;
 }
 
 .stocks-table tr.stocks-spacer-row td {
@@ -2500,7 +2498,6 @@
     background: transparent !important;
     line-height: 0;
     font-size: 0;
-    height: inherit;
 }
 
 .stocks-rank {

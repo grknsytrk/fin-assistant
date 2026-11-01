@@ -120,4 +120,142 @@ describe('useTableVirtualizer', () => {
         expect(div.scrollTop).toBe(0);
         expect(result.current.startIndex).toBe(0);
     });
+
+    it('attaches scroll listener even if containerRef.current was initially null', async () => {
+        const containerRef = { current: null as HTMLDivElement | null };
+        const { result, rerender } = renderHook(() =>
+            useTableVirtualizer({
+                totalRows: 580,
+                rowHeight: 38,
+                overscan: 10,
+                containerRef,
+            })
+        );
+
+        const div = document.createElement('div');
+        Object.defineProperty(div, 'clientHeight', { value: 600, configurable: true });
+        let currentScrollTop = 0;
+        Object.defineProperty(div, 'scrollTop', {
+            get: () => currentScrollTop,
+            set: (val: number) => { currentScrollTop = val; },
+            configurable: true,
+        });
+
+        // Div mounts on second render
+        containerRef.current = div;
+        rerender();
+
+        // Simulate scroll
+        await act(async () => {
+            currentScrollTop = 3800;
+            div.dispatchEvent(new Event('scroll'));
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+        });
+
+        expect(result.current.startIndex).toBe(90);
+    });
+
+    it('handles fast scroll directly to bottom and conserves total height', async () => {
+        const div = document.createElement('div');
+        Object.defineProperty(div, 'clientHeight', { value: 600, configurable: true });
+        let currentScrollTop = 0;
+        Object.defineProperty(div, 'scrollTop', {
+            get: () => currentScrollTop,
+            set: (val: number) => { currentScrollTop = val; },
+            configurable: true,
+        });
+        const containerRef = { current: div };
+
+        const { result } = renderHook(() =>
+            useTableVirtualizer({
+                totalRows: 580,
+                rowHeight: 38,
+                overscan: 10,
+                containerRef,
+            })
+        );
+
+        // Fast scroll to 22000px
+        await act(async () => {
+            currentScrollTop = 22000;
+            div.dispatchEvent(new Event('scroll'));
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+        });
+
+        expect(result.current.endIndex).toBe(580);
+        expect(result.current.bottomSpacerHeight).toBe(0);
+        expect(
+            result.current.topSpacerHeight +
+            (result.current.endIndex - result.current.startIndex) * 38 +
+            result.current.bottomSpacerHeight
+        ).toBe(580 * 38);
+    });
+
+    it('works seamlessly with returned callback ref', async () => {
+        const { result } = renderHook(() =>
+            useTableVirtualizer({
+                totalRows: 200,
+                rowHeight: 38,
+                overscan: 5,
+            })
+        );
+
+        const div = document.createElement('div');
+        Object.defineProperty(div, 'clientHeight', { value: 600, configurable: true });
+        let currentScrollTop = 0;
+        Object.defineProperty(div, 'scrollTop', {
+            get: () => currentScrollTop,
+            set: (val: number) => { currentScrollTop = val; },
+            configurable: true,
+        });
+
+        // Attach using callback ref
+        act(() => {
+            result.current.containerRef(div);
+        });
+
+        await act(async () => {
+            currentScrollTop = 1900;
+            div.dispatchEvent(new Event('scroll'));
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+        });
+
+        // 1900 / 38 = 50. startIndex = 50 - 5 = 45
+        expect(result.current.startIndex).toBe(45);
+    });
+
+    it('clamps range safely when totalRows shrinks while scrolled down', async () => {
+        const div = document.createElement('div');
+        Object.defineProperty(div, 'clientHeight', { value: 600, configurable: true });
+        let currentScrollTop = 5000;
+        Object.defineProperty(div, 'scrollTop', {
+            get: () => currentScrollTop,
+            set: (val: number) => { currentScrollTop = val; },
+            configurable: true,
+        });
+        const containerRef = { current: div };
+
+        let rows = 580;
+        const { result, rerender } = renderHook(() =>
+            useTableVirtualizer({
+                totalRows: rows,
+                rowHeight: 38,
+                overscan: 10,
+                containerRef,
+            })
+        );
+
+        // User filters down to 8 rows
+        rows = 8;
+        currentScrollTop = 0;
+        rerender();
+
+        expect(result.current.startIndex).toBe(0);
+        expect(result.current.endIndex).toBe(8);
+        expect(result.current.bottomSpacerHeight).toBe(0);
+        expect(result.current.topSpacerHeight).toBe(0);
+        expect(result.current.totalHeight).toBe(8 * 38);
+    });
 });
+
+

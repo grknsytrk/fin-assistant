@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { Building2, Check, Coins, GripHorizontal, Plus, RotateCcw, Search, SlidersHorizontal, Sparkles, Trash2, TrendingUp, X } from 'lucide-react';
@@ -3752,6 +3752,7 @@ export default function MarketsView({
         endIndex: stockEndIndex,
         topSpacerHeight: stockTopSpacerHeight,
         bottomSpacerHeight: stockBottomSpacerHeight,
+        containerRef: stockTableWrapCallbackRef,
     } = useTableVirtualizer({
         totalRows: sortedStocks.length,
         rowHeight: 38,
@@ -3890,15 +3891,18 @@ export default function MarketsView({
     ]);
     useDocumentTitle(documentTitle);
 
-    const onCompanyClick = (ticker: string) => {
-        const normalizedTicker = String(ticker || '').trim().toUpperCase();
-        if (!normalizedTicker) return;
-        if (onOpenTicker) {
-            onOpenTicker(normalizedTicker);
-            return;
-        }
-        window.location.href = `/?ticker=${normalizedTicker}`;
-    };
+    const onCompanyClick = useCallback(
+        (ticker: string) => {
+            const normalizedTicker = String(ticker || '').trim().toUpperCase();
+            if (!normalizedTicker) return;
+            if (onOpenTicker) {
+                onOpenTicker(normalizedTicker);
+                return;
+            }
+            window.location.href = `/?ticker=${normalizedTicker}`;
+        },
+        [onOpenTicker]
+    );
 
     const handleStockIndexChange = (index: MarketStockIndex) => {
         setStockIndex(index);
@@ -4755,7 +4759,7 @@ export default function MarketsView({
                                 {sortedStocks.length === 0 ? (
                                     <div className="no-results">Aranan kritere uyan hisse bulunamadı.</div>
                                 ) : (
-                                    <div className="stocks-table-wrap" ref={stockTableWrapRef}>
+                                    <div className="stocks-table-wrap" ref={stockTableWrapCallbackRef}>
                                         <table className={`stocks-table${stockTableMode === 'fundamentals' ? ' stocks-fundamental-table' : ''}`}>
                                             <colgroup>
                                                 <col style={{ width: '44px', minWidth: '44px' }} />
