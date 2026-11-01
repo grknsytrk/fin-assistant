@@ -84,7 +84,7 @@ def admin_refresh_kap_statements(
     universe: Literal["all", "bist30", "bist100", "symbols"] = Query("all"),
     symbols: Optional[str] = Query(None),
     max_quarters: int = Query(5, ge=1, le=20),
-    budget_seconds: int = Query(1500, ge=30, le=5400),
+    budget_seconds: int = Query(5400, ge=30, le=10800),
     concurrency: int = Query(1, ge=1, le=2),
 ) -> Dict[str, Any]:
     """Start a conservative KAP statement refresh job.

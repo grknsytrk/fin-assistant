@@ -1,12 +1,15 @@
 name: refresh KAP statements
 
-# Manual only until the BIST 100 pilot confirms KAP tolerates the request rate.
-# Once the pilot is verified, add a schedule entry here (see funds-refresh.yml).
+# Runs automatically once a day after evening KAP disclosures (23:30 Europe/Istanbul)
+# and can also be triggered manually via workflow_dispatch.
 on:
+  schedule:
+    # 20:30 UTC = 23:30 Europe/Istanbul (UTC+3) every day
+    - cron: "30 20 * * *"
   workflow_dispatch:
     inputs:
       mode:
-        description: "Çalışma modu (incremental: mevcutları kontrol et, full: eksikleri ve eski şemaları tamamla)"
+        description: "Çalışma modu (incremental: mevcutları kontrol et + eksikleri tamamla, full: sadece eksikleri tamamla)"
         type: choice
         options:
           - incremental
@@ -30,9 +33,9 @@ on:
         type: string
         default: "5"
       budget_seconds:
-        description: "Maksimum çalışma süresi - saniye (30-5400, örn: 1500 = 25 dk, 3600 = 60 dk)"
+        description: "Maksimum çalışma süresi - saniye (30-10800, varsayılan: 5400 = 90 dk, maks: 10800 = 180 dk)"
         type: string
-        default: "1500"
+        default: "5400"
       concurrency:
         description: "Aynı anda taranacak şirket sayısı (1-2; KAP engeli yememek için 1 bırakın)"
         type: string
@@ -47,16 +50,16 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 100
+    timeout-minutes: 195
     env:
       FIN_API_BASE_URL: https://grknsytrk-fin-api.hf.space
       FIN_API_ADMIN_TOKEN: ${{ secrets.FIN_API_ADMIN_TOKEN }}
-      MODE: ${{ inputs.mode }}
-      UNIVERSE: ${{ inputs.universe }}
-      SYMBOLS: ${{ inputs.symbols }}
-      MAX_QUARTERS: ${{ inputs.max_quarters }}
-      BUDGET_SECONDS: ${{ inputs.budget_seconds }}
-      CONCURRENCY: ${{ inputs.concurrency }}
+      MODE: ${{ inputs.mode || 'incremental' }}
+      UNIVERSE: ${{ inputs.universe || 'bist100' }}
+      SYMBOLS: ${{ inputs.symbols || '' }}
+      MAX_QUARTERS: ${{ inputs.max_quarters || '5' }}
+      BUDGET_SECONDS: ${{ inputs.budget_seconds || '5400' }}
+      CONCURRENCY: ${{ inputs.concurrency || '1' }}
     steps:
       - name: validate inputs
         shell: bash
@@ -70,8 +73,8 @@ jobs:
             echo "max_quarters must be an integer between 1 and 20" >&2
             exit 1
           fi
-          if ! [[ "$BUDGET_SECONDS" =~ ^[0-9]+$ ]] || (( BUDGET_SECONDS < 30 || BUDGET_SECONDS > 5400 )); then
-            echo "budget_seconds must be an integer between 30 and 5400" >&2
+          if ! [[ "$BUDGET_SECONDS" =~ ^[0-9]+$ ]] || (( BUDGET_SECONDS < 30 || BUDGET_SECONDS > 10800 )); then
+            echo "budget_seconds must be an integer between 30 and 10800" >&2
             exit 1
           fi
           if ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || (( CONCURRENCY < 1 || CONCURRENCY > 2 )); then
@@ -110,13 +113,15 @@ jobs:
           echo "job_id=$job_id" >> "$GITHUB_OUTPUT"
 
       - name: wait for statement refresh result
+        id: wait_primary
         shell: bash
         env:
           JOB_ID: ${{ steps.request.outputs.job_id }}
         run: |
           set -euo pipefail
-          poll_deadline=$((SECONDS + 5520))
-          for attempt in $(seq 1 185); do
+          poll_deadline=$((SECONDS + BUDGET_SECONDS + 180))
+          max_attempts=$(((BUDGET_SECONDS + 180) / 30 + 2))
+          for attempt in $(seq 1 "$max_attempts"); do
             response="$(curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors \
               --connect-timeout 10 --max-time 30 \
               -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
@@ -148,6 +153,9 @@ jobs:
                 if [[ "${job_mode:-$MODE}" == "full" && "$coverage_ready" != "$total" ]]; then
                   echo "::warning::full refresh finished but coverage_ready=$coverage_ready/$total; some companies may expose fewer quarters than requested"
                 fi
+                if [[ "${job_mode:-$MODE}" == "incremental" ]] && (( skipped_missing + skipped_shallow + skipped_schema > 0 )); then
+                  echo "needs_backfill=true" >> "$GITHUB_OUTPUT"
+                fi
                 echo "statement refresh succeeded: updated=$updated unchanged=$unchanged skipped_ready=$skipped_ready coverage_ready=$coverage_ready"
                 exit 0
                 ;;
@@ -157,7 +165,7 @@ jobs:
                   echo "$response" >&2
                   exit 1
                 fi
-                echo "::warning::statement refresh stopped early (stop_reason=${stop_reason:-budget_exhausted}); processed=$processed/$total remaining=$remaining. Re-run the workflow in $MODE mode to continue."
+                echo "::warning::statement refresh stopped early (stop_reason=${stop_reason:-budget_exhausted}); processed=$processed/$total remaining=$remaining. Next run will continue automatically."
                 exit 0
                 ;;
               aborted)
@@ -182,4 +190,77 @@ jobs:
             sleep 30
           done
           echo "statement refresh did not finish within the polling window; job_id=$JOB_ID may still be running" >&2
+          exit 1
+
+      - name: backfill missing or outdated caches after incremental check
+        if: steps.wait_primary.outputs.needs_backfill == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "incremental refresh found missing/outdated caches; starting automatic full backfill pass..."
+          query="mode=full&universe=$(jq -rn --arg v "$UNIVERSE" '$v|@uri')"
+          if [[ -n "${SYMBOLS//[[:space:]]/}" ]]; then
+            query+="&symbols=$(jq -rn --arg v "$SYMBOLS" '$v|@uri')"
+          fi
+          query+="&max_quarters=$MAX_QUARTERS&budget_seconds=$BUDGET_SECONDS&concurrency=$CONCURRENCY"
+          response="$(curl --fail-with-body --silent --show-error --retry 2 \
+            --connect-timeout 10 --max-time 60 \
+            -X POST \
+            -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
+            "$FIN_API_BASE_URL/admin/kap/refresh-statements?$query")"
+          job_id="$(echo "$response" | jq -r '.refresh_job.job_id // empty')"
+          if [[ -z "$job_id" ]]; then
+            echo "backfill endpoint did not return a job id" >&2
+            echo "$response" >&2
+            exit 1
+          fi
+          echo "backfill refresh requested: job_id=$job_id"
+          poll_deadline=$((SECONDS + BUDGET_SECONDS + 180))
+          max_attempts=$(((BUDGET_SECONDS + 180) / 30 + 2))
+          for attempt in $(seq 1 "$max_attempts"); do
+            response="$(curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors \
+              --connect-timeout 10 --max-time 30 \
+              -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
+              "$FIN_API_BASE_URL/admin/kap/refresh-statements/status?job_id=$job_id")"
+            status="$(echo "$response" | jq -r '.refresh_job.status // empty')"
+            processed="$(echo "$response" | jq -r '.refresh_job.processed // 0')"
+            total="$(echo "$response" | jq -r '.refresh_job.total // 0')"
+            updated="$(echo "$response" | jq -r '.refresh_job.updated // 0')"
+            skipped_ready="$(echo "$response" | jq -r '.refresh_job.skipped_ready_cache // 0')"
+            failed="$(echo "$response" | jq -r '.refresh_job.failed // 0')"
+            blocked="$(echo "$response" | jq -r '.refresh_job.blocked // 0')"
+            remaining="$(echo "$response" | jq -r '.refresh_job.remaining // 0')"
+            coverage_ready="$(echo "$response" | jq -r '.refresh_job.coverage.ready // "?"')"
+            stop_reason="$(echo "$response" | jq -r '.refresh_job.stop_reason // empty')"
+            echo "backfill refresh: job_id=$job_id status=${status:-unknown} processed=$processed/$total updated=$updated skipped_ready=$skipped_ready failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
+            case "$status" in
+              succeeded)
+                if (( failed > 0 || blocked > 0 )); then
+                  echo "::error::backfill refresh reported errors: failed=$failed blocked=$blocked" >&2
+                  exit 1
+                fi
+                echo "backfill refresh succeeded: updated=$updated coverage_ready=$coverage_ready"
+                exit 0
+                ;;
+              partial)
+                if [[ "$stop_reason" == "completed_with_errors" ]] || (( failed > 0 || blocked > 0 )); then
+                  echo "::error::backfill refresh completed with errors: failed=$failed blocked=$blocked" >&2
+                  exit 1
+                fi
+                echo "::warning::backfill refresh stopped early (stop_reason=${stop_reason:-budget_exhausted}); remaining=$remaining"
+                exit 0
+                ;;
+              aborted|failed)
+                echo "::error::backfill refresh failed: status=$status stop_reason=${stop_reason:-unknown}" >&2
+                exit 1
+                ;;
+              superseded)
+                exit 0
+                ;;
+            esac
+            if (( SECONDS >= poll_deadline )); then
+              exit 1
+            fi
+            sleep 30
+          done
           exit 1
