@@ -1955,10 +1955,22 @@ function StockCardMiniChart({
     const hoverPoint = activeHoverIndex == null ? null : validPoints[activeHoverIndex];
     const hoverX = activeHoverIndex == null ? null : xFor(activeHoverIndex);
     const hoverY = hoverPoint ? yFor(hoverPoint.close) : null;
-    const tooltipWidth = 132;
-    const tooltipHeight = 58;
-    const tooltipX = hoverX == null ? 0 : clamp(hoverX + 12, 8, width - tooltipWidth - 8);
-    const tooltipY = hoverY == null ? 0 : clamp(hoverY - tooltipHeight / 2, padding.top, height - tooltipHeight - 8);
+    const tooltipWidth = 124;
+    const tooltipHeight = 38;
+    const isLeftHalf = hoverX != null && hoverX < width / 2;
+    const horizontalOffset = 14;
+    let tooltipX = 0;
+    let tooltipY = 0;
+    if (hoverX != null && hoverY != null) {
+        if (isLeftHalf) {
+            tooltipX = Math.min(width - tooltipWidth - 6, hoverX + horizontalOffset);
+        } else {
+            tooltipX = Math.max(6, hoverX - tooltipWidth - horizontalOffset);
+        }
+        const minTop = (!isLeftHalf && tooltipX < 190) ? 32 : 6;
+        const maxTop = Math.max(minTop, height - tooltipHeight - 16);
+        tooltipY = clamp(hoverY - tooltipHeight / 2, minTop, maxTop);
+    }
 
     return (
         <div ref={shellRef} className="stock-card-chart-shell">
@@ -2056,16 +2068,25 @@ function StockCardMiniChart({
                             stroke="rgba(255,255,255,0.24)"
                             strokeDasharray="5 5"
                         />
-                        <circle cx={hoverX} cy={hoverY} r="3.5" fill={color} stroke="#0a0c0f" strokeWidth="1.5" />
-                        <g transform={`translate(${tooltipX}, ${tooltipY})`}>
-                            <rect width={tooltipWidth} height={tooltipHeight} rx="4" fill="#07090b" stroke="rgba(59,130,246,0.2)" />
-                            <text x="10" y="19" fill="#d8dee9" fontSize="12" fontFamily="monospace">
+                        <circle cx={hoverX} cy={hoverY} r="6" fill={color} opacity="0.25" />
+                        <circle cx={hoverX} cy={hoverY} r="3.5" fill={color} stroke="#07090b" strokeWidth="1.8" />
+                        <g transform={`translate(${tooltipX}, ${tooltipY})`} style={{ pointerEvents: 'none' }}>
+                            <rect
+                                width={tooltipWidth}
+                                height={tooltipHeight}
+                                rx="5"
+                                fill="#0b0e12"
+                                stroke="rgba(59,130,246,0.3)"
+                                strokeWidth="1"
+                                style={{ filter: 'drop-shadow(0 4px 10px rgba(0,0,0,0.5))' }}
+                            />
+                            <text x="8" y="14" fill="#94a3b8" fontSize="9.5" fontFamily="monospace">
                                 {formatStockCardChartDate(hoverPoint.time, selectedRange)}
                             </text>
-                            <text x="10" y="42" fill="#f8fafc" fontSize="12" fontFamily="monospace" fontWeight="700">
+                            <text x="8" y="29" fill="#f8fafc" fontSize="11" fontFamily="monospace" fontWeight="700">
                                 {symbol}
                             </text>
-                            <text x={tooltipWidth - 10} y="42" fill="#f8fafc" fontSize="12" fontFamily="monospace" fontWeight="700" textAnchor="end">
+                            <text x={tooltipWidth - 8} y="29" fill="#f8fafc" fontSize="11" fontFamily="monospace" fontWeight="700" textAnchor="end">
                                 {formatCardCurrency(hoverPoint.close, currency)}
                             </text>
                         </g>
