@@ -745,6 +745,27 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
     job["duration_seconds"] = round(time.monotonic() - started_monotonic, 1)
     job["processed"] = cursor
     job["remaining"] = max(0, total - cursor)
+    if int(job.get("updated") or 0) > 0:
+        try:
+            from app.kap_api_service import (
+                _KAP_COMPANIES_RESPONSE_CACHE,
+                _KAP_COMPANIES_RESPONSE_CACHE_KEY,
+            )
+            from app.market_service import (
+                _MARKET_STOCK_INDEX_ORDER,
+                _STOCKS_CACHE,
+                _UNIVERSE_CACHE,
+            )
+
+            _KAP_COMPANIES_RESPONSE_CACHE.clear()
+            _UNIVERSE_CACHE.clear()
+            _STOCKS_CACHE.clear()
+            backend.delete(_KAP_COMPANIES_RESPONSE_CACHE_KEY)
+            for idx_name in _MARKET_STOCK_INDEX_ORDER:
+                backend.delete(f"api:market:universe:{idx_name}:v3")
+                backend.delete(f"api:market:stocks:{idx_name}:v4")
+        except Exception:  # noqa: BLE001 - cache invalidation must not fail the job
+            LOGGER.warning("Market fundamental cache invalidation failed", exc_info=True)
     try:
         job["coverage"] = _statement_coverage(symbols, max_quarters)
     except Exception:  # noqa: BLE001 - coverage must not fail the job

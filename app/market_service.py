@@ -277,8 +277,8 @@ def _build_market_universe_payload(*, index_name: str = "XUTUM", force_refresh: 
         instrument_metadata = instrument.get("metadata") if isinstance(instrument.get("metadata"), dict) else {}
         cached_meta = financial_snapshots.get(normalized_symbol) or {}
         latest_quarter = (
-            instrument_metadata.get("latest_quarter")
-            or cached_meta.get("latest_quarter")
+            cached_meta.get("latest_quarter")
+            or instrument_metadata.get("latest_quarter")
         )
         source = str(instrument.get("source") or "").strip().lower()
         has_kap_cache = bool(
