@@ -91,8 +91,10 @@ _KAP_STATEMENT_FAILURE_STREAK_LIMIT = _kap_statement_env_int(
 )
 
 _KAP_STATEMENT_HEARTBEAT_STALE_SECONDS = _kap_statement_env_int(
-    "RAGFIN_KAP_STATEMENT_HEARTBEAT_STALE_SECONDS", 360, minimum=60
+    "RAGFIN_KAP_STATEMENT_HEARTBEAT_STALE_SECONDS", 900, minimum=60
 )
+
+_LOCAL_RUNNING_STATEMENT_JOBS: set[str] = set()
 
 _KAP_STATEMENT_MAX_ERRORS = 15
 
@@ -222,10 +224,12 @@ def _active_kap_statement_refresh_job() -> Optional[Dict[str, Any]]:
 
 def _kap_statement_job_is_stale(job: Dict[str, Any]) -> bool:
     now = datetime.now(timezone.utc)
-    heartbeat = _kap_statement_parse_iso(job.get("updated_at"))
-    if heartbeat is not None:
-        if (now - heartbeat).total_seconds() > max(60, _KAP_STATEMENT_HEARTBEAT_STALE_SECONDS):
-            return True
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id or job_id not in _LOCAL_RUNNING_STATEMENT_JOBS:
+        heartbeat = _kap_statement_parse_iso(job.get("updated_at"))
+        if heartbeat is not None:
+            if (now - heartbeat).total_seconds() > max(60, _KAP_STATEMENT_HEARTBEAT_STALE_SECONDS):
+                return True
     started = _kap_statement_parse_iso(job.get("started_at") or job.get("requested_at"))
     if started is None:
         return True
@@ -337,7 +341,14 @@ def _statement_cache_state(symbol: str, max_quarters: int) -> str:
         schema_version = 0
     if schema_version != KAP_CACHE_SCHEMA_VERSION:
         return "schema_outdated"
-    if _statement_cached_depth(payload) < max(1, int(max_quarters)):
+    cached_depth = _statement_cached_depth(payload)
+    try:
+        live_period_count = int(payload.get("live_period_count") or 0)
+    except (TypeError, ValueError):
+        live_period_count = 0
+    if live_period_count > 0 and cached_depth >= live_period_count and cached_depth > 0:
+        return "ready"
+    if cached_depth < max(1, int(max_quarters)):
         return "shallow"
     return "ready"
 
@@ -513,7 +524,33 @@ def _process_kap_statement_symbol(
     if financial_snapshot:
         upsert_financial_snapshots(CONFIG.paths.processed_dir, [financial_snapshot])
 
-    changed = _latest_statement_key(previous) != _latest_statement_key(raw)
+    try:
+        prev_schema = int((previous or {}).get("schema_version") or 0)
+    except (TypeError, ValueError):
+        prev_schema = 0
+    try:
+        new_schema = int(raw.get("schema_version") or KAP_CACHE_SCHEMA_VERSION)
+    except (TypeError, ValueError):
+        new_schema = KAP_CACHE_SCHEMA_VERSION
+    changed = (
+        _latest_statement_key(previous) != _latest_statement_key(raw)
+        or _statement_cached_depth(previous) != _statement_cached_depth(raw)
+        or prev_schema != new_schema
+    )
+    if changed:
+        try:
+            from app.kap_api_service import (
+                _fetch_kap_valuation_history_prices,
+                _kap_history_price_start_date,
+            )
+
+            quarters_list = [row for row in raw.get("quarters") or [] if isinstance(row, dict)]
+            history_start = _kap_history_price_start_date(quarters_list)
+            if history_start is not None:
+                _fetch_kap_valuation_history_prices(normalized, start_date=history_start)
+        except Exception:  # noqa: BLE001 - price warm-up must not fail statement refresh
+            LOGGER.debug("Valuation history price warm-up skipped for %s", normalized, exc_info=True)
+
     return {
         "symbol": normalized,
         "outcome": "updated" if changed else "unchanged",
@@ -571,6 +608,14 @@ def _statement_coverage(symbols: List[str], max_quarters: int) -> Dict[str, int]
 
 
 def _run_kap_statement_refresh_job(job_id: str) -> None:
+    _LOCAL_RUNNING_STATEMENT_JOBS.add(job_id)
+    try:
+        _run_kap_statement_refresh_job_inner(job_id)
+    finally:
+        _LOCAL_RUNNING_STATEMENT_JOBS.discard(job_id)
+
+
+def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
     job = _get_kap_statement_refresh_job(job_id)
     if not isinstance(job, dict):
         return
@@ -940,6 +985,7 @@ def _start_kap_statement_refresh_job(
             raise RuntimeError("Bilanço yenilemesi başka bir worker tarafından devralındı; tekrar deneyin.")
 
     _set_kap_statement_refresh_job(job)
+    _LOCAL_RUNNING_STATEMENT_JOBS.add(job_id)
     _KAP_STATEMENT_EXECUTOR.submit(_run_kap_statement_refresh_job, job_id)
     return _public_kap_statement_job(job)
 

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+from datetime import date
+from typing import Any, Dict, List
+
+import pytest
+
 from app import api as api_module
+from app import cache as cache_module
+from app import kap_api_service
 from app import kap_service as kap_service_module
 
 
@@ -66,3 +73,48 @@ def test_comparative_quarterly_profit_does_not_replace_prior_fy_profit() -> None
 
     assert prior_fy["metrics"]["net_kar"]["value"] == 120.0
     assert prior_fy["metrics"]["ozkaynaklar"]["value"] == 120.0
+
+
+def test_valuation_history_prices_populates_on_cold_miss_and_reuses_across_depths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_module.reset_cache_for_tests()
+    kap_api_service._KAP_VALUATION_HISTORY_PRICE_CACHE.clear()
+    calls: List[Dict[str, Any]] = []
+
+    def fake_chart(symbol: str, **kwargs: Any) -> Dict[str, Any]:
+        calls.append({"symbol": symbol, **kwargs})
+        return {
+            "ok": True,
+            "points": [
+                {"time": "2025-03-31", "close": 100.0},
+                {"time": "2026-03-31", "close": 150.0},
+            ],
+            "splits": [],
+        }
+
+    monkeypatch.setattr(kap_api_service, "_fetch_yahoo_chart_period_raw", fake_chart)
+
+    # First call for 5-quarter window populates synchronously (not pending)
+    first_payload, first_status, first_stale, first_pending = (
+        kap_api_service._fetch_kap_valuation_history_prices(
+            "THYAO",
+            start_date=date(2025, 3, 31),
+        )
+    )
+    # Second call for 20-quarter window reuses the anchored 11-year series
+    second_payload, second_status, second_stale, second_pending = (
+        kap_api_service._fetch_kap_valuation_history_prices(
+            "THYAO",
+            start_date=date(2021, 3, 31),
+        )
+    )
+
+    assert first_payload is not None
+    assert first_pending is False
+    assert first_stale is False
+    assert len(first_payload["points"]) == 2
+    assert second_payload == first_payload
+    assert second_status == "local_hit"
+    assert second_pending is False
+    assert len(calls) == 1

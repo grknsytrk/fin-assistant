@@ -3522,7 +3522,15 @@ def fetch_kap_company_snapshot(
     cache_path, cached = _read_first_cache(processed_dir, company_norm)
     cache_version = int(cached.get("schema_version", 0)) if isinstance(cached, dict) else 0
     cached_period_count = _cached_period_count(cached)
-    cache_has_requested_depth = cached_period_count >= requested_max_quarters
+    try:
+        cached_live_period_count = int(cached.get("live_period_count") or 0) if isinstance(cached, dict) else 0
+    except (TypeError, ValueError):
+        cached_live_period_count = 0
+    cache_has_requested_depth = cached_period_count >= requested_max_quarters or (
+        cached_live_period_count > 0
+        and cached_period_count >= cached_live_period_count
+        and cached_period_count > 0
+    )
     if (
         cached
         and not force_refresh

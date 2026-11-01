@@ -2309,15 +2309,17 @@ def _fetch_kap_valuation_history_prices(
     if not normalized or start_date > end_date:
         return None, "unavailable", False, False
 
-    # Key by calendar year so quarter-to-quarter requests for the same stock
-    # reuse the daily series. The latest complete trading day is included.
-    start_of_year = date(start_date.year, 1, 1)
+    # Anchor the start year to cover the full 44-quarter (~11-year) window so
+    # progressive 5Q -> 20Q -> 44Q loads reuse one series per stock, and omit
+    # end_date from the cache key so the 7-day SWR cache survives midnight.
+    default_history_start_year = max(2014, end_date.year - 11)
+    start_of_year = date(min(start_date.year, default_history_start_year), 1, 1)
     cache_key = (
-        f"api:kap:valuation-history-prices:v1:{normalized}:"
-        f"from={start_of_year.isoformat()}:to={end_date.isoformat()}"
+        f"api:kap:valuation-history-prices:v2:{normalized}:"
+        f"from={start_of_year.isoformat()}"
     )
     failure_cache_key = f"{cache_key}:failure"
-    local_key = f"{normalized}:{start_of_year.isoformat()}:{end_date.isoformat()}"
+    local_key = f"{normalized}:{start_of_year.isoformat()}"
 
     def build() -> Optional[Dict[str, Any]]:
         chart = _fetch_yahoo_chart_period_raw(
@@ -2388,13 +2390,32 @@ def _fetch_kap_valuation_history_prices(
     if _shared_cache_get_dict(failure_cache_key):
         return None, "unavailable", False, False
 
-    _schedule_swr_revalidation(
-        cache_key=cache_key,
-        factory=build,
-        fresh_ttl_seconds=_KAP_VALUATION_HISTORY_PRICE_TTL,
-        stale_ttl_seconds=_KAP_VALUATION_HISTORY_PRICE_STALE_TTL,
+    def build_entry() -> Optional[Dict[str, Any]]:
+        built = build()
+        if not isinstance(built, dict):
+            return None
+        return _swr_cache_entry(
+            built,
+            fresh_ttl_seconds=_KAP_VALUATION_HISTORY_PRICE_TTL,
+            stale_ttl_seconds=_KAP_VALUATION_HISTORY_PRICE_STALE_TTL,
+        )
+
+    entry, status = _get_or_set_single_flight(
+        cache_key,
+        ttl_seconds=max(1, _KAP_VALUATION_HISTORY_PRICE_STALE_TTL),
+        factory=build_entry,
+        lock_key=f"single-flight:{cache_key}",
+        lock_ttl_seconds=_MARKET_SWR_LOCK_TTL_SECONDS,
+        wait_timeout_seconds=_MARKET_SWR_WAIT_TIMEOUT_SECONDS,
+        cache_usable=_swr_entry_is_fresh,
     )
-    return None, "pending", False, True
+    payload = _swr_entry_payload(entry)
+    if payload is not None:
+        _KAP_VALUATION_HISTORY_PRICE_CACHE[local_key] = entry
+        return payload, status, False, False
+    if status == "pending":
+        return None, "pending", False, True
+    return None, "unavailable", False, False
 
 def _build_kap_historical_multiples(*, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     company = str(snapshot.get("stock_code") or snapshot.get("company") or "").strip().upper()
