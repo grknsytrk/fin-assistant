@@ -90,6 +90,10 @@ _KAP_STATEMENT_FAILURE_STREAK_LIMIT = _kap_statement_env_int(
     "RAGFIN_KAP_STATEMENT_FAILURE_STREAK_LIMIT", 12, minimum=1
 )
 
+_KAP_STATEMENT_HEARTBEAT_STALE_SECONDS = _kap_statement_env_int(
+    "RAGFIN_KAP_STATEMENT_HEARTBEAT_STALE_SECONDS", 360, minimum=60
+)
+
 _KAP_STATEMENT_MAX_ERRORS = 15
 
 _KAP_STATEMENT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
@@ -115,6 +119,7 @@ _STATEMENT_JOB_PUBLIC_FIELDS = (
     "request_interval_seconds",
     "requested_at",
     "started_at",
+    "updated_at",
     "finished_at",
     "duration_seconds",
     "total",
@@ -130,6 +135,8 @@ _STATEMENT_JOB_PUBLIC_FIELDS = (
     "blocked",
     "remaining",
     "cursor",
+    "current_symbol",
+    "last_symbol",
     "coverage",
     "stop_reason",
     "errors",
@@ -171,7 +178,27 @@ def _get_kap_statement_refresh_job(job_id: str) -> Optional[Dict[str, Any]]:
     if not normalized:
         return None
     payload = _shared_cache_get_dict(_kap_statement_job_key(normalized))
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("status") or "") in {"queued", "running"} and _kap_statement_job_is_stale(payload):
+        now_iso = _kap_statement_now_iso()
+        interrupted = dict(payload)
+        interrupted.update(
+            status="partial",
+            stop_reason="worker_interrupted",
+            current_symbol=None,
+            updated_at=now_iso,
+            finished_at=now_iso,
+        )
+        _set_kap_statement_refresh_job(interrupted)
+        owner_token = str(payload.get("owner_token") or "")
+        if owner_token:
+            _get_cache().release_if_owner(
+                _KAP_STATEMENT_ACTIVE_KEY,
+                {"job_id": normalized, "owner_token": owner_token},
+            )
+        return interrupted
+    return payload
 
 
 def _public_kap_statement_job(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -194,6 +221,11 @@ def _active_kap_statement_refresh_job() -> Optional[Dict[str, Any]]:
 
 
 def _kap_statement_job_is_stale(job: Dict[str, Any]) -> bool:
+    now = datetime.now(timezone.utc)
+    heartbeat = _kap_statement_parse_iso(job.get("updated_at"))
+    if heartbeat is not None:
+        if (now - heartbeat).total_seconds() > max(60, _KAP_STATEMENT_HEARTBEAT_STALE_SECONDS):
+            return True
     started = _kap_statement_parse_iso(job.get("started_at") or job.get("requested_at"))
     if started is None:
         return True
@@ -201,7 +233,7 @@ def _kap_statement_job_is_stale(job: Dict[str, Any]) -> bool:
         budget = int(job.get("budget_seconds") or _KAP_STATEMENT_DEFAULT_BUDGET_SECONDS)
     except (TypeError, ValueError):
         budget = _KAP_STATEMENT_DEFAULT_BUDGET_SECONDS
-    age = (datetime.now(timezone.utc) - started).total_seconds()
+    age = (now - started).total_seconds()
     return age > max(300, budget + 600)
 
 
@@ -564,6 +596,7 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
     job.update(
         status="running",
         started_at=started_at,
+        updated_at=started_at,
         total=0,
         processed=0,
         fetched=0,
@@ -577,6 +610,8 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
         blocked=0,
         remaining=0,
         cursor=0,
+        current_symbol=None,
+        last_symbol=None,
         coverage=None,
         stop_reason=None,
         errors=[],
@@ -590,9 +625,11 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
             list(job.get("symbols") or []),
         )
     except Exception as exc:  # noqa: BLE001 - surface the reason to the operator
+        now_iso = _kap_statement_now_iso()
         job.update(
             status="failed",
-            finished_at=_kap_statement_now_iso(),
+            updated_at=now_iso,
+            finished_at=now_iso,
             stop_reason="symbol_resolution_failed",
             error=str(exc or exc.__class__.__name__),
             duration_seconds=round(time.monotonic() - started_monotonic, 1),
@@ -605,7 +642,7 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
         return
 
     total = len(symbols)
-    job.update(total=total, remaining=total)
+    job.update(total=total, remaining=total, updated_at=_kap_statement_now_iso())
     _set_kap_statement_refresh_job(job)
 
     deadline = started_monotonic + budget_seconds
@@ -637,6 +674,18 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
                 break
 
             window = symbols[cursor:cursor + concurrency]
+            job["current_symbol"] = ",".join(window)
+            job["updated_at"] = _kap_statement_now_iso()
+            will_fetch = any(
+                (mode == "full" and _statement_cache_state(symbol, max_quarters) != "ready")
+                or (mode != "full" and _statement_cache_state(symbol, max_quarters) == "ready")
+                for symbol in window
+            )
+            now_before = time.monotonic()
+            if will_fetch or (now_before - last_flush >= 1.0):
+                _set_kap_statement_refresh_job(job)
+                last_flush = now_before
+
             results = list(
                 pool.map(
                     lambda symbol: _guarded_process_kap_statement_symbol(
@@ -694,6 +743,10 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
             job["cursor"] = cursor
             job["processed"] = cursor
             job["remaining"] = max(0, total - cursor)
+            job["last_symbol"] = ",".join(
+                f"{result.get('symbol')}:{result.get('outcome')}" for result in results
+            )
+            job["updated_at"] = _kap_statement_now_iso()
 
             if block_streak >= _KAP_STATEMENT_BLOCK_STREAK_LIMIT:
                 stop_reason = "provider_blocked"
@@ -703,7 +756,7 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
                 break
 
             now = time.monotonic()
-            if now - last_flush >= 1.0:
+            if will_fetch or (now - last_flush >= 1.0):
                 _set_kap_statement_refresh_job(job)
                 last_flush = now
             pause_seconds = (
@@ -739,9 +792,12 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
     else:
         status = "failed"
 
+    finished_iso = _kap_statement_now_iso()
     job["status"] = status
     job["stop_reason"] = stop_reason
-    job["finished_at"] = _kap_statement_now_iso()
+    job["current_symbol"] = None
+    job["updated_at"] = finished_iso
+    job["finished_at"] = finished_iso
     job["duration_seconds"] = round(time.monotonic() - started_monotonic, 1)
     job["processed"] = cursor
     job["remaining"] = max(0, total - cursor)
@@ -823,6 +879,7 @@ def _start_kap_statement_refresh_job(
 
     job_id = uuid.uuid4().hex
     owner_token = uuid.uuid4().hex
+    requested_at = _kap_statement_now_iso()
     job: Dict[str, Any] = {
         "job_id": job_id,
         "status": "queued",
@@ -833,8 +890,9 @@ def _start_kap_statement_refresh_job(
         "budget_seconds": effective_budget,
         "concurrency": effective_concurrency,
         "request_interval_seconds": _KAP_STATEMENT_REQUEST_INTERVAL_SECONDS,
-        "requested_at": _kap_statement_now_iso(),
+        "requested_at": requested_at,
         "started_at": None,
+        "updated_at": requested_at,
         "finished_at": None,
         "duration_seconds": None,
         "total": 0,
@@ -850,6 +908,8 @@ def _start_kap_statement_refresh_job(
         "blocked": 0,
         "remaining": 0,
         "cursor": 0,
+        "current_symbol": None,
+        "last_symbol": None,
         "coverage": None,
         "stop_reason": None,
         "errors": [],

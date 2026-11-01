@@ -500,3 +500,53 @@ def test_statement_refresh_status_returns_404_for_unknown_job(monkeypatch: pytes
     )
 
     assert response.status_code == 404
+
+
+def test_job_tracks_current_and_last_symbol_and_detects_interrupted_worker(
+    statement_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed_current: List[Any] = []
+
+    def fake_snapshot(**kwargs: Any) -> Dict[str, Any]:
+        stored = statement_module._get_kap_statement_refresh_job("job-track")
+        assert stored is not None
+        observed_current.append(stored.get("current_symbol"))
+        return {
+            "ok": True,
+            "schema_version": 15,
+            "live_period_count": 5,
+            "quarters": [
+                {"year": 2026, "period": period, "disclosure_index": period}
+                for period in range(1, 6)
+            ],
+        }
+
+    monkeypatch.setattr("app.kap_service.get_kap_snapshot", fake_snapshot)
+    job = _seed_and_run_job(mode="full", symbols=["MGROS"], job_id="job-track")
+
+    assert observed_current == ["MGROS"]
+    assert job["current_symbol"] is None
+    assert job["last_symbol"] == "MGROS:updated"
+
+    # Simulate a container restart leaving a running job with a stale heartbeat
+    stale_job = {
+        "job_id": "job-stale",
+        "status": "running",
+        "mode": "full",
+        "universe": "bist100",
+        "budget_seconds": 5400,
+        "started_at": "2020-01-01T00:00:00+00:00",
+        "updated_at": "2020-01-01T00:01:00+00:00",
+        "current_symbol": "MGROS",
+        "last_symbol": "MAVI:updated",
+        "processed": 62,
+        "remaining": 38,
+        "owner_token": "owner-stale",
+    }
+    statement_module._set_kap_statement_refresh_job(stale_job)
+    recovered = statement_module._get_kap_statement_refresh_job("job-stale")
+    assert recovered is not None
+    assert recovered["status"] == "partial"
+    assert recovered["stop_reason"] == "worker_interrupted"
+    assert recovered["current_symbol"] is None
+    assert recovered["last_symbol"] == "MAVI:updated"

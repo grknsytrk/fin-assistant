@@ -139,10 +139,12 @@ jobs:
             failed="$(echo "$response" | jq -r '.refresh_job.failed // 0')"
             blocked="$(echo "$response" | jq -r '.refresh_job.blocked // 0')"
             remaining="$(echo "$response" | jq -r '.refresh_job.remaining // 0')"
+            current_symbol="$(echo "$response" | jq -r '.refresh_job.current_symbol // "-"')"
+            last_symbol="$(echo "$response" | jq -r '.refresh_job.last_symbol // "-"')"
             coverage_ready="$(echo "$response" | jq -r '.refresh_job.coverage.ready // "?"')"
             stop_reason="$(echo "$response" | jq -r '.refresh_job.stop_reason // empty')"
             job_mode="$(echo "$response" | jq -r '.refresh_job.mode // empty')"
-            echo "statement refresh: job_id=$JOB_ID status=${status:-unknown} processed=$processed/$total fetched=$fetched updated=$updated unchanged=$unchanged skipped_ready=$skipped_ready skipped_missing=$skipped_missing skipped_shallow=$skipped_shallow skipped_schema=$skipped_schema failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
+            echo "statement refresh: job_id=$JOB_ID status=${status:-unknown} processed=$processed/$total current=$current_symbol last=$last_symbol fetched=$fetched updated=$updated unchanged=$unchanged skipped_ready=$skipped_ready skipped_missing=$skipped_missing skipped_shallow=$skipped_shallow skipped_schema=$skipped_schema failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
             case "$status" in
               succeeded)
                 if (( failed > 0 || blocked > 0 )); then
@@ -230,9 +232,11 @@ jobs:
             failed="$(echo "$response" | jq -r '.refresh_job.failed // 0')"
             blocked="$(echo "$response" | jq -r '.refresh_job.blocked // 0')"
             remaining="$(echo "$response" | jq -r '.refresh_job.remaining // 0')"
+            current_symbol="$(echo "$response" | jq -r '.refresh_job.current_symbol // "-"')"
+            last_symbol="$(echo "$response" | jq -r '.refresh_job.last_symbol // "-"')"
             coverage_ready="$(echo "$response" | jq -r '.refresh_job.coverage.ready // "?"')"
             stop_reason="$(echo "$response" | jq -r '.refresh_job.stop_reason // empty')"
-            echo "backfill refresh: job_id=$job_id status=${status:-unknown} processed=$processed/$total updated=$updated skipped_ready=$skipped_ready failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
+            echo "backfill refresh: job_id=$job_id status=${status:-unknown} processed=$processed/$total current=$current_symbol last=$last_symbol updated=$updated skipped_ready=$skipped_ready failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
             case "$status" in
               succeeded)
                 if (( failed > 0 || blocked > 0 )); then
