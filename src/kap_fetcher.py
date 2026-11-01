@@ -5,6 +5,7 @@ import html
 import io
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -746,12 +747,51 @@ def _candidate_user_agents(cfg: KapConfig) -> List[str]:
     return result or [KAP_BROWSER_USER_AGENT]
 
 
+_KAP_REQUEST_PACING_LOCK = threading.Lock()
+_KAP_REQUEST_PACING_INTERVAL = 0.0
+_KAP_REQUEST_PACING_LAST_AT = 0.0
+
+
+def set_kap_request_pacing(interval_seconds: float) -> None:
+    """Throttle process-wide KAP JSON requests to a minimum start-to-start gap.
+
+    KAP resets connections after a burst of statement attachment downloads, so
+    batch jobs enable pacing for their duration. Interactive requests inherit
+    the same pacing while a batch is running, which is desirable protection.
+    """
+
+    global _KAP_REQUEST_PACING_INTERVAL, _KAP_REQUEST_PACING_LAST_AT
+    try:
+        interval = max(0.0, float(interval_seconds))
+    except (TypeError, ValueError):
+        interval = 0.0
+    with _KAP_REQUEST_PACING_LOCK:
+        _KAP_REQUEST_PACING_INTERVAL = interval
+        _KAP_REQUEST_PACING_LAST_AT = (
+            time.monotonic() - interval if interval > 0 else 0.0
+        )
+
+
+def _wait_for_kap_request_slot() -> None:
+    global _KAP_REQUEST_PACING_LAST_AT
+    if _KAP_REQUEST_PACING_INTERVAL <= 0:
+        return
+    with _KAP_REQUEST_PACING_LOCK:
+        now = time.monotonic()
+        wait_seconds = _KAP_REQUEST_PACING_INTERVAL - (now - _KAP_REQUEST_PACING_LAST_AT)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+            now = time.monotonic()
+        _KAP_REQUEST_PACING_LAST_AT = now
+
+
 def _http_get_json(url: str, cfg: KapConfig) -> Any:
     last_error: Optional[BaseException] = None
     for user_agent in _candidate_user_agents(cfg):
         headers = _kap_request_headers(cfg, accept="application/json, text/plain, */*")
         headers["User-Agent"] = user_agent
         for attempt in range(2):
+            _wait_for_kap_request_slot()
             request = urllib.request.Request(url, method="GET", headers=headers)
             try:
                 with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
@@ -780,6 +820,7 @@ def _http_get_text(url: str, cfg: KapConfig) -> str:
         headers = _kap_request_headers(cfg, accept="text/html,application/xhtml+xml,*/*")
         headers["User-Agent"] = user_agent
         for attempt in range(2):
+            _wait_for_kap_request_slot()
             request = urllib.request.Request(url, method="GET", headers=headers)
             try:
                 with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
@@ -810,6 +851,7 @@ def _http_post_json(url: str, payload: Dict[str, Any], cfg: KapConfig) -> Any:
         headers["User-Agent"] = user_agent
         headers["Content-Type"] = "application/json"
         for attempt in range(2):
+            _wait_for_kap_request_slot()
             request = urllib.request.Request(url, data=body, method="POST", headers=headers)
             try:
                 with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
@@ -838,6 +880,7 @@ def _http_get_bytes(url: str, cfg: KapConfig, *, accept: str = "*/*") -> bytes:
         headers = _kap_request_headers(cfg, accept=accept)
         headers["User-Agent"] = user_agent
         for attempt in range(2):
+            _wait_for_kap_request_slot()
             request = urllib.request.Request(url, method="GET", headers=headers)
             try:
                 with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
@@ -879,19 +922,32 @@ def _select_member_filter_row(company_key: str, rows: List[Any]) -> Optional[Dic
     return materialized[0]
 
 
-def _resolve_member(company: str, cfg: KapConfig) -> Optional[Dict[str, Any]]:
+def _resolve_member(
+    company: str,
+    cfg: KapConfig,
+    *,
+    strict: bool = False,
+) -> Optional[Dict[str, Any]]:
     company_key = str(company or "").strip().upper()
     if not company_key:
         return None
     cached = _resolve_member_from_cache(company_key)
     if cached is not None:
-        return _empty_member_to_none(cached)
-    resolved = _resolve_member_uncached(company_key, cfg)
-    _store_resolved_member(company_key, resolved)
+        resolved_cached = _empty_member_to_none(cached)
+        if resolved_cached is not None or not strict:
+            return resolved_cached
+    resolved = _resolve_member_uncached(company_key, cfg, strict=strict)
+    if resolved is not None or not strict:
+        _store_resolved_member(company_key, resolved)
     return resolved
 
 
-def _resolve_member_uncached(company_key: str, cfg: KapConfig) -> Optional[Dict[str, Any]]:
+def _resolve_member_uncached(
+    company_key: str,
+    cfg: KapConfig,
+    *,
+    strict: bool = False,
+) -> Optional[Dict[str, Any]]:
     candidate_queries = COMPANY_QUERY_ALIASES.get(company_key, [])
     if company_key not in candidate_queries:
         candidate_queries.append(company_key)
@@ -902,12 +958,12 @@ def _resolve_member_uncached(company_key: str, cfg: KapConfig) -> Optional[Dict[
         if main_token and main_token not in candidate_queries:
             candidate_queries.append(main_token)
 
+    last_error: Optional[BaseException] = None
     for query in candidate_queries:
         try:
             rows = _http_get_json(_member_filter_url(query), cfg)
-        except urllib.error.HTTPError:
-            continue
-        except Exception:
+        except Exception as exc:
+            last_error = exc
             continue
         if not isinstance(rows, list) or not rows:
             continue
@@ -938,6 +994,10 @@ def _resolve_member_uncached(company_key: str, cfg: KapConfig) -> Optional[Dict[
             "permalink": str(row.get("permaLink", "")).strip(),
             "query": query,
         }
+    if strict and last_error is not None:
+        raise RuntimeError(
+            f"KAP uye kaydi alinamadi: {company_key} error={last_error}"
+        ) from last_error
     fallback = KAP_MEMBER_FALLBACKS.get(company_key)
     return dict(fallback) if fallback else None
 
@@ -1089,9 +1149,13 @@ def _list_company_disclosures(
     cfg: KapConfig,
     max_years_back: int = 10,
     max_periods: Optional[int] = None,
+    *,
+    allow_criteria_fallback: bool = True,
 ) -> List[Dict[str, Any]]:
     current_year = _utc_now().year
     rows: List[Dict[str, Any]] = []
+    last_error: Optional[BaseException] = None
+    provider_error: Optional[BaseException] = None
     requested_periods = max(1, int(max_periods)) if max_periods is not None else None
 
     for idx, year in enumerate(range(current_year, current_year - max_years_back - 1, -1)):
@@ -1101,8 +1165,9 @@ def _list_company_disclosures(
         try:
             payload = _http_get_json(url, cfg)
         except urllib.error.HTTPError as exc:
-            if int(getattr(exc, "code", 0) or 0) == 429:
-                if not rows:
+            code = int(getattr(exc, "code", 0) or 0)
+            if code == 429:
+                if not rows and allow_criteria_fallback:
                     fallback_rows = _list_financial_report_disclosures_by_criteria(
                         member_oid=member_oid,
                         cfg=cfg,
@@ -1111,10 +1176,25 @@ def _list_company_disclosures(
                     )
                     if fallback_rows:
                         return fallback_rows
-                    raise RuntimeError("KAP istek limiti nedeniyle finansal bildirimler şu anda alınamadı.")
+                    raise RuntimeError(
+                        "KAP istek limiti (429) nedeniyle finansal bildirimler şu anda alınamadı."
+                    ) from exc
+                if not allow_criteria_fallback:
+                    raise RuntimeError(
+                        f"KAP finansal bildirim listesi 429 ile sinirlandi: member_oid={member_oid}"
+                    ) from exc
                 break
+            if code in KAP_RETRYABLE_HTTP_CODES:
+                provider_error = exc
+            last_error = exc
             continue
-        except Exception:
+        except Exception as exc:
+            last_error = exc
+            if not allow_criteria_fallback:
+                # Connection resets and timeouts often arrive without an HTTP
+                # status. Do not turn a partial year list into an "unchanged"
+                # result in batch mode when one of those requests failed.
+                provider_error = exc
             continue
         if not isinstance(payload, list):
             continue
@@ -1156,10 +1236,21 @@ def _list_company_disclosures(
             if period_count >= requested_periods:
                 break
 
+    if not allow_criteria_fallback and provider_error is not None:
+        raise RuntimeError(
+            f"KAP finansal bildirim listesi saglayici hatasi: member_oid={member_oid} error={provider_error}"
+        ) from provider_error
+
+    if not rows and not allow_criteria_fallback and last_error is not None:
+        raise RuntimeError(
+            f"KAP finansal bildirim listesi alinamadi: member_oid={member_oid} error={last_error}"
+        ) from last_error
+
     selected_rows = _preferred_disclosures_by_period(rows)
     current_period_count = len(selected_rows)
-    needs_fallback = not selected_rows or (
-        requested_periods is not None and current_period_count < requested_periods
+    needs_fallback = allow_criteria_fallback and (
+        not selected_rows
+        or (requested_periods is not None and current_period_count < requested_periods)
     )
     if needs_fallback:
         fallback_rows = _list_financial_report_disclosures_by_criteria(
@@ -2979,6 +3070,7 @@ def _fetch_insurance_premium_disclosures(
     member_oid: str,
     cfg: KapConfig,
     max_items: int = KAP_INSURANCE_PREMIUM_MAX_DISCLOSURES,
+    strict: bool = False,
 ) -> List[Dict[str, Any]]:
     if not member_oid:
         return []
@@ -3036,8 +3128,14 @@ def _fetch_insurance_premium_disclosures(
         try:
             detail = _fetch_attachment_detail(disclosure_index, cfg)
         except Exception:
+            if strict:
+                raise
             continue
         if not detail:
+            if strict:
+                raise RuntimeError(
+                    f"KAP prim bildirim detayi bos dondu: disclosure_index={disclosure_index}"
+                )
             continue
         disclosure_text = _premium_disclosure_text(detail)
         pdf_text = _premium_attachment_text(detail, cfg)
@@ -3106,6 +3204,7 @@ def _ensure_insurance_premium_disclosures(
     cfg: KapConfig,
     member: Optional[Dict[str, Any]] = None,
     force_refresh: bool = False,
+    strict: bool = False,
 ) -> Dict[str, Any]:
     if not _is_insurance_like_payload(payload, member):
         return payload
@@ -3125,8 +3224,14 @@ def _ensure_insurance_premium_disclosures(
     kap_error: Optional[BaseException] = None
     try:
         if member_oid:
-            disclosures = _fetch_insurance_premium_disclosures(member_oid=member_oid, cfg=cfg)
+            disclosures = _fetch_insurance_premium_disclosures(
+                member_oid=member_oid,
+                cfg=cfg,
+                strict=strict,
+            )
     except Exception as exc:
+        if strict:
+            raise
         kap_error = exc
 
     should_fetch_marketvisuals = (
@@ -3259,6 +3364,7 @@ def fetch_kap_company_snapshot(
     force_refresh: bool = False,
     max_quarters: int = 4,
     use_cache_when_complete: bool = False,
+    allow_criteria_fallback: bool = True,
 ) -> Dict[str, Any]:
     company_norm = str(company or "").strip().upper()
     if not company_norm:
@@ -3293,6 +3399,7 @@ def fetch_kap_company_snapshot(
                 cfg=cfg,
                 member=None,
                 force_refresh=False,
+                strict=not allow_criteria_fallback,
             )
 
         if use_cache_when_complete:
@@ -3303,6 +3410,7 @@ def fetch_kap_company_snapshot(
                         member_oid=cached_member_oid,
                         cfg=cfg,
                         max_periods=1,
+                        allow_criteria_fallback=allow_criteria_fallback,
                     )
                     live_latest_key = _latest_disclosure_key_from_list(latest_disclosures)
                     cached_latest_key = _latest_disclosure_key_from_cache(cached)
@@ -3317,10 +3425,16 @@ def fetch_kap_company_snapshot(
                             cfg=cfg,
                             member=None,
                             force_refresh=False,
+                            strict=not allow_criteria_fallback,
                         )
                     if not live_latest_key:
                         raise RuntimeError("KAP finansal bildirim listesi bos dondu.")
                 except Exception as exc:
+                    # The UI can fall back to the cached snapshot, but a batch
+                    # job must surface provider blocks instead of reporting a
+                    # throttled check as "unchanged".
+                    if not allow_criteria_fallback:
+                        raise
                     _mark_live_disclosure_check_failed(cache_path, cached, exc)
                     cached["cache_hit"] = True
                     cached["cache_stale"] = False
@@ -3336,7 +3450,13 @@ def fetch_kap_company_snapshot(
     member: Optional[Dict[str, Any]] = None
 
     try:
-        member = _resolve_member(company_norm, cfg)
+        # Keep the legacy two-argument call for interactive paths so existing
+        # monkeypatches keep working; batch jobs opt into strict mode.
+        member = (
+            _resolve_member(company_norm, cfg)
+            if allow_criteria_fallback
+            else _resolve_member(company_norm, cfg, strict=True)
+        )
         if not member:
             raise RuntimeError(f"KAP uyelik kaydi bulunamadi: {company_norm}")
 
@@ -3352,6 +3472,7 @@ def fetch_kap_company_snapshot(
             member_oid=member["mkk_member_oid"],
             cfg=cfg,
             max_periods=requested_max_quarters,
+            allow_criteria_fallback=allow_criteria_fallback,
         )
         if not disclosures:
             raise RuntimeError("KAP finansal bildirimleri şu anda alınamadı.")
@@ -3369,6 +3490,10 @@ def fetch_kap_company_snapshot(
             disclosure_index = int(item["disclosure_index"])
             detail = _fetch_attachment_detail(disclosure_index, cfg)
             if not detail:
+                if not allow_criteria_fallback:
+                    raise RuntimeError(
+                        f"KAP bildirim detayi bos dondu: disclosure_index={disclosure_index}"
+                    )
                 continue
             basic = (
                 detail.get("disclosure", {})
@@ -3438,6 +3563,15 @@ def fetch_kap_company_snapshot(
 
         quarter_rows = _merge_live_and_cached_quarters(quarter_rows, cached, requested_max_quarters)
 
+        if not allow_criteria_fallback:
+            expected_live_periods = min(requested_max_quarters, len(disclosures))
+            actual_periods = _cached_period_count({"quarters": quarter_rows})
+            if actual_periods < expected_live_periods:
+                raise RuntimeError(
+                    "KAP bilanco derinligi yetersiz: "
+                    f"beklenen={expected_live_periods} alinan={actual_periods}"
+                )
+
         payload: Dict[str, Any] = {
             "ok": True,
             "cache_hit": False,
@@ -3450,6 +3584,7 @@ def fetch_kap_company_snapshot(
             "member_oid": str(member.get("mkk_member_oid", "")).strip(),
             "source_url": f"https://www.kap.org.tr/tr/sirket-bilgileri/ozet/{member.get('permalink', '')}",
             "fetched_at": _utc_now().isoformat(),
+            "live_period_count": len(disclosures),
             "quarters": quarter_rows,
         }
         payload = _ensure_insurance_premium_disclosures(
@@ -3458,10 +3593,15 @@ def fetch_kap_company_snapshot(
             cfg=cfg,
             member=member,
             force_refresh=True,
+            strict=not allow_criteria_fallback,
         )
         _write_cache(cache_path, payload)
         return payload
     except Exception as exc:
+        # A batch job must see the provider failure; serving the previous cache
+        # here would report a throttled or partial refresh as success.
+        if not allow_criteria_fallback:
+            raise
         if cached:
             cached["ok"] = bool(cached.get("ok", False))
             cached["cache_hit"] = True

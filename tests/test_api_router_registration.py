@@ -41,6 +41,8 @@ EXPECTED_METHOD_PATHS = {
     ("POST", "/admin/funds/{fund_code}/refresh-allocations"),
     ("POST", "/kap/overview-commentary"),
     ("POST", "/admin/kap/refresh"),
+    ("POST", "/admin/kap/refresh-statements"),
+    ("GET", "/admin/kap/refresh-statements/status"),
     ("GET", "/kap/overview-models"),
     ("GET", "/kap/companies"),
     ("GET", "/kap/snapshot"),

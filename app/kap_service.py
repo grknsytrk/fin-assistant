@@ -372,6 +372,7 @@ def get_kap_snapshot(
     force_refresh: bool = False,
     max_quarters: int = 10,
     use_cache_when_complete: bool = False,
+    allow_criteria_fallback: bool = True,
 ) -> Dict[str, Any]:
     """Fetch a raw snapshot via kap_fetcher with correct keyword args."""
     normalized_company = normalize_kap_symbol(company)
@@ -382,6 +383,7 @@ def get_kap_snapshot(
         force_refresh=force_refresh,
         max_quarters=max_quarters,
         use_cache_when_complete=use_cache_when_complete,
+        allow_criteria_fallback=allow_criteria_fallback,
     )
 
 

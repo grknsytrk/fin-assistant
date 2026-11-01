@@ -16,6 +16,7 @@ from app import fund_api_service as _fund_api_service
 from app import kap_api_service as _kap_api_service
 from app import kap_financials as _kap_financials
 from app import kap_service as _kap_service
+from app import kap_statement_refresh as _kap_statement_refresh
 from app import market_service as _market_service
 from app import model_portfolio_api_service as _model_portfolio_api_service
 from app.routers import funds as _funds_router
@@ -37,6 +38,7 @@ _MODULES: tuple[ModuleType, ...] = (
     _kap_financials,
     _api_runtime,
     _kap_service,
+    _kap_statement_refresh,
 )
 
 

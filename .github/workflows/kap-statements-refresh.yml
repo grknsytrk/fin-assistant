@@ -1,0 +1,185 @@
+name: refresh KAP statements
+
+# Manual only until the BIST 100 pilot confirms KAP tolerates the request rate.
+# Once the pilot is verified, add a schedule entry here (see funds-refresh.yml).
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "incremental re-checks current caches; full fills missing depth"
+        type: choice
+        options:
+          - incremental
+          - full
+        default: incremental
+      universe:
+        description: "Company universe"
+        type: choice
+        options:
+          - all
+          - bist30
+          - bist100
+          - symbols
+        default: bist100
+      symbols:
+        description: "Comma separated symbols (used when universe=symbols)"
+        type: string
+        default: ""
+      max_quarters:
+        description: "Requested statement depth (1-20)"
+        type: string
+        default: "5"
+      budget_seconds:
+        description: "Wall-clock budget for this run (30-5400); workflow timeout is 100 minutes"
+        type: string
+        default: "1500"
+      concurrency:
+        description: "Parallel company workers (1-2); keep at 1 until KAP rate limits are proven"
+        type: string
+        default: "1"
+
+permissions: {}
+
+concurrency:
+  group: kap-statements-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      FIN_API_BASE_URL: https://grknsytrk-fin-api.hf.space
+      FIN_API_ADMIN_TOKEN: ${{ secrets.FIN_API_ADMIN_TOKEN }}
+      MODE: ${{ inputs.mode }}
+      UNIVERSE: ${{ inputs.universe }}
+      SYMBOLS: ${{ inputs.symbols }}
+      MAX_QUARTERS: ${{ inputs.max_quarters }}
+      BUDGET_SECONDS: ${{ inputs.budget_seconds }}
+      CONCURRENCY: ${{ inputs.concurrency }}
+    steps:
+      - name: validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$UNIVERSE" == "symbols" && -z "${SYMBOLS//[[:space:],;]/}" ]]; then
+            echo "universe=symbols requires at least one symbol" >&2
+            exit 1
+          fi
+          if ! [[ "$MAX_QUARTERS" =~ ^[0-9]+$ ]] || (( MAX_QUARTERS < 1 || MAX_QUARTERS > 20 )); then
+            echo "max_quarters must be an integer between 1 and 20" >&2
+            exit 1
+          fi
+          if ! [[ "$BUDGET_SECONDS" =~ ^[0-9]+$ ]] || (( BUDGET_SECONDS < 30 || BUDGET_SECONDS > 5400 )); then
+            echo "budget_seconds must be an integer between 30 and 5400" >&2
+            exit 1
+          fi
+          if ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || (( CONCURRENCY < 1 || CONCURRENCY > 2 )); then
+            echo "concurrency must be 1 or 2" >&2
+            exit 1
+          fi
+
+      - name: request statement refresh job
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          query="mode=$(jq -rn --arg v "$MODE" '$v|@uri')"
+          query+="&universe=$(jq -rn --arg v "$UNIVERSE" '$v|@uri')"
+          if [[ -n "${SYMBOLS//[[:space:]]/}" ]]; then
+            query+="&symbols=$(jq -rn --arg v "$SYMBOLS" '$v|@uri')"
+          fi
+          query+="&max_quarters=$MAX_QUARTERS&budget_seconds=$BUDGET_SECONDS&concurrency=$CONCURRENCY"
+          response="$(curl --fail-with-body --silent --show-error --retry 2 \
+            --connect-timeout 10 --max-time 60 \
+            -X POST \
+            -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
+            "$FIN_API_BASE_URL/admin/kap/refresh-statements?$query")"
+          job_id="$(echo "$response" | jq -r '.refresh_job.job_id // empty')"
+          job_mode="$(echo "$response" | jq -r '.refresh_job.mode // empty')"
+          job_status="$(echo "$response" | jq -r '.refresh_job.status // empty')"
+          if [[ -z "$job_id" ]]; then
+            echo "refresh endpoint did not return a job id" >&2
+            echo "$response" >&2
+            exit 1
+          fi
+          echo "statement refresh requested: job_id=$job_id mode=${job_mode:-unknown} status=${job_status:-unknown}"
+          if [[ -n "$job_mode" && "$job_mode" != "$MODE" ]]; then
+            echo "::warning::an active $job_mode job was already running; polling it instead of starting a new $MODE job"
+          fi
+          echo "job_id=$job_id" >> "$GITHUB_OUTPUT"
+
+      - name: wait for statement refresh result
+        shell: bash
+        env:
+          JOB_ID: ${{ steps.request.outputs.job_id }}
+        run: |
+          set -euo pipefail
+          poll_deadline=$((SECONDS + 5520))
+          for attempt in $(seq 1 185); do
+            response="$(curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors \
+              --connect-timeout 10 --max-time 30 \
+              -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
+              "$FIN_API_BASE_URL/admin/kap/refresh-statements/status?job_id=$JOB_ID")"
+            status="$(echo "$response" | jq -r '.refresh_job.status // empty')"
+            processed="$(echo "$response" | jq -r '.refresh_job.processed // 0')"
+            total="$(echo "$response" | jq -r '.refresh_job.total // 0')"
+            fetched="$(echo "$response" | jq -r '.refresh_job.fetched // 0')"
+            updated="$(echo "$response" | jq -r '.refresh_job.updated // 0')"
+            unchanged="$(echo "$response" | jq -r '.refresh_job.unchanged // 0')"
+            skipped_missing="$(echo "$response" | jq -r '.refresh_job.skipped_missing_cache // 0')"
+            skipped_shallow="$(echo "$response" | jq -r '.refresh_job.skipped_shallow_cache // 0')"
+            skipped_schema="$(echo "$response" | jq -r '.refresh_job.skipped_schema // 0')"
+            skipped_ready="$(echo "$response" | jq -r '.refresh_job.skipped_ready_cache // 0')"
+            failed="$(echo "$response" | jq -r '.refresh_job.failed // 0')"
+            blocked="$(echo "$response" | jq -r '.refresh_job.blocked // 0')"
+            remaining="$(echo "$response" | jq -r '.refresh_job.remaining // 0')"
+            coverage_ready="$(echo "$response" | jq -r '.refresh_job.coverage.ready // "?"')"
+            stop_reason="$(echo "$response" | jq -r '.refresh_job.stop_reason // empty')"
+            job_mode="$(echo "$response" | jq -r '.refresh_job.mode // empty')"
+            echo "statement refresh: job_id=$JOB_ID status=${status:-unknown} processed=$processed/$total fetched=$fetched updated=$updated unchanged=$unchanged skipped_ready=$skipped_ready skipped_missing=$skipped_missing skipped_shallow=$skipped_shallow skipped_schema=$skipped_schema failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
+            case "$status" in
+              succeeded)
+                if (( failed > 0 || blocked > 0 )); then
+                  echo "::error::statement refresh reported success with failed=$failed blocked=$blocked; refusing to treat partial coverage as healthy" >&2
+                  echo "$response" >&2
+                  exit 1
+                fi
+                if [[ "${job_mode:-$MODE}" == "full" && "$coverage_ready" != "$total" ]]; then
+                  echo "::warning::full refresh finished but coverage_ready=$coverage_ready/$total; some companies may expose fewer quarters than requested"
+                fi
+                echo "statement refresh succeeded: updated=$updated unchanged=$unchanged skipped_ready=$skipped_ready coverage_ready=$coverage_ready"
+                exit 0
+                ;;
+              partial)
+                if [[ "$stop_reason" == "completed_with_errors" ]] || (( failed > 0 || blocked > 0 )); then
+                  echo "::error::statement refresh completed with errors: stop_reason=${stop_reason:-completed_with_errors} failed=$failed blocked=$blocked processed=$processed/$total remaining=$remaining" >&2
+                  echo "$response" >&2
+                  exit 1
+                fi
+                echo "::warning::statement refresh stopped early (stop_reason=${stop_reason:-budget_exhausted}); processed=$processed/$total remaining=$remaining. Re-run the workflow in $MODE mode to continue."
+                exit 0
+                ;;
+              aborted)
+                echo "statement refresh aborted to protect KAP from a request burst: stop_reason=${stop_reason:-unknown} blocked=$blocked failed=$failed" >&2
+                echo "$response" >&2
+                exit 1
+                ;;
+              failed)
+                echo "statement refresh failed: stop_reason=${stop_reason:-unknown}" >&2
+                echo "$response" >&2
+                exit 1
+                ;;
+              superseded)
+                echo "statement refresh was superseded by a newer job; the newer job owns the active marker"
+                exit 0
+                ;;
+            esac
+            if (( SECONDS >= poll_deadline )); then
+              echo "statement refresh polling deadline reached; job_id=$JOB_ID may still be running" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "statement refresh did not finish within the polling window; job_id=$JOB_ID may still be running" >&2
+          exit 1

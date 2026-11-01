@@ -6,6 +6,7 @@ from app.api_runtime import *
 from app.kap_api_service import *
 from app.market_service import *
 from app.kap_service import *
+from app.kap_statement_refresh import *
 
 router = APIRouter()
 
@@ -75,6 +76,55 @@ def admin_refresh_kap_flow(
 
     _require_admin_refresh_access(request)
     return _refresh_kap_flow_store(fast=fast)
+
+@router.post("/admin/kap/refresh-statements")
+def admin_refresh_kap_statements(
+    request: Request,
+    mode: Literal["incremental", "full"] = Query("incremental"),
+    universe: Literal["all", "bist30", "bist100", "symbols"] = Query("all"),
+    symbols: Optional[str] = Query(None),
+    max_quarters: int = Query(5, ge=1, le=20),
+    budget_seconds: int = Query(1500, ge=30, le=5400),
+    concurrency: int = Query(1, ge=1, le=2),
+) -> Dict[str, Any]:
+    """Start a conservative KAP statement refresh job.
+
+    ``incremental`` only re-checks companies whose cache is already current and
+    never expands a shallow cache. ``full`` is the explicit backfill that fills
+    gaps but still skips caches that already meet the requested depth.
+    """
+
+    _require_admin_refresh_access(request)
+    if not getattr(CONFIG, "kap", None) or not getattr(CONFIG.kap, "enabled", False):
+        raise HTTPException(status_code=503, detail="KAP modülü devre dışı.")
+    parsed_symbols = _parse_kap_statement_symbols(symbols)
+    try:
+        job = _start_kap_statement_refresh_job(
+            mode=mode,
+            universe=universe,
+            symbols=parsed_symbols,
+            max_quarters=max_quarters,
+            budget_seconds=budget_seconds,
+            concurrency=concurrency,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"refresh_job": job}
+
+@router.get("/admin/kap/refresh-statements/status")
+def kap_statement_refresh_status(
+    request: Request,
+    job_id: str = Query(..., min_length=8, max_length=64),
+) -> Dict[str, Any]:
+    _require_admin_refresh_access(request)
+    if not getattr(CONFIG, "kap", None) or not getattr(CONFIG.kap, "enabled", False):
+        raise HTTPException(status_code=503, detail="KAP modülü devre dışı.")
+    job = _get_kap_statement_refresh_job(job_id.strip())
+    if job is None:
+        raise HTTPException(status_code=404, detail="Bilanço yenileme işi bulunamadı veya süresi doldu.")
+    return {"refresh_job": _public_kap_statement_job(job)}
 
 @router.get("/kap/companies")
 def kap_companies() -> Dict[str, Any]:

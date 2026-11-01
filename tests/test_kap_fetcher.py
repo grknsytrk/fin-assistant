@@ -332,6 +332,139 @@ def test_list_company_disclosures_stops_after_requested_period_count(
     assert len(calls) == 2
 
 
+def test_list_company_disclosures_raises_on_rate_limit_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def rate_limited(*_args: object, **_kwargs: object) -> None:
+        raise urllib.error.HTTPError("url", 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setattr(kap_fetcher, "_http_get_json", rate_limited)
+    monkeypatch.setattr(kap_fetcher.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="429"):
+        _list_company_disclosures(
+            member_oid="oid",
+            cfg=_cfg(),
+            max_periods=5,
+            allow_criteria_fallback=False,
+        )
+
+
+def test_list_company_disclosures_raises_on_partial_provider_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_http_get_json(url: str, _cfg_obj: object) -> list[dict[str, object]]:
+        if "/2026/" in url:
+            return [
+                {
+                    "mkkMemberOid": "oid",
+                    "stockCode": "THYAO",
+                    "disclosureIndex": 1601478,
+                    "year": 2026,
+                    "period": 1,
+                    "title": "TURK HAVA YOLLARI",
+                }
+            ]
+        raise urllib.error.HTTPError("url", 503, "Service Unavailable", {}, None)
+
+    monkeypatch.setattr(kap_fetcher, "_http_get_json", fake_http_get_json)
+    monkeypatch.setattr(kap_fetcher.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(kap_fetcher, "_utc_now", lambda: kap_fetcher.datetime(2026, 5, 11, tzinfo=kap_fetcher.timezone.utc))
+
+    with pytest.raises(RuntimeError, match="saglayici hatasi"):
+        _list_company_disclosures(
+            member_oid="oid",
+            cfg=_cfg(),
+            max_periods=5,
+            allow_criteria_fallback=False,
+        )
+
+
+def test_list_company_disclosures_raises_on_partial_connection_resets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_http_get_json(url: str, _cfg_obj: object) -> list[dict[str, object]]:
+        if "/2026/" in url:
+            return [
+                {
+                    "mkkMemberOid": "oid",
+                    "stockCode": "THYAO",
+                    "disclosureIndex": 1601478,
+                    "year": 2026,
+                    "period": 1,
+                    "title": "TURK HAVA YOLLARI",
+                }
+            ]
+        raise ConnectionResetError("connection reset by peer")
+
+    monkeypatch.setattr(kap_fetcher, "_http_get_json", fake_http_get_json)
+    monkeypatch.setattr(kap_fetcher.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_utc_now",
+        lambda: kap_fetcher.datetime(2026, 5, 11, tzinfo=kap_fetcher.timezone.utc),
+    )
+
+    with pytest.raises(RuntimeError, match="saglayici hatasi.*connection reset"):
+        _list_company_disclosures(
+            member_oid="oid",
+            cfg=_cfg(),
+            max_periods=5,
+            allow_criteria_fallback=False,
+        )
+
+
+def test_resolve_member_strict_raises_on_provider_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reset(*_args: object, **_kwargs: object) -> None:
+        raise ConnectionResetError("connection reset by peer")
+
+    monkeypatch.setattr(kap_fetcher, "_http_get_json", reset)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        kap_fetcher._resolve_member_uncached("BINHO", _cfg(), strict=True)
+    assert kap_fetcher._resolve_member_uncached("BINHO", _cfg()) is None
+
+
+def test_resolve_member_strict_surfaces_errors_if_an_alias_was_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def partial_provider_failure(*_args: object, **_kwargs: object) -> list[object]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionResetError("connection reset by peer")
+        return []
+
+    monkeypatch.setattr(kap_fetcher, "_http_get_json", partial_provider_failure)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        kap_fetcher._resolve_member_uncached("BIMAS", _cfg(), strict=True)
+
+
+def test_kap_request_pacing_enforces_start_to_start_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 100.0}
+    sleeps: list[float] = []
+    monkeypatch.setattr(kap_fetcher.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(kap_fetcher.time, "sleep", lambda seconds: sleeps.append(seconds))
+    kap_fetcher.set_kap_request_pacing(2.5)
+    try:
+        kap_fetcher._wait_for_kap_request_slot()
+        assert sleeps == []
+
+        clock["now"] = 101.0
+        kap_fetcher._wait_for_kap_request_slot()
+        assert sleeps == [pytest.approx(1.5)]
+    finally:
+        kap_fetcher.set_kap_request_pacing(0.0)
+
+
+
 def test_fetch_snapshot_uses_ticker_alias_cache_when_live_list_is_empty(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -515,6 +648,43 @@ def test_fetch_snapshot_keeps_schema_mismatched_cache_stale_on_live_error(
     assert payload["cache_hit"] is True
     assert payload["cache_stale"] is True
     assert payload["error"] == "live kap unavailable"
+
+
+def test_fetch_snapshot_strict_mode_raises_instead_of_serving_stale_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    cache_dir = tmp_path / "kap_cache"
+    cache_dir.mkdir()
+    (cache_dir / "AKBNK.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "schema_version": KAP_CACHE_SCHEMA_VERSION - 1,
+                "company": "AKBNK",
+                "stock_code": "AKBNK",
+                "member_oid": "oid-akbnk",
+                "fetched_at": "2026-05-01T00:00:00+00:00",
+                "quarters": [{"quarter": "2026Q1", "year": 2026, "period": 1}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_resolve_member",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("live kap unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="live kap unavailable"):
+        fetch_kap_company_snapshot(
+            company="AKBNK",
+            cfg=SimpleNamespace(cache_ttl_hours=24.0, timeout_seconds=1.0, user_agent="ragfin-test/1.0"),
+            processed_dir=tmp_path,
+            force_refresh=False,
+            max_quarters=1,
+            allow_criteria_fallback=False,
+        )
 
 
 def test_parse_insurance_premium_pdf_text_extracts_general_total() -> None:
@@ -966,6 +1136,36 @@ def test_ensure_insurance_premium_disclosures_prefers_marketvisuals_for_known_co
     assert result["insurance_premium_disclosures"] == [
         {"year": 2026, "month": 4, "monthly_gross_premium": 3_153_910_000.0}
     ]
+
+
+def test_ensure_insurance_premium_disclosures_strict_raises_on_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    payload = {
+        "ok": True,
+        "schema_version": KAP_CACHE_SCHEMA_VERSION,
+        "company": "ANSGR",
+        "company_title": "Anadolu Sigorta",
+        "stock_code": "ANSGR",
+        "member_oid": "oid",
+        "quarters": [],
+    }
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_fetch_insurance_premium_disclosures",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            urllib.error.HTTPError("url", 403, "Forbidden", {}, None)
+        ),
+    )
+
+    with pytest.raises(urllib.error.HTTPError):
+        kap_fetcher._ensure_insurance_premium_disclosures(
+            payload=payload,
+            cache_path=tmp_path / "ANSGR.json",
+            cfg=_cfg(),
+            strict=True,
+        )
 
 
 def test_fetch_snapshot_uses_premium_only_when_financials_rate_limited(
