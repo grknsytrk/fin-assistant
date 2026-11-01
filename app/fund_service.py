@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import concurrent.futures
 import copy
@@ -562,12 +562,7 @@ def _init_fund_prices_schema(conn: Any) -> None:
         )
         """
     )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_fund_prices_code_date
-        ON fund_prices (fund_code, date)
-        """
-    )
+    conn.execute("DROP INDEX IF EXISTS idx_fund_prices_code_date")
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_fund_prices_code_date_updated
@@ -2338,7 +2333,7 @@ def _price_warning_from_row(
         "source": source,
         "warning": warning,
         "metadata": {"price": price},
-        "raw": raw if isinstance(raw, dict) else row,
+        "raw": None,
     }
 
 
@@ -2367,19 +2362,11 @@ def _storage_point_from_row(
     daily_return = _coerce_float(point.get("daily_return"))
     if daily_return is None and isinstance(raw, dict):
         daily_return = _coerce_float(_first_present(raw, "gunlukGetiri", "daily_return"))
-    metadata = {
-        key: point.get(key)
-        for key in (
-            "name",
-            "fund_type",
-            "founder_company",
-            "manager_company",
-            "tefas_open",
-            "risk_value",
-            "currency",
-        )
-        if point.get(key) is not None
-    }
+    metadata = (
+        {"tefas_open": point["tefas_open"]}
+        if point.get("tefas_open") is not None
+        else {}
+    )
     return (
         {
             "fund_code": fund_code,
@@ -2391,7 +2378,7 @@ def _storage_point_from_row(
             "investor_count": _coerce_int(point.get("investor_count")),
             "share_count": _coerce_float(point.get("share_count")),
             "metadata": metadata,
-            "raw": raw if isinstance(raw, dict) else None,
+            "raw": None,
         },
         None,
     )
@@ -2559,6 +2546,13 @@ def upsert_fund_price_points(
                     raw_json = excluded.raw_json,
                     fetched_at = excluded.fetched_at,
                     updated_at = excluded.updated_at
+                WHERE fund_prices.price IS DISTINCT FROM excluded.price
+                   OR fund_prices.daily_return IS DISTINCT FROM excluded.daily_return
+                   OR fund_prices.aum IS DISTINCT FROM excluded.aum
+                   OR fund_prices.investor_count IS DISTINCT FROM excluded.investor_count
+                   OR fund_prices.share_count IS DISTINCT FROM excluded.share_count
+                   OR fund_prices.metadata_json IS DISTINCT FROM excluded.metadata_json
+                   OR fund_prices.raw_json IS DISTINCT FROM excluded.raw_json
             """
             for offset in range(0, len(prepared_rows), 250):
                 chunk = prepared_rows[offset : offset + 250]
