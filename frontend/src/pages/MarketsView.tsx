@@ -1725,9 +1725,51 @@ function StockCardMiniChart({
     isLoading?: boolean;
     isLive?: boolean;
 }) {
+    const shellRef = useRef<HTMLDivElement>(null);
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-    const width = 360;
-    const height = 150;
+    const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
+        width: 360,
+        height: 150,
+    });
+
+    useLayoutEffect(() => {
+        const el = shellRef.current;
+        if (!el) return;
+
+        let frameId: number | null = null;
+        const updateFromRect = (rect: DOMRectReadOnly | DOMRect) => {
+            const w = Math.round(rect.width);
+            const h = Math.round(rect.height);
+            if (w <= 0 || h <= 0) return;
+            if (frameId !== null) cancelAnimationFrame(frameId);
+            frameId = requestAnimationFrame(() => {
+                setDimensions((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }));
+            });
+        };
+
+        updateFromRect(el.getBoundingClientRect());
+
+        if (typeof ResizeObserver !== 'undefined') {
+            const observer = new ResizeObserver((entries) => {
+                const entry = entries[0];
+                if (entry) updateFromRect(entry.contentRect);
+            });
+            observer.observe(el);
+            return () => {
+                if (frameId !== null) cancelAnimationFrame(frameId);
+                observer.disconnect();
+            };
+        }
+
+        const onResize = () => updateFromRect(el.getBoundingClientRect());
+        window.addEventListener('resize', onResize);
+        return () => {
+            if (frameId !== null) cancelAnimationFrame(frameId);
+            window.removeEventListener('resize', onResize);
+        };
+    }, []);
+
+    const { width, height } = dimensions;
     const padding = { top: 8, right: 2, bottom: 18, left: 2 };
     const validPoints = (points ?? []).filter((point) => Number.isFinite(point.close));
     const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
@@ -1794,7 +1836,7 @@ function StockCardMiniChart({
 
     if (isLoading) {
         return (
-            <div className="stock-card-chart-shell">
+            <div ref={shellRef} className="stock-card-chart-shell">
                 {rangeControls}
                 <div className="stock-card-inline-chart-skeleton" aria-hidden="true">
                     <div className="stock-card-inline-chart-track stock-card-inline-skeleton-pulse">
@@ -1802,6 +1844,7 @@ function StockCardMiniChart({
                             className="stock-card-inline-chart-svg"
                             viewBox={`0 0 ${width} ${height}`}
                             preserveAspectRatio="none"
+                            shapeRendering="geometricPrecision"
                         >
                             <defs>
                                 <linearGradient id={skeletonAreaGradientId} x1="0%" y1="0%" x2="0%" y2="100%">
@@ -1825,7 +1868,7 @@ function StockCardMiniChart({
 
     if (validPoints.length < 2) {
         return (
-            <div className="stock-card-chart-shell">
+            <div ref={shellRef} className="stock-card-chart-shell">
                 {rangeControls}
                 <div className="stock-card-chart-empty">Veri yok</div>
             </div>
@@ -1918,7 +1961,7 @@ function StockCardMiniChart({
     const tooltipY = hoverY == null ? 0 : clamp(hoverY - tooltipHeight / 2, padding.top, height - tooltipHeight - 8);
 
     return (
-        <div className="stock-card-chart-shell">
+        <div ref={shellRef} className="stock-card-chart-shell">
             {rangeControls}
             <svg
                 className="stock-card-mini-chart"
@@ -1928,6 +1971,8 @@ function StockCardMiniChart({
                 aria-label={`${symbol} ${selectedRange} çizgi grafiği`}
                 onPointerMove={handlePointerMove}
                 onPointerLeave={() => setHoverIndex(null)}
+                shapeRendering="geometricPrecision"
+                textRendering="geometricPrecision"
             >
                 <defs>
                     <linearGradient id={gradientId} x1="0%" y1="0%" x2="0%" y2="100%">

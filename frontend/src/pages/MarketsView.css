@@ -961,14 +961,14 @@
 
 .stock-card-mini-chart {
     width: 100%;
-    height: 150px;
+    height: 100%;
     display: block;
     touch-action: none;
     background: transparent;
 }
 
 .markets-workspace-with-rail .stock-card-mini-chart {
-    height: 126px;
+    height: 100%;
 }
 
 .stock-card-chart-empty {
