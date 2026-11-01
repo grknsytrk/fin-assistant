@@ -314,13 +314,18 @@ def _statement_cache_path(symbol: str) -> Path:
 def _read_local_statement_cache(symbol: str) -> Optional[Dict[str, Any]]:
     """Read only the local mirror; remote hydration happens at bootstrap."""
 
-    path = _statement_cache_path(symbol)
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, ValueError):
-        return None
-    return payload if isinstance(payload, dict) else None
+    from src.kap_fetcher import _cache_matches_requested_company, _company_cache_keys
+
+    for key in _company_cache_keys(symbol):
+        path = _statement_cache_path(key)
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if isinstance(payload, dict) and _cache_matches_requested_company(payload, symbol):
+            return payload
+    return None
 
 
 def _statement_cached_depth(payload: Optional[Dict[str, Any]]) -> int:

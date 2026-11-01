@@ -525,8 +525,9 @@ def _read_first_cache(processed_dir: Path, company: str) -> Tuple[Path, Optional
         cached = _read_cache(path)
         if cached and _cache_matches_requested_company(cached, company):
             # Snapshot refresh paths annotate and merge this payload in place.
-            # Keep those changes out of the shared parsed-payload LRU.
-            return path, copy.deepcopy(cached)
+            # Keep those changes out of the shared parsed-payload LRU, and
+            # always return primary_path so updates write to the canonical key.
+            return primary_path, copy.deepcopy(cached)
     return primary_path, None
 
 
