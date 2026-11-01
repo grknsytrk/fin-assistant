@@ -70,11 +70,11 @@ _KAP_STATEMENT_REQUEST_GAP_SECONDS = float(
 )
 
 # Minimum start-to-start gap between KAP JSON requests while a batch job runs.
-# KAP starts resetting/throttling around a few dozen statement downloads per
-# minute, so the default keeps the job under roughly 24 requests/minute.
+# Keep batch traffic around 12 JSON requests per minute by default. KAP
+# returned 429s at the previous 2.5 second interval during the BIST100 pilot.
 _KAP_STATEMENT_REQUEST_INTERVAL_SECONDS = max(
     0.0,
-    float(os.getenv("RAGFIN_KAP_STATEMENT_REQUEST_INTERVAL_SECONDS", "2.5") or 0.0),
+    float(os.getenv("RAGFIN_KAP_STATEMENT_REQUEST_INTERVAL_SECONDS", "5.0") or 0.0),
 )
 
 _KAP_STATEMENT_BLOCK_COOLDOWN_SECONDS = max(

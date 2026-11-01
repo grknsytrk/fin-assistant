@@ -265,8 +265,9 @@ def test_http_get_json_uses_browser_user_agent_before_custom(monkeypatch: pytest
     assert seen_user_agents == [KAP_BROWSER_USER_AGENT]
 
 
-def test_http_get_json_stops_after_429_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_http_get_json_defers_after_429_without_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_user_agents: list[str] = []
+    deferred: list[urllib.error.HTTPError] = []
 
     def fake_urlopen(request: object, timeout: float) -> _FakeResponse:
         del timeout
@@ -281,12 +282,60 @@ def test_http_get_json_stops_after_429_retry(monkeypatch: pytest.MonkeyPatch) ->
         )
 
     monkeypatch.setattr(kap_fetcher.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(kap_fetcher.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(kap_fetcher, "_defer_kap_requests_after_rate_limit", deferred.append)
 
     with pytest.raises(urllib.error.HTTPError):
         _http_get_json("https://example.test/kap", _cfg())
 
-    assert seen_user_agents == [KAP_BROWSER_USER_AGENT, KAP_BROWSER_USER_AGENT]
+    assert seen_user_agents == [KAP_BROWSER_USER_AGENT]
+    assert len(deferred) == 1
+
+
+def test_kap_retry_after_seconds_uses_header_or_safe_default() -> None:
+    retry_after = urllib.error.HTTPError(
+        "https://example.test/kap",
+        429,
+        "Request Limit Exceeded",
+        hdrs={"Retry-After": "15"},
+        fp=io.BytesIO(b""),
+    )
+    missing_retry_after = urllib.error.HTTPError(
+        "https://example.test/kap",
+        429,
+        "Request Limit Exceeded",
+        hdrs=None,
+        fp=io.BytesIO(b""),
+    )
+
+    assert kap_fetcher._kap_retry_after_seconds(retry_after) == 15
+    assert kap_fetcher._kap_retry_after_seconds(missing_retry_after) == 120
+
+
+def test_rate_limit_cooldown_blocks_next_kap_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"now": 100.0}
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    rate_limit = urllib.error.HTTPError(
+        "https://example.test/kap",
+        429,
+        "Request Limit Exceeded",
+        hdrs={"Retry-After": "15"},
+        fp=io.BytesIO(b""),
+    )
+    monkeypatch.setattr(kap_fetcher.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(kap_fetcher.time, "sleep", fake_sleep)
+    monkeypatch.setattr(kap_fetcher, "_KAP_REQUEST_PACING_COOLDOWN_UNTIL", 0.0)
+    kap_fetcher.set_kap_request_pacing(0.0)
+
+    kap_fetcher._defer_kap_requests_after_rate_limit(rate_limit)
+    kap_fetcher._wait_for_kap_request_slot()
+    kap_fetcher._wait_for_kap_request_slot()
+
+    assert sleeps == [15]
 
 
 def test_list_company_disclosures_stops_after_requested_period_count(

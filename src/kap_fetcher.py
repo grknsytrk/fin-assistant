@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -750,6 +751,9 @@ def _candidate_user_agents(cfg: KapConfig) -> List[str]:
 _KAP_REQUEST_PACING_LOCK = threading.Lock()
 _KAP_REQUEST_PACING_INTERVAL = 0.0
 _KAP_REQUEST_PACING_LAST_AT = 0.0
+_KAP_REQUEST_PACING_COOLDOWN_UNTIL = 0.0
+_KAP_429_FALLBACK_COOLDOWN_SECONDS = 120.0
+_KAP_429_MAX_COOLDOWN_SECONDS = 3600.0
 
 
 def set_kap_request_pacing(interval_seconds: float) -> None:
@@ -772,17 +776,53 @@ def set_kap_request_pacing(interval_seconds: float) -> None:
         )
 
 
-def _wait_for_kap_request_slot() -> None:
-    global _KAP_REQUEST_PACING_LAST_AT
-    if _KAP_REQUEST_PACING_INTERVAL <= 0:
+def _kap_retry_after_seconds(exc: urllib.error.HTTPError) -> float:
+    headers = getattr(exc, "headers", None) or getattr(exc, "hdrs", None)
+    retry_after = headers.get("Retry-After") if headers is not None else None
+    if retry_after is not None:
+        try:
+            seconds = float(str(retry_after).strip())
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(str(retry_after))
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                seconds = _KAP_429_FALLBACK_COOLDOWN_SECONDS
+    else:
+        seconds = _KAP_429_FALLBACK_COOLDOWN_SECONDS
+    return min(_KAP_429_MAX_COOLDOWN_SECONDS, max(0.0, seconds))
+
+
+def _defer_kap_requests_after_rate_limit(exc: urllib.error.HTTPError) -> None:
+    """Keep all KAP callers idle for the provider's Retry-After window."""
+
+    global _KAP_REQUEST_PACING_COOLDOWN_UNTIL
+    cooldown_seconds = _kap_retry_after_seconds(exc)
+    if cooldown_seconds <= 0:
         return
     with _KAP_REQUEST_PACING_LOCK:
+        _KAP_REQUEST_PACING_COOLDOWN_UNTIL = max(
+            _KAP_REQUEST_PACING_COOLDOWN_UNTIL,
+            time.monotonic() + cooldown_seconds,
+        )
+
+
+def _wait_for_kap_request_slot() -> None:
+    global _KAP_REQUEST_PACING_LAST_AT
+    with _KAP_REQUEST_PACING_LOCK:
         now = time.monotonic()
-        wait_seconds = _KAP_REQUEST_PACING_INTERVAL - (now - _KAP_REQUEST_PACING_LAST_AT)
+        next_slot = max(
+            _KAP_REQUEST_PACING_LAST_AT + _KAP_REQUEST_PACING_INTERVAL,
+            _KAP_REQUEST_PACING_COOLDOWN_UNTIL,
+        )
+        wait_seconds = next_slot - now
         if wait_seconds > 0:
             time.sleep(wait_seconds)
             now = time.monotonic()
-        _KAP_REQUEST_PACING_LAST_AT = now
+        if _KAP_REQUEST_PACING_INTERVAL > 0:
+            _KAP_REQUEST_PACING_LAST_AT = now
 
 
 def _http_get_json(url: str, cfg: KapConfig) -> Any:
@@ -801,7 +841,8 @@ def _http_get_json(url: str, cfg: KapConfig) -> Any:
                 code = int(getattr(exc, "code", 0) or 0)
                 if code not in KAP_RETRYABLE_HTTP_CODES:
                     raise
-                if code == 429 and attempt >= 1:
+                if code == 429:
+                    _defer_kap_requests_after_rate_limit(exc)
                     raise
                 time.sleep(0.8 * (attempt + 1))
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
@@ -830,7 +871,8 @@ def _http_get_text(url: str, cfg: KapConfig) -> str:
                 code = int(getattr(exc, "code", 0) or 0)
                 if code not in KAP_RETRYABLE_HTTP_CODES:
                     raise
-                if code == 429 and attempt >= 1:
+                if code == 429:
+                    _defer_kap_requests_after_rate_limit(exc)
                     raise
                 time.sleep(0.8 * (attempt + 1))
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -861,7 +903,8 @@ def _http_post_json(url: str, payload: Dict[str, Any], cfg: KapConfig) -> Any:
                 code = int(getattr(exc, "code", 0) or 0)
                 if code not in KAP_RETRYABLE_HTTP_CODES:
                     raise
-                if code == 429 and attempt >= 1:
+                if code == 429:
+                    _defer_kap_requests_after_rate_limit(exc)
                     raise
                 time.sleep(0.8 * (attempt + 1))
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
@@ -890,7 +933,8 @@ def _http_get_bytes(url: str, cfg: KapConfig, *, accept: str = "*/*") -> bytes:
                 code = int(getattr(exc, "code", 0) or 0)
                 if code not in KAP_RETRYABLE_HTTP_CODES:
                     raise
-                if code == 429 and attempt >= 1:
+                if code == 429:
+                    _defer_kap_requests_after_rate_limit(exc)
                     raise
                 time.sleep(0.8 * (attempt + 1))
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
