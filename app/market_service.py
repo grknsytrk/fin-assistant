@@ -444,7 +444,9 @@ _MARKET_STOCK_CARD_CHART_RANGES: Dict[str, Dict[str, Any]] = {
     "1d": {"interval": "5m", "range": "1d", "ttl": 30},
     "1w": {"interval": "15m", "range": "5d", "ttl": 60},
     "1m": {"interval": "4h", "range": "1mo", "ttl": 600},
+    "ytd": {"interval": "1d", "range": "ytd", "ttl": 1800},
     "1y": {"interval": "1d", "range": "1y", "ttl": 3600},
+    "5y": {"interval": "1wk", "range": "5y", "ttl": 3600},
 }
 
 _STOCK_RETURN_BASE_CACHE: Dict[str, Any] = {}

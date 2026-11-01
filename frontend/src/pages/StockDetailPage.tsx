@@ -116,7 +116,9 @@ const STOCK_DETAIL_CHART_RANGES: Array<{ id: MarketStockCardChartRange; label: s
     { id: '1d', label: 'G', title: 'Gün içi' },
     { id: '1w', label: '1H', title: '1 Hafta' },
     { id: '1m', label: '1A', title: '1 Ay' },
+    { id: 'ytd', label: 'YTD', title: 'Yılbaşından bugüne' },
     { id: '1y', label: '1Y', title: '1 Yıl' },
+    { id: '5y', label: '5Y', title: '5 Yıl' },
 ];
 
 function stockDetailChartDateKey(value: Date): string {
@@ -149,7 +151,7 @@ function formatStockDetailChartTime(value: string, range: MarketStockCardChartRa
     return date.toLocaleDateString('tr-TR', {
         day: '2-digit',
         month: 'short',
-        year: range === '1y' ? 'numeric' : undefined,
+        year: range === 'ytd' || range === '1y' || range === '5y' ? 'numeric' : undefined,
     });
 }
 

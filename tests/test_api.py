@@ -6412,7 +6412,7 @@ def test_market_stock_card_chart_maps_range_and_normalizes_points(monkeypatch: p
 
 @pytest.mark.parametrize(
     ("chart_range", "expected_interval", "expected_yahoo_range"),
-    [("1m", "4h", "1mo"), ("1y", "1d", "1y")],
+    [("1m", "4h", "1mo"), ("ytd", "1d", "ytd"), ("1y", "1d", "1y"), ("5y", "1wk", "5y")],
 )
 def test_market_stock_card_chart_uses_requested_long_range_granularity(
     monkeypatch: pytest.MonkeyPatch,

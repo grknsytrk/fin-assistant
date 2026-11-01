@@ -664,7 +664,7 @@ export interface MarketIndexLinePoint {
   low?: number;
 }
 
-export type MarketStockCardChartRange = '1d' | '1w' | '1m' | '1y';
+export type MarketStockCardChartRange = '1d' | '1w' | '1m' | 'ytd' | '1y' | '5y';
 export type MarketStockCardStage = 'quick' | 'full';
 
 export interface MarketStockCardItem {

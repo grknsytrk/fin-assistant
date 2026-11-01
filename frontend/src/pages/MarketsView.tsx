@@ -219,7 +219,9 @@ const STOCK_CARD_CHART_RANGES: Array<{ id: MarketStockCardChartRange; label: str
     { id: '1d', label: 'G', title: 'Gün içi' },
     { id: '1w', label: '1H', title: '1 Hafta' },
     { id: '1m', label: '1A', title: '1 Ay' },
+    { id: 'ytd', label: 'YTD', title: 'Yılbaşından bugüne' },
     { id: '1y', label: '1Y', title: '1 Yıl' },
+    { id: '5y', label: '5Y', title: '5 Yıl' },
 ];
 const INDEX_COLUMNS: Array<{ key: keyof MarketIndexListRow; label: string; align?: 'left' | 'right' }> = [
     { key: 'symbol', label: 'Endeks', align: 'left' },
@@ -410,6 +412,13 @@ function formatStockCardAxisDate(iso: string | null | undefined, range: MarketSt
             timeZone: 'Europe/Istanbul',
             hour: '2-digit',
             minute: '2-digit',
+        }).format(dt);
+    }
+    if (range === '5y') {
+        return new Intl.DateTimeFormat('tr-TR', {
+            timeZone: 'Europe/Istanbul',
+            month: 'short',
+            year: '2-digit',
         }).format(dt);
     }
     return new Intl.DateTimeFormat('tr-TR', {
@@ -2444,7 +2453,15 @@ function MarketStockCard({
                     if (selectedRange === '1d') return item.change_pct;
                     if (selectedRange === '1w') return item.return_1w_pct;
                     if (selectedRange === '1m') return item.return_1m_pct;
+                    if (selectedRange === 'ytd') return item.return_ytd_pct;
                     if (selectedRange === '1y') return item.return_1y_pct;
+                    if (selectedRange === '5y') {
+                        const points = chartDataByRange['5y'];
+                        if (points && points.length >= 2 && points[0].close > 0) {
+                            return ((points[points.length - 1].close - points[0].close) / points[0].close) * 100;
+                        }
+                        return null;
+                    }
                     return item.change_pct;
                 })()}
                 currency={item.currency}
