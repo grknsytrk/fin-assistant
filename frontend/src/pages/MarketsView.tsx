@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { Building2, Check, Coins, GripHorizontal, Plus, RotateCcw, Search, SlidersHorizontal, Sparkles, Trash2, TrendingUp, X } from 'lucide-react';
@@ -29,6 +29,7 @@ import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavig
 import SymbolLogo from '../components/SymbolLogo';
 import { buildDocumentTitle, formatTitleNumber, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { MAX_WATCHLIST_ITEMS, normalizeWatchlistSymbol, useWatchlist, type WatchlistItem } from '../hooks/useWatchlist';
+import { useTableVirtualizer } from '../hooks/useTableVirtualizer';
 import {
     getMarketStockCardSymbolsNeedingLoad,
     retainMarketStockCardsForSymbols,
@@ -107,7 +108,7 @@ type StockScreenerFilterState = {
     positive_free_cash_flow: boolean;
     net_cash_only: boolean;
 };
-type StockTableColumn = { key: StockSortKey; label: string; sublabel?: string; align?: 'left' | 'right' };
+type StockTableColumn = { key: StockSortKey; label: string; sublabel?: string; align?: 'left' | 'right'; width?: number };
 
 const EMPTY_STOCK_SCREENER_FILTERS: StockScreenerFilterState = {
     sector: '',
@@ -141,37 +142,37 @@ const EMPTY_STOCK_SCREENER_FILTERS: StockScreenerFilterState = {
 };
 
 const STOCK_COLUMNS: StockTableColumn[] = [
-    { key: 'company', label: 'Hisse', align: 'left' },
-    { key: 'price', label: 'Fiyat (₺)', align: 'right' },
-    { key: 'change_pct', label: 'Gün %', align: 'right' },
-    { key: 'volume', label: 'Hacim', align: 'right' },
-    { key: 'market_cap', label: 'Piyasa Değeri', align: 'right' },
-    { key: 'return_1w_pct', label: '1 Hafta', align: 'right' },
-    { key: 'return_1m_pct', label: '1 Ay', align: 'right' },
-    { key: 'return_3m_pct', label: '3 Ay', align: 'right' },
-    { key: 'return_6m_pct', label: '6 Ay', align: 'right' },
-    { key: 'return_ytd_pct', label: 'Yılbaşı', align: 'right' },
-    { key: 'return_1y_pct', label: '1 Yıl', align: 'right' },
+    { key: 'company', label: 'Hisse', align: 'left', width: 130 },
+    { key: 'price', label: 'Fiyat (₺)', align: 'right', width: 100 },
+    { key: 'change_pct', label: 'Gün %', align: 'right', width: 90 },
+    { key: 'volume', label: 'Hacim', align: 'right', width: 110 },
+    { key: 'market_cap', label: 'Piyasa Değeri', align: 'right', width: 130 },
+    { key: 'return_1w_pct', label: '1 Hafta', align: 'right', width: 90 },
+    { key: 'return_1m_pct', label: '1 Ay', align: 'right', width: 90 },
+    { key: 'return_3m_pct', label: '3 Ay', align: 'right', width: 90 },
+    { key: 'return_6m_pct', label: '6 Ay', align: 'right', width: 90 },
+    { key: 'return_ytd_pct', label: 'Yılbaşı', align: 'right', width: 90 },
+    { key: 'return_1y_pct', label: '1 Yıl', align: 'right', width: 90 },
 ];
 const STOCK_FUNDAMENTAL_COLUMNS: StockTableColumn[] = [
-    { key: 'company', label: 'Hisse', align: 'left' },
-    { key: 'sector', label: 'Sektör', align: 'left' },
-    { key: 'fundamental_period', label: 'Dönem', align: 'left' },
-    { key: 'price', label: 'Fiyat', align: 'right' },
-    { key: 'market_cap', label: 'Piyasa Değeri', align: 'right' },
-    { key: 'fk', label: 'F/K', align: 'right' },
-    { key: 'pd_dd', label: 'PD/DD', align: 'right' },
-    { key: 'fd_favok', label: 'FD/FAVÖK', align: 'right' },
-    { key: 'fd_satis', label: 'FD/Satış', align: 'right' },
-    { key: 'net_borc_favok', label: 'Net Borç/FAVÖK', align: 'right' },
-    { key: 'ttm_net_kar', label: 'TTM Net Kâr', align: 'right' },
-    { key: 'ttm_fcf', label: 'TTM Serbest Nakit Akışı', align: 'right' },
-    { key: 'ttm_satis_gelirleri', label: 'TTM Satışlar', align: 'right' },
-    { key: 'ttm_favok', label: 'TTM FAVÖK', align: 'right' },
-    { key: 'net_borc', label: 'Net Borç', align: 'right' },
-    { key: 'ozkaynaklar', label: 'Özkaynaklar', align: 'right' },
-    { key: 'roe_pct', label: 'ROE %', align: 'right' },
-    { key: 'free_float_pct', label: 'Halka Açıklık %', align: 'right' },
+    { key: 'company', label: 'Hisse', align: 'left', width: 120 },
+    { key: 'sector', label: 'Sektör', align: 'left', width: 180 },
+    { key: 'fundamental_period', label: 'Dönem', align: 'left', width: 80 },
+    { key: 'price', label: 'Fiyat', align: 'right', width: 95 },
+    { key: 'market_cap', label: 'Piyasa Değeri', align: 'right', width: 125 },
+    { key: 'fk', label: 'F/K', align: 'right', width: 85 },
+    { key: 'pd_dd', label: 'PD/DD', align: 'right', width: 85 },
+    { key: 'fd_favok', label: 'FD/FAVÖK', align: 'right', width: 95 },
+    { key: 'fd_satis', label: 'FD/Satış', align: 'right', width: 95 },
+    { key: 'net_borc_favok', label: 'Net Borç/FAVÖK', align: 'right', width: 120 },
+    { key: 'ttm_net_kar', label: 'TTM Net Kâr', align: 'right', width: 125 },
+    { key: 'ttm_fcf', label: 'TTM Serbest Nakit Akışı', align: 'right', width: 150 },
+    { key: 'ttm_satis_gelirleri', label: 'TTM Satışlar', align: 'right', width: 125 },
+    { key: 'ttm_favok', label: 'TTM FAVÖK', align: 'right', width: 125 },
+    { key: 'net_borc', label: 'Net Borç', align: 'right', width: 120 },
+    { key: 'ozkaynaklar', label: 'Özkaynaklar', align: 'right', width: 125 },
+    { key: 'roe_pct', label: 'ROE %', align: 'right', width: 85 },
+    { key: 'free_float_pct', label: 'Halka Açıklık %', align: 'right', width: 110 },
 ];
 const STOCK_SCREENER_PRESETS: Array<{
     id: StockScreenerPresetId;
@@ -1253,12 +1254,21 @@ function constituentSortValue(
     return null;
 }
 
-function FlashStockRow({
+const StockTableRow = memo(function StockTableRow({
     row,
     rank,
-    children,
-    onClick,
-}: React.PropsWithChildren<{ row: MarketStockRow; rank: number; onClick: () => void }>) {
+    mode,
+    returnMode,
+    benchmarks,
+    onCompanyClick,
+}: {
+    row: MarketStockRow;
+    rank: number;
+    mode: 'performance' | 'fundamentals';
+    returnMode: StockReturnMode;
+    benchmarks?: MarketStocksResponse['benchmarks'];
+    onCompanyClick: (symbol: string) => void;
+}) {
     const prevPriceRef = useRef(row.price);
     const [flashClass, setFlashClass] = useState('');
 
@@ -1272,25 +1282,94 @@ function FlashStockRow({
         prevPriceRef.current = row.price;
     }, [row.price]);
 
+    const symbol = row.symbol || row.company;
+
     return (
         <tr
             className={flashClass}
             onClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
                 if (event.button !== 0) return;
-                onClick();
+                onCompanyClick(row.company);
             }}
             onAuxClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
                 if (event.button !== 1) return;
                 if ((event.target as Element).closest('a[href]')) return;
                 event.preventDefault();
-                window.open(toStockDetail(row.symbol), '_blank', 'noopener,noreferrer');
+                window.open(toStockDetail(symbol), '_blank', 'noopener,noreferrer');
             }}
         >
             <td className="stocks-rank">{rank}</td>
-            {children}
+            <td className="stocks-symbol-cell">
+                <a
+                    className="stocks-symbol-link"
+                    href={toStockDetail(row.company)}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                        event.preventDefault();
+                        onCompanyClick(row.company);
+                    }}
+                >
+                    <span className="stocks-symbol-main">
+                        <SymbolLogo
+                            symbol={row.company}
+                            name={row.company}
+                            kind="stock"
+                            logoUrl={row.logo_url}
+                            size="xs"
+                            className="stocks-symbol-logo"
+                        />
+                        <span>{row.company}</span>
+                    </span>
+                </a>
+            </td>
+            {mode === 'fundamentals' ? (
+                <>
+                    <td title={row.sector || undefined}>{row.sector || '—'}</td>
+                    <td>{row.fundamental_period || row.latest_quarter || '—'}</td>
+                    <td className="stocks-cell-right stocks-price-cell">{formatStockPrice(row)}</td>
+                    <td className="stocks-cell-right">{formatMarketCap(row.market_cap)}</td>
+                    <td className="stocks-cell-right">{formatFundamentalRatio(row.fk)}</td>
+                    <td className="stocks-cell-right">{formatFundamentalRatio(row.pd_dd)}</td>
+                    <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_favok)}</td>
+                    <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_satis)}</td>
+                    <td className="stocks-cell-right">{formatFundamentalRatio(row.net_borc_favok)}</td>
+                    <td className="stocks-cell-right">{formatMarketCap(row.ttm_net_kar ?? null)}</td>
+                    <td className="stocks-cell-right">{formatMarketCap(row.ttm_fcf ?? null)}</td>
+                    <td className="stocks-cell-right">{formatMarketCap(row.ttm_satis_gelirleri ?? null)}</td>
+                    <td className="stocks-cell-right">{formatMarketCap(row.ttm_favok ?? null)}</td>
+                    <td className="stocks-cell-right">{formatMarketCap(row.net_borc ?? null)}</td>
+                    <td className="stocks-cell-right">{formatMarketCap(row.ozkaynaklar ?? null)}</td>
+                    <td className="stocks-cell-right">{formatFundamentalPercent(row.roe_pct)}</td>
+                    <td className="stocks-cell-right">{formatFundamentalPercent(row.free_float_pct)}</td>
+                </>
+            ) : (
+                <>
+                    <td className="stocks-cell-right stocks-price-cell">{formatStockPrice(row)}</td>
+                    <td className={`stocks-cell-right ${row.change_pct == null ? 'stocks-cell-muted' : getTableChangeClass(row.change_pct)}`}>
+                        {formatTablePct(row.change_pct)}
+                    </td>
+                    <td className="stocks-cell-right stocks-volume-cell">{formatVolume(row.volume)}</td>
+                    <td className="stocks-cell-right stocks-market-cap-cell">
+                        {formatMarketCap(row.market_cap)}
+                    </td>
+                    {RETURN_KEYS.map((k) => {
+                        const val = getReturnValue(row, k, benchmarks, returnMode);
+                        const isNull = val == null || !Number.isFinite(val);
+                        return (
+                            <td
+                                key={k}
+                                className={`stocks-cell-right ${isNull ? 'stocks-cell-muted' : getTableChangeClass(val)}`}
+                            >
+                                {formatTablePct(val)}
+                            </td>
+                        );
+                    })}
+                </>
+            )}
         </tr>
     );
-}
+});
 
 
 const isBistSymbol = (sym?: string) => {
@@ -3667,6 +3746,32 @@ export default function MarketsView({
         return arr;
     }, [filteredStocks, stockSort, stocks?.benchmarks, returnMode]);
 
+    const stockTableWrapRef = useRef<HTMLDivElement>(null);
+    const {
+        startIndex: stockStartIndex,
+        endIndex: stockEndIndex,
+        topSpacerHeight: stockTopSpacerHeight,
+        bottomSpacerHeight: stockBottomSpacerHeight,
+    } = useTableVirtualizer({
+        totalRows: sortedStocks.length,
+        rowHeight: 38,
+        overscan: 12,
+        containerRef: stockTableWrapRef,
+        resetDeps: [
+            searchTerm,
+            stockIndex,
+            stockTableMode,
+            returnMode,
+            stockSort.key,
+            stockSort.direction,
+            activeFilterCount,
+        ],
+    });
+
+    const visibleStocks = useMemo(() => {
+        return sortedStocks.slice(stockStartIndex, stockEndIndex);
+    }, [sortedStocks, stockStartIndex, stockEndIndex]);
+
     const stockCardsBySymbol = useMemo(() => {
         const map = new Map<string, MarketStockCardItem>();
         for (const item of stockCards?.items || []) {
@@ -3993,16 +4098,6 @@ export default function MarketsView({
         if (tile.areaPct >= 3.5) return '1rem';
         if (tile.areaPct >= 1.2) return '0.78rem';
         return '0.64rem';
-    };
-
-    const renderReturnCell = (row: MarketStockRow, key: StockReturnKey) => {
-        const value = getReturnValue(row, key, stocks?.benchmarks, returnMode);
-        const isNull = value == null || !Number.isFinite(value);
-        return (
-            <td className={`stocks-cell-right ${isNull ? 'stocks-cell-muted' : getTableChangeClass(value)}`}>
-                {formatTablePct(value)}
-            </td>
-        );
     };
 
     return (
@@ -4660,8 +4755,17 @@ export default function MarketsView({
                                 {sortedStocks.length === 0 ? (
                                     <div className="no-results">Aranan kritere uyan hisse bulunamadı.</div>
                                 ) : (
-                                    <div className="stocks-table-wrap">
+                                    <div className="stocks-table-wrap" ref={stockTableWrapRef}>
                                         <table className={`stocks-table${stockTableMode === 'fundamentals' ? ' stocks-fundamental-table' : ''}`}>
+                                            <colgroup>
+                                                <col style={{ width: '44px', minWidth: '44px' }} />
+                                                {(stockTableMode === 'fundamentals' ? STOCK_FUNDAMENTAL_COLUMNS : STOCK_COLUMNS).map((column) => (
+                                                    <col
+                                                        key={column.key}
+                                                        style={{ width: `${column.width || 100}px`, minWidth: `${column.width || 100}px` }}
+                                                    />
+                                                ))}
+                                            </colgroup>
                                             <thead>
                                                 <tr>
                                                     <th className="stocks-rank">#</th>
@@ -4695,77 +4799,36 @@ export default function MarketsView({
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                                {sortedStocks.map((row, index) => (
-                                                    <FlashStockRow
-                                                        key={row.company}
-                                                        row={row}
-                                                        rank={index + 1}
-                                                        onClick={() => onCompanyClick(row.company)}
-                                                    >
-                                                        <td className="stocks-symbol-cell">
-                                                            <a
-                                                                className="stocks-symbol-link"
-                                                                href={toStockDetail(row.company)}
-                                                                onClick={(event) => {
-                                                                    event.stopPropagation();
-                                                                    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                                                                    event.preventDefault();
-                                                                    onCompanyClick(row.company);
-                                                                }}
-                                                            >
-                                                                <span className="stocks-symbol-main">
-                                                                    <SymbolLogo
-                                                                        symbol={row.company}
-                                                                        name={row.company}
-                                                                        kind="stock"
-                                                                        logoUrl={row.logo_url}
-                                                                        size="xs"
-                                                                        className="stocks-symbol-logo"
-                                                                    />
-                                                                    <span>{row.company}</span>
-                                                                </span>
-                                                            </a>
-                                                        </td>
-                                                        {stockTableMode === 'fundamentals' ? (
-                                                            <>
-                                                                <td>{row.sector || '—'}</td>
-                                                                <td>{row.fundamental_period || row.latest_quarter || '—'}</td>
-                                                                <td className="stocks-cell-right stocks-price-cell">{formatStockPrice(row)}</td>
-                                                                <td className="stocks-cell-right">{formatMarketCap(row.market_cap)}</td>
-                                                                <td className="stocks-cell-right">{formatFundamentalRatio(row.fk)}</td>
-                                                                <td className="stocks-cell-right">{formatFundamentalRatio(row.pd_dd)}</td>
-                                                                <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_favok)}</td>
-                                                                <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_satis)}</td>
-                                                                <td className="stocks-cell-right">{formatFundamentalRatio(row.net_borc_favok)}</td>
-                                                                <td className="stocks-cell-right">{formatMarketCap(row.ttm_net_kar ?? null)}</td>
-                                                                <td className="stocks-cell-right">{formatMarketCap(row.ttm_fcf ?? null)}</td>
-                                                                <td className="stocks-cell-right">{formatMarketCap(row.ttm_satis_gelirleri ?? null)}</td>
-                                                                <td className="stocks-cell-right">{formatMarketCap(row.ttm_favok ?? null)}</td>
-                                                                <td className="stocks-cell-right">{formatMarketCap(row.net_borc ?? null)}</td>
-                                                                <td className="stocks-cell-right">{formatMarketCap(row.ozkaynaklar ?? null)}</td>
-                                                                <td className="stocks-cell-right">{formatFundamentalPercent(row.roe_pct)}</td>
-                                                                <td className="stocks-cell-right">{formatFundamentalPercent(row.free_float_pct)}</td>
-                                                            </>
-                                                        ) : (
-                                                            <>
-                                                                <td className="stocks-cell-right stocks-price-cell">{formatStockPrice(row)}</td>
-                                                                <td className={`stocks-cell-right ${row.change_pct == null ? 'stocks-cell-muted' : getTableChangeClass(row.change_pct)}`}>
-                                                                    {formatTablePct(row.change_pct)}
-                                                                </td>
-                                                                <td className="stocks-cell-right stocks-volume-cell">{formatVolume(row.volume)}</td>
-                                                                <td className="stocks-cell-right stocks-market-cap-cell">
-                                                                    {formatMarketCap(row.market_cap)}
-                                                                </td>
-                                                                {renderReturnCell(row, 'return_1w_pct')}
-                                                                {renderReturnCell(row, 'return_1m_pct')}
-                                                                {renderReturnCell(row, 'return_3m_pct')}
-                                                                {renderReturnCell(row, 'return_6m_pct')}
-                                                                {renderReturnCell(row, 'return_ytd_pct')}
-                                                                {renderReturnCell(row, 'return_1y_pct')}
-                                                            </>
-                                                        )}
-                                                    </FlashStockRow>
-                                                ))}
+                                                {stockTopSpacerHeight > 0 && (
+                                                    <tr className="stocks-spacer-row" style={{ height: `${stockTopSpacerHeight}px` }} aria-hidden="true">
+                                                        <td
+                                                            colSpan={(stockTableMode === 'fundamentals' ? STOCK_FUNDAMENTAL_COLUMNS.length : STOCK_COLUMNS.length) + 1}
+                                                            style={{ height: `${stockTopSpacerHeight}px` }}
+                                                        />
+                                                    </tr>
+                                                )}
+                                                {visibleStocks.map((row, index) => {
+                                                    const actualRank = stockStartIndex + index + 1;
+                                                    return (
+                                                        <StockTableRow
+                                                            key={row.company}
+                                                            row={row}
+                                                            rank={actualRank}
+                                                            mode={stockTableMode}
+                                                            returnMode={returnMode}
+                                                            benchmarks={stocks?.benchmarks}
+                                                            onCompanyClick={onCompanyClick}
+                                                        />
+                                                    );
+                                                })}
+                                                {stockBottomSpacerHeight > 0 && (
+                                                    <tr className="stocks-spacer-row" style={{ height: `${stockBottomSpacerHeight}px` }} aria-hidden="true">
+                                                        <td
+                                                            colSpan={(stockTableMode === 'fundamentals' ? STOCK_FUNDAMENTAL_COLUMNS.length : STOCK_COLUMNS.length) + 1}
+                                                            style={{ height: `${stockBottomSpacerHeight}px` }}
+                                                        />
+                                                    </tr>
+                                                )}
                                             </tbody>
                                         </table>
                                     </div>

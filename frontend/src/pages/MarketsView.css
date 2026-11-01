@@ -2408,6 +2408,10 @@
     max-height: min(68vh, 760px);
     scrollbar-width: thin;
     scrollbar-color: color-mix(in srgb, var(--surface-border) 70%, var(--text-secondary)) transparent;
+    contain: paint layout;
+    will-change: scroll-position;
+    transform: translateZ(0);
+    -webkit-overflow-scrolling: touch;
 }
 
 .stocks-table-wrap::-webkit-scrollbar {
@@ -2426,15 +2430,20 @@
 
 .stocks-table {
     width: 100%;
-    min-width: 1320px;
+    min-width: 1144px;
     border-collapse: separate;
     border-spacing: 0;
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
 }
 
-.stocks-fundamental-table {
-    min-width: 1900px;
+.stocks-view .stocks-table {
+    table-layout: fixed;
+    min-width: 1144px;
+}
+
+.stocks-view .stocks-fundamental-table {
+    min-width: 2004px;
 }
 
 .stocks-table th,
@@ -2443,6 +2452,13 @@
     border-bottom: 1px solid rgba(255, 255, 255, 0.035);
     white-space: nowrap;
     font-size: 0.80rem;
+}
+
+.stocks-table td {
+    height: 38px;
+    box-sizing: border-box;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .stocks-table th {
@@ -2459,6 +2475,8 @@
 }
 
 .stocks-table tbody tr {
+    height: 38px;
+    box-sizing: border-box;
     color: var(--text-primary);
     cursor: pointer;
     transition: background-color 0.12s ease;
@@ -2466,6 +2484,23 @@
 
 .stocks-table tbody tr:hover {
     background: rgba(255, 255, 255, 0.025);
+}
+
+.stocks-table tr.stocks-spacer-row,
+.stocks-table tr.stocks-spacer-row:hover {
+    background: transparent !important;
+    cursor: default;
+    border: none !important;
+    height: auto;
+}
+
+.stocks-table tr.stocks-spacer-row td {
+    padding: 0 !important;
+    border: none !important;
+    background: transparent !important;
+    line-height: 0;
+    font-size: 0;
+    height: inherit;
 }
 
 .stocks-rank {
