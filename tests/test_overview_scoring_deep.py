@@ -209,3 +209,29 @@ def test_reasoning_effort_validation_and_default():
         validate_overview_commentary_request(dict(base_req, reasoning_effort="extreme"))
 
 
+def test_low_margin_high_turnover_retail_scores_strong_profitability_when_margins_and_efk_expand():
+    """Structurally low-margin retail companies (e.g., BIMAS with ~5-6% EBITDA margin
+    and ~3-3.6% net margin) should not be penalized down to ~6.7 when current margins
+    beat their historical median and operating profit (EFK & FAVÖK) expands strongly.
+    """
+    history = [
+        _quarter(2024, 3, 140, 7.0, 2.2, 4.3, cfo=10.0, capex=3.0, equity=150.0, net_debt=20.0, current_ratio=1.02),
+        _quarter(2024, 4, 150, 8.0, 3.0, 4.6, cfo=12.0, capex=4.0, equity=160.0, net_debt=22.0, current_ratio=1.01),
+        _quarter(2025, 1, 148, 5.2, 0.8, 2.7, cfo=8.0, capex=4.0, equity=170.0, net_debt=25.0, current_ratio=1.00),
+        _quarter(2025, 2, 162, 9.7, 3.7, 2.9, cfo=11.0, capex=4.5, equity=180.0, net_debt=28.0, current_ratio=1.03),
+        _quarter(2025, 3, 200, 14.4, 6.2, 5.3, cfo=15.0, capex=5.0, equity=190.0, net_debt=26.0, current_ratio=1.04),
+        _quarter(2025, 4, 210, 14.2, 7.2, 7.2, cfo=16.0, capex=5.0, equity=198.0, net_debt=29.0, current_ratio=1.06),
+        _quarter(2026, 1, 213, 10.1, 2.5, 6.5, cfo=19.0, capex=5.5, equity=202.0, net_debt=30.0, current_ratio=1.09),
+    ]
+    latest = _quarter(2026, 2, 237, 14.3, 5.5, 8.5, cfo=14.0, capex=7.0, equity=201.0, net_debt=32.4, current_ratio=1.03)
+    latest["ratios"]["roe"] = 13.9
+
+    result = compute_base_analysis({"company_kind": "generic", "quarters": history + [latest]})
+    card = result["scorecard"]
+    karlilik = next(s for s in card["subscores"] if s["key"] == "karlilik")
+
+    assert karlilik["score"] >= 8.0, f"Expected strong profitability (>=8.0) for retail margin & EFK expansion, got {karlilik['score']}"
+    assert card["adjustment_guards"]["karlilik"]["min"] >= -0.3
+
+
+

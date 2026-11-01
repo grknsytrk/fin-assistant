@@ -15,7 +15,13 @@ const FALLBACK_LABELS: Record<string, string> = {
     XU100: 'BIST 100',
     XU030: 'BIST 30',
     'USD/TRY': 'Amerikan Doları',
+    USDTRY: 'Amerikan Doları',
     'EUR/TRY': 'Euro',
+    EURTRY: 'Euro',
+    'GBP/TRY': 'İngiliz Sterlini',
+    GBPTRY: 'İngiliz Sterlini',
+    'EUR/USD': 'Euro / Dolar',
+    EURUSD: 'Euro / Dolar',
     BRENT: 'Brent Petrol',
     ALTIN: 'Altın (Ons)',
     GUMUS: 'Gümüş (Ons)',
@@ -225,6 +231,7 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
             const key = normalizeSymbol(item.symbol);
             if (!key) continue;
             map.set(key, item);
+            map.set(key.replace('/', ''), item);
         }
         return map;
     }, [payload]);
@@ -298,6 +305,7 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
                 const norm = normalizeSymbol(item.symbol);
                 if (norm && !seenFx.has(norm)) {
                     seenFx.add(norm);
+                    seenFx.add(norm.replace('/', ''));
                     fx.push(item);
                 }
             }
@@ -306,12 +314,13 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
             const norm = normalizeSymbol(sym);
             if (!seenFx.has(norm)) {
                 seenFx.add(norm);
+                seenFx.add(norm.replace('/', ''));
                 fx.push(lookup.get(norm) || placeholderItem(sym));
             }
         }
         fx.sort((a, b) => {
-            const pA = fxOrder[normalizeSymbol(a.symbol)] ?? 99;
-            const pB = fxOrder[normalizeSymbol(b.symbol)] ?? 99;
+            const pA = fxOrder[normalizeSymbol(a.symbol)] ?? fxOrder[normalizeSymbol(a.symbol).replace('/', '')] ?? 99;
+            const pB = fxOrder[normalizeSymbol(b.symbol)] ?? fxOrder[normalizeSymbol(b.symbol).replace('/', '')] ?? 99;
             return pA - pB;
         });
 

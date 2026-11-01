@@ -7220,6 +7220,32 @@ def test_market_watch_success_payload(monkeypatch: pytest.MonkeyPatch) -> None:
                     "as_of": "2026-04-20T09:30:00+00:00",
                     "error": None,
                 },
+                {
+                    "symbol": "GBP/TRY",
+                    "label": "?ngiliz Sterlini",
+                    "yahoo_symbol": "GBPTRY=X",
+                    "price": 49.10,
+                    "prev_close": 49.00,
+                    "change": 0.10,
+                    "change_pct": 0.20,
+                    "currency": "TRY",
+                    "market_state": "REGULAR",
+                    "as_of": "2026-04-20T09:30:00+00:00",
+                    "error": None,
+                },
+                {
+                    "symbol": "EUR/USD",
+                    "label": "Euro / Dolar",
+                    "yahoo_symbol": "EURUSD=X",
+                    "price": 1.085,
+                    "prev_close": 1.082,
+                    "change": 0.003,
+                    "change_pct": 0.28,
+                    "currency": "USD",
+                    "market_state": "REGULAR",
+                    "as_of": "2026-04-20T09:30:00+00:00",
+                    "error": None,
+                },
             ]
         ),
     )
@@ -7294,7 +7320,7 @@ def test_market_watch_success_payload(monkeypatch: pytest.MonkeyPatch) -> None:
 
     sections = payload["sections"]
     assert [row["symbol"] for row in sections["indices"]] == ["XUTUM", "XU100", "XU030"]
-    assert [row["symbol"] for row in sections["fx"]] == ["USD/TRY", "EUR/TRY"]
+    assert [row["symbol"] for row in sections["fx"]] == ["USD/TRY", "EUR/TRY", "GBP/TRY", "EUR/USD"]
     assert [row["symbol"] for row in sections["commodities"]] == ["BRENT", "ALTIN", "GUMUS", "DOGALGAZ"]
 
 

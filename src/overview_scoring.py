@@ -171,6 +171,46 @@ def _shrink(score: Optional[float], factor: float) -> Optional[float]:
     return 5.0 + (score - 5.0) * factor
 
 
+def _score_margin_level(
+    margin: Optional[float],
+    *,
+    abs_low: float,
+    abs_high: float,
+    hist_median: Optional[float] = None,
+    roe: Optional[float] = None,
+) -> Optional[float]:
+    """Score a margin level while respecting structurally low-margin, high-turnover models."""
+    abs_score = _score_higher(margin, abs_low, abs_high)
+    if abs_score is None or margin is None or margin <= 0:
+        return abs_score
+    if hist_median is None or hist_median <= 0:
+        return abs_score
+    hist_low = max(0.4, hist_median * 0.55)
+    hist_high = max(hist_median * 1.25, hist_median + 1.2)
+    hist_score = _score_higher(margin, hist_low, hist_high)
+    if hist_score is None:
+        return abs_score
+    if (roe is not None and roe >= 10.0) or margin >= hist_median:
+        return max(abs_score, hist_score)
+    if hist_median >= 1.5:
+        return max(abs_score, 0.30 * abs_score + 0.70 * hist_score)
+    return abs_score
+
+
+def _margin_pp_scale(
+    hist_median: Optional[float],
+    current_margin: Optional[float],
+    *,
+    default_scale: float,
+    min_scale: float,
+) -> float:
+    """Scale pp-change thresholds proportionally for low-margin businesses."""
+    ref = hist_median if (hist_median is not None and hist_median > 0) else current_margin
+    if ref is None or ref <= 0:
+        return default_scale
+    return _clamp(ref * 0.30, min_scale, default_scale)
+
+
 # ---------------------------------------------------------------------------
 # Display helpers (Turkish formatting for signal values / flags)
 # ---------------------------------------------------------------------------
@@ -511,6 +551,7 @@ def _earnings_quality(
     operating: Dict[str, Optional[float]],
     *,
     ebitda_current: Optional[float],
+    ebitda_ly: Optional[float] = None,
     reference_current: Optional[float],
     materiality_pp: float,
 ) -> Dict[str, Any]:
@@ -552,11 +593,25 @@ def _earnings_quality(
                 op_material = abs(op_delta) / reference_current * 100.0 >= materiality_pp
             else:
                 op_material = abs(op_delta) >= 0.05 * max(abs(op_ly or 0.0), 1.0)
+            ebitda_explained: Optional[float] = None
+            if ebitda_current is not None and ebitda_ly is not None:
+                ebitda_explained = (ebitda_current - ebitda_ly) / net_delta
+            op_yoy_pct = ((op_cur - op_ly) / op_ly * 100.0) if (op_ly is not None and op_ly > 0) else None
             # A material increase in operating profit is positive evidence
             # even when net profit rises faster because of other items. Treat
             # its share as context, not as an automatic quality penalty.
             if op_delta > 0 and op_material and explained >= 0.6:
                 score, code = 9.0, "faaliyet_destekli"
+            elif (
+                op_delta > 0
+                and op_material
+                and ebitda_explained is not None
+                and ebitda_explained >= 0.6
+                and (op_yoy_pct is None or op_yoy_pct >= 25.0)
+            ):
+                score, code = 8.5, "kismen_faaliyet_destekli"
+            elif op_delta > 0 and op_material and op_yoy_pct is not None and op_yoy_pct >= 35.0:
+                score, code = 8.2, "kismen_faaliyet_destekli"
             elif op_delta > 0 and op_material:
                 score, code = 7.5, "kismen_faaliyet_destekli"
             elif op_delta >= 0:
@@ -799,6 +854,7 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
         net,
         operating,
         ebitda_current=favok["cur"],
+        ebitda_ly=favok["ly"],
         reference_current=sales["cur"],
         materiality_pp=0.3,
     )
@@ -815,11 +871,24 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
     op_change_score, _ = _score_profit_change(
         op_metric["cur"], op_metric["ly"], sales["cur"], sales["ly"], pct_scale=45.0, delta_scale=3.0, materiality=4.0,
     )
+    op_karlilik_metric = efk if efk["cur"] is not None and efk["ly"] is not None else favok
+    op_karlilik_label = "Esas faaliyet kârı" if op_karlilik_metric is efk else "FAVÖK"
+    op_karlilik_change_score, _ = _score_profit_change(
+        op_karlilik_metric["cur"],
+        op_karlilik_metric["ly"],
+        sales["cur"],
+        sales["ly"],
+        pct_scale=45.0,
+        delta_scale=1.5 if op_karlilik_metric is efk else 3.0,
+        materiality=1.5 if op_karlilik_metric is efk else 4.0,
+    )
     op_ytd_metric = efk if efk["ytd"] is not None and efk["ytd_ly"] is not None else favok
     op_ytd_label = "Esas faaliyet kârı" if op_ytd_metric is efk else "FAVÖK"
     op_ytd_change_score, _ = _score_profit_change(
         op_ytd_metric["ytd"], op_ytd_metric["ytd_ly"], sales["ytd"], sales["ytd_ly"],
-        pct_scale=45.0, delta_scale=3.0, materiality=4.0,
+        pct_scale=45.0,
+        delta_scale=1.5 if op_ytd_metric is efk else 3.0,
+        materiality=1.5 if op_ytd_metric is efk else 4.0,
     )
     # Unbacked net profit growth counts less in both growth and profitability.
     net_growth_for_growth_bucket = _shrink(net_change_score, 0.5) if non_operating else net_change_score
@@ -844,16 +913,30 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
 
     favok_margin_vs_hist = (favok_margin - favok_margin_median) if favok_margin is not None and favok_margin_median is not None else None
     favok_margin_yoy_pp = (favok_margin - favok_margin_ly) if favok_margin is not None and favok_margin_ly is not None else None
+    favok_hist_scale = _margin_pp_scale(favok_margin_median, favok_margin, default_scale=3.0, min_scale=1.2)
+    favok_qoq_scale = _margin_pp_scale(favok_margin_median, favok_margin, default_scale=2.0, min_scale=1.0)
+    favok_yoy_scale = _margin_pp_scale(favok_margin_median, favok_margin, default_scale=3.0, min_scale=1.2)
+    net_qoq_scale = _margin_pp_scale(net_margin_median, net_margin, default_scale=2.0, min_scale=0.8)
+    net_yoy_scale = _margin_pp_scale(net_margin_median, net_margin, default_scale=2.5, min_scale=1.0)
+    net_margin_level_score = _score_margin_level(
+        net_margin, abs_low=0.0, abs_high=12.0, hist_median=None if non_operating else net_margin_median, roe=roe,
+    )
+    net_margin_yoy_score = _score_growth(net_margin_yoy_pp, net_yoy_scale)
+    if non_operating:
+        net_margin_level_score = _shrink(net_margin_level_score, 0.5)
+        net_margin_yoy_score = _shrink(net_margin_yoy_score, 0.5)
     karlilik = [
         _spec("Brüt kâr marjı (çeyreklik değişim)", _score_growth(gross_margin_qoq_pp, 2.0), 0.35, _fmt_pp(gross_margin_qoq_pp)),
-        _spec("FAVÖK marjı seviyesi", _score_higher(favok_margin, 4.0, 20.0), 0.6, _fmt_level_pct(favok_margin)),
-        _spec("FAVÖK marjı (kendi geçmişine göre)", _score_growth(favok_margin_vs_hist, 3.0), 0.7, _fmt_pp(favok_margin_vs_hist)),
-        _spec("FAVÖK marjı (çeyreklik değişim)", _score_growth(favok_margin_qoq_pp, 2.0), 0.55, _fmt_pp(favok_margin_qoq_pp)),
-        _spec("FAVÖK marjı yıllık değişim", _score_growth(favok_margin_yoy_pp, 3.0), 0.6, _fmt_pp(favok_margin_yoy_pp)),
-        _spec("Net kâr marjı seviyesi", _score_higher(net_margin, 0.0, 12.0), 0.3 if non_operating else 0.6, _fmt_level_pct(net_margin)),
-        _spec("Net kâr marjı (çeyreklik değişim)" + (" · kalite indirimi" if non_operating else ""), _score_growth(net_margin_qoq_pp, 2.0), 0.2 if non_operating else 0.35, _fmt_pp(net_margin_qoq_pp)),
-        _spec("ROE (son 12 ay)", _score_higher(roe, 4.0, 24.0), 0.8, _fmt_level_pct(roe)),
+        _spec("FAVÖK marjı seviyesi", _score_margin_level(favok_margin, abs_low=4.0, abs_high=20.0, hist_median=favok_margin_median, roe=roe), 0.6, _fmt_level_pct(favok_margin)),
+        _spec("FAVÖK marjı (kendi geçmişine göre)", _score_growth(favok_margin_vs_hist, favok_hist_scale), 0.7, _fmt_pp(favok_margin_vs_hist)),
+        _spec("FAVÖK marjı (çeyreklik değişim)", _score_growth(favok_margin_qoq_pp, favok_qoq_scale), 0.55, _fmt_pp(favok_margin_qoq_pp)),
+        _spec("FAVÖK marjı yıllık değişim", _score_growth(favok_margin_yoy_pp, favok_yoy_scale), 0.6, _fmt_pp(favok_margin_yoy_pp)),
+        _spec("Net kâr marjı seviyesi", net_margin_level_score, 0.3 if non_operating else 0.6, _fmt_level_pct(net_margin)),
+        _spec("Net kâr marjı (çeyreklik değişim)" + (" · kalite indirimi" if non_operating else ""), _score_growth(net_margin_qoq_pp, net_qoq_scale), 0.2 if non_operating else 0.35, _fmt_pp(net_margin_qoq_pp)),
+        _spec("Net kâr marjı yıllık değişim" + (" · kalite indirimi" if non_operating else ""), net_margin_yoy_score, 0.2 if non_operating else 0.45, _fmt_pp(net_margin_yoy_pp)),
+        _spec("ROE (son 12 ay)", _score_higher(roe, 2.0, 18.0), 0.8, _fmt_level_pct(roe)),
         _spec("Net kâr değişimi (aynı çeyrek)" + (" · kalite indirimi" if non_operating else ""), net_growth_for_profitability, 0.6, _fmt_change(net["cur"], net["ly"])),
+        _spec(f"{op_karlilik_label} değişimi (aynı çeyrek)", op_karlilik_change_score, 0.6, _fmt_change(op_karlilik_metric["cur"], op_karlilik_metric["ly"])),
         _spec(f"{op_ytd_label} değişimi (YTD)", op_ytd_change_score, 0.7, _fmt_change(op_ytd_metric["ytd"], op_ytd_metric["ytd_ly"])),
         _spec(f"Kâr kalitesi ({operating_label} desteği)", quality["score"], 1.0, str(quality["code"] or "-")),
     ]
@@ -1003,10 +1086,16 @@ def _analyze_generic(h: _History) -> Dict[str, Any]:
 
     # ---- guards / caps -------------------------------------------------------
     guards = _empty_guards()
-    supported_growth = quality["code"] == "faaliyet_destekli" and regime in ("kar_artti", "zarardan_kara")
+    supported_growth = (
+        quality["code"] in ("faaliyet_destekli", "kismen_faaliyet_destekli")
+        and not non_operating
+        and regime in ("kar_artti", "zarardan_kara")
+    )
     if supported_growth:
         _tighten(guards, "karlilik", minimum=-0.3)
         _tighten(guards, "buyume", minimum=-0.3)
+        if (favok_margin_qoq_pp or 0.0) >= 0.3 and (favok_margin_vs_hist or 0.0) >= 0.0:
+            _tighten(guards, "karlilik", minimum=-0.2)
     if non_operating:
         _tighten(guards, "karlilik", maximum=0.3)
         _tighten(guards, "buyume", maximum=0.3)

@@ -4763,11 +4763,13 @@ _WATCH_GLOBAL_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [
     ("CAC40", "CAC 40", ["^FCHI", "CAC.PA"]),
 ]
 
-_WATCH_FX_SYMBOLS: List[str] = ["USD/TRY", "EUR/TRY"]
+_WATCH_FX_SYMBOLS: List[str] = ["USD/TRY", "EUR/TRY", "GBP/TRY", "EUR/USD"]
 
 _WATCH_FX_LABELS: Dict[str, str] = {
     "USD/TRY": "Amerikan Doları",
     "EUR/TRY": "Euro",
+    "GBP/TRY": "İngiliz Sterlini",
+    "EUR/USD": "Euro / Dolar",
 }
 
 _WATCH_COMMODITY_SYMBOLS: List[str] = ["BRENT", "ALTIN", "GUMUS", "DOGALGAZ"]
