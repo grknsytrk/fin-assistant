@@ -6,14 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "incremental re-checks current caches; full fills missing depth"
+        description: "Çalışma modu (incremental: mevcutları kontrol et, full: eksikleri ve eski şemaları tamamla)"
         type: choice
         options:
           - incremental
           - full
         default: incremental
       universe:
-        description: "Company universe"
+        description: "Şirket kapsamı (bist30, bist100, all: tümü, symbols: seçili hisseler)"
         type: choice
         options:
           - all
@@ -22,19 +22,19 @@ on:
           - symbols
         default: bist100
       symbols:
-        description: "Comma separated symbols (used when universe=symbols)"
+        description: "Hisse kodları (sadece universe=symbols seçiliyse, örn: CCOLA,GLYHO,KARSN)"
         type: string
         default: ""
       max_quarters:
-        description: "Requested statement depth (1-20)"
+        description: "Çekilecek çeyrek bilanço sayısı (1-20, varsayılan: 5)"
         type: string
         default: "5"
       budget_seconds:
-        description: "Wall-clock budget for this run (30-5400); workflow timeout is 100 minutes"
+        description: "Maksimum çalışma süresi - saniye (30-5400, örn: 1500 = 25 dk, 3600 = 60 dk)"
         type: string
         default: "1500"
       concurrency:
-        description: "Parallel company workers (1-2); keep at 1 until KAP rate limits are proven"
+        description: "Aynı anda taranacak şirket sayısı (1-2; KAP engeli yememek için 1 bırakın)"
         type: string
         default: "1"
 
