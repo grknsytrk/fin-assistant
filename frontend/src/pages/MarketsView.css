@@ -571,6 +571,26 @@
     gap: 0.55rem;
 }
 
+.markets-workspace-with-rail[data-collapsed-menus="1"] .stock-card-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.5rem;
+}
+
+.markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.45rem;
+}
+
+.markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-head,
+.markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-price-row,
+.markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-metrics,
+.markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-foot,
+.markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-detail-metrics,
+.markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-performance {
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+}
+
 .markets-workspace-with-rail .stock-card-head,
 .markets-workspace-with-rail .stock-card-price-row,
 .markets-workspace-with-rail .stock-card-metrics,
@@ -3150,8 +3170,19 @@
 }
 
 @media (max-width: 1280px) {
-    .markets-workspace-with-rail .stock-card-grid {
+    .markets-workspace-with-rail .stock-card-grid,
+    .markets-workspace-with-rail .stock-card-skeleton-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .markets-workspace-with-rail[data-collapsed-menus="1"] .stock-card-grid,
+    .markets-workspace-with-rail[data-collapsed-menus="1"] .stock-card-skeleton-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-grid,
+    .markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-skeleton-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
     }
 }
 
@@ -3367,7 +3398,12 @@
         grid-template-columns: 1fr;
     }
 
-    .markets-workspace-with-rail .stock-card-grid {
+    .markets-workspace-with-rail .stock-card-grid,
+    .markets-workspace-with-rail[data-collapsed-menus="1"] .stock-card-grid,
+    .markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-grid,
+    .markets-workspace-with-rail .stock-card-skeleton-grid,
+    .markets-workspace-with-rail[data-collapsed-menus="1"] .stock-card-skeleton-grid,
+    .markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-skeleton-grid {
         grid-template-columns: 1fr;
     }
 
@@ -3397,6 +3433,16 @@
 .markets-workspace-with-rail .stock-card-skeleton-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.55rem;
+}
+
+.markets-workspace-with-rail[data-collapsed-menus="1"] .stock-card-skeleton-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.5rem;
+}
+
+.markets-workspace-with-rail[data-collapsed-menus="2"] .stock-card-skeleton-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.45rem;
 }
 
 .stock-card-skeleton {

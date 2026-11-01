@@ -79,6 +79,7 @@ interface MarketWatchRailProps {
     onSelectFund: (fundCode: string) => void;
     mobilePanelOpen?: boolean;
     onMobilePanelOpenChange?: (open: boolean) => void;
+    onCollapseChange?: (collapsed: boolean) => void;
 }
 
 const RAIL_TABS: Array<{ id: RailTab; label: string }> = [
@@ -305,11 +306,16 @@ export default function MarketWatchRail({
     onSelectFund,
     mobilePanelOpen,
     onMobilePanelOpenChange,
+    onCollapseChange,
 }: MarketWatchRailProps) {
     const [isCollapsed, setIsCollapsed] = useState(() => (
         typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
     ));
     const panelCollapsed = mobilePanelOpen === undefined ? isCollapsed : !mobilePanelOpen;
+
+    useEffect(() => {
+        onCollapseChange?.(panelCollapsed);
+    }, [panelCollapsed, onCollapseChange]);
     const [activeTool, setActiveTool] = useState<'markets' | 'watchlist' | 'news' | 'history' | 'portfolio'>('markets');
     const [activeTab, setActiveTab] = useState<RailTab>(readStoredRailTab);
     const [sort, setSort] = useState<{ key: RailSortKey | null; direction: RailSortDirection | null }>({
@@ -555,7 +561,8 @@ export default function MarketWatchRail({
     const updateCollapsed = useCallback((next: boolean) => {
         setIsCollapsed(next);
         onMobilePanelOpenChange?.(!next);
-    }, [onMobilePanelOpenChange]);
+        onCollapseChange?.(next);
+    }, [onMobilePanelOpenChange, onCollapseChange]);
 
     const handleDragStart = (e: React.DragEvent<HTMLDivElement>, item: WatchlistItem) => {
         setDraggedWatchlistKey(watchlistItemKey(item));

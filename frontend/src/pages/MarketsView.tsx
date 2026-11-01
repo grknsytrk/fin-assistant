@@ -2867,6 +2867,8 @@ export default function MarketsView({
     const [searchTerm, setSearchTerm] = useState('');
     const [stockCardSearchTerm, setStockCardSearchTerm] = useState('');
     const [navCollapsed, setNavCollapsed] = useState(false);
+    const [railCollapsed, setRailCollapsed] = useState(false);
+    const collapsedMenuCount = (navCollapsed ? 1 : 0) + (railCollapsed ? 1 : 0);
     const [activeSection, setActiveSection] = useState<MarketSection>(routeSection);
     const [isMobileViewport, setIsMobileViewport] = useState(() => (
         typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
@@ -3993,7 +3995,10 @@ export default function MarketsView({
                 onSelectTicker={onCompanyClick}
                 onSelectFund={onOpenFund}
             />
-            <div className={`markets-workspace${activeSection === 'markets' ? ' markets-workspace-with-rail' : ''}`}>
+            <div
+                className={`markets-workspace${activeSection === 'markets' ? ' markets-workspace-with-rail' : ''}${navCollapsed ? ' is-nav-collapsed' : ''}${railCollapsed ? ' is-rail-collapsed' : ''}`}
+                data-collapsed-menus={collapsedMenuCount}
+            >
                 <div className="market-page" ref={marketPageRef}>
             {activeSection !== 'markets' && (
                 <header className="market-header">
@@ -5164,6 +5169,7 @@ export default function MarketsView({
                         onSelectFund={(fundCode) => onOpenFund?.(fundCode)}
                         mobilePanelOpen={isMobileViewport ? mobileMarketPanelOpen : undefined}
                         onMobilePanelOpenChange={isMobileViewport ? setMobileMarketPanelOpen : undefined}
+                        onCollapseChange={setRailCollapsed}
                     />
                 )}
             </div>
