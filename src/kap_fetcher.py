@@ -648,6 +648,12 @@ def _merge_live_and_cached_quarters(
 ) -> List[Dict[str, Any]]:
     if not isinstance(cached_payload, dict):
         return live_quarters
+    try:
+        cached_schema = int(cached_payload.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        cached_schema = 0
+    if cached_schema not in {0, KAP_CACHE_SCHEMA_VERSION}:
+        return live_quarters[: max(1, int(max_quarters))]
     cached_quarters = cached_payload.get("quarters") or []
     if not isinstance(cached_quarters, list) or len(cached_quarters) <= len(live_quarters):
         return live_quarters
@@ -752,11 +758,20 @@ _KAP_REQUEST_PACING_LOCK = threading.Lock()
 _KAP_REQUEST_PACING_INTERVAL = 0.0
 _KAP_REQUEST_PACING_LAST_AT = 0.0
 _KAP_REQUEST_PACING_COOLDOWN_UNTIL = 0.0
+_KAP_REQUEST_PACING_DEADLINE = 0.0
 _KAP_429_FALLBACK_COOLDOWN_SECONDS = 120.0
 _KAP_429_MAX_COOLDOWN_SECONDS = 3600.0
 
 
-def set_kap_request_pacing(interval_seconds: float) -> None:
+class KapPacingDeadlineExceeded(RuntimeError):
+    """Raised when waiting for the next KAP request slot would exceed a batch job deadline."""
+
+
+def set_kap_request_pacing(
+    interval_seconds: float,
+    *,
+    deadline_monotonic: float = 0.0,
+) -> None:
     """Throttle process-wide KAP JSON requests to a minimum start-to-start gap.
 
     KAP resets connections after a burst of statement attachment downloads, so
@@ -764,16 +779,29 @@ def set_kap_request_pacing(interval_seconds: float) -> None:
     the same pacing while a batch is running, which is desirable protection.
     """
 
-    global _KAP_REQUEST_PACING_INTERVAL, _KAP_REQUEST_PACING_LAST_AT
+    global _KAP_REQUEST_PACING_INTERVAL, _KAP_REQUEST_PACING_LAST_AT, _KAP_REQUEST_PACING_DEADLINE
     try:
         interval = max(0.0, float(interval_seconds))
     except (TypeError, ValueError):
         interval = 0.0
+    try:
+        deadline = max(0.0, float(deadline_monotonic)) if interval > 0 else 0.0
+    except (TypeError, ValueError):
+        deadline = 0.0
     with _KAP_REQUEST_PACING_LOCK:
         _KAP_REQUEST_PACING_INTERVAL = interval
+        _KAP_REQUEST_PACING_DEADLINE = deadline
         _KAP_REQUEST_PACING_LAST_AT = (
             time.monotonic() - interval if interval > 0 else 0.0
         )
+
+
+def _kap_batch_pacing_enabled() -> bool:
+    return _KAP_REQUEST_PACING_INTERVAL > 0
+
+
+def _is_kap_url(url: str) -> bool:
+    return "marketvisuals.net" not in str(url or "").lower()
 
 
 def _kap_retry_after_seconds(exc: urllib.error.HTTPError) -> float:
@@ -817,21 +845,31 @@ def _wait_for_kap_request_slot() -> None:
             _KAP_REQUEST_PACING_LAST_AT + _KAP_REQUEST_PACING_INTERVAL,
             _KAP_REQUEST_PACING_COOLDOWN_UNTIL,
         )
+        if _KAP_REQUEST_PACING_DEADLINE > 0 and (
+            now >= _KAP_REQUEST_PACING_DEADLINE
+            or next_slot > _KAP_REQUEST_PACING_DEADLINE
+        ):
+            raise KapPacingDeadlineExceeded("KAP istek sirasi is butcesini asti.")
         wait_seconds = next_slot - now
         if wait_seconds > 0:
             time.sleep(wait_seconds)
             now = time.monotonic()
+            if _KAP_REQUEST_PACING_DEADLINE > 0 and now >= _KAP_REQUEST_PACING_DEADLINE:
+                raise KapPacingDeadlineExceeded("KAP istek sirasi is butcesini asti.")
         if _KAP_REQUEST_PACING_INTERVAL > 0:
             _KAP_REQUEST_PACING_LAST_AT = now
 
 
 def _http_get_json(url: str, cfg: KapConfig) -> Any:
     last_error: Optional[BaseException] = None
+    is_kap = _is_kap_url(url)
     for user_agent in _candidate_user_agents(cfg):
         headers = _kap_request_headers(cfg, accept="application/json, text/plain, */*")
         headers["User-Agent"] = user_agent
-        for attempt in range(2):
-            _wait_for_kap_request_slot()
+        max_attempts = 3 if (is_kap and _kap_batch_pacing_enabled()) else 2
+        for attempt in range(max_attempts):
+            if is_kap:
+                _wait_for_kap_request_slot()
             request = urllib.request.Request(url, method="GET", headers=headers)
             try:
                 with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
@@ -842,7 +880,10 @@ def _http_get_json(url: str, cfg: KapConfig) -> Any:
                 if code not in KAP_RETRYABLE_HTTP_CODES:
                     raise
                 if code == 429:
-                    _defer_kap_requests_after_rate_limit(exc)
+                    if is_kap:
+                        _defer_kap_requests_after_rate_limit(exc)
+                    if is_kap and _kap_batch_pacing_enabled() and attempt + 1 < max_attempts:
+                        continue
                     raise
                 time.sleep(0.8 * (attempt + 1))
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
@@ -857,11 +898,14 @@ def _http_get_json(url: str, cfg: KapConfig) -> Any:
 
 def _http_get_text(url: str, cfg: KapConfig) -> str:
     last_error: Optional[BaseException] = None
+    is_kap = _is_kap_url(url)
     for user_agent in _candidate_user_agents(cfg):
         headers = _kap_request_headers(cfg, accept="text/html,application/xhtml+xml,*/*")
         headers["User-Agent"] = user_agent
-        for attempt in range(2):
-            _wait_for_kap_request_slot()
+        max_attempts = 3 if (is_kap and _kap_batch_pacing_enabled()) else 2
+        for attempt in range(max_attempts):
+            if is_kap:
+                _wait_for_kap_request_slot()
             request = urllib.request.Request(url, method="GET", headers=headers)
             try:
                 with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
@@ -872,7 +916,10 @@ def _http_get_text(url: str, cfg: KapConfig) -> str:
                 if code not in KAP_RETRYABLE_HTTP_CODES:
                     raise
                 if code == 429:
-                    _defer_kap_requests_after_rate_limit(exc)
+                    if is_kap:
+                        _defer_kap_requests_after_rate_limit(exc)
+                    if is_kap and _kap_batch_pacing_enabled() and attempt + 1 < max_attempts:
+                        continue
                     raise
                 time.sleep(0.8 * (attempt + 1))
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -888,12 +935,15 @@ def _http_get_text(url: str, cfg: KapConfig) -> str:
 def _http_post_json(url: str, payload: Dict[str, Any], cfg: KapConfig) -> Any:
     last_error: Optional[BaseException] = None
     body = json.dumps(payload).encode("utf-8")
+    is_kap = _is_kap_url(url)
     for user_agent in _candidate_user_agents(cfg):
         headers = _kap_request_headers(cfg, accept="application/json, text/plain, */*")
         headers["User-Agent"] = user_agent
         headers["Content-Type"] = "application/json"
-        for attempt in range(2):
-            _wait_for_kap_request_slot()
+        max_attempts = 3 if (is_kap and _kap_batch_pacing_enabled()) else 2
+        for attempt in range(max_attempts):
+            if is_kap:
+                _wait_for_kap_request_slot()
             request = urllib.request.Request(url, data=body, method="POST", headers=headers)
             try:
                 with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
@@ -904,7 +954,10 @@ def _http_post_json(url: str, payload: Dict[str, Any], cfg: KapConfig) -> Any:
                 if code not in KAP_RETRYABLE_HTTP_CODES:
                     raise
                 if code == 429:
-                    _defer_kap_requests_after_rate_limit(exc)
+                    if is_kap:
+                        _defer_kap_requests_after_rate_limit(exc)
+                    if is_kap and _kap_batch_pacing_enabled() and attempt + 1 < max_attempts:
+                        continue
                     raise
                 time.sleep(0.8 * (attempt + 1))
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
@@ -919,11 +972,14 @@ def _http_post_json(url: str, payload: Dict[str, Any], cfg: KapConfig) -> Any:
 
 def _http_get_bytes(url: str, cfg: KapConfig, *, accept: str = "*/*") -> bytes:
     last_error: Optional[BaseException] = None
+    is_kap = _is_kap_url(url)
     for user_agent in _candidate_user_agents(cfg):
         headers = _kap_request_headers(cfg, accept=accept)
         headers["User-Agent"] = user_agent
-        for attempt in range(2):
-            _wait_for_kap_request_slot()
+        max_attempts = 3 if (is_kap and _kap_batch_pacing_enabled()) else 2
+        for attempt in range(max_attempts):
+            if is_kap:
+                _wait_for_kap_request_slot()
             request = urllib.request.Request(url, method="GET", headers=headers)
             try:
                 with urllib.request.urlopen(request, timeout=float(cfg.timeout_seconds)) as response:
@@ -934,7 +990,10 @@ def _http_get_bytes(url: str, cfg: KapConfig, *, accept: str = "*/*") -> bytes:
                 if code not in KAP_RETRYABLE_HTTP_CODES:
                     raise
                 if code == 429:
-                    _defer_kap_requests_after_rate_limit(exc)
+                    if is_kap:
+                        _defer_kap_requests_after_rate_limit(exc)
+                    if is_kap and _kap_batch_pacing_enabled() and attempt + 1 < max_attempts:
+                        continue
                     raise
                 time.sleep(0.8 * (attempt + 1))
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -1006,6 +1065,8 @@ def _resolve_member_uncached(
     for query in candidate_queries:
         try:
             rows = _http_get_json(_member_filter_url(query), cfg)
+        except KapPacingDeadlineExceeded:
+            raise
         except Exception as exc:
             last_error = exc
             continue
@@ -1201,6 +1262,7 @@ def _list_company_disclosures(
     last_error: Optional[BaseException] = None
     provider_error: Optional[BaseException] = None
     requested_periods = max(1, int(max_periods)) if max_periods is not None else None
+    empty_year_streak = 0
 
     for idx, year in enumerate(range(current_year, current_year - max_years_back - 1, -1)):
         if idx > 0:
@@ -1208,6 +1270,8 @@ def _list_company_disclosures(
         url = f"{KAP_BASE_URL}/{LIST_COMPANY_EXCEL_MEMBERS_ENDPOINT}/{member_oid}/{year}/T"
         try:
             payload = _http_get_json(url, cfg)
+        except KapPacingDeadlineExceeded:
+            raise
         except urllib.error.HTTPError as exc:
             code = int(getattr(exc, "code", 0) or 0)
             if code == 429:
@@ -1241,7 +1305,12 @@ def _list_company_disclosures(
                 provider_error = exc
             continue
         if not isinstance(payload, list):
+            if rows:
+                empty_year_streak += 1
+                if empty_year_streak >= 2:
+                    break
             continue
+        rows_before_year = len(rows)
         for item in payload:
             if not isinstance(item, dict):
                 continue
@@ -1275,6 +1344,12 @@ def _list_company_disclosures(
                     "_source_order": len(rows),
                 }
             )
+        if len(rows) > rows_before_year:
+            empty_year_streak = 0
+        elif rows:
+            empty_year_streak += 1
+            if empty_year_streak >= 2:
+                break
         if requested_periods is not None:
             period_count = len({(row["year"], row["period"]) for row in rows})
             if period_count >= requested_periods:
@@ -2699,6 +2774,12 @@ def _premium_attachment_text(detail: Dict[str, Any], cfg: KapConfig) -> str:
                 cfg,
                 accept="application/pdf,*/*",
             )
+        except KapPacingDeadlineExceeded:
+            raise
+        except urllib.error.HTTPError as exc:
+            if int(getattr(exc, "code", 0) or 0) in {403, 429, 503}:
+                raise
+            continue
         except Exception:
             continue
         text = _extract_pdf_text(data)
@@ -3266,29 +3347,46 @@ def _ensure_insurance_premium_disclosures(
     disclosures: List[Dict[str, Any]] = []
     fallback_disclosures: List[Dict[str, Any]] = []
     kap_error: Optional[BaseException] = None
-    try:
-        if member_oid:
-            disclosures = _fetch_insurance_premium_disclosures(
-                member_oid=member_oid,
-                cfg=cfg,
-                strict=strict,
-            )
-    except Exception as exc:
-        if strict:
-            raise
-        kap_error = exc
+    prefers_marketvisuals = company_key in MARKETVISUALS_INSURANCE_COMPANY_ALIASES
 
-    should_fetch_marketvisuals = (
-        company_key in MARKETVISUALS_INSURANCE_COMPANY_ALIASES
-        or (not disclosures and not _has_insurance_premium_rows(payload.get("insurance_premium_disclosures")))
-    )
-    if should_fetch_marketvisuals:
+    if prefers_marketvisuals:
         try:
             fallback_disclosures = _fetch_tsb_marketvisuals_premium_disclosures(
                 company_key=company_key,
                 company_title=company_title,
                 cfg=cfg,
             )
+        except KapPacingDeadlineExceeded:
+            raise
+        except Exception as exc:
+            kap_error = exc
+
+    if not (prefers_marketvisuals and fallback_disclosures):
+        try:
+            if member_oid:
+                disclosures = _fetch_insurance_premium_disclosures(
+                    member_oid=member_oid,
+                    cfg=cfg,
+                    strict=strict,
+                )
+        except KapPacingDeadlineExceeded:
+            raise
+        except Exception as exc:
+            if strict:
+                raise
+            kap_error = exc
+
+    if not prefers_marketvisuals and not disclosures and not _has_insurance_premium_rows(
+        payload.get("insurance_premium_disclosures")
+    ):
+        try:
+            fallback_disclosures = _fetch_tsb_marketvisuals_premium_disclosures(
+                company_key=company_key,
+                company_title=company_title,
+                cfg=cfg,
+            )
+        except KapPacingDeadlineExceeded:
+            raise
         except Exception as exc:
             if kap_error is None:
                 kap_error = exc
@@ -3521,6 +3619,28 @@ def fetch_kap_company_snapshot(
         if not disclosures:
             raise RuntimeError("KAP finansal bildirimleri şu anda alınamadı.")
 
+        reusable_quarters_by_key: Dict[Tuple[int, int, int], Dict[str, Any]] = {}
+        if (
+            isinstance(cached, dict)
+            and not force_refresh
+            and cache_version == KAP_CACHE_SCHEMA_VERSION
+        ):
+            for cached_quarter in cached.get("quarters") or []:
+                if not isinstance(cached_quarter, dict):
+                    continue
+                if not isinstance(cached_quarter.get("metrics"), dict) or not cached_quarter.get("metrics"):
+                    continue
+                try:
+                    cached_key = (
+                        int(cached_quarter.get("year") or 0),
+                        int(cached_quarter.get("period") or 0),
+                        int(cached_quarter.get("disclosure_index") or 0),
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if cached_key[0] > 0 and 1 <= cached_key[1] <= 4 and cached_key[2] > 0:
+                    reusable_quarters_by_key[cached_key] = cached_quarter
+
         quarter_rows: List[Dict[str, Any]] = []
         seen_periods: set[Tuple[int, int]] = set()
         for item in disclosures:
@@ -3532,6 +3652,11 @@ def fetch_kap_company_snapshot(
             if period_key in seen_periods:
                 continue
             disclosure_index = int(item["disclosure_index"])
+            reusable = reusable_quarters_by_key.get((year, period, disclosure_index))
+            if reusable is not None:
+                quarter_rows.append(copy.deepcopy(reusable))
+                seen_periods.add(period_key)
+                continue
             detail = _fetch_attachment_detail(disclosure_index, cfg)
             if not detail:
                 if not allow_criteria_fallback:
@@ -3631,12 +3756,20 @@ def fetch_kap_company_snapshot(
             "live_period_count": len(disclosures),
             "quarters": quarter_rows,
         }
+        if isinstance(cached, dict):
+            for key in (
+                "insurance_premium_disclosures",
+                "insurance_premium_disclosures_checked_at",
+                "insurance_premium_disclosures_version",
+            ):
+                if key in cached:
+                    payload[key] = copy.deepcopy(cached[key])
         payload = _ensure_insurance_premium_disclosures(
             payload=payload,
             cache_path=cache_path,
             cfg=cfg,
             member=member,
-            force_refresh=True,
+            force_refresh=force_refresh,
             strict=not allow_criteria_fallback,
         )
         _write_cache(cache_path, payload)

@@ -278,6 +278,62 @@ def test_full_backfill_accepts_company_with_fewer_available_periods(
     assert job["updated"] == 1
 
 
+def test_full_backfill_does_not_inflate_fetch_depth_from_outdated_schema_cache(
+    statement_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_statement_cache(statement_env.cache_dir, "OLD20", quarters=20, schema_version=11)
+    calls: List[Dict[str, Any]] = []
+
+    def fake_snapshot(**kwargs: Any) -> Dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "ok": True,
+            "schema_version": 15,
+            "live_period_count": 5,
+            "quarters": [
+                {"year": 2026, "period": period, "disclosure_index": period}
+                for period in range(1, 6)
+            ],
+        }
+
+    monkeypatch.setattr("app.kap_service.get_kap_snapshot", fake_snapshot)
+
+    job = _seed_and_run_job(mode="full", symbols=["OLD20"], max_quarters=5)
+
+    assert len(calls) == 1
+    assert calls[0]["max_quarters"] == 5
+    assert job["status"] == "succeeded"
+    assert job["updated"] == 1
+
+
+def test_pacing_deadline_exceeded_stops_job_as_budget_exhausted_without_blocked_count(
+    statement_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.kap_fetcher import KapPacingDeadlineExceeded
+
+    calls = 0
+
+    def fake_process(symbol: str, **_kwargs: Any) -> Dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"symbol": symbol, "outcome": "updated"}
+        raise KapPacingDeadlineExceeded("KAP istek sirasi is butcesini asti.")
+
+    monkeypatch.setattr(statement_module, "_process_kap_statement_symbol", fake_process)
+
+    job = _seed_and_run_job(mode="full", symbols=["SYM1", "SYM2", "SYM3"], budget_seconds=300)
+
+    assert job["status"] == "partial"
+    assert job["stop_reason"] == "budget_exhausted"
+    assert job["processed"] == 1
+    assert job["updated"] == 1
+    assert job["blocked"] == 0
+    assert job["failed"] == 0
+    assert job["remaining"] == 2
+    assert job["cursor"] == 1
+
+
 def test_budget_exhaustion_marks_job_partial(statement_env, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(statement_module, "time", _AdvancingClock(step=20.0))
     monkeypatch.setattr(

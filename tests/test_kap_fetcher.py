@@ -1164,11 +1164,17 @@ def test_ensure_insurance_premium_disclosures_prefers_marketvisuals_for_known_co
             {"year": 2026, "month": 4, "monthly_gross_premium": -1.0},
         ],
     }
+    kap_called = False
+
+    def fail_if_kap_called(**_kwargs: object) -> list[dict[str, object]]:
+        nonlocal kap_called
+        kap_called = True
+        return [{"year": 2026, "month": 4, "monthly_gross_premium": 10.0}]
 
     monkeypatch.setattr(
         kap_fetcher,
         "_fetch_insurance_premium_disclosures",
-        lambda **_kwargs: [{"year": 2026, "month": 4, "monthly_gross_premium": 10.0}],
+        fail_if_kap_called,
     )
     monkeypatch.setattr(
         kap_fetcher,
@@ -1182,6 +1188,7 @@ def test_ensure_insurance_premium_disclosures_prefers_marketvisuals_for_known_co
         cfg=_cfg(),
     )
 
+    assert kap_called is False
     assert result["insurance_premium_disclosures"] == [
         {"year": 2026, "month": 4, "monthly_gross_premium": 3_153_910_000.0}
     ]
@@ -1200,6 +1207,7 @@ def test_ensure_insurance_premium_disclosures_strict_raises_on_provider_error(
         "member_oid": "oid",
         "quarters": [],
     }
+    monkeypatch.setattr(kap_fetcher, "_fetch_tsb_marketvisuals_premium_disclosures", lambda **_kwargs: [])
     monkeypatch.setattr(
         kap_fetcher,
         "_fetch_insurance_premium_disclosures",
@@ -1552,3 +1560,124 @@ def test_extract_rows_from_legacy_kap_table_keeps_report_labels_and_columns() ->
         ("Hasılat", 6, 40_000_000.0),
         ("Hasılat", 7, 35_000_000.0),
     ]
+
+
+def test_http_get_json_retries_after_429_cooldown_when_pacing_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    deferred: list[urllib.error.HTTPError] = []
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        del timeout
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise urllib.error.HTTPError(
+                "https://www.kap.org.tr/tr/api/test",
+                429,
+                "Request Limit Exceeded",
+                hdrs={"Retry-After": "15"},
+                fp=io.BytesIO(b""),
+            )
+        return _FakeResponse([{"ok": True}])
+
+    monkeypatch.setattr(kap_fetcher.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(kap_fetcher, "_defer_kap_requests_after_rate_limit", deferred.append)
+    monkeypatch.setattr(kap_fetcher, "_wait_for_kap_request_slot", lambda: None)
+    kap_fetcher.set_kap_request_pacing(5.0)
+    try:
+        payload = _http_get_json("https://www.kap.org.tr/tr/api/test", _cfg())
+    finally:
+        kap_fetcher.set_kap_request_pacing(0.0)
+
+    assert payload == [{"ok": True}]
+    assert attempts == 2
+    assert len(deferred) == 1
+
+
+def test_wait_for_kap_request_slot_raises_when_cooldown_exceeds_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 100.0}
+    sleeps: list[float] = []
+    rate_limit = urllib.error.HTTPError(
+        "https://www.kap.org.tr/tr/api/test",
+        429,
+        "Request Limit Exceeded",
+        hdrs={"Retry-After": "120"},
+        fp=io.BytesIO(b""),
+    )
+    monkeypatch.setattr(kap_fetcher.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(kap_fetcher.time, "sleep", sleeps.append)
+    monkeypatch.setattr(kap_fetcher, "_KAP_REQUEST_PACING_COOLDOWN_UNTIL", 0.0)
+    kap_fetcher.set_kap_request_pacing(5.0, deadline_monotonic=150.0)
+    try:
+        kap_fetcher._defer_kap_requests_after_rate_limit(rate_limit)
+        with pytest.raises(kap_fetcher.KapPacingDeadlineExceeded):
+            kap_fetcher._wait_for_kap_request_slot()
+    finally:
+        kap_fetcher.set_kap_request_pacing(0.0)
+
+    assert sleeps == []
+
+
+def test_wait_for_kap_request_slot_raises_after_deadline_even_if_slot_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(kap_fetcher.time, "monotonic", lambda: 200.0)
+    monkeypatch.setattr(kap_fetcher.time, "sleep", lambda _seconds: pytest.fail("must not sleep"))
+    monkeypatch.setattr(kap_fetcher, "_KAP_REQUEST_PACING_COOLDOWN_UNTIL", 0.0)
+    kap_fetcher.set_kap_request_pacing(5.0, deadline_monotonic=150.0)
+    try:
+        with pytest.raises(kap_fetcher.KapPacingDeadlineExceeded):
+            kap_fetcher._wait_for_kap_request_slot()
+    finally:
+        kap_fetcher.set_kap_request_pacing(0.0)
+
+
+def test_list_company_disclosures_stops_after_consecutive_empty_years(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_http_get_json(url: str, _cfg_obj: object) -> list[dict[str, object]]:
+        calls.append(url)
+        if "/2026/" in url:
+            return [
+                {
+                    "mkkMemberOid": "oid",
+                    "stockCode": "DSTKF",
+                    "disclosureIndex": 1601000,
+                    "year": 2026,
+                    "period": 1,
+                    "title": "DESTEK FAKTORING",
+                },
+                {
+                    "mkkMemberOid": "oid",
+                    "stockCode": "DSTKF",
+                    "disclosureIndex": 1590000,
+                    "year": 2025,
+                    "period": 4,
+                    "title": "DESTEK FAKTORING",
+                },
+            ]
+        return []
+
+    monkeypatch.setattr(kap_fetcher, "_http_get_json", fake_http_get_json)
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_utc_now",
+        lambda: kap_fetcher.datetime(2026, 5, 11, tzinfo=kap_fetcher.timezone.utc),
+    )
+
+    rows = _list_company_disclosures(
+        member_oid="oid",
+        cfg=_cfg(),
+        max_periods=5,
+        allow_criteria_fallback=False,
+    )
+
+    assert len(rows) == 2
+    assert len(calls) == 3
+    assert all(any(f"/{year}/" in call for year in (2026, 2025, 2024)) for call in calls)

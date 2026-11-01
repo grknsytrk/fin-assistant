@@ -70,11 +70,11 @@ _KAP_STATEMENT_REQUEST_GAP_SECONDS = float(
 )
 
 # Minimum start-to-start gap between KAP JSON requests while a batch job runs.
-# Keep batch traffic around 12 JSON requests per minute by default. KAP
-# returned 429s at the previous 2.5 second interval during the BIST100 pilot.
+# Keep batch traffic around 9 JSON requests per minute by default so sustained
+# runs stay below KAP's ~35-40 request / 5-minute sliding window.
 _KAP_STATEMENT_REQUEST_INTERVAL_SECONDS = max(
     0.0,
-    float(os.getenv("RAGFIN_KAP_STATEMENT_REQUEST_INTERVAL_SECONDS", "5.0") or 0.0),
+    float(os.getenv("RAGFIN_KAP_STATEMENT_REQUEST_INTERVAL_SECONDS", "6.5") or 0.0),
 )
 
 _KAP_STATEMENT_BLOCK_COOLDOWN_SECONDS = max(
@@ -359,6 +359,44 @@ def _is_provider_block_error(exc: BaseException) -> bool:
     )
 
 
+def _seed_resolved_member_from_statement_cache(
+    symbol: str,
+    payload: Optional[Dict[str, Any]],
+) -> None:
+    if not isinstance(payload, dict):
+        return
+    from src.kap_fetcher import (
+        _cache_matches_requested_company,
+        _resolve_member_from_cache,
+        _store_resolved_member,
+    )
+
+    if not _cache_matches_requested_company(payload, symbol):
+        return
+    member_oid = str(payload.get("member_oid") or "").strip()
+    title = str(payload.get("company_title") or "").strip()
+    if not member_oid or not title:
+        return
+    if _resolve_member_from_cache(symbol) is not None:
+        return
+    source_url = str(payload.get("source_url") or "").strip()
+    permalink = (
+        source_url.rsplit("/ozet/", 1)[-1].strip("/")
+        if "/ozet/" in source_url
+        else ""
+    )
+    _store_resolved_member(
+        symbol,
+        {
+            "company_code": str(payload.get("stock_code") or symbol).strip().upper(),
+            "mkk_member_oid": member_oid,
+            "title": title,
+            "permalink": permalink,
+            "query": symbol,
+        },
+    )
+
+
 def _process_kap_statement_symbol(
     symbol: str,
     *,
@@ -383,7 +421,16 @@ def _process_kap_statement_symbol(
         return {"symbol": normalized, "outcome": state}
 
     previous = _read_local_statement_cache(normalized)
-    cached_depth = min(_KAP_STATEMENT_DEPTH_CEILING, _statement_cached_depth(previous))
+    _seed_resolved_member_from_statement_cache(normalized, previous)
+    previous_is_current_schema = (
+        isinstance(previous, dict)
+        and int(previous.get("schema_version") or 0) == KAP_CACHE_SCHEMA_VERSION
+    )
+    cached_depth = (
+        min(_KAP_STATEMENT_DEPTH_CEILING, _statement_cached_depth(previous))
+        if previous_is_current_schema
+        else 0
+    )
     fetch_depth = min(
         _KAP_STATEMENT_DEPTH_CEILING,
         max(int(max_quarters), cached_depth),
@@ -449,6 +496,8 @@ def _guarded_process_kap_statement_symbol(
     mode: str,
     max_quarters: int,
 ) -> Dict[str, Any]:
+    from src.kap_fetcher import KapPacingDeadlineExceeded
+
     try:
         result = _process_kap_statement_symbol(
             symbol,
@@ -456,6 +505,12 @@ def _guarded_process_kap_statement_symbol(
             max_quarters=max_quarters,
         )
         return {**result, "blocked": False}
+    except KapPacingDeadlineExceeded:
+        return {
+            "symbol": symbol,
+            "outcome": "budget_exhausted",
+            "blocked": False,
+        }
     except Exception as exc:  # noqa: BLE001 - one symbol must not stop the job
         blocked = _is_provider_block_error(exc)
         return {
@@ -568,7 +623,10 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
     from src.kap_fetcher import set_kap_request_pacing
 
     try:
-        set_kap_request_pacing(_KAP_STATEMENT_REQUEST_INTERVAL_SECONDS)
+        set_kap_request_pacing(
+            _KAP_STATEMENT_REQUEST_INTERVAL_SECONDS,
+            deadline_monotonic=deadline,
+        )
         while cursor < total:
             if not _owns_kap_statement_active_marker(job_id, owner_token):
                 stop_reason = "superseded"
@@ -589,6 +647,9 @@ def _run_kap_statement_refresh_job(job_id: str) -> None:
                     window,
                 )
             )
+            if any(str(result.get("outcome") or "") == "budget_exhausted" for result in results):
+                stop_reason = "budget_exhausted"
+                break
 
             window_blocked = 0
             window_failed = 0
