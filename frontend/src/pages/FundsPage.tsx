@@ -40,6 +40,7 @@ import { Link } from 'react-router-dom';
 import { apiClient } from '../api/client';
 import { useMobileChartLayout } from '../hooks/useMobileChartLayout';
 import { useBackgroundRefresh } from '../hooks/useBackgroundRefresh';
+import { useTableVirtualizer } from '../hooks/useTableVirtualizer';
 import type {
     FundAllocation,
     FundAllocationHistoryDay,
@@ -935,12 +936,15 @@ function periodReturnsFromPerformancePoints(
     }, {});
 }
 
+const FUND_TABLE_ROW_HEIGHT = 48;
+
 type FundsTableProps = {
     rows: FundSummary[];
     sortKey: FundSortKey;
     sortOrder: 'asc' | 'desc';
     onSort: (key: FundSortKey) => void;
     onOpenFund: (fundCode: string, tab?: FundTab) => void;
+    resetDeps?: unknown[];
 };
 
 const FundTableRow = memo(function FundTableRow({
@@ -1009,7 +1013,27 @@ const FundsTable = memo(function FundsTable({
     sortOrder,
     onSort,
     onOpenFund,
+    resetDeps,
 }: FundsTableProps) {
+    const tableWrapRef = useRef<HTMLDivElement>(null);
+    const {
+        startIndex,
+        endIndex,
+        topSpacerHeight,
+        bottomSpacerHeight,
+        containerRef: tableWrapCallbackRef,
+    } = useTableVirtualizer({
+        totalRows: rows.length,
+        rowHeight: FUND_TABLE_ROW_HEIGHT,
+        overscan: 12,
+        containerRef: tableWrapRef,
+        resetDeps: resetDeps ?? [sortKey, sortOrder, rows.length],
+    });
+
+    const visibleRows = useMemo(() => {
+        return rows.slice(startIndex, endIndex);
+    }, [rows, startIndex, endIndex]);
+
     const sortLabel = sortOrder === 'asc' ? 'artan' : 'azalan';
     const renderSortHeader = (key: FundSortKey, label: string, align: 'left' | 'right' = 'left') => (
         <th className={align === 'right' ? 'funds-cell-right' : undefined} aria-sort={sortKey === key ? (sortOrder === 'asc' ? 'ascending' : 'descending') : 'none'}>
@@ -1027,7 +1051,7 @@ const FundsTable = memo(function FundsTable({
     );
 
     return (
-        <div className="funds-table-wrap">
+        <div className="funds-table-wrap" ref={tableWrapCallbackRef}>
             <table className="funds-table">
                 <thead>
                     <tr>
@@ -1042,9 +1066,19 @@ const FundsTable = memo(function FundsTable({
                     </tr>
                 </thead>
                 <tbody>
-                    {rows.map((row) => (
+                    {topSpacerHeight > 0 && (
+                        <tr key="funds-top-spacer" className="funds-spacer-row" style={{ height: `${topSpacerHeight}px` }} aria-hidden="true">
+                            <td colSpan={8} style={{ height: `${topSpacerHeight}px` }} />
+                        </tr>
+                    )}
+                    {visibleRows.map((row) => (
                         <FundTableRow key={row.fund_code} row={row} onOpenFund={onOpenFund} />
                     ))}
+                    {bottomSpacerHeight > 0 && (
+                        <tr key="funds-bottom-spacer" className="funds-spacer-row" style={{ height: `${bottomSpacerHeight}px` }} aria-hidden="true">
+                            <td colSpan={8} style={{ height: `${bottomSpacerHeight}px` }} />
+                        </tr>
+                    )}
                 </tbody>
             </table>
         </div>
@@ -6069,6 +6103,11 @@ export default function FundsPage({
         return filtered;
     }, [deferredSearchTerm, fundSearchIndex, fundTypeFilter, riskFilter, sortKey, sortOrder]);
 
+    const tableResetDeps = useMemo(
+        () => [searchTerm, fundTypeFilter, riskFilter, sortKey, sortOrder],
+        [searchTerm, fundTypeFilter, riskFilter, sortKey, sortOrder],
+    );
+
     const normalizedRouteFundCode = fundCode?.trim().toUpperCase() || '';
     const routeFundSummary = normalizedRouteFundCode
         ? funds?.rows.find((row) => row.fund_code.trim().toUpperCase() === normalizedRouteFundCode) || null
@@ -6547,6 +6586,7 @@ export default function FundsPage({
                                         sortOrder={sortOrder}
                                         onSort={setTableSort}
                                         onOpenFund={onOpenFund}
+                                        resetDeps={tableResetDeps}
                                     />
                                 )}
                             </section>

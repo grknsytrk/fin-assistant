@@ -100,8 +100,8 @@ def test_finite_number_accepts_postgres_decimal_values() -> None:
     assert store._finite_number(Decimal("NaN")) is None
 
 
-def test_financial_snapshot_memory_cache_lives_60_seconds_and_expires(tmp_path: Path, monkeypatch) -> None:
-    assert store._SNAPSHOT_MEMORY_CACHE_TTL_SECONDS == 60.0
+def test_financial_snapshot_memory_cache_lives_1800_seconds_and_expires(tmp_path: Path, monkeypatch) -> None:
+    assert store._SNAPSHOT_MEMORY_CACHE_TTL_SECONDS == 1800.0
     store.reset_financial_snapshot_store_for_tests()
     processed_dir = tmp_path / "processed"
     store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Enerji"}})
@@ -123,11 +123,11 @@ def test_financial_snapshot_memory_cache_lives_60_seconds_and_expires(tmp_path: 
 
     monkeypatch.setattr(store, "_connection", counted_connection)
     assert "AAA" in store.get_financial_snapshots_map(processed_dir)
-    FakeTime.now = 159.0
+    FakeTime.now = 1899.0
     assert "AAA" in store.get_financial_snapshots_map(processed_dir)
     assert reads["count"] == 1
 
-    FakeTime.now = 161.0
+    FakeTime.now = 1901.0
     assert "AAA" in store.get_financial_snapshots_map(processed_dir)
     assert reads["count"] == 2
     store.reset_financial_snapshot_store_for_tests()
