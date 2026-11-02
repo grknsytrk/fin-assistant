@@ -550,3 +550,22 @@ def test_job_tracks_current_and_last_symbol_and_detects_interrupted_worker(
     assert recovered["stop_reason"] == "worker_interrupted"
     assert recovered["current_symbol"] is None
     assert recovered["last_symbol"] == "MAVI:updated"
+
+
+def test_max_budget_seconds_allows_up_to_360_minutes(statement_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(statement_module, "_run_kap_statement_refresh_job", lambda *args, **kwargs: None)
+    job = statement_module._start_kap_statement_refresh_job(
+        mode="incremental",
+        universe="symbols",
+        symbols=["THYAO"],
+        budget_seconds=21600,
+    )
+    assert job["budget_seconds"] == 21600
+    # Clamps values exceeding 21600
+    job_clamped = statement_module._start_kap_statement_refresh_job(
+        mode="incremental",
+        universe="symbols",
+        symbols=["THYAO"],
+        budget_seconds=99999,
+    )
+    assert job_clamped["budget_seconds"] == 21600

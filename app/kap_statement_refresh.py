@@ -46,7 +46,7 @@ _KAP_STATEMENT_ACTIVE_KEY = "api:kap:statements:active:v1"
 _KAP_STATEMENT_JOB_KEY_PREFIX = "api:kap:statements:job:"
 
 _KAP_STATEMENT_JOB_TTL_SECONDS = _kap_statement_env_int(
-    "RAGFIN_KAP_STATEMENT_JOB_TTL_SECONDS", 6 * 60 * 60, minimum=1800
+    "RAGFIN_KAP_STATEMENT_JOB_TTL_SECONDS", 10 * 60 * 60, minimum=1800
 )
 
 _KAP_STATEMENT_DEFAULT_BUDGET_SECONDS = _kap_statement_env_int(
@@ -54,7 +54,7 @@ _KAP_STATEMENT_DEFAULT_BUDGET_SECONDS = _kap_statement_env_int(
 )
 
 _KAP_STATEMENT_MAX_BUDGET_SECONDS = _kap_statement_env_int(
-    "RAGFIN_KAP_STATEMENT_MAX_BUDGET_SECONDS", 10800, minimum=60
+    "RAGFIN_KAP_STATEMENT_MAX_BUDGET_SECONDS", 21600, minimum=60
 )
 
 _KAP_STATEMENT_MAX_QUARTERS = 20
