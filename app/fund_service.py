@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import copy
 import hashlib
@@ -26,6 +27,11 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, urlencode
 
 import httpx
+
+_ORIGINAL_HTTPX_CLIENT = httpx.Client
+_CLIENT_LOCK = threading.Lock()
+_KAP_CLIENT: Optional[httpx.Client] = None
+_FINTABLES_PROXY_CLIENT: Optional[httpx.Client] = None
 
 from app import json_cache as json_cache_store
 from app.database import (
@@ -210,6 +216,60 @@ _FUND_SNAPSHOT_COMMIT_LOCK = threading.Lock()
 _AUTO_FETCH_LOCK = threading.Lock()
 _AUTO_FETCH_IN_FLIGHT: Dict[str, threading.Event] = {}
 _AUTO_FETCH_NEGATIVE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_kap_client() -> httpx.Client:
+    """Return a shared persistent HTTP client for KAP requests, or a fresh mock in tests."""
+    if httpx.Client is not _ORIGINAL_HTTPX_CLIENT:
+        return httpx.Client(timeout=KAP_TIMEOUT_SECONDS, follow_redirects=True)
+    global _KAP_CLIENT
+    with _CLIENT_LOCK:
+        if _KAP_CLIENT is None or _KAP_CLIENT.is_closed:
+            _KAP_CLIENT = httpx.Client(
+                timeout=KAP_TIMEOUT_SECONDS,
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=30.0),
+            )
+        return _KAP_CLIENT
+
+
+def _get_fintables_proxy_client(timeout_seconds: Optional[float] = None) -> httpx.Client:
+    """Return a shared persistent HTTP client for Fintables proxy requests, or a fresh mock in tests."""
+    effective_timeout = timeout_seconds if timeout_seconds is not None else FINTABLES_TIMEOUT_SECONDS
+    if httpx.Client is not _ORIGINAL_HTTPX_CLIENT:
+        return httpx.Client(timeout=effective_timeout, follow_redirects=True)
+    global _FINTABLES_PROXY_CLIENT
+    with _CLIENT_LOCK:
+        if _FINTABLES_PROXY_CLIENT is None or _FINTABLES_PROXY_CLIENT.is_closed:
+            _FINTABLES_PROXY_CLIENT = httpx.Client(
+                timeout=effective_timeout,
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0),
+            )
+        return _FINTABLES_PROXY_CLIENT
+
+
+def close_shared_http_clients() -> None:
+    """Close any shared HTTP connection pools cleanly."""
+    global _KAP_CLIENT, _FINTABLES_PROXY_CLIENT
+    with _CLIENT_LOCK:
+        if _KAP_CLIENT is not None:
+            try:
+                _KAP_CLIENT.close()
+            except Exception:
+                LOGGER.debug("error closing KAP HTTP client", exc_info=True)
+            finally:
+                _KAP_CLIENT = None
+        if _FINTABLES_PROXY_CLIENT is not None:
+            try:
+                _FINTABLES_PROXY_CLIENT.close()
+            except Exception:
+                LOGGER.debug("error closing Fintables proxy HTTP client", exc_info=True)
+            finally:
+                _FINTABLES_PROXY_CLIENT = None
+
+
+atexit.register(close_shared_http_clients)
 
 
 @dataclass
@@ -1869,15 +1929,23 @@ def _fintables_proxy_payload(
     else:
         raise FintablesUpstreamError(f"{context}: unsupported Fintables proxy endpoint")
     proxy_url = f"{FINTABLES_PROXY_BASE_URL}{proxy_path}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {FINTABLES_PROXY_TOKEN}",
+    }
+    client = _get_fintables_proxy_client(timeout_seconds)
     try:
-        with httpx.Client(timeout=timeout_seconds, follow_redirects=True) as client:
+        try:
             response = client.get(
                 proxy_url,
                 params=params,
-                headers={
-                    "Accept": "application/json",
-                    "Authorization": f"Bearer {FINTABLES_PROXY_TOKEN}",
-                },
+                headers=headers,
+            )
+        except httpx.RemoteProtocolError:
+            response = client.get(
+                proxy_url,
+                params=params,
+                headers=headers,
             )
     except httpx.HTTPError as exc:
         raise FintablesUpstreamError(f"{context}: Fintables proxy request failed: {exc}") from exc
@@ -9943,32 +10011,37 @@ def _kap_url(path: str) -> str:
     return f"{KAP_BASE_URL}/{str(path).lstrip('/')}"
 
 
+def _kap_request_get(url: str, headers: Dict[str, str]) -> httpx.Response:
+    client = _get_kap_client()
+    try:
+        return client.get(url, headers=headers)
+    except httpx.RemoteProtocolError:
+        return client.get(url, headers=headers)
+
+
 def _kap_get_json(path: str) -> Any:
-    with httpx.Client(timeout=KAP_TIMEOUT_SECONDS, follow_redirects=True, headers=_kap_headers()) as client:
-        response = client.get(_kap_url(path))
-        response.raise_for_status()
-        return response.json()
+    response = _kap_request_get(_kap_url(path), _kap_headers())
+    response.raise_for_status()
+    return response.json()
 
 
 def _kap_post_json(path: str, payload: Dict[str, Any]) -> Any:
-    with httpx.Client(timeout=KAP_TIMEOUT_SECONDS, follow_redirects=True, headers=_kap_headers()) as client:
-        response = client.post(_kap_url(path), json=payload)
-        response.raise_for_status()
-        return response.json()
+    client = _get_kap_client()
+    response = client.post(_kap_url(path), json=payload, headers=_kap_headers())
+    response.raise_for_status()
+    return response.json()
 
 
 def _kap_get_text(path: str) -> str:
-    with httpx.Client(timeout=KAP_TIMEOUT_SECONDS, follow_redirects=True, headers=_kap_headers("text/html,*/*")) as client:
-        response = client.get(_kap_url(path))
-        response.raise_for_status()
-        return response.text
+    response = _kap_request_get(_kap_url(path), _kap_headers("text/html,*/*"))
+    response.raise_for_status()
+    return response.text
 
 
 def _kap_get_bytes(path: str, accept: str = "application/pdf,*/*") -> bytes:
-    with httpx.Client(timeout=KAP_TIMEOUT_SECONDS, follow_redirects=True, headers=_kap_headers(accept)) as client:
-        response = client.get(_kap_url(path))
-        response.raise_for_status()
-        return bytes(response.content)
+    response = _kap_request_get(_kap_url(path), _kap_headers(accept))
+    response.raise_for_status()
+    return bytes(response.content)
 
 
 def _kap_search_fund_metadata(fund_code: str) -> Optional[Dict[str, Any]]:

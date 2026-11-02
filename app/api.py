@@ -17,6 +17,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
+from app.etag import ORJSONResponse
+
 from app.api_runtime import (
     CONFIG,
     LOGGER,
@@ -44,6 +46,7 @@ from app import market_service as _market_service
 from app import model_portfolio_api_service as _model_portfolio_api_service
 from app import kap_service as _kap_service
 from app.fund_api_service import _start_fund_price_collector, _stop_fund_price_collector
+from app.fund_service import close_shared_http_clients
 
 
 # The Gradio Space entrypoint imports this callable directly and invokes it
@@ -98,9 +101,15 @@ async def _lifespan(_app: FastAPI):
     finally:
         await _stop_fund_price_collector()
         close_postgres_pool()
+        close_shared_http_clients()
 
 
-app = FastAPI(title="RAG-Fin API", version="0.10.0", lifespan=_lifespan)
+app = FastAPI(
+    title="RAG-Fin API",
+    version="0.10.0",
+    lifespan=_lifespan,
+    default_response_class=ORJSONResponse,
+)
 
 
 def _cors_allow_origins() -> List[str]:
