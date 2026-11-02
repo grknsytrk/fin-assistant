@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
-import { Building2, Check, Coins, GripHorizontal, Plus, RotateCcw, Search, SlidersHorizontal, Sparkles, Trash2, TrendingUp, X } from 'lucide-react';
+import { Building2, Check, Coins, GripHorizontal, Maximize2, Plus, RotateCcw, Search, SlidersHorizontal, Sparkles, Trash2, TrendingUp, X } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type {
     MarketIndexCode,
@@ -1788,6 +1788,7 @@ function StockCardMiniChart({
     rangeLoading,
     rangeError,
     onRangeSelect,
+    onOpenDetail,
     isLoading = false,
     isLive = false,
 }: {
@@ -1801,18 +1802,19 @@ function StockCardMiniChart({
     rangeLoading: Partial<Record<MarketStockCardChartRange, boolean>>;
     rangeError: Partial<Record<MarketStockCardChartRange, string | null>>;
     onRangeSelect: (range: MarketStockCardChartRange) => void;
+    onOpenDetail?: () => void;
     isLoading?: boolean;
     isLive?: boolean;
 }) {
-    const shellRef = useRef<HTMLDivElement>(null);
+    const canvasWrapRef = useRef<HTMLDivElement>(null);
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
-        width: 360,
-        height: 150,
+        width: 340,
+        height: 125,
     });
 
     useLayoutEffect(() => {
-        const el = shellRef.current;
+        const el = canvasWrapRef.current;
         if (!el) return;
 
         let frameId: number | null = null;
@@ -1849,7 +1851,7 @@ function StockCardMiniChart({
     }, []);
 
     const { width, height } = dimensions;
-    const padding = { top: 8, right: 2, bottom: 18, left: 2 };
+    const padding = { top: 12, right: 6, bottom: 20, left: 6 };
     const validPoints = (points ?? []).filter((point) => Number.isFinite(point.close));
     const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
     const rangeControls = (
@@ -1883,8 +1885,27 @@ function StockCardMiniChart({
             })}
         </div>
     );
-    const skeletonTop = 6;
-    const skeletonBottom = height - 4;
+    const chartToolbar = (
+        <div className="stock-card-chart-toolbar">
+            {rangeControls}
+            {onOpenDetail && (
+                <button
+                    type="button"
+                    className="stock-card-chart-action-btn"
+                    title={`${symbol} detaylı grafik ve analiz`}
+                    aria-label={`${symbol} detaylı analiz`}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onOpenDetail();
+                    }}
+                >
+                    <Maximize2 size={13} aria-hidden="true" />
+                </button>
+            )}
+        </div>
+    );
+    const skeletonTop = 10;
+    const skeletonBottom = height - 16;
     const skeletonSpan = Math.max(1, skeletonBottom - skeletonTop);
     const skeletonPointCount = 44;
     let skeletonSeed = `${symbol}:${selectedRange}`
@@ -1915,30 +1936,32 @@ function StockCardMiniChart({
 
     if (isLoading) {
         return (
-            <div ref={shellRef} className="stock-card-chart-shell">
-                {rangeControls}
-                <div className="stock-card-inline-chart-skeleton" aria-hidden="true">
-                    <div className="stock-card-inline-chart-track stock-card-inline-skeleton-pulse">
-                        <svg
-                            className="stock-card-inline-chart-svg"
-                            viewBox={`0 0 ${width} ${height}`}
-                            preserveAspectRatio="none"
-                            shapeRendering="geometricPrecision"
-                        >
-                            <defs>
-                                <linearGradient id={skeletonAreaGradientId} x1="0%" y1="0%" x2="0%" y2="100%">
-                                    <stop offset="0%" stopColor="rgba(148,163,184,0.22)" />
-                                    <stop offset="100%" stopColor="rgba(148,163,184,0)" />
-                                </linearGradient>
-                            </defs>
-                            <line className="stock-card-inline-chart-gridline" x1={0} x2={width} y1={height * 0.56} y2={height * 0.56} />
-                            <path className="stock-card-inline-chart-area" d={skeletonAreaPath} fill={`url(#${skeletonAreaGradientId})`} />
-                            <path
-                                className="stock-card-inline-chart-line"
-                                d={skeletonLinePath}
-                                pathLength={100}
-                            />
-                        </svg>
+            <div className="stock-card-chart-shell">
+                {chartToolbar}
+                <div ref={canvasWrapRef} className="stock-card-chart-canvas-wrap">
+                    <div className="stock-card-inline-chart-skeleton" aria-hidden="true">
+                        <div className="stock-card-inline-chart-track stock-card-inline-skeleton-pulse">
+                            <svg
+                                className="stock-card-inline-chart-svg"
+                                viewBox={`0 0 ${width} ${height}`}
+                                preserveAspectRatio="none"
+                                shapeRendering="geometricPrecision"
+                            >
+                                <defs>
+                                    <linearGradient id={skeletonAreaGradientId} x1="0%" y1="0%" x2="0%" y2="100%">
+                                        <stop offset="0%" stopColor="rgba(148,163,184,0.18)" />
+                                        <stop offset="100%" stopColor="rgba(148,163,184,0)" />
+                                    </linearGradient>
+                                </defs>
+                                <line className="stock-card-inline-chart-gridline" x1={0} x2={width} y1={height * 0.52} y2={height * 0.52} />
+                                <path className="stock-card-inline-chart-area" d={skeletonAreaPath} fill={`url(#${skeletonAreaGradientId})`} />
+                                <path
+                                    className="stock-card-inline-chart-line"
+                                    d={skeletonLinePath}
+                                    pathLength={100}
+                                />
+                            </svg>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1947,9 +1970,11 @@ function StockCardMiniChart({
 
     if (validPoints.length < 2) {
         return (
-            <div ref={shellRef} className="stock-card-chart-shell">
-                {rangeControls}
-                <div className="stock-card-chart-empty">Veri yok</div>
+            <div className="stock-card-chart-shell">
+                {chartToolbar}
+                <div ref={canvasWrapRef} className="stock-card-chart-canvas-wrap">
+                    <div className="stock-card-chart-empty">Veri yok</div>
+                </div>
             </div>
         );
     }
@@ -2046,132 +2071,131 @@ function StockCardMiniChart({
         } else {
             tooltipX = Math.max(6, hoverX - tooltipWidth - horizontalOffset);
         }
-        const minTop = (!isLeftHalf && tooltipX < 190) ? 32 : 6;
-        const maxTop = Math.max(minTop, height - tooltipHeight - 16);
+        const minTop = 4;
+        const maxTop = Math.max(minTop, height - tooltipHeight - 4);
         tooltipY = clamp(hoverY - tooltipHeight / 2, minTop, maxTop);
     }
 
     return (
-        <div ref={shellRef} className="stock-card-chart-shell">
-            {rangeControls}
-            <svg
-                className="stock-card-mini-chart"
-                viewBox={`0 0 ${width} ${height}`}
-                preserveAspectRatio="none"
-                role="img"
-                aria-label={`${symbol} ${selectedRange} çizgi grafiği`}
-                onPointerMove={handlePointerMove}
-                onPointerLeave={() => setHoverIndex(null)}
-                shapeRendering="geometricPrecision"
-                textRendering="geometricPrecision"
-            >
-                <defs>
-                    <linearGradient id={gradientId} x1="0%" y1="0%" x2="0%" y2="100%">
-                        <stop offset="0%" stopColor={color} stopOpacity="0.22" />
-                        <stop offset="100%" stopColor={color} stopOpacity="0" />
-                    </linearGradient>
-                </defs>
-                <line
-                    x1={0}
-                    x2={width}
-                    y1={baselineY}
-                    y2={baselineY}
-                    stroke="rgba(255,255,255,0.16)"
-                    strokeDasharray="3 4"
-                />
-                {useTimeScale ? (
-                    [startTimeMs, startTimeMs + (endTimeMs - startTimeMs) / 2, endTimeMs].map((timeMs, index) => {
-                        const x = index === 0 ? padding.left : index === 2 ? width - padding.right : padding.left + plotWidth / 2;
-                        return (
-                            <text
-                                key={timeMs}
-                                x={x}
-                                y={height - 6}
-                                fill="rgba(255,255,255,0.24)"
-                                fontSize="10"
-                                fontFamily="monospace"
-                                textAnchor={index === 0 ? 'start' : index === 2 ? 'end' : 'middle'}
-                            >
-                                {formatStockCardAxisTime(new Date(timeMs))}
-                            </text>
-                        );
-                    })
-                ) : (
-                    timeTickIndexes.map((index) => {
-                        const x = xFor(index);
-                        return (
-                            <text
-                                key={index}
-                                x={x}
-                                y={height - 6}
-                                fill="rgba(255,255,255,0.24)"
-                                fontSize="10"
-                                fontFamily="monospace"
-                                textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
-                            >
-                                {formatStockCardAxisDate(validPoints[index].time, selectedRange)}
-                            </text>
-                        );
-                    })
-                )}
-                <path d={areaData} fill={`url(#${gradientId})`} />
-                <path d={pathData} fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-                
-                {selectedRange === '1d' && (
-                    <>
-                        {isLive && (
-                            <circle cx={xFor(validPoints.length - 1)} cy={yFor(validPoints[validPoints.length - 1].close)} r="4" fill={color} opacity="0.6">
-                                <animate attributeName="r" values="4; 14; 14" keyTimes="0; 0.5; 1" dur="2s" repeatCount="indefinite" />
-                                <animate attributeName="opacity" values="0.6; 0; 0" keyTimes="0; 0.5; 1" dur="2s" repeatCount="indefinite" />
-                            </circle>
-                        )}
-                        <circle cx={xFor(validPoints.length - 1)} cy={yFor(validPoints[validPoints.length - 1].close)} r="4" fill={color} />
-                    </>
-                )}
+        <div className="stock-card-chart-shell">
+            {chartToolbar}
+            <div ref={canvasWrapRef} className="stock-card-chart-canvas-wrap">
+                <svg
+                    className="stock-card-mini-chart"
+                    viewBox={`0 0 ${width} ${height}`}
+                    preserveAspectRatio="none"
+                    role="img"
+                    aria-label={`${symbol} ${selectedRange} çizgi grafiği`}
+                    onPointerMove={handlePointerMove}
+                    onPointerLeave={() => setHoverIndex(null)}
+                    shapeRendering="geometricPrecision"
+                    textRendering="geometricPrecision"
+                >
+                    <defs>
+                        <linearGradient id={gradientId} x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor={color} stopOpacity="0.22" />
+                            <stop offset="100%" stopColor={color} stopOpacity="0" />
+                        </linearGradient>
+                    </defs>
+                    <line
+                        x1={0}
+                        x2={width}
+                        y1={baselineY}
+                        y2={baselineY}
+                        stroke="rgba(255,255,255,0.12)"
+                        strokeDasharray="3 3"
+                    />
+                    {useTimeScale ? (
+                        [startTimeMs, startTimeMs + (endTimeMs - startTimeMs) / 2, endTimeMs].map((timeMs, index) => {
+                            const x = index === 0 ? padding.left : index === 2 ? width - padding.right : padding.left + plotWidth / 2;
+                            return (
+                                <text
+                                    key={timeMs}
+                                    x={x}
+                                    y={height - 6}
+                                    fill="#71717a"
+                                    fontSize="10"
+                                    fontFamily="var(--font-mono)"
+                                    textAnchor={index === 0 ? 'start' : index === 2 ? 'end' : 'middle'}
+                                >
+                                    {formatStockCardAxisTime(new Date(timeMs))}
+                                </text>
+                            );
+                        })
+                    ) : (
+                        timeTickIndexes.map((index) => {
+                            const x = xFor(index);
+                            return (
+                                <text
+                                    key={index}
+                                    x={x}
+                                    y={height - 6}
+                                    fill="#71717a"
+                                    fontSize="10"
+                                    fontFamily="var(--font-mono)"
+                                    textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
+                                >
+                                    {formatStockCardAxisDate(validPoints[index].time, selectedRange)}
+                                </text>
+                            );
+                        })
+                    )}
+                    <path d={areaData} fill={`url(#${gradientId})`} />
+                    <path d={pathData} fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                    
+                    {selectedRange === '1d' && validPoints.length > 0 && (
+                        <circle
+                            cx={xFor(validPoints.length - 1)}
+                            cy={yFor(validPoints[validPoints.length - 1].close)}
+                            r="3"
+                            fill={color}
+                        />
+                    )}
 
-                {hoverPoint && hoverX != null && hoverY != null && (
-                    <g className="stock-card-chart-hover">
-                        <line
-                            x1={hoverX}
-                            x2={hoverX}
-                            y1={padding.top}
-                            y2={height - padding.bottom}
-                            stroke="rgba(255,255,255,0.42)"
-                            strokeDasharray="4 4"
-                        />
-                        <line
-                            x1={padding.left}
-                            x2={width - padding.right}
-                            y1={hoverY}
-                            y2={hoverY}
-                            stroke="rgba(255,255,255,0.24)"
-                            strokeDasharray="5 5"
-                        />
-                        <circle cx={hoverX} cy={hoverY} r="6" fill={color} opacity="0.25" />
-                        <circle cx={hoverX} cy={hoverY} r="3.5" fill={color} stroke="#07090b" strokeWidth="1.8" />
-                        <g transform={`translate(${tooltipX}, ${tooltipY})`} style={{ pointerEvents: 'none' }}>
-                            <rect
-                                width={tooltipWidth}
-                                height={tooltipHeight}
-                                rx="5"
-                                fill="#0b0e12"
-                                stroke="rgba(59,130,246,0.3)"
-                                strokeWidth="1"
-                                style={{ filter: 'drop-shadow(0 4px 10px rgba(0,0,0,0.5))' }}
+                    {hoverPoint && hoverX != null && hoverY != null && (
+                        <g className="stock-card-chart-hover">
+                            <line
+                                x1={hoverX}
+                                x2={hoverX}
+                                y1={padding.top}
+                                y2={height - padding.bottom}
+                                stroke="rgba(255,255,255,0.28)"
+                                strokeDasharray="3 3"
                             />
-                            <text x="8" y="14" fill="#94a3b8" fontSize="9.5" fontFamily="monospace">
-                                {formatStockCardChartDate(hoverPoint.time, selectedRange)}
-                            </text>
-                            <text x="8" y="29" fill="#f8fafc" fontSize="11" fontFamily="monospace" fontWeight="700">
-                                {symbol}
-                            </text>
-                            <text x={tooltipWidth - 8} y="29" fill="#f8fafc" fontSize="11" fontFamily="monospace" fontWeight="700" textAnchor="end">
-                                {formatCardCurrency(hoverPoint.close, currency)}
-                            </text>
+                            <line
+                                x1={padding.left}
+                                x2={width - padding.right}
+                                y1={hoverY}
+                                y2={hoverY}
+                                stroke="rgba(255,255,255,0.18)"
+                                strokeDasharray="4 4"
+                            />
+                            <circle cx={hoverX} cy={hoverY} r="5" fill={color} opacity="0.25" />
+                            <circle cx={hoverX} cy={hoverY} r="3" fill={color} stroke="#141413" strokeWidth="1.5" />
+                            <g transform={`translate(${tooltipX}, ${tooltipY})`} style={{ pointerEvents: 'none' }}>
+                                <rect
+                                    width={tooltipWidth}
+                                    height={tooltipHeight}
+                                    rx="5"
+                                    fill="#18181b"
+                                    stroke="rgba(255,255,255,0.12)"
+                                    strokeWidth="1"
+                                    style={{ filter: 'drop-shadow(0 4px 10px rgba(0,0,0,0.5))' }}
+                                />
+                                <text x="8" y="14" fill="#a1a1aa" fontSize="9.5" fontFamily="var(--font-mono)">
+                                    {formatStockCardChartDate(hoverPoint.time, selectedRange)}
+                                </text>
+                                <text x="8" y="29" fill="#f8fafc" fontSize="11" fontFamily="var(--font-mono)" fontWeight="700">
+                                    {symbol}
+                                </text>
+                                <text x={tooltipWidth - 8} y="29" fill="#f8fafc" fontSize="11" fontFamily="var(--font-mono)" fontWeight="700" textAnchor="end">
+                                    {formatCardCurrency(hoverPoint.close, currency)}
+                                </text>
+                            </g>
                         </g>
-                    </g>
-                )}
-            </svg>
+                    )}
+                </svg>
+            </div>
         </div>
     );
 }
@@ -2615,6 +2639,7 @@ function MarketStockCard({
                 rangeLoading={rangeLoading}
                 rangeError={rangeError}
                 onRangeSelect={handleRangeSelect}
+                onOpenDetail={onOpen}
                 isLoading={isCardDataLoading}
                 isLive={isCardLive}
             />

@@ -903,85 +903,118 @@
 .stock-card-chart-shell {
     position: relative;
     width: 100%;
-    height: 150px;
-    min-height: 150px;
+    height: 164px;
+    min-height: 164px;
     margin-top: 0.65rem;
     border-top: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
     border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
     background: #141413;
-    overflow: hidden;
+    display: flex;
+    flex-direction: column;
 }
 
 .markets-workspace-with-rail .stock-card-chart-shell {
-    height: 126px;
-    min-height: 126px;
+    height: 150px;
+    min-height: 150px;
     margin-top: 0.52rem;
 }
 
-.stock-card-chart-ranges {
-    position: absolute;
-    z-index: 2;
-    top: 6px;
-    left: 0.55rem;
-    display: inline-flex;
+.stock-card-chart-toolbar {
+    display: flex;
     align-items: center;
-    gap: 0.18rem;
+    justify-content: space-between;
+    padding: 0.35rem 0.55rem 0.15rem;
+    flex-shrink: 0;
+    min-height: 30px;
 }
 
-.markets-workspace-with-rail .stock-card-chart-ranges {
-    top: 5px;
-    left: 0.45rem;
+.markets-workspace-with-rail .stock-card-chart-toolbar {
+    padding: 0.25rem 0.45rem 0.1rem;
+    min-height: 26px;
+}
+
+.stock-card-chart-ranges {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
 }
 
 .stock-card-chart-range {
     min-width: 28px;
-    height: 26px;
+    height: 24px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 0 0.36rem;
+    padding: 0 0.45rem;
     border: 0;
     border-radius: 6px;
     background: transparent;
-    color: var(--text-secondary);
+    color: #71717a;
     font-family: var(--font-mono);
     font-size: 0.72rem;
-    font-weight: 900;
+    font-weight: 600;
     cursor: pointer;
+    outline: none;
+    transition: background 0.12s ease, color 0.12s ease;
 }
 
 .markets-workspace-with-rail .stock-card-chart-range {
-    min-width: 25px;
-    height: 24px;
-    padding: 0 0.3rem;
-    font-size: 0.66rem;
+    min-width: 24px;
+    height: 22px;
+    padding: 0 0.32rem;
+    font-size: 0.68rem;
 }
 
 .stock-card-chart-range:hover {
-    color: var(--text-primary);
-    background: color-mix(in srgb, var(--surface-border) 42%, transparent);
+    color: #e4e4e7;
+    background: rgba(255, 255, 255, 0.06);
 }
 
 .stock-card-chart-range.is-active {
-    color: var(--text-primary);
-    background: color-mix(in srgb, var(--surface-border) 70%, transparent);
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.12);
 }
 
-.stock-card-chart-range.is-loading::after,
-.stock-card-chart-range.has-error::after {
-    content: '';
-    width: 4px;
-    height: 4px;
-    margin-left: 4px;
-    border-radius: 999px;
-    background: var(--accent-color);
+.stock-card-chart-range.is-loading {
+    opacity: 0.5;
 }
 
-.stock-card-chart-range.has-error::after {
-    background: var(--danger-color);
+.stock-card-chart-range:focus-visible {
+    outline: 1.5px solid var(--accent-color);
+    outline-offset: 1px;
+}
+
+.stock-card-chart-action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: #71717a;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+    padding: 0;
+}
+
+.stock-card-chart-action-btn:hover {
+    color: #e4e4e7;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.stock-card-chart-canvas-wrap {
+    position: relative;
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
 }
 
 .stock-card-mini-chart {
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
     display: block;
@@ -998,13 +1031,13 @@
     height: 100%;
     display: grid;
     place-items: center;
-    padding-top: 1.6rem;
+    padding-top: 0;
     color: var(--text-secondary);
     font-size: 0.78rem;
 }
 
 .markets-workspace-with-rail .stock-card-chart-empty {
-    padding-top: 1.35rem;
+    padding-top: 0;
     font-size: 0.72rem;
 }
 
