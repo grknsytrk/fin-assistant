@@ -6,6 +6,7 @@ import { apiClient } from '../api/client';
 import type { MarketFlowItem } from '../api/types';
 import { normalizeWatchlistSymbol, useWatchlist } from '../hooks/useWatchlist';
 import { toStockDetail } from '../routing/routes';
+import { isBistTradingHours } from '../utils/marketHours';
 
 export type FlowFilter = 'all' | 'watchlist' | 'model_portfolio' | 'ozel_durum' | 'finansal_rapor' | 'kar_payi' | 'genel_kurul' | 'diger';
 
@@ -27,7 +28,13 @@ const FLOW_BACKFILL_PAGE_SIZE = 500;
 const FLOW_MAX_ITEMS = 2_500;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
 const FLOW_NEW_ITEM_HIGHLIGHT_MS = 5_000;
-const FLOW_HEAD_POLL_MS = 5_000;
+export const FLOW_HEAD_POLL_OPEN_MS = 5_000;
+export const FLOW_HEAD_POLL_CLOSED_MS = 60_000;
+export const FLOW_HEAD_POLL_MS = FLOW_HEAD_POLL_OPEN_MS;
+
+export function getFlowHeadPollInterval(now: Date = new Date()): number {
+    return isBistTradingHours(now) ? FLOW_HEAD_POLL_OPEN_MS : FLOW_HEAD_POLL_CLOSED_MS;
+}
 
 function getServerFlowCategory(filter: FlowFilter): string | undefined {
     if (filter === 'ozel_durum' || filter === 'finansal_rapor' || filter === 'kar_payi' || filter === 'genel_kurul') {
@@ -294,49 +301,82 @@ export default function MarketFlowPanel({
     }, [load]);
 
     useEffect(() => {
-        const timer = window.setInterval(() => {
-            if (document.visibilityState !== 'visible') return;
-            const serverCategory = requestCategoryRef.current;
-            apiClient
-                .marketFlowHead(serverCategory)
-                .then((head) => {
-                    setWarning(head.warning || null);
-                    const previousCursor = latestCursorRef.current;
-                    if (!head.latest_cursor) return;
-                    if (!previousCursor) {
-                        latestCursorRef.current = head.latest_cursor;
-                        return;
-                    }
-                    if (head.latest_cursor === previousCursor) return;
+        let timerId: number | null = null;
+        let cancelled = false;
+        let inFlight = false;
 
-                    return apiClient
-                        .marketFlow(FLOW_PAGE_SIZE, serverCategory, { after: previousCursor })
-                        .then((payload) => {
-                            const incoming = payload.items || [];
-                            const newIds = getNewFlowItemIds(observedFlowIdsRef.current, incoming);
-                            if (incoming.length > 0) {
-                                setItems((currentItems) => {
-                                    const current = currentItems || [];
-                                    const incomingIds = new Set(incoming.map((item) => item.id));
-                                    return [
-                                        ...incoming,
-                                        ...current.filter((item) => !incomingIds.has(item.id)),
-                                    ];
-                                });
-                                const observed = observedFlowIdsRef.current || new Set<string>();
-                                incoming.forEach((item) => observed.add(item.id));
-                                observedFlowIdsRef.current = observed;
-                                markNewItems(newIds);
-                                setWarning(payload.warning || null);
+        const poll = async () => {
+            if (inFlight || cancelled) return;
+            inFlight = true;
+            try {
+                if (document.visibilityState === 'visible') {
+                    const serverCategory = requestCategoryRef.current;
+                    try {
+                        const head = await apiClient.marketFlowHead(serverCategory);
+                        if (cancelled) return;
+                        setWarning(head.warning || null);
+                        const previousCursor = latestCursorRef.current;
+                        if (head.latest_cursor) {
+                            if (!previousCursor) {
+                                latestCursorRef.current = head.latest_cursor;
+                            } else if (head.latest_cursor !== previousCursor) {
+                                const payload = await apiClient.marketFlow(FLOW_PAGE_SIZE, serverCategory, { after: previousCursor });
+                                if (cancelled) return;
+                                const incoming = payload.items || [];
+                                const newIds = getNewFlowItemIds(observedFlowIdsRef.current, incoming);
+                                if (incoming.length > 0) {
+                                    setItems((currentItems) => {
+                                        const current = currentItems || [];
+                                        const incomingIds = new Set(incoming.map((item) => item.id));
+                                        return [
+                                            ...incoming,
+                                            ...current.filter((item) => !incomingIds.has(item.id)),
+                                        ];
+                                    });
+                                    const observed = observedFlowIdsRef.current || new Set<string>();
+                                    incoming.forEach((item) => observed.add(item.id));
+                                    observedFlowIdsRef.current = observed;
+                                    markNewItems(newIds);
+                                    setWarning(payload.warning || null);
+                                }
+                                latestCursorRef.current = head.latest_cursor;
                             }
-                            latestCursorRef.current = head.latest_cursor;
-                        });
-                })
-                .catch(() => {
-                    // The last successful flow remains visible while the head check retries later.
-                });
-        }, FLOW_HEAD_POLL_MS);
-        return () => window.clearInterval(timer);
+                        }
+                    } catch {
+                        // The last successful flow remains visible while the head check retries later.
+                    }
+                }
+            } finally {
+                inFlight = false;
+                if (!cancelled) {
+                    const nextInterval = getFlowHeadPollInterval();
+                    timerId = window.setTimeout(poll, nextInterval);
+                }
+            }
+        };
+
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible' && !cancelled) {
+                if (timerId !== null) {
+                    window.clearTimeout(timerId);
+                    timerId = null;
+                }
+                void poll();
+            }
+        };
+
+        document.addEventListener('visibilitychange', onVisibilityChange);
+
+        const initialInterval = getFlowHeadPollInterval();
+        timerId = window.setTimeout(poll, initialInterval);
+
+        return () => {
+            cancelled = true;
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            if (timerId !== null) {
+                window.clearTimeout(timerId);
+            }
+        };
     }, [markNewItems]);
 
     const handleFilterChange = (nextFilter: FlowFilter) => {

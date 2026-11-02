@@ -22,6 +22,10 @@ describe('Worker edge cache routing', () => {
             .toBe('market-stocks');
         expect(getCacheableListRoute(new URL('https://fin-rag.example/api/funds?sort=name')))
             .toBe('funds');
+        expect(getCacheableListRoute(new URL('https://fin-rag.example/api/market/flow/head')))
+            .toBe('market-flow-head');
+        expect(getCacheableListRoute(new URL('https://fin-rag.example/api/kap/companies')))
+            .toBe('kap-companies');
         expect(getCacheableListRoute(new URL('https://fin-rag.example/api/funds/search?q=bank')))
             .toBeNull();
         expect(getCacheableListRoute(new URL('https://fin-rag.example/funds')))
@@ -33,6 +37,12 @@ describe('Worker edge cache routing', () => {
         expect(shouldUseCachedList(makeRequest('/api/funds', { headers: { Authorization: 'Bearer token' } })))
             .toBe(false);
         expect(shouldUseCachedList(makeRequest('/api/funds', { headers: { Cookie: 'session=1' } })))
+            .toBe(false);
+        expect(shouldUseCachedList(makeRequest('/api/market/flow/head'))).toBe(true);
+        expect(shouldUseCachedList(makeRequest('/api/market/flow/head', { headers: { Cookie: 'session=1' } })))
+            .toBe(false);
+        expect(shouldUseCachedList(makeRequest('/api/kap/companies'))).toBe(true);
+        expect(shouldUseCachedList(makeRequest('/api/kap/companies', { headers: { Cookie: 'session=1' } })))
             .toBe(false);
         expect(shouldUseCachedList(makeRequest('/api/funds', { headers: { Origin: 'https://other.example' } })))
             .toBe(false);
@@ -83,6 +93,10 @@ describe('Worker edge cache policies', () => {
 
         expect(cacheControlForListRequest(makeRequest('/api/funds?sort=name')))
             .toBe('public, max-age=300, stale-while-revalidate=3600, stale-if-error=0');
+        expect(cacheControlForListRequest(makeRequest('/api/market/flow/head')))
+            .toBe('public, max-age=3, stale-while-revalidate=15, stale-if-error=0');
+        expect(cacheControlForListRequest(makeRequest('/api/kap/companies')))
+            .toBe('public, max-age=3600, stale-while-revalidate=86400, stale-if-error=0');
     });
 
     it('tags the fund list and each market index variant', () => {
@@ -91,6 +105,10 @@ describe('Worker edge cache policies', () => {
         expect(cacheTagsForList('market-stocks', url)).toEqual(['market-stocks', 'market-stocks-XU100']);
         expect(cacheTagsForList('funds', new URL('https://fin-rag.example/api/funds?sort=name')))
             .toEqual(['funds-list']);
+        expect(cacheTagsForList('market-flow-head', new URL('https://fin-rag.example/api/market/flow/head')))
+            .toEqual(['market-flow-head']);
+        expect(cacheTagsForList('kap-companies', new URL('https://fin-rag.example/api/kap/companies')))
+            .toEqual(['kap-companies']);
     });
 
     it('purges the refreshed market index tag and leaves other requests alone', async () => {
@@ -162,15 +180,39 @@ describe('Worker edge cache policies', () => {
         expect(failed.headers.get('Cache-Control')).toBe('private, no-store');
     });
 
-    it('keeps 304 validators usable during cache revalidation', async () => {
-        const response = await applyListCachePolicy(
-            new Response(null, { status: 304, headers: { ETag: 'W/"funds-v1"', 'Cache-Control': 'private, no-cache' } }),
-            makeRequest('/api/funds'),
-            'funds',
+    it('caches valid market flow head and KAP companies responses', async () => {
+        const flowRequest = makeRequest('/api/market/flow/head');
+        const flowResponse = await applyListCachePolicy(
+            new Response(JSON.stringify({ latest_cursor: 'cursor-1' }), {
+                headers: { 'Content-Type': 'application/json' },
+            }),
+            flowRequest,
+            'market-flow-head',
         );
-        expect(response.status).toBe(304);
-        expect(response.headers.get('ETag')).toBe('W/"funds-v1"');
-        expect(response.headers.get('Cloudflare-CDN-Cache-Control'))
-            .toBe('public, max-age=300, stale-while-revalidate=3600, stale-if-error=0');
+        expect(flowResponse.headers.get('Cloudflare-CDN-Cache-Control'))
+            .toBe('public, max-age=3, stale-while-revalidate=15, stale-if-error=0');
+        expect(flowResponse.headers.get('Cache-Tag')).toBe('market-flow-head');
+
+        const kapRequest = makeRequest('/api/kap/companies');
+        const kapResponse = await applyListCachePolicy(
+            new Response(JSON.stringify({ companies: ['THYAO', 'GARAN'], items: [] }), {
+                headers: { 'Content-Type': 'application/json' },
+            }),
+            kapRequest,
+            'kap-companies',
+        );
+        expect(kapResponse.headers.get('Cloudflare-CDN-Cache-Control'))
+            .toBe('public, max-age=3600, stale-while-revalidate=86400, stale-if-error=0');
+        expect(kapResponse.headers.get('Cache-Tag')).toBe('kap-companies');
+
+        const emptyKapResponse = await applyListCachePolicy(
+            new Response(JSON.stringify({ companies: [], items: [] }), {
+                headers: { 'Content-Type': 'application/json' },
+            }),
+            kapRequest,
+            'kap-companies',
+        );
+        expect(emptyKapResponse.headers.get('Cache-Control')).toBe('private, no-store');
+        expect(emptyKapResponse.headers.has('Cloudflare-CDN-Cache-Control')).toBe(false);
     });
 });

@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { MarketFlowItem } from '../api/types';
-import { getMatchingFavoriteSymbols, getNewFlowItemIds, matchesFlowFilter } from './MarketFlowPanel';
+import {
+    FLOW_HEAD_POLL_CLOSED_MS,
+    FLOW_HEAD_POLL_OPEN_MS,
+    getFlowHeadPollInterval,
+    getMatchingFavoriteSymbols,
+    getNewFlowItemIds,
+    matchesFlowFilter,
+} from './MarketFlowPanel';
 
 const flowItem: MarketFlowItem = {
     id: 'kap-example',
@@ -34,5 +41,26 @@ describe('MarketFlowPanel favorites matching', () => {
             { ...flowItem, id: 'old-1' },
         ])).toEqual(['new-1']);
         expect(getNewFlowItemIds(null, [flowItem])).toEqual([]);
+    });
+});
+
+describe('MarketFlowPanel polling intervals', () => {
+    it('uses 5,000 ms during BIST trading hours', () => {
+        // Wednesday 11:00 UTC = 14:00 Istanbul (during session 09:50 - 18:20)
+        const openDate = new Date('2026-10-21T11:00:00.000Z');
+        expect(getFlowHeadPollInterval(openDate)).toBe(FLOW_HEAD_POLL_OPEN_MS);
+        expect(getFlowHeadPollInterval(openDate)).toBe(5_000);
+    });
+
+    it('relaxes to 60,000 ms when BIST market is closed (nights and weekends)', () => {
+        // Sunday 11:00 UTC
+        const weekendDate = new Date('2026-10-25T11:00:00.000Z');
+        expect(getFlowHeadPollInterval(weekendDate)).toBe(FLOW_HEAD_POLL_CLOSED_MS);
+        expect(getFlowHeadPollInterval(weekendDate)).toBe(60_000);
+
+        // Wednesday 21:00 UTC = 00:00 Istanbul (night)
+        const nightDate = new Date('2026-10-21T21:00:00.000Z');
+        expect(getFlowHeadPollInterval(nightDate)).toBe(FLOW_HEAD_POLL_CLOSED_MS);
+        expect(getFlowHeadPollInterval(nightDate)).toBe(60_000);
     });
 });

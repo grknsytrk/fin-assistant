@@ -3,10 +3,12 @@ import { isBistTradingHours } from "../frontend/src/utils/marketHours";
 export const API_PREFIX = "/api";
 export const MARKET_STOCKS_PATH = `${API_PREFIX}/market/stocks`;
 export const FUNDS_LIST_PATH = `${API_PREFIX}/funds`;
+export const MARKET_FLOW_HEAD_PATH = `${API_PREFIX}/market/flow/head`;
+export const KAP_COMPANIES_PATH = `${API_PREFIX}/kap/companies`;
 const EDGE_HOST_QUERY_PARAM = "__finrag_edge_host";
 const MAX_MARKET_CACHE_AGE_SECONDS = 300;
 
-export type CacheableListRoute = "market-stocks" | "funds";
+export type CacheableListRoute = "market-stocks" | "funds" | "market-flow-head" | "kap-companies";
 
 interface IstanbulDateParts {
     year: number;
@@ -114,6 +116,8 @@ function secondsUntilNextBistSession(now: Date): number {
 export function getCacheableListRoute(url: URL): CacheableListRoute | null {
     if (url.pathname === MARKET_STOCKS_PATH) return "market-stocks";
     if (url.pathname === FUNDS_LIST_PATH) return "funds";
+    if (url.pathname === MARKET_FLOW_HEAD_PATH) return "market-flow-head";
+    if (url.pathname === KAP_COMPANIES_PATH) return "kap-companies";
     return null;
 }
 
@@ -154,6 +158,8 @@ export function marketStocksCacheTag(requestUrl: URL): string {
 
 export function cacheTagsForList(route: CacheableListRoute, requestUrl: URL): string[] {
     if (route === "funds") return ["funds-list"];
+    if (route === "market-flow-head") return ["market-flow-head"];
+    if (route === "kap-companies") return ["kap-companies"];
     return ["market-stocks", marketStocksCacheTag(requestUrl)];
 }
 
@@ -196,6 +202,12 @@ export function cacheControlForListRequest(request: Request, now: Date = new Dat
     if (route === "funds") {
         return "public, max-age=300, stale-while-revalidate=3600, stale-if-error=0";
     }
+    if (route === "market-flow-head") {
+        return "public, max-age=3, stale-while-revalidate=15, stale-if-error=0";
+    }
+    if (route === "kap-companies") {
+        return "public, max-age=3600, stale-while-revalidate=86400, stale-if-error=0";
+    }
     if (route !== "market-stocks") return "no-store";
 
     if (isBistTradingHours(now)) {
@@ -235,6 +247,7 @@ export async function isCacheableListResponse(
     }
     if (route === "funds" && status && status !== "ok") return false;
     if (route === "market-stocks" && Array.isArray(payload.rows) && payload.rows.length === 0) return false;
+    if (route === "kap-companies" && (!Array.isArray(payload.companies) || payload.companies.length === 0)) return false;
     return true;
 }
 

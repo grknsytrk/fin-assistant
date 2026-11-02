@@ -3126,8 +3126,13 @@
 }
 
 .indices-constituent-wrap {
+    overflow: auto;
     max-height: 420px;
     border-top: 1px solid color-mix(in srgb, var(--surface-border) 68%, transparent);
+    contain: layout;
+    will-change: scroll-position;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
 }
 
 .indices-constituent-table {
@@ -3761,8 +3766,34 @@
     }
 
     .indices-constituent-wrap {
-        max-height: none;
-        overflow: visible;
+        max-height: min(72vh, 600px);
+        overflow: auto;
+        contain: layout;
+        will-change: scroll-position;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .indices-constituent-table tbody tr.stocks-spacer-row {
+        display: block !important;
+        flex-shrink: 0 !important;
+        min-height: 0 !important;
+        padding: 0 !important;
+        border: none !important;
+        background: transparent !important;
+        margin: 0 !important;
+    }
+
+    .indices-constituent-table tbody tr.stocks-spacer-row td {
+        display: block !important;
+        min-height: 0 !important;
+        padding: 0 !important;
+        border: none !important;
+    }
+
+    .indices-constituent-table tbody tr.stocks-spacer-row td::before {
+        display: none !important;
+        content: none !important;
     }
 
     .indices-constituent-table,

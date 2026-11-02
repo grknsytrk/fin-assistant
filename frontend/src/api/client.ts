@@ -756,7 +756,10 @@ export const apiClient = {
         const params = new URLSearchParams();
         if (category) params.append('category', category);
         const query = params.toString();
-        return fetchApi<MarketFlowHeadResponse>(query ? `/market/flow/head?${query}` : '/market/flow/head');
+        return fetchApi<MarketFlowHeadResponse>(
+            query ? `/market/flow/head?${query}` : '/market/flow/head',
+            { credentials: 'omit' },
+        );
     },
     marketWatch: (options?: { refresh?: boolean }) => {
         const params = new URLSearchParams();
@@ -1096,7 +1099,7 @@ export const apiClient = {
         return request;
     },
 
-    kapCompanies: () => fetchApi<KapCompaniesResponse>('/kap/companies'),
+    kapCompanies: () => fetchApi<KapCompaniesResponse>('/kap/companies', { credentials: 'omit' }),
 
     kapSnapshot: async (company: string, refresh = false, maxQuarters = 10, signal?: AbortSignal) => {
         const params = new URLSearchParams({ company, max_quarters: String(maxQuarters) });

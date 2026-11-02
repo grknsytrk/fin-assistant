@@ -3811,6 +3811,31 @@ export default function MarketsView({
         });
         return arr;
     }, [indexConstituents, indexConstituentSort, indexImpactLevel]);
+
+    const indexConstituentWrapRef = useRef<HTMLDivElement>(null);
+    const {
+        startIndex: indexConstituentStartIndex,
+        endIndex: indexConstituentEndIndex,
+        topSpacerHeight: indexConstituentTopSpacerHeight,
+        bottomSpacerHeight: indexConstituentBottomSpacerHeight,
+        containerRef: indexConstituentTableWrapCallbackRef,
+    } = useTableVirtualizer({
+        totalRows: sortedIndexConstituents.length,
+        rowHeight: isMobileViewport ? 95 : 38,
+        overscan: 12,
+        containerRef: indexConstituentWrapRef,
+        resetDeps: [
+            activeSection,
+            selectedIndex,
+            indexConstituentSort.key,
+            indexConstituentSort.direction,
+            isMobileViewport,
+        ],
+    });
+
+    const visibleIndexConstituents = useMemo(() => {
+        return sortedIndexConstituents.slice(indexConstituentStartIndex, indexConstituentEndIndex);
+    }, [sortedIndexConstituents, indexConstituentStartIndex, indexConstituentEndIndex]);
     const heatmapConstituents = useMemo(
         () =>
             indexConstituents
@@ -5150,7 +5175,7 @@ export default function MarketsView({
                                     </div>
                                 </div>
 
-                                <div className="stocks-table-wrap indices-constituent-wrap">
+                                <div className="stocks-table-wrap indices-constituent-wrap" ref={indexConstituentTableWrapCallbackRef}>
                                     <table className="stocks-table indices-constituent-table">
                                         <thead>
                                             <tr>
@@ -5187,7 +5212,15 @@ export default function MarketsView({
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {sortedIndexConstituents.map((row) => (
+                                            {indexConstituentTopSpacerHeight > 0 && (
+                                                <tr className="stocks-spacer-row" style={{ height: `${indexConstituentTopSpacerHeight}px` }} aria-hidden="true">
+                                                    <td
+                                                        colSpan={INDEX_CONSTITUENT_COLUMNS.length}
+                                                        style={{ height: `${indexConstituentTopSpacerHeight}px` }}
+                                                    />
+                                                </tr>
+                                            )}
+                                            {visibleIndexConstituents.map((row) => (
                                                 <tr
                                                     key={row.symbol}
                                                     onClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
@@ -5239,6 +5272,14 @@ export default function MarketsView({
                                                     </td>
                                                 </tr>
                                             ))}
+                                            {indexConstituentBottomSpacerHeight > 0 && (
+                                                <tr className="stocks-spacer-row" style={{ height: `${indexConstituentBottomSpacerHeight}px` }} aria-hidden="true">
+                                                    <td
+                                                        colSpan={INDEX_CONSTITUENT_COLUMNS.length}
+                                                        style={{ height: `${indexConstituentBottomSpacerHeight}px` }}
+                                                    />
+                                                </tr>
+                                            )}
                                         </tbody>
                                     </table>
                                 </div>
