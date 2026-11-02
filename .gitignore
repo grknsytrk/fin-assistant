@@ -61,6 +61,7 @@ data/processed/chroma/
 
 # Local planning / notes (keep local)
 agents_plan/
+.agents/
 WORK_SUMMARY.md
 
 # Temporary Chrome Profiles and Logs
