@@ -10,6 +10,7 @@ from typing import Callable, Dict, Optional
 
 from app.api_runtime import *
 from app.market_service import *
+from app.etag import orjson_dumps
 
 _FUND_COLLECTOR_TASK: Optional[asyncio.Task[None]] = None
 
@@ -164,7 +165,7 @@ def _fund_listing_cache_get_locked(key: str) -> Optional[Dict[str, Any]]:
 
 def _fund_listing_cache_store(key: str, payload: Dict[str, Any]) -> int:
     global _FUND_LISTING_CACHE_BYTES
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    encoded = orjson_dumps(payload)
     weight = len(encoded)
     if weight > _FUND_LISTING_CACHE_MAX_BYTES:
         return weight
@@ -779,7 +780,7 @@ def _funds_listing_payload(
         order=order,
     )
     revision_key = hashlib.sha256(
-        json.dumps(revision, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        orjson_dumps(revision, sort_keys=True)
     ).hexdigest()
     key = f"{base_key}|revision={revision_key}"
 

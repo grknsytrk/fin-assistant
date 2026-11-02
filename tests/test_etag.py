@@ -11,7 +11,14 @@ from app import fund_service as fund_service_module
 from app import fund_api_service as fund_api_service_module
 from app.routers import funds as funds_router
 from app.routers import market as market_router
-from app.etag import if_none_match_matches
+from app.etag import (
+    ORJSONResponse,
+    conditional_json_response,
+    if_none_match_matches,
+    orjson_default,
+    orjson_dumps,
+    weak_etag,
+)
 
 
 def test_if_none_match_uses_weak_comparison_and_supports_lists() -> None:
@@ -284,3 +291,122 @@ def test_cors_exposes_etag_and_allows_conditional_request_header(monkeypatch) ->
     assert "etag" in response.headers.get("access-control-expose-headers", "").lower()
     assert not_modified.status_code == 304
     assert "etag" in not_modified.headers.get("access-control-expose-headers", "").lower()
+
+
+def test_orjson_serialization_data_types() -> None:
+    import dataclasses
+    from decimal import Decimal
+    from enum import Enum
+    from pathlib import PurePosixPath, PureWindowsPath
+    import uuid
+    import datetime
+    from collections import deque
+    import pandas as pd
+    from pydantic import BaseModel
+    import json
+
+    class TestEnum(Enum):
+        ALPHA = "alpha"
+
+    @dataclasses.dataclass
+    class TestDataclass:
+        val: int
+
+    class TestModel(BaseModel):
+        name: str
+        val: Decimal
+
+    payload = {
+        "dec_int": Decimal("42.0"),
+        "dec_float": Decimal("42.5"),
+        "dec_nan": Decimal("NaN"),
+        "dec_inf": Decimal("Infinity"),
+        "path_posix": PurePosixPath("dir/file.txt"),
+        "path_win": PureWindowsPath("C:\\dir\\file.txt"),
+        "set": {10, 20},
+        "frozenset": frozenset([30]),
+        "deque": deque([40, 50]),
+        "bytes": b"raw_data",
+        "enum": TestEnum.ALPHA,
+        "dataclass": TestDataclass(val=99),
+        "pydantic": TestModel(name="test", val=Decimal("12.34")),
+        "timestamp": pd.Timestamp("2026-11-02 12:00:00"),
+        "nat": pd.NaT,
+        "uuid": uuid.UUID("12345678-1234-5678-1234-567812345678"),
+        "dt": datetime.datetime(2026, 11, 2, 12, 0, 0),
+        "date": datetime.date(2026, 11, 2),
+        "int_key_dict": {1: "one", 2: "two"},
+        "nan": float("nan"),
+        "inf": float("inf"),
+    }
+
+    raw = orjson_dumps(payload)
+    parsed = json.loads(raw.decode("utf-8"))
+
+    assert parsed["dec_int"] == 42
+    assert parsed["dec_float"] == 42.5
+    assert parsed["dec_nan"] is None
+    assert parsed["dec_inf"] is None
+    assert parsed["path_posix"] == "dir/file.txt"
+    assert "file.txt" in parsed["path_win"]
+    assert set(parsed["set"]) == {10, 20}
+    assert parsed["frozenset"] == [30]
+    assert parsed["deque"] == [40, 50]
+    assert parsed["bytes"] == "raw_data"
+    assert parsed["enum"] == "alpha"
+    assert parsed["dataclass"] == {"val": 99}
+    assert parsed["pydantic"] == {"name": "test", "val": 12.34}
+    assert parsed["timestamp"] == "2026-11-02T12:00:00"
+    assert parsed["nat"] is None
+    assert parsed["uuid"] == "12345678-1234-5678-1234-567812345678"
+    assert parsed["dt"] == "2026-11-02T12:00:00"
+    assert parsed["date"] == "2026-11-02"
+    assert parsed["int_key_dict"] == {"1": "one", "2": "two"}
+    assert parsed["nan"] is None
+    assert parsed["inf"] is None
+
+
+def test_orjson_response_and_conditional_json_response() -> None:
+    from fastapi import Request
+
+    resp = ORJSONResponse(content={"hello": "world"}, status_code=201, headers={"X-Custom": "yes"})
+    assert resp.status_code == 201
+    assert resp.headers["content-type"] == "application/json"
+    assert resp.headers["x-custom"] == "yes"
+    assert resp.body == b'{"hello":"world"}'
+
+    empty_resp = ORJSONResponse(content=None)
+    assert empty_resp.body == b""
+
+    bytes_resp = ORJSONResponse(content=b'{"raw":true}')
+    assert bytes_resp.body == b'{"raw":true}'
+
+    scope = {"type": "http", "method": "GET", "path": "/test", "headers": []}
+    req = Request(scope)
+
+    c_resp = conditional_json_response(req, {"status": "ok"}, revision={"rev": 1})
+    assert c_resp.status_code == 200
+    assert "etag" in c_resp.headers
+    etag = c_resp.headers["etag"]
+    assert c_resp.headers["cache-control"] == "private, no-cache"
+    assert c_resp.headers["content-type"] == "application/json"
+    assert c_resp.body == b'{"status":"ok"}'
+
+    req_match = Request({**scope, "headers": [(b"if-none-match", etag.encode("utf-8"))]})
+    not_modified = conditional_json_response(req_match, {"status": "ok"}, revision={"rev": 1})
+    assert not_modified.status_code == 304
+    assert not_modified.body == b""
+    assert not_modified.headers["etag"] == etag
+
+
+def test_orjson_dumps_fallback_when_orjson_missing(monkeypatch) -> None:
+    from app import etag as etag_module
+
+    monkeypatch.setattr(etag_module, "orjson", None)
+    payload = {"a": 1, "b": "text"}
+    fallback_bytes = etag_module.orjson_dumps(payload)
+    assert fallback_bytes == b'{"a":1,"b":"text"}'
+
+    etag_val = etag_module.weak_etag({"a": 1})
+    assert etag_val.startswith('W/"')
+

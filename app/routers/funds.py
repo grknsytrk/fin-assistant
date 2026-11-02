@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, Response
 
 from app.api_runtime import *
-from app.etag import conditional_json_response, if_none_match_matches, weak_etag
+from app.etag import ORJSONResponse, conditional_json_response, if_none_match_matches, weak_etag
 from app.fund_api_service import *
 
 router = APIRouter()
@@ -238,7 +238,7 @@ def fund_allocations_history(
     metadata["allocation_history_job"] = _allocation_history_job_public(job)
     response["source_metadata"] = metadata
     if not response.get("history"):
-        return JSONResponse(status_code=202, content=response)
+        return ORJSONResponse(status_code=202, content=response)
     return response
 
 @router.get("/funds/{fund_code}")
