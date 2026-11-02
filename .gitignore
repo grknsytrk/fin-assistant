@@ -30,6 +30,7 @@ env/
 ENV/
 
 # Packaging and build artifacts
+node_modules/
 build/
 dist/
 *.egg-info/
