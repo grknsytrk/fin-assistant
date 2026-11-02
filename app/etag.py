@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import collections
 import dataclasses
+import datetime
 import hashlib
 import json
-from collections import deque
-from collections.abc import Set as AbstractSet
+import math
+import pathlib
+import re
+import uuid
 from decimal import Decimal
 from enum import Enum
-from pathlib import PurePath
 from typing import Any, Callable, Dict
 
 from fastapi import Request, Response
+
+try:
+    import pandas as pd  # type: ignore
+except ImportError:
+    pd = None
+
+try:
+    import numpy as np  # type: ignore
+except ImportError:
+    np = None
 
 try:
     import orjson
@@ -23,30 +36,61 @@ def orjson_default(obj: Any) -> Any:
     if isinstance(obj, Decimal):
         if obj.is_nan() or obj.is_infinite():
             return None
-        return int(obj) if obj % 1 == 0 else float(obj)
-    if isinstance(obj, PurePath):
+        try:
+            if obj == obj.to_integral_value():
+                val = int(obj)
+                if -9223372036854775808 <= val <= 9223372036854775807:
+                    return val
+            as_float = float(obj)
+            if math.isnan(as_float) or math.isinf(as_float):
+                return None
+            return as_float
+        except Exception:
+            return str(obj)
+    if isinstance(obj, pathlib.PurePath):
         return str(obj)
-    if isinstance(obj, (AbstractSet, deque)):
+    if isinstance(obj, (collections.abc.Set, collections.deque)):
         return list(obj)
     if isinstance(obj, (bytes, bytearray)):
         return obj.decode("utf-8", errors="replace")
     if isinstance(obj, Enum):
         return obj.value
+    if (pd is not None and obj is pd.NaT) or type(obj).__name__ == "NaTType":
+        return None
+    if isinstance(obj, (datetime.datetime, datetime.date, datetime.time)):
+        return obj.isoformat()
+    if isinstance(obj, datetime.timedelta):
+        return obj.total_seconds()
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
+    if isinstance(obj, re.Pattern):
+        return obj.pattern
     if hasattr(obj, "model_dump") and callable(obj.model_dump):
         return obj.model_dump()
     if hasattr(obj, "dict") and callable(obj.dict):
         return obj.dict()
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return dataclasses.asdict(obj)
-    try:
-        import pandas as pd  # type: ignore
-
+    if pd is not None:
         if isinstance(obj, pd.Timestamp):
             return obj.isoformat()
-        if pd.isna(obj):
+        if obj is pd.NaT:
             return None
-    except Exception:
-        pass
+        if isinstance(obj, pd.Series):
+            return obj.tolist()
+        if isinstance(obj, pd.DataFrame):
+            return obj.to_dict(orient="records")
+        if pd.isna(obj) is True:
+            return None
+    if hasattr(obj, "to_dict") and callable(obj.to_dict):
+        try:
+            return obj.to_dict(orient="records")
+        except TypeError:
+            return obj.to_dict()
+    if hasattr(obj, "tolist") and callable(obj.tolist):
+        return obj.tolist()
+    if hasattr(obj, "item") and callable(obj.item):
+        return obj.item()
     if isinstance(obj, Exception):
         return str(obj)
     if hasattr(obj, "__dict__"):

@@ -317,6 +317,7 @@ def test_orjson_serialization_data_types() -> None:
         val: Decimal
 
     payload = {
+        "dec_huge": Decimal("1" + "0" * 30),
         "dec_int": Decimal("42.0"),
         "dec_float": Decimal("42.5"),
         "dec_nan": Decimal("NaN"),
@@ -332,9 +333,12 @@ def test_orjson_serialization_data_types() -> None:
         "pydantic": TestModel(name="test", val=Decimal("12.34")),
         "timestamp": pd.Timestamp("2026-11-02 12:00:00"),
         "nat": pd.NaT,
+        "series": pd.Series([100, 200]),
+        "df": pd.DataFrame([{"k": "v"}]),
         "uuid": uuid.UUID("12345678-1234-5678-1234-567812345678"),
         "dt": datetime.datetime(2026, 11, 2, 12, 0, 0),
         "date": datetime.date(2026, 11, 2),
+        "timedelta": datetime.timedelta(seconds=120),
         "int_key_dict": {1: "one", 2: "two"},
         "nan": float("nan"),
         "inf": float("inf"),
@@ -343,6 +347,7 @@ def test_orjson_serialization_data_types() -> None:
     raw = orjson_dumps(payload)
     parsed = json.loads(raw.decode("utf-8"))
 
+    assert parsed["dec_huge"] == 1e30
     assert parsed["dec_int"] == 42
     assert parsed["dec_float"] == 42.5
     assert parsed["dec_nan"] is None
@@ -358,9 +363,12 @@ def test_orjson_serialization_data_types() -> None:
     assert parsed["pydantic"] == {"name": "test", "val": 12.34}
     assert parsed["timestamp"] == "2026-11-02T12:00:00"
     assert parsed["nat"] is None
+    assert parsed["series"] == [100, 200]
+    assert parsed["df"] == [{"k": "v"}]
     assert parsed["uuid"] == "12345678-1234-5678-1234-567812345678"
     assert parsed["dt"] == "2026-11-02T12:00:00"
     assert parsed["date"] == "2026-11-02"
+    assert parsed["timedelta"] == 120.0
     assert parsed["int_key_dict"] == {"1": "one", "2": "two"}
     assert parsed["nan"] is None
     assert parsed["inf"] is None
@@ -400,13 +408,41 @@ def test_orjson_response_and_conditional_json_response() -> None:
 
 
 def test_orjson_dumps_fallback_when_orjson_missing(monkeypatch) -> None:
+    import datetime
+    from decimal import Decimal
+    import json
+    import numpy as np
+    import pandas as pd
+    import uuid
     from app import etag as etag_module
 
     monkeypatch.setattr(etag_module, "orjson", None)
-    payload = {"a": 1, "b": "text"}
+    payload = {
+        "a": 1,
+        "b": "text",
+        "dt": datetime.datetime(2026, 11, 2, 14, 30, 0),
+        "date": datetime.date(2026, 11, 2),
+        "dec": Decimal("99.50"),
+        "dec_huge": Decimal("1" + "0" * 30),
+        "np_int": np.int64(123),
+        "series": pd.Series([5, 6]),
+        "df": pd.DataFrame([{"col": "val"}]),
+        "uuid": uuid.UUID("11111111-2222-3333-4444-555555555555"),
+    }
     fallback_bytes = etag_module.orjson_dumps(payload)
-    assert fallback_bytes == b'{"a":1,"b":"text"}'
+    parsed = json.loads(fallback_bytes.decode("utf-8"))
+    assert parsed["a"] == 1
+    assert parsed["b"] == "text"
+    assert parsed["dt"] == "2026-11-02T14:30:00"
+    assert parsed["date"] == "2026-11-02"
+    assert parsed["dec"] == 99.5
+    assert parsed["dec_huge"] == 1e30
+    assert parsed["np_int"] == 123
+    assert parsed["series"] == [5, 6]
+    assert parsed["df"] == [{"col": "val"}]
+    assert parsed["uuid"] == "11111111-2222-3333-4444-555555555555"
 
     etag_val = etag_module.weak_etag({"a": 1})
     assert etag_val.startswith('W/"')
+
 
