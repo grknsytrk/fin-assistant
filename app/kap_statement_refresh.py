@@ -24,6 +24,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -90,8 +91,13 @@ _KAP_STATEMENT_FAILURE_STREAK_LIMIT = _kap_statement_env_int(
     "RAGFIN_KAP_STATEMENT_FAILURE_STREAK_LIMIT", 12, minimum=1
 )
 
+_KAP_STATEMENT_HEARTBEAT_INTERVAL_SECONDS = max(
+    5.0,
+    float(os.getenv("RAGFIN_KAP_STATEMENT_HEARTBEAT_INTERVAL_SECONDS", "15.0") or 15.0),
+)
+
 _KAP_STATEMENT_HEARTBEAT_STALE_SECONDS = _kap_statement_env_int(
-    "RAGFIN_KAP_STATEMENT_HEARTBEAT_STALE_SECONDS", 900, minimum=60
+    "RAGFIN_KAP_STATEMENT_HEARTBEAT_STALE_SECONDS", 300, minimum=60
 )
 
 _LOCAL_RUNNING_STATEMENT_JOBS: set[str] = set()
@@ -184,6 +190,12 @@ def _get_kap_statement_refresh_job(job_id: str) -> Optional[Dict[str, Any]]:
         return None
     if str(payload.get("status") or "") in {"queued", "running"} and _kap_statement_job_is_stale(payload):
         now_iso = _kap_statement_now_iso()
+        started_dt = _kap_statement_parse_iso(payload.get("started_at") or payload.get("requested_at"))
+        duration = (
+            round((datetime.now(timezone.utc) - started_dt).total_seconds(), 1)
+            if started_dt is not None
+            else None
+        )
         interrupted = dict(payload)
         interrupted.update(
             status="partial",
@@ -191,6 +203,7 @@ def _get_kap_statement_refresh_job(job_id: str) -> Optional[Dict[str, Any]]:
             current_symbol=None,
             updated_at=now_iso,
             finished_at=now_iso,
+            duration_seconds=duration,
         )
         _set_kap_statement_refresh_job(interrupted)
         owner_token = str(payload.get("owner_token") or "")
@@ -709,6 +722,33 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
     )
     from src.kap_fetcher import set_kap_request_pacing
 
+    active_ttl = max(120, min(_KAP_STATEMENT_JOB_TTL_SECONDS, budget_seconds + 900))
+    owner_marker = {"job_id": job_id, "owner_token": owner_token}
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat_worker() -> None:
+        interval = _KAP_STATEMENT_HEARTBEAT_INTERVAL_SECONDS
+        while not heartbeat_stop.wait(interval):
+            try:
+                if not _owns_kap_statement_active_marker(job_id, owner_token):
+                    continue
+                backend.renew_if_owner(
+                    _KAP_STATEMENT_ACTIVE_KEY,
+                    owner_marker,
+                    ttl_seconds=active_ttl,
+                )
+                job["updated_at"] = _kap_statement_now_iso()
+                _set_kap_statement_refresh_job(job)
+            except Exception:
+                LOGGER.debug("KAP statement refresh heartbeat pulse failed: %s", job_id, exc_info=True)
+
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_worker,
+        name=f"kap-statement-heartbeat-{job_id[:8]}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+
     try:
         set_kap_request_pacing(
             _KAP_STATEMENT_REQUEST_INTERVAL_SECONDS,
@@ -824,6 +864,8 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
         ]
         stop_reason = "job_error"
     finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2.0)
         pool.shutdown(wait=True)
         set_kap_request_pacing(0.0)
 

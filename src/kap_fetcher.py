@@ -107,6 +107,11 @@ COMPANY_QUERY_ALIASES: Dict[str, List[str]] = {
     "TOASO": ["TOASO", "TOFAS"],
     "TUPRS": ["TUPRS", "TUPRAS"],
     "YKBNK": ["YKBNK", "YAPI KREDI"],
+    "KRDMA": ["KRDMA", "KRDMD", "KARDEMIR"],
+    "KRDMB": ["KRDMB", "KRDMD", "KARDEMIR"],
+    "KRDMD": ["KRDMD", "KARDEMIR"],
+    "DENGE": ["DENGE", "DENGE YATIRIM"],
+    "INVEO": ["INVEO", "INVEO YATIRIM"],
 }
 
 COMPANY_MEMBER_TITLE_HINTS: Dict[str, Tuple[str, ...]] = {
@@ -133,7 +138,11 @@ COMPANY_MEMBER_TITLE_HINTS: Dict[str, Tuple[str, ...]] = {
     "KCHOL": ("KOC HOLDING",),
     "KOZAL": ("TURK ALTIN ISLETMELERI", "KOZA ALTIN ISLETMELERI"),
     "KOZAA": ("KOZA ANADOLU METAL",),
+    "KRDMA": ("KARDEMIR",),
+    "KRDMB": ("KARDEMIR",),
     "KRDMD": ("KARDEMIR",),
+    "DENGE": ("DENGE YATIRIM",),
+    "INVEO": ("INVEO YATIRIM",),
     "MGROS": ("MIGROS TICARET",),
     "PETKM": ("PETKIM PETROKIMYA",),
     "SAHOL": ("HACI OMER SABANCI", "SABANCI HOLDING"),
@@ -169,6 +178,48 @@ KAP_MEMBER_FALLBACKS: Dict[str, Dict[str, str]] = {
         "title": "RAY SİGORTA A.Ş.",
         "permalink": "1063-ray-sigorta-a-s",
         "query": "RAYSG",
+    },
+    "KRDMA": {
+        "company_code": "KRDMD",
+        "mkk_member_oid": "4028e4a140f2ed7201412ace3ada0707",
+        "title": "KARDEMİR KARABÜK DEMİR ÇELİK SANAYİ VE TİCARET A.Ş.",
+        "permalink": "994-kardemir-karabuk-demir-celik-sanayi-ve-ticaret-a-s",
+        "query": "KRDMD",
+    },
+    "KRDMB": {
+        "company_code": "KRDMD",
+        "mkk_member_oid": "4028e4a140f2ed7201412ace3ada0707",
+        "title": "KARDEMİR KARABÜK DEMİR ÇELİK SANAYİ VE TİCARET A.Ş.",
+        "permalink": "994-kardemir-karabuk-demir-celik-sanayi-ve-ticaret-a-s",
+        "query": "KRDMD",
+    },
+    "KRDMD": {
+        "company_code": "KRDMD",
+        "mkk_member_oid": "4028e4a140f2ed7201412ace3ada0707",
+        "title": "KARDEMİR KARABÜK DEMİR ÇELİK SANAYİ VE TİCARET A.Ş.",
+        "permalink": "994-kardemir-karabuk-demir-celik-sanayi-ve-ticaret-a-s",
+        "query": "KRDMD",
+    },
+    "DENGE": {
+        "company_code": "1678",
+        "mkk_member_oid": "4028e4a240ee866c0140f1f80b55002b",
+        "title": "DENGE YATIRIM HOLDİNG A.Ş.",
+        "permalink": "1678-denge-yatirim-holding-a-s",
+        "query": "DENGE",
+    },
+    "INVEO": {
+        "company_code": "962",
+        "mkk_member_oid": "4028e4a140f2ed7201413b67b22f0929",
+        "title": "INVEO YATIRIM HOLDİNG A.Ş.",
+        "permalink": "962-inveo-yatirim-holding-a-s",
+        "query": "INVEO",
+    },
+    "DOCO": {
+        "company_code": "1530",
+        "mkk_member_oid": "1DE05DAA82B4073AE0530A4A622A2EBD",
+        "title": "DO & CO AKTIENGESELLSCHAFT",
+        "permalink": "1530-do-co-aktiengesellschaft",
+        "query": "DOCO",
     },
 }
 

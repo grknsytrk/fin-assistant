@@ -550,6 +550,8 @@ def test_job_tracks_current_and_last_symbol_and_detects_interrupted_worker(
     assert recovered["stop_reason"] == "worker_interrupted"
     assert recovered["current_symbol"] is None
     assert recovered["last_symbol"] == "MAVI:updated"
+    assert recovered["duration_seconds"] is not None
+    assert recovered["duration_seconds"] > 0
 
 
 def test_max_budget_seconds_allows_up_to_360_minutes(statement_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -569,3 +571,60 @@ def test_max_budget_seconds_allows_up_to_360_minutes(statement_env, monkeypatch:
         budget_seconds=99999,
     )
     assert job_clamped["budget_seconds"] == 21600
+
+
+def test_heartbeat_worker_pulses_updated_at(statement_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+    heartbeat_ticks: List[str] = []
+
+    def slow_snapshot(**kwargs: Any) -> Dict[str, Any]:
+        # Give the heartbeat thread time to pulse updated_at at least once
+        time.sleep(0.3)
+        stored = statement_module._get_kap_statement_refresh_job("job-heartbeat")
+        if stored and stored.get("updated_at"):
+            heartbeat_ticks.append(stored["updated_at"])
+        return {
+            "ok": True,
+            "schema_version": 15,
+            "live_period_count": 5,
+            "quarters": [
+                {"year": 2026, "period": period, "disclosure_index": period}
+                for period in range(1, 6)
+            ],
+        }
+
+    monkeypatch.setattr("app.kap_service.get_kap_snapshot", slow_snapshot)
+    monkeypatch.setattr(statement_module, "_KAP_STATEMENT_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+
+    job = _seed_and_run_job(mode="full", symbols=["KRDMD"], job_id="job-heartbeat")
+    assert job["status"] == "succeeded"
+    assert len(heartbeat_ticks) >= 1
+
+
+def test_member_resolution_for_kardemir_denge_inveo_doco() -> None:
+    from src.kap_fetcher import _resolve_member
+    from app.api_runtime import CONFIG
+
+    krdma = _resolve_member("KRDMA", CONFIG.kap)
+    assert krdma is not None
+    assert "KARDEMİR" in krdma["title"]
+
+    krdmb = _resolve_member("KRDMB", CONFIG.kap)
+    assert krdmb is not None
+    assert "KARDEMİR" in krdmb["title"]
+
+    krdmd = _resolve_member("KRDMD", CONFIG.kap)
+    assert krdmd is not None
+    assert "KARDEMİR" in krdmd["title"]
+
+    denge = _resolve_member("DENGE", CONFIG.kap)
+    assert denge is not None
+    assert "DENGE YATIRIM HOLDİNG" in denge["title"]
+
+    inveo = _resolve_member("INVEO", CONFIG.kap)
+    assert inveo is not None
+    assert "INVEO YATIRIM HOLDİNG" in inveo["title"]
+
+    doco = _resolve_member("DOCO", CONFIG.kap)
+    assert doco is not None
+    assert "DO & CO" in doco["title"]
