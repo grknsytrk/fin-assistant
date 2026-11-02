@@ -28,7 +28,28 @@ _POSTGRES_SCHEMA_READY = False
 _LOCAL_SCHEMA_READY: set[str] = set()
 _CACHE_LOCK = threading.RLock()
 _SNAPSHOT_MEMORY_CACHE: Dict[str, tuple[float, Dict[str, Dict[str, Any]]]] = {}
-_SNAPSHOT_MEMORY_CACHE_TTL_SECONDS = 1800.0
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        LOGGER.warning("invalid %s=%r; using default %s", name, raw, default)
+        return default
+
+
+# Çok süreçli mimaride üst sınır; bayat snapshot okuma süresini sınırlar.
+# Upper bound only. Writes invalidate this cache inside the same process; a
+# separate writer process (another uvicorn worker, a cron job, a manual SQL
+# update) is NOT invalidated and can stay stale until this TTL expires. Keep
+# this low (e.g. 60) when multiple processes write to the same database.
+_SNAPSHOT_MEMORY_CACHE_TTL_SECONDS = max(
+    1.0,
+    _env_float("RAGFIN_FINANCIAL_SNAPSHOT_MEMORY_CACHE_TTL_SECONDS", 1800.0),
+)
 
 _SNAPSHOT_COLUMNS = (
     "symbol",

@@ -131,3 +131,19 @@ def test_financial_snapshot_memory_cache_lives_1800_seconds_and_expires(tmp_path
     assert "AAA" in store.get_financial_snapshots_map(processed_dir)
     assert reads["count"] == 2
     store.reset_financial_snapshot_store_for_tests()
+
+
+def test_env_float_parses_snapshot_cache_ttl_override(monkeypatch) -> None:
+    assert store._env_float("RAGFIN_TEST_TTL", 1800.0) == 1800.0
+
+    monkeypatch.setenv("RAGFIN_TEST_TTL", "60.0")
+    assert store._env_float("RAGFIN_TEST_TTL", 1800.0) == 60.0
+
+    monkeypatch.setenv("RAGFIN_TEST_TTL", "  120.5  ")
+    assert store._env_float("RAGFIN_TEST_TTL", 1800.0) == 120.5
+
+    monkeypatch.setenv("RAGFIN_TEST_TTL", "invalid-float")
+    assert store._env_float("RAGFIN_TEST_TTL", 1800.0) == 1800.0
+
+    monkeypatch.setenv("RAGFIN_TEST_TTL", "")
+    assert store._env_float("RAGFIN_TEST_TTL", 1800.0) == 1800.0
