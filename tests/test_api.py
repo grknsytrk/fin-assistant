@@ -7319,7 +7319,14 @@ def test_market_watch_success_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "15dk" in payload["delay_note"]
 
     sections = payload["sections"]
-    assert [row["symbol"] for row in sections["indices"]] == ["XUTUM", "XU100", "XU030"]
+    assert [row["symbol"] for row in sections["indices"]] == [
+        "XUTUM",
+        "XU100",
+        "XU030",
+        "NASDAQ",
+        "SP500",
+        "DOW",
+    ]
     assert [row["symbol"] for row in sections["fx"]] == ["USD/TRY", "EUR/TRY", "GBP/TRY", "EUR/USD"]
     assert [row["symbol"] for row in sections["commodities"]] == ["BRENT", "ALTIN", "GUMUS", "DOGALGAZ"]
 
@@ -7360,7 +7367,9 @@ def test_market_watch_index_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_market_watch_index_quotes_run_concurrently_and_keep_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    quote_barrier = threading.Barrier(3)
+    expected_symbols = [entry[0] for entry in api_module._WATCH_INDEX_CANDIDATES]
+    candidate_count = len(expected_symbols)
+    quote_barrier = threading.Barrier(candidate_count)
     active_calls = 0
     max_active_calls = 0
     state_lock = threading.Lock()
@@ -7372,9 +7381,17 @@ def test_market_watch_index_quotes_run_concurrently_and_keep_order(
             max_active_calls = max(max_active_calls, active_calls)
         try:
             quote_barrier.wait(timeout=3)
-            index = yahoo_symbol.split(".", maxsplit=1)[0]
+            index = yahoo_symbol.split(".", maxsplit=1)[0].replace("^", "")
+            price_map = {
+                "XUTUM": 10000.0,
+                "XU100": 1000.0,
+                "XU030": 3000.0,
+                "IXIC": 16000.0,
+                "GSPC": 5100.0,
+                "DJI": 39000.0,
+            }
             return _watch_quote(
-                price={"XUTUM": 10000.0, "XU100": 1000.0, "XU030": 3000.0}[index],
+                price=price_map.get(index, 100.0),
                 prev_close=99.0,
             )
         finally:
@@ -7389,9 +7406,9 @@ def test_market_watch_index_quotes_run_concurrently_and_keep_order(
 
     assert response.status_code == 200
     indices = response.json()["sections"]["indices"]
-    assert [row["symbol"] for row in indices] == ["XUTUM", "XU100", "XU030"]
-    assert [row["price"] for row in indices] == [10000.0, 1000.0, 3000.0]
-    assert max_active_calls == 3
+    assert [row["symbol"] for row in indices] == expected_symbols
+    assert [row["price"] for row in indices][:3] == [10000.0, 1000.0, 3000.0]
+    assert max_active_calls == candidate_count
 
 
 def test_market_watch_reuses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -7423,7 +7440,7 @@ def test_market_watch_reuses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert counters["quote"][0] == 3
+    assert counters["quote"][0] == len(api_module._WATCH_INDEX_CANDIDATES)
     assert counters["fx"][0] == 1
     assert counters["commodity"][0] == 1
 

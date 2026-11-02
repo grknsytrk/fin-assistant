@@ -4750,6 +4750,9 @@ _WATCH_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [
     ("XUTUM", "BIST Tüm", ["XUTUM.IS", "^XUTUM", "XUTUM"]),
     ("XU100", "BIST 100", ["XU100.IS", "^XU100", "XU100"]),
     ("XU030", "BIST 30", ["XU030.IS", "^XU030", "XU030"]),
+    ("NASDAQ", "Nasdaq", ["^IXIC", "QQQ"]),
+    ("SP500", "S&P 500", ["^GSPC", "SPY"]),
+    ("DOW", "Dow Jones", ["^DJI", "DIA"]),
 ]
 
 _WATCH_GLOBAL_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [
@@ -4939,13 +4942,15 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
 
         def _watch_index(entry: tuple[str, str, List[str]]) -> Dict[str, Any]:
             symbol, label, yahoo_candidates = entry
+            fallback_curr = "USD" if symbol in {"SP500", "NASDAQ", "DOW"} else "TRY"
             return _watch_index_item(
                 symbol=symbol,
                 label=label,
                 yahoo_candidates=yahoo_candidates,
+                fallback_currency=fallback_curr,
             )
 
-        with ThreadPoolExecutor(max_workers=min(3, len(_WATCH_INDEX_CANDIDATES))) as pool:
+        with ThreadPoolExecutor(max_workers=min(6, len(_WATCH_INDEX_CANDIDATES))) as pool:
             indices = list(pool.map(_watch_index, _WATCH_INDEX_CANDIDATES))
         fx_items = _pick_watch_items(
             items=list(fx_payload.get("items") or []),
@@ -4969,7 +4974,7 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
         }
 
     payload, cache_status, stale, refresh_pending = _shared_swr_payload(
-        cache_key="api:market:watch:v2",
+        cache_key="api:market:watch:v3",
         factory=build,
         fresh_ttl_seconds=_WATCH_CACHE_TTL,
         stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,

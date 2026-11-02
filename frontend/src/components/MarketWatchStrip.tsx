@@ -5,7 +5,7 @@ import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
 import { getAdaptiveRefreshMs } from '../utils/marketHours';
 import './MarketWatchStrip.css';
 
-const PRIMARY_SYMBOLS = ['XUTUM', 'XU100', 'XU030', 'USD/TRY', 'EUR/TRY'] as const;
+const PRIMARY_SYMBOLS = ['XUTUM', 'XU100', 'XU030', 'NASDAQ', 'SP500', 'DOW', 'USD/TRY', 'EUR/TRY'] as const;
 const COMMODITY_SYMBOLS = ['BRENT', 'ALTIN', 'GUMUS', 'DOGALGAZ'] as const;
 const DEFAULT_DELAY_NOTE = 'Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).';
 let marketWatchMemoryCache: MarketWatchResponse | null = null;
@@ -19,6 +19,12 @@ const FALLBACK_LABELS: Record<string, string> = {
     XUTUM: 'BIST Tüm',
     XU100: 'BIST 100',
     XU030: 'BIST 30',
+    NASDAQ: 'Nasdaq',
+    SP500: 'S&P 500',
+    DOW: 'Dow Jones',
+    '^IXIC': 'Nasdaq',
+    '^GSPC': 'S&P 500',
+    '^DJI': 'Dow Jones',
     'USD/TRY': 'Amerikan Doları',
     USDTRY: 'Amerikan Doları',
     'EUR/TRY': 'Euro',
@@ -38,6 +44,8 @@ function normalizeSymbol(raw: string): string {
 }
 
 function placeholderItem(symbol: string): MarketWatchItem {
+    const norm = normalizeSymbol(symbol);
+    const isUsd = norm === 'NASDAQ' || norm === 'SP500' || norm === 'DOW' || norm === '^IXIC' || norm === '^GSPC' || norm === '^DJI';
     return {
         symbol,
         label: FALLBACK_LABELS[symbol] || symbol,
@@ -46,7 +54,7 @@ function placeholderItem(symbol: string): MarketWatchItem {
         prev_close: null,
         change: null,
         change_pct: null,
-        currency: '',
+        currency: isUsd ? 'USD' : '',
         market_state: '',
         as_of: null,
         error: 'data_unavailable',
@@ -271,6 +279,16 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
             XU100: 1,
             XU030: 2,
             XUTUM: 3,
+            NASDAQ: 4,
+            IXIC: 4,
+            '^IXIC': 4,
+            SP500: 5,
+            GSPC: 5,
+            '^GSPC': 5,
+            SPX: 5,
+            DOW: 6,
+            DJI: 6,
+            '^DJI': 6,
         };
 
         const fxOrder: Record<string, number> = {
@@ -292,7 +310,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
             DOGALGAZ: 4,
         };
 
-        // 1. Indices (BIST)
+        // 1. Indices (BIST & Global)
         const indices: MarketWatchItem[] = [];
         const seenIndices = new Set<string>();
         if (payload?.sections?.indices) {
@@ -304,7 +322,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                 }
             }
         }
-        for (const sym of ['XU100', 'XU030', 'XUTUM']) {
+        for (const sym of ['XU100', 'XU030', 'XUTUM', 'NASDAQ', 'SP500', 'DOW']) {
             const norm = normalizeSymbol(sym);
             if (!seenIndices.has(norm)) {
                 seenIndices.add(norm);
