@@ -4226,12 +4226,6 @@ export default function MarketsView({
                                         <span>Ekle</span>
                                         <Plus size={16} aria-hidden="true" />
                                     </button>
-                                    {stockCardSymbols.length > 0 && stockCardPendingSymbols.length > 0 && !stockCardsError && (
-                                        <span className="stock-cards-sync-pill" role="status" aria-live="polite" title="Kart detayları arka planda güncelleniyor">
-                                            <span className="stock-cards-sync-dot" aria-hidden="true" />
-                                            <span>Güncelleniyor</span>
-                                        </span>
-                                    )}
                                 </div>
                             </div>
 
