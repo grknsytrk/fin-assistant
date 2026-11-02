@@ -390,16 +390,39 @@ function formatCardFullCurrency(value: number | null | undefined, currency?: str
     return `${prefix}${formatCardFullNumber(value)}`;
 }
 
+function istanbulDateKey(date: Date): string {
+    if (Number.isNaN(date.getTime())) return '';
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Europe/Istanbul',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    }).format(date);
+}
+
 function formatStockCardChartDate(iso: string | null | undefined, range: MarketStockCardChartRange): string {
     if (!iso) return '-';
     const dt = new Date(iso);
     if (Number.isNaN(dt.getTime())) return '-';
-    const withTime = range === '1d' || range === '1w' || range === '1m';
+
+    const timeStr = new Intl.DateTimeFormat('tr-TR', {
+        timeZone: 'Europe/Istanbul',
+        hour: '2-digit',
+        minute: '2-digit',
+    }).format(dt);
+
+    const isToday = istanbulDateKey(dt) === istanbulDateKey(new Date());
+
+    if (range === '1d' || isToday) {
+        return `Bugün ${timeStr}`;
+    }
+
+    const withTime = range === '1w' || range === '1m';
     return new Intl.DateTimeFormat('tr-TR', {
         timeZone: 'Europe/Istanbul',
         day: '2-digit',
         month: 'short',
-        year: '2-digit',
+        ...(range === '5y' ? { year: '2-digit' } : {}),
         ...(withTime ? { hour: '2-digit', minute: '2-digit' } : {}),
     }).format(dt);
 }
@@ -474,16 +497,6 @@ function isPreviousIstanbulDate(iso: string | null | undefined): boolean {
     const dt = new Date(iso);
     if (Number.isNaN(dt.getTime())) return false;
     return istanbulDateKey(dt) < istanbulDateKey(new Date());
-}
-
-function istanbulDateKey(date: Date): string {
-    if (Number.isNaN(date.getTime())) return '';
-    return new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Europe/Istanbul',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-    }).format(date);
 }
 
 function formatDateTime(iso: string | null | undefined): string {
@@ -2059,10 +2072,10 @@ function StockCardMiniChart({
     const hoverPoint = activeHoverIndex == null ? null : validPoints[activeHoverIndex];
     const hoverX = activeHoverIndex == null ? null : xFor(activeHoverIndex);
     const hoverY = hoverPoint ? yFor(hoverPoint.close) : null;
-    const tooltipWidth = 124;
-    const tooltipHeight = 38;
+    const tooltipWidth = 100;
+    const tooltipHeight = 36;
     const isLeftHalf = hoverX != null && hoverX < width / 2;
-    const horizontalOffset = 14;
+    const horizontalOffset = 12;
     let tooltipX = 0;
     let tooltipY = 0;
     if (hoverX != null && hoverY != null) {
@@ -2185,10 +2198,7 @@ function StockCardMiniChart({
                                 <text x="8" y="14" fill="#a1a1aa" fontSize="9.5" fontFamily="var(--font-mono)">
                                     {formatStockCardChartDate(hoverPoint.time, selectedRange)}
                                 </text>
-                                <text x="8" y="29" fill="#f8fafc" fontSize="11" fontFamily="var(--font-mono)" fontWeight="700">
-                                    {symbol}
-                                </text>
-                                <text x={tooltipWidth - 8} y="29" fill="#f8fafc" fontSize="11" fontFamily="var(--font-mono)" fontWeight="700" textAnchor="end">
+                                <text x="8" y="28" fill="#f8fafc" fontSize="12" fontFamily="var(--font-mono)" fontWeight="700">
                                     {formatCardCurrency(hoverPoint.close, currency)}
                                 </text>
                             </g>
