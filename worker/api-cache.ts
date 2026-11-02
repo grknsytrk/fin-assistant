@@ -203,7 +203,10 @@ export function cacheControlForListRequest(request: Request, now: Date = new Dat
         return "public, max-age=300, stale-while-revalidate=3600, stale-if-error=0";
     }
     if (route === "market-flow-head") {
-        return "public, max-age=3, stale-while-revalidate=15, stale-if-error=0";
+        // The KAP flow is refreshed by cron once per minute, and the panel
+        // polls every 5s. A 10s edge TTL is the smallest value that can serve
+        // at least every other poll for a single client.
+        return "public, max-age=10, stale-while-revalidate=10, stale-if-error=0";
     }
     if (route === "kap-companies") {
         return "public, max-age=3600, stale-while-revalidate=86400, stale-if-error=0";
@@ -227,7 +230,6 @@ export async function isCacheableListResponse(
     response: Response,
     route: CacheableListRoute,
 ): Promise<boolean> {
-    if (response.status === 304) return true;
     if (response.status !== 200 || response.headers.has("Set-Cookie")) return false;
     if (!response.headers.get("Content-Type")?.toLowerCase().includes("application/json")) return false;
 
@@ -246,6 +248,11 @@ export async function isCacheableListResponse(
         return false;
     }
     if (route === "funds" && status && status !== "ok") return false;
+    if (route === "market-flow-head") {
+        const refreshStatus = String(payload.refresh_status || "").trim().toLowerCase();
+        if (["empty", "error", "failed", "unavailable"].includes(refreshStatus)) return false;
+        if (!payload.latest_cursor) return false;
+    }
     if (route === "market-stocks" && Array.isArray(payload.rows) && payload.rows.length === 0) return false;
     if (route === "kap-companies" && (!Array.isArray(payload.companies) || payload.companies.length === 0)) return false;
     return true;
@@ -257,6 +264,10 @@ export async function applyListCachePolicy(
     route: CacheableListRoute,
     now: Date = new Date(),
 ): Promise<Response> {
+    // A 304 has no body; caching it as a standalone entry is not meaningful and
+    // would make the edge serve an empty response without revalidation.
+    if (response.status === 304) return response;
+
     const cacheable = await isCacheableListResponse(response, route);
     const headers = new Headers(response.headers);
     headers.delete("Cache-Tag");

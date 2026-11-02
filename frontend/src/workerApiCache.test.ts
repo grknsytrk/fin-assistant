@@ -94,7 +94,7 @@ describe('Worker edge cache policies', () => {
         expect(cacheControlForListRequest(makeRequest('/api/funds?sort=name')))
             .toBe('public, max-age=300, stale-while-revalidate=3600, stale-if-error=0');
         expect(cacheControlForListRequest(makeRequest('/api/market/flow/head')))
-            .toBe('public, max-age=3, stale-while-revalidate=15, stale-if-error=0');
+            .toBe('public, max-age=10, stale-while-revalidate=10, stale-if-error=0');
         expect(cacheControlForListRequest(makeRequest('/api/kap/companies')))
             .toBe('public, max-age=3600, stale-while-revalidate=86400, stale-if-error=0');
     });
@@ -190,7 +190,7 @@ describe('Worker edge cache policies', () => {
             'market-flow-head',
         );
         expect(flowResponse.headers.get('Cloudflare-CDN-Cache-Control'))
-            .toBe('public, max-age=3, stale-while-revalidate=15, stale-if-error=0');
+            .toBe('public, max-age=10, stale-while-revalidate=10, stale-if-error=0');
         expect(flowResponse.headers.get('Cache-Tag')).toBe('market-flow-head');
 
         const kapRequest = makeRequest('/api/kap/companies');
@@ -214,5 +214,91 @@ describe('Worker edge cache policies', () => {
         );
         expect(emptyKapResponse.headers.get('Cache-Control')).toBe('private, no-store');
         expect(emptyKapResponse.headers.has('Cloudflare-CDN-Cache-Control')).toBe(false);
+    });
+
+    it('does not cache an empty market flow head', async () => {
+        const response = await applyListCachePolicy(
+            new Response(JSON.stringify({ latest_cursor: null, refresh_status: 'empty' }), {
+                headers: { 'Content-Type': 'application/json' },
+            }),
+            makeRequest('/api/market/flow/head'),
+            'market-flow-head',
+        );
+        expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+        expect(response.headers.get('Cloudflare-CDN-Cache-Control')).toBeNull();
+    });
+
+    it('does not cache uncacheable market flow head responses (empty, error, failed, unavailable, missing cursor)', async () => {
+        const uncacheableCases: Array<{ payload: Record<string, unknown>; reason: string }> = [
+            { payload: { latest_cursor: 'cursor-1', refresh_status: 'empty' }, reason: 'empty refresh_status' },
+            { payload: { latest_cursor: 'cursor-1', refresh_status: 'error' }, reason: 'error refresh_status' },
+            { payload: { latest_cursor: 'cursor-1', refresh_status: 'failed' }, reason: 'failed refresh_status' },
+            { payload: { latest_cursor: 'cursor-1', refresh_status: 'unavailable' }, reason: 'unavailable refresh_status' },
+            { payload: { latest_cursor: 'cursor-1', refresh_status: '  ERROR  ' }, reason: 'untrimmed uppercase error' },
+            { payload: { latest_cursor: null, refresh_status: 'ok' }, reason: 'null latest_cursor with ok status' },
+            { payload: { latest_cursor: '', refresh_status: 'ok' }, reason: 'empty string latest_cursor' },
+            { payload: { refresh_status: 'ok' }, reason: 'omitted latest_cursor key' },
+        ];
+
+        for (const { payload, reason } of uncacheableCases) {
+            const response = await applyListCachePolicy(
+                new Response(JSON.stringify(payload), {
+                    headers: { 'Content-Type': 'application/json' },
+                }),
+                makeRequest('/api/market/flow/head'),
+                'market-flow-head',
+            );
+            expect(
+                response.headers.get('Cache-Control'),
+                `expected private, no-store for ${reason}`,
+            ).toBe('private, no-store');
+            expect(
+                response.headers.get('Cloudflare-CDN-Cache-Control'),
+                `expected no Cloudflare-CDN-Cache-Control for ${reason}`,
+            ).toBeNull();
+            expect(
+                response.headers.get('Cache-Tag'),
+                `expected no Cache-Tag for ${reason}`,
+            ).toBeNull();
+        }
+    });
+
+    it('caches market flow head when refresh_status is stale or ok with valid cursor', async () => {
+        for (const refreshStatus of ['ok', 'stale']) {
+            const response = await applyListCachePolicy(
+                new Response(JSON.stringify({ latest_cursor: 'cursor-valid', refresh_status: refreshStatus }), {
+                    headers: { 'Content-Type': 'application/json' },
+                }),
+                makeRequest('/api/market/flow/head'),
+                'market-flow-head',
+            );
+            expect(response.headers.get('Cloudflare-CDN-Cache-Control'))
+                .toBe('public, max-age=10, stale-while-revalidate=10, stale-if-error=0');
+            expect(response.headers.get('Cache-Tag')).toBe('market-flow-head');
+        }
+    });
+
+    it('passes 304 responses through without edge cache headers', async () => {
+        const response = await applyListCachePolicy(
+            new Response(null, { status: 304, headers: { ETag: 'W/"abc"' } }),
+            makeRequest('/api/funds'),
+            'funds',
+        );
+        expect(response.status).toBe(304);
+        expect(response.headers.get('Cloudflare-CDN-Cache-Control')).toBeNull();
+        expect(response.headers.get('Cache-Tag')).toBeNull();
+        expect(response.headers.get('ETag')).toBe('W/"abc"');
+    });
+
+    it('passes 304 market-flow-head responses through without reading body or caching', async () => {
+        const response = await applyListCachePolicy(
+            new Response(null, { status: 304, headers: { ETag: 'W/"flow-head-1"' } }),
+            makeRequest('/api/market/flow/head'),
+            'market-flow-head',
+        );
+        expect(response.status).toBe(304);
+        expect(response.headers.get('Cloudflare-CDN-Cache-Control')).toBeNull();
+        expect(response.headers.get('Cache-Tag')).toBeNull();
+        expect(response.headers.get('ETag')).toBe('W/"flow-head-1"');
     });
 });
