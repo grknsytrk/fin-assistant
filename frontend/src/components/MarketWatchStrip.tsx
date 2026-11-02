@@ -426,6 +426,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                                             isClickable
                                                 ? (e) => {
                                                       e.stopPropagation();
+                                                      (e.currentTarget as HTMLElement).blur();
                                                       onSelectIndex?.(normalizeSymbol(item.symbol) as MarketIndexCode);
                                                   }
                                                 : undefined

@@ -295,6 +295,10 @@
     animation: mw-ticker-scroll 45s linear infinite;
 }
 
+.mw-ticker-viewport:hover .mw-ticker-track {
+    animation-play-state: paused;
+}
+
 @keyframes mw-ticker-scroll {
     from {
         transform: translate3d(0, 0, 0);
