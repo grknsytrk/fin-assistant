@@ -4226,6 +4226,12 @@ export default function MarketsView({
                                         <span>Ekle</span>
                                         <Plus size={16} aria-hidden="true" />
                                     </button>
+                                    {stockCardSymbols.length > 0 && stockCardPendingSymbols.length > 0 && !stockCardsError && (
+                                        <span className="stock-cards-sync-pill" role="status" aria-live="polite" title="Kart detayları arka planda güncelleniyor">
+                                            <span className="stock-cards-sync-dot" aria-hidden="true" />
+                                            <span>Güncelleniyor</span>
+                                        </span>
+                                    )}
                                 </div>
                             </div>
 
@@ -4284,20 +4290,14 @@ export default function MarketsView({
                                 </div>
                             )}
 
-                            {stockCardSymbols.length > 0 && stockCardPendingSymbols.length > 0 && !stockCardsError && (
-                                <div className="stock-card-loading-notice" role="status" aria-live="polite">
-                                    <span>Öncelikli veriler gösteriliyor; kartların kalan detayları arka planda hazırlanıyor.</span>
-                                </div>
-                            )}
-
                             {stockCardsError && (
-                                <div className="stock-card-loading-notice" role="status" aria-live="polite">
-                                    <span>Hisse kartları şu an hazırlanıyor; kısa süre içinde otomatik olarak tekrar denenecek.</span>
+                                <div className="stock-cards-inline-alert" role="status" aria-live="polite">
+                                    <span>Hisse kartları güncellenemedi.</span>
                                     <button
                                         type="button"
                                         onClick={() => loadStockCards(false, true, stockCardSymbols.slice(0, STOCK_CARD_INITIAL_BATCH_SIZE))}
                                     >
-                                        Şimdi dene
+                                        Tekrar dene
                                     </button>
                                 </div>
                             )}
