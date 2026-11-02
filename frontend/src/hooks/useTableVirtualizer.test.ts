@@ -256,6 +256,52 @@ describe('useTableVirtualizer', () => {
         expect(result.current.topSpacerHeight).toBe(0);
         expect(result.current.totalHeight).toBe(8 * 38);
     });
+
+    it('keeps a non-empty range when totalRows shrinks while scrolled far down', () => {
+        const div = document.createElement('div');
+        Object.defineProperty(div, 'clientHeight', { value: 600, configurable: true });
+        let currentScrollTop = 5000;
+        Object.defineProperty(div, 'scrollTop', {
+            get: () => currentScrollTop,
+            set: (val: number) => { currentScrollTop = val; },
+            configurable: true,
+        });
+        const containerRef = { current: div };
+
+        const { result, rerender } = renderHook(
+            ({ totalRows }: { totalRows: number }) =>
+                useTableVirtualizer({ totalRows, rowHeight: 38, overscan: 10, containerRef }),
+            { initialProps: { totalRows: 580 } },
+        );
+
+        expect(result.current.startIndex).toBeGreaterThan(0);
+
+        // No resetDeps change and scrollTop stays at 5000 on purpose: this is
+        // the stale state that used to produce startIndex > endIndex.
+        rerender({ totalRows: 8 });
+
+        expect(result.current.startIndex).toBe(0);
+        expect(result.current.endIndex).toBe(8);
+        expect(result.current.endIndex).toBeGreaterThan(result.current.startIndex);
+        expect(
+            result.current.topSpacerHeight
+            + (result.current.endIndex - result.current.startIndex) * 38
+            + result.current.bottomSpacerHeight,
+        ).toBe(8 * 38);
+    });
+
+    it.each([1, 2, 7, 50])('never returns an inverted range for totalRows=%i', (totalRows) => {
+        const div = document.createElement('div');
+        Object.defineProperty(div, 'clientHeight', { value: 600, configurable: true });
+        Object.defineProperty(div, 'scrollTop', { value: 100000, configurable: true });
+        const containerRef = { current: div };
+
+        const { result } = renderHook(() =>
+            useTableVirtualizer({ totalRows, rowHeight: 38, overscan: 10, containerRef })
+        );
+
+        expect(result.current.startIndex).toBeLessThan(result.current.endIndex);
+    });
 });
 
 

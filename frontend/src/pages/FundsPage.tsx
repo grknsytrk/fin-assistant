@@ -1027,7 +1027,7 @@ const FundsTable = memo(function FundsTable({
         rowHeight: FUND_TABLE_ROW_HEIGHT,
         overscan: 12,
         containerRef: tableWrapRef,
-        resetDeps: resetDeps ?? [sortKey, sortOrder, rows.length],
+        resetDeps: resetDeps ?? [sortKey, sortOrder],
     });
 
     const visibleRows = useMemo(() => {
@@ -6104,8 +6104,8 @@ export default function FundsPage({
     }, [deferredSearchTerm, fundSearchIndex, fundTypeFilter, riskFilter, sortKey, sortOrder]);
 
     const tableResetDeps = useMemo(
-        () => [searchTerm, fundTypeFilter, riskFilter, sortKey, sortOrder],
-        [searchTerm, fundTypeFilter, riskFilter, sortKey, sortOrder],
+        () => [searchTerm, deferredSearchTerm, fundTypeFilter, riskFilter, sortKey, sortOrder],
+        [searchTerm, deferredSearchTerm, fundTypeFilter, riskFilter, sortKey, sortOrder],
     );
 
     const normalizedRouteFundCode = fundCode?.trim().toUpperCase() || '';

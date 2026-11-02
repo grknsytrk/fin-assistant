@@ -56,10 +56,19 @@ export function useTableVirtualizer({
             if (safeTotal === 0) {
                 return { startIndex: 0, endIndex: 0 };
             }
-            const startRow = Math.floor(sTop / rowHeight);
-            const visibleRowCount = Math.ceil(vHeight / rowHeight);
-            const startIndex = Math.max(0, startRow - overscan);
-            const endIndex = Math.min(safeTotal, startRow + visibleRowCount + overscan);
+            const safeHeight = Math.max(0, vHeight);
+            // Row count can shrink while the user is scrolled far down (search,
+            // filter, live data refresh). Clamp the stale scrollTop to the new
+            // content height so the window never inverts and renders nothing.
+            const maxScrollTop = Math.max(0, safeTotal * rowHeight - safeHeight);
+            const effectiveScrollTop = Math.min(Math.max(0, sTop), maxScrollTop);
+            const startRow = Math.floor(effectiveScrollTop / rowHeight);
+            const visibleRowCount = Math.ceil(safeHeight / rowHeight);
+            const startIndex = Math.max(0, Math.min(startRow - overscan, safeTotal - 1));
+            const endIndex = Math.min(
+                safeTotal,
+                Math.max(startIndex + 1, startRow + visibleRowCount + overscan),
+            );
             return { startIndex, endIndex };
         },
         [rowHeight, overscan]
