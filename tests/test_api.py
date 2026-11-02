@@ -7331,6 +7331,43 @@ def test_market_watch_success_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [row["symbol"] for row in sections["commodities"]] == ["BRENT", "ALTIN", "GUMUS", "DOGALGAZ"]
 
 
+def test_market_watch_reuses_global_quote_for_us_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: List[str] = []
+
+    def fake_quote(yahoo_symbol: str) -> Dict[str, Any]:
+        calls.append(yahoo_symbol)
+        prices = {
+            "^GSPC": 5100.0,
+            "^IXIC": 16000.0,
+            "^DJI": 39000.0,
+        }
+        if yahoo_symbol in prices:
+            return _watch_quote(price=prices[yahoo_symbol], prev_close=prices[yahoo_symbol] - 100, currency="USD")
+        return {"ok": False, "error": "unsupported_symbol"}
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_quote", fake_quote)
+    monkeypatch.setattr(api_module, "_market_fx_payload", lambda: _fx_payload_for_watch([]))
+    monkeypatch.setattr(api_module, "_market_commodities_payload", lambda: _commodity_payload_for_watch([]))
+
+    client = TestClient(app)
+    watch_payload = client.get("/market/watch").json()
+    global_payload = client.get("/market/watch/global").json()
+
+    watch_indices = {row["symbol"]: row for row in watch_payload["sections"]["indices"]}
+    global_indices = {row["symbol"]: row for row in global_payload["items"]}
+
+    for symbol in ("SP500", "NASDAQ", "DOW"):
+        assert watch_indices[symbol]["price"] == global_indices[symbol]["price"]
+        assert watch_indices[symbol]["as_of"] == global_indices[symbol]["as_of"]
+
+    # Each US index is fetched once and then shared by both endpoints.
+    assert calls.count("^GSPC") == 1
+    assert calls.count("^IXIC") == 1
+    assert calls.count("^DJI") == 1
+
+
 def test_market_watch_index_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: List[str] = []
     calls_lock = threading.Lock()
@@ -7368,35 +7405,49 @@ def test_market_watch_index_quotes_run_concurrently_and_keep_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     expected_symbols = [entry[0] for entry in api_module._WATCH_INDEX_CANDIDATES]
-    candidate_count = len(expected_symbols)
+    bist_candidates = api_module._WATCH_BIST_INDEX_CANDIDATES
+    candidate_count = len(bist_candidates)
+    bist_yahoo_symbols = {
+        yahoo_symbol
+        for _symbol, _label, yahoo_candidates in bist_candidates
+        for yahoo_symbol in yahoo_candidates
+    }
     quote_barrier = threading.Barrier(candidate_count)
-    active_calls = 0
-    max_active_calls = 0
+    active_bist_calls = 0
+    max_active_bist_calls = 0
     state_lock = threading.Lock()
 
+    def _quote_for(yahoo_symbol: str) -> Dict[str, Any]:
+        index = yahoo_symbol.split(".", maxsplit=1)[0].replace("^", "")
+        price_map = {
+            "XUTUM": 10000.0,
+            "XU100": 1000.0,
+            "XU030": 3000.0,
+            "IXIC": 16000.0,
+            "GSPC": 5100.0,
+            "DJI": 39000.0,
+        }
+        return _watch_quote(
+            price=price_map.get(index, 100.0),
+            prev_close=99.0,
+        )
+
     def fake_quote(yahoo_symbol: str) -> Dict[str, Any]:
-        nonlocal active_calls, max_active_calls
+        nonlocal active_bist_calls, max_active_bist_calls
+        if yahoo_symbol not in bist_yahoo_symbols:
+            # SP500/NASDAQ/DOW come from the shared global cache now, so the
+            # world-index fetches must not join the BIST barrier.
+            return _quote_for(yahoo_symbol)
+
         with state_lock:
-            active_calls += 1
-            max_active_calls = max(max_active_calls, active_calls)
+            active_bist_calls += 1
+            max_active_bist_calls = max(max_active_bist_calls, active_bist_calls)
         try:
             quote_barrier.wait(timeout=3)
-            index = yahoo_symbol.split(".", maxsplit=1)[0].replace("^", "")
-            price_map = {
-                "XUTUM": 10000.0,
-                "XU100": 1000.0,
-                "XU030": 3000.0,
-                "IXIC": 16000.0,
-                "GSPC": 5100.0,
-                "DJI": 39000.0,
-            }
-            return _watch_quote(
-                price=price_map.get(index, 100.0),
-                prev_close=99.0,
-            )
+            return _quote_for(yahoo_symbol)
         finally:
             with state_lock:
-                active_calls -= 1
+                active_bist_calls -= 1
 
     monkeypatch.setattr(api_module, "_fetch_yahoo_quote", fake_quote)
     monkeypatch.setattr(api_module, "_market_fx_payload", lambda: _fx_payload_for_watch([]))
@@ -7408,7 +7459,8 @@ def test_market_watch_index_quotes_run_concurrently_and_keep_order(
     indices = response.json()["sections"]["indices"]
     assert [row["symbol"] for row in indices] == expected_symbols
     assert [row["price"] for row in indices][:3] == [10000.0, 1000.0, 3000.0]
-    assert max_active_calls == candidate_count
+    assert [row["price"] for row in indices][3:] == [16000.0, 5100.0, 39000.0]
+    assert max_active_bist_calls == candidate_count
 
 
 def test_market_watch_reuses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -7440,7 +7492,10 @@ def test_market_watch_reuses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert counters["quote"][0] == len(api_module._WATCH_INDEX_CANDIDATES)
+    assert counters["quote"][0] == (
+        len(api_module._WATCH_BIST_INDEX_CANDIDATES)
+        + len(api_module._WATCH_GLOBAL_INDEX_CANDIDATES)
+    )
     assert counters["fx"][0] == 1
     assert counters["commodity"][0] == 1
 

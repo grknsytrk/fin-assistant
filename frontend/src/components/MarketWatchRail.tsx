@@ -13,10 +13,10 @@ import type {
     MarketStockRow,
     MarketStocksResponse,
     MarketUniverseRow,
-    MarketWatchGlobalResponse,
     MarketWatchItem,
 } from '../api/types';
 import { normalizeWatchlistSymbol, useWatchlist, watchlistItemKey, type WatchlistItem } from '../hooks/useWatchlist';
+import { useMarketWatchData } from '../hooks/useMarketWatchData';
 import { cacheWatchlistFund, fetchWatchlistFund, getCachedWatchlistFund, searchWatchlistFunds } from '../utils/watchlistData';
 import MarketFlowPanel from './MarketFlowPanel';
 import { getAdaptiveRefreshMs, isBistTradingHours } from '../utils/marketHours';
@@ -44,16 +44,15 @@ const DEFAULT_ORDER: Partial<Record<RailTab, string[]>> = {
 };
 
 // Panel her bölüm/menü değişiminde route ile birlikte yeniden mount oluyor.
-// Son başarılı yanıtları modül seviyesinde tutup ilk render'da kullanıyoruz;
-// böylece dönüşte iskelet yerine veri anında görünüyor ve canlı yenileme
-// döngüsü aynı veriyi arka planda sessizce tazeliyor.
+// Emtia/döviz/hisse yanıtlarını modül seviyesinde tutup ilk render'da
+// kullanıyoruz; böylece dönüşte iskelet yerine veri anında görünüyor ve canlı
+// yenileme döngüsü aynı veriyi arka planda sessizce tazeliyor. Endeks verisi
+// ise MarketWatchStrip ile ortak useMarketWatchData store'undan geliyor.
 const railCache: {
-    global: MarketWatchGlobalResponse | null;
     commodities: CommodityQuote[] | null;
     fx: FxQuote[] | null;
     stocks: Partial<Record<StockRailTab, MarketStocksResponse>>;
 } = {
-    global: null,
     commodities: null,
     fx: null,
     stocks: {},
@@ -322,7 +321,14 @@ export default function MarketWatchRail({
         key: null,
         direction: null,
     });
-    const [globalPayload, setGlobalPayload] = useState<MarketWatchGlobalResponse | null>(() => railCache.global);
+    const {
+        global: globalPayload,
+        globalLoading,
+        globalError,
+    } = useMarketWatchData({
+        global: true,
+        enabled: !panelCollapsed && activeTool === 'markets' && activeTab === 'global',
+    });
     const [commodityRows, setCommodityRows] = useState<CommodityQuote[] | null>(() => railCache.commodities);
     const [fxRows, setFxRows] = useState<FxQuote[] | null>(() => railCache.fx);
     const [xutumPayload, setXutumPayload] = useState<MarketStocksResponse | null>(() => railCache.stocks.xutum ?? null);
@@ -669,32 +675,6 @@ export default function MarketWatchRail({
         });
     };
 
-    // Endeks (global) verilerini çeker; döviz ile aynı kalıpta canlı polling destekler.
-    const loadGlobalRows = useCallback((options?: { silent?: boolean }) => {
-        if (inFlightRef.current.global) return;
-        inFlightRef.current.global = true;
-        if (!options?.silent) {
-            setTabLoading('global', true);
-            setTabError('global', null);
-        }
-        apiClient
-            .marketWatchGlobal()
-            .then((payload) => {
-                railCache.global = payload;
-                setGlobalPayload(payload);
-                setTabError('global', null);
-            })
-            .catch((error) => {
-                if (!options?.silent || !globalPayload?.items?.length) {
-                    setTabError('global', error instanceof Error ? error.message : 'Endeks verisi alınamadı.');
-                }
-            })
-            .finally(() => {
-                inFlightRef.current.global = false;
-                if (!options?.silent) setTabLoading('global', false);
-            });
-    }, [globalPayload?.items?.length]);
-
     // Emtia verilerini çeker; döviz ile aynı kalıpta canlı polling destekler.
     const loadCommodityRows = useCallback((options?: { silent?: boolean }) => {
         if (inFlightRef.current.commodities) return;
@@ -788,10 +768,6 @@ export default function MarketWatchRail({
     useEffect(() => {
         if (panelCollapsed || activeTool !== 'markets') return;
 
-        if (activeTab === 'global' && !globalPayload) {
-            loadGlobalRows();
-        }
-
         if (activeTab === 'commodities' && !commodityRows) {
             loadCommodityRows();
         }
@@ -814,11 +790,9 @@ export default function MarketWatchRail({
         activeTool,
         commodityRows,
         fxRows,
-        globalPayload,
         panelCollapsed,
         loadCommodityRows,
         loadFxRows,
-        loadGlobalRows,
         loadStockTab,
         xutumPayload?.rows?.length,
         xu030Payload?.rows?.length,
@@ -853,6 +827,8 @@ export default function MarketWatchRail({
     // Seans saati ve sekme görünürlüğüne duyarlı (Adaptive) canlı yenileme döngüsü
     useEffect(() => {
         if (panelCollapsed || activeTool !== 'markets') return;
+        // Endeks sekmesi paylaşımlı market-watch store'u tarafından yönetilir.
+        if (activeTab === 'global') return;
 
         const isStockTab = activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030';
         const marketKind = isStockTab ? 'bist' : 'global_fx';
@@ -864,9 +840,7 @@ export default function MarketWatchRail({
             if (document.visibilityState !== 'visible') return;
             const currentInterval = getAdaptiveRefreshMs(marketKind, { activeMs });
             if (currentInterval === null) return;
-            if (activeTab === 'global') {
-                loadGlobalRows({ silent: true });
-            } else if (activeTab === 'commodities') {
+            if (activeTab === 'commodities') {
                 loadCommodityRows({ silent: true });
             } else if (activeTab === 'fx') {
                 loadFxRows({ silent: true });
@@ -907,7 +881,7 @@ export default function MarketWatchRail({
             window.clearInterval(phaseCheckTimer);
             document.removeEventListener('visibilitychange', onVisibilityChange);
         };
-    }, [activeTab, activeTool, panelCollapsed, loadCommodityRows, loadFxRows, loadGlobalRows, loadStockTab]);
+    }, [activeTab, activeTool, panelCollapsed, loadCommodityRows, loadFxRows, loadStockTab]);
 
     const rawRows = useMemo<RailRow[]>(() => {
         let mapped: RailRow[] = [];
@@ -947,8 +921,10 @@ export default function MarketWatchRail({
         return sorted;
     }, [rawRows, sort.direction, sort.key]);
 
-    const tabLoading = Boolean(loading[activeTab]);
-    const tabError = errors[activeTab];
+    const tabLoading = activeTab === 'global'
+        ? globalLoading || (!globalPayload && !globalError)
+        : Boolean(loading[activeTab]);
+    const tabError = activeTab === 'global' ? globalError : errors[activeTab];
     return (
         <div className={`mwr-shell${panelCollapsed ? ' mwr-shell-collapsed' : ''}`}>
             <aside

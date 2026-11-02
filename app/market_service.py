@@ -4755,6 +4755,15 @@ _WATCH_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [
     ("DOW", "Dow Jones", ["^DJI", "DIA"]),
 ]
 
+# SP500/NASDAQ/DOW are also served by /market/watch/global. Fetching them
+# again here doubled the upstream Yahoo traffic and let the two endpoints
+# return different prices for the same instrument.
+_WATCH_GLOBAL_INDEX_SYMBOLS = {"NASDAQ", "SP500", "DOW"}
+
+_WATCH_BIST_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [
+    entry for entry in _WATCH_INDEX_CANDIDATES if entry[0] not in _WATCH_GLOBAL_INDEX_SYMBOLS
+]
+
 _WATCH_GLOBAL_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [
     ("SP500", "S&P 500", ["^GSPC", "SPY"]),
     ("NASDAQ", "Nasdaq", ["^IXIC", "QQQ"]),
@@ -4900,7 +4909,7 @@ def _market_watch_global_payload(*, force_refresh: bool = False) -> Dict[str, An
                 symbol=symbol,
                 label=label,
                 yahoo_candidates=yahoo_candidates,
-                fallback_currency="",
+                fallback_currency="USD" if symbol in _WATCH_GLOBAL_INDEX_SYMBOLS else "",
             )
 
         try:
@@ -4942,7 +4951,7 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
 
         def _watch_index(entry: tuple[str, str, List[str]]) -> Dict[str, Any]:
             symbol, label, yahoo_candidates = entry
-            fallback_curr = "USD" if symbol in {"SP500", "NASDAQ", "DOW"} else "TRY"
+            fallback_curr = "USD" if symbol in _WATCH_GLOBAL_INDEX_SYMBOLS else "TRY"
             return _watch_index_item(
                 symbol=symbol,
                 label=label,
@@ -4950,8 +4959,25 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
                 fallback_currency=fallback_curr,
             )
 
-        with ThreadPoolExecutor(max_workers=min(6, len(_WATCH_INDEX_CANDIDATES))) as pool:
-            indices = list(pool.map(_watch_index, _WATCH_INDEX_CANDIDATES))
+        with ThreadPoolExecutor(max_workers=min(6, len(_WATCH_BIST_INDEX_CANDIDATES))) as pool:
+            local_indices = list(pool.map(_watch_index, _WATCH_BIST_INDEX_CANDIDATES))
+        local_indices_by_symbol = {row["symbol"]: row for row in local_indices}
+
+        # Reuse the global-index cache for SP500/NASDAQ/DOW instead of hitting
+        # Yahoo a second time. Both market-watch endpoints then expose the
+        # exact same quote for the same instrument.
+        global_indices_by_symbol = {
+            str(item.get("symbol") or "").strip().upper(): item
+            for item in (_market_watch_global_payload().get("items") or [])
+            if str(item.get("symbol") or "").strip()
+        }
+
+        indices: List[Dict[str, Any]] = []
+        for symbol, label, yahoo_candidates in _WATCH_INDEX_CANDIDATES:
+            row = local_indices_by_symbol.get(symbol) or global_indices_by_symbol.get(symbol)
+            if row is None:
+                row = _watch_index((symbol, label, yahoo_candidates))
+            indices.append(row)
         fx_items = _pick_watch_items(
             items=list(fx_payload.get("items") or []),
             symbols=_WATCH_FX_SYMBOLS,
@@ -4974,7 +5000,7 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
         }
 
     payload, cache_status, stale, refresh_pending = _shared_swr_payload(
-        cache_key="api:market:watch:v3",
+        cache_key="api:market:watch:v4",
         factory=build,
         fresh_ttl_seconds=_WATCH_CACHE_TTL,
         stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,

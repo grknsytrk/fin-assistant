@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { apiClient } from '../api/client';
-import type { MarketIndexCode, MarketWatchItem, MarketWatchResponse, MarketWatchGlobalResponse } from '../api/types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { MarketIndexCode, MarketWatchItem } from '../api/types';
 import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
-import { getAdaptiveRefreshMs } from '../utils/marketHours';
+import { useMarketWatchData } from '../hooks/useMarketWatchData';
 import './MarketWatchStrip.css';
 
 const PRIMARY_SYMBOLS = ['XUTUM', 'XU100', 'XU030', 'NASDAQ', 'SP500', 'DOW', 'USD/TRY', 'EUR/TRY'] as const;
 const COMMODITY_SYMBOLS = ['BRENT', 'ALTIN', 'GUMUS', 'DOGALGAZ'] as const;
+// These indices are owned by /market/watch/global. /market/watch returns the
+// same symbols from a separate cache, so prefer the global snapshot to keep
+// the ticker and the Piyasalar rail numerically identical.
+const GLOBAL_INDEX_SYMBOLS = new Set(['SP500', 'NASDAQ', 'DOW']);
 const DEFAULT_DELAY_NOTE = 'Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).';
-let marketWatchMemoryCache: MarketWatchResponse | null = null;
-let marketWatchGlobalMemoryCache: MarketWatchGlobalResponse | null = null;
 
 function isIndexSymbol(raw: string): raw is MarketIndexCode {
     const norm = normalizeSymbol(raw);
@@ -185,81 +186,19 @@ interface MarketWatchStripProps {
 }
 
 export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: MarketWatchStripProps) {
-    const [payload, setPayload] = useState<MarketWatchResponse | null>(() => marketWatchMemoryCache);
-    const [globalPayload, setGlobalPayload] = useState<MarketWatchGlobalResponse | null>(() => marketWatchGlobalMemoryCache);
-    const [loading, setLoading] = useState(() => !marketWatchMemoryCache && !marketWatchGlobalMemoryCache);
-    const [error, setError] = useState<string | null>(null);
-    const inFlightRef = useRef(false);
-
-    const loadWatch = useCallback(async (options?: { refresh?: boolean; silent?: boolean }) => {
-        if (inFlightRef.current) return;
-        inFlightRef.current = true;
-        const silent = Boolean(options?.silent);
-        if (!silent) {
-            setLoading(true);
-            setError(null);
-        }
-        try {
-            const [watchRes, globalRes] = await Promise.allSettled([
-                apiClient.marketWatch({ refresh: options?.refresh }),
-                apiClient.marketWatchGlobal({ refresh: options?.refresh }),
-            ]);
-            if (watchRes.status === 'fulfilled') {
-                marketWatchMemoryCache = watchRes.value;
-                setPayload(watchRes.value);
-            }
-            if (globalRes.status === 'fulfilled') {
-                marketWatchGlobalMemoryCache = globalRes.value;
-                setGlobalPayload(globalRes.value);
-            }
-            if (watchRes.status === 'rejected' && globalRes.status === 'rejected' && !silent) {
-                const err = watchRes.reason;
-                const msg = err instanceof Error ? err.message : 'Borsa izleme verisi alınamadı.';
-                setError(msg);
-            }
-        } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : 'Borsa izleme verisi alınamadı.';
-            if (!silent) setError(msg);
-        } finally {
-            inFlightRef.current = false;
-            if (!silent) setLoading(false);
-        }
-    }, []);
-
-    useEffect(() => {
-        void loadWatch(marketWatchMemoryCache ? { silent: true } : undefined);
-        let pollTimer: number | null = null;
-        const scheduleAdaptiveTimer = () => {
-            if (pollTimer !== null) {
-                window.clearInterval(pollTimer);
-                pollTimer = null;
-            }
-            const intervalMs = getAdaptiveRefreshMs('global_fx');
-            if (intervalMs !== null) {
-                pollTimer = window.setInterval(() => {
-                    if (document.visibilityState === 'visible') {
-                        void loadWatch({ silent: true });
-                    }
-                }, intervalMs);
-            }
-        };
-        scheduleAdaptiveTimer();
-        const phaseCheckTimer = window.setInterval(scheduleAdaptiveTimer, 60_000);
-        const onVisibilityChange = () => {
-            scheduleAdaptiveTimer();
-            if (document.visibilityState === 'visible' && getAdaptiveRefreshMs('global_fx') !== null) {
-                void loadWatch({ silent: true });
-            }
-        };
-        document.addEventListener('visibilitychange', onVisibilityChange);
-        const timer = pollTimer ?? undefined;
-        return () => {
-            if (pollTimer !== null) window.clearInterval(pollTimer);
-            window.clearInterval(phaseCheckTimer);
-            document.removeEventListener('visibilitychange', onVisibilityChange);
-            void timer;
-        };
-    }, [loadWatch]);
+    const {
+        watch: payload,
+        global: globalPayload,
+        watchLoading,
+        globalLoading,
+        watchError,
+        globalError,
+        refresh,
+    } = useMarketWatchData({ watch: true, global: true });
+    const loading = watchLoading || globalLoading;
+    // The strip is usable when either feed is alive. Only report an error when
+    // both feeds failed and there is nothing to render.
+    const error = watchError && globalError ? watchError : null;
 
     const lookup = useMemo(() => {
         const map = new Map<string, MarketWatchItem>();
@@ -286,6 +225,11 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                 const key = normalizeSymbol(item.symbol);
                 if (!key) continue;
                 const existing = map.get(key);
+                // World indices have a single owner: /market/watch/global.
+                // /market/watch also returns NASDAQ/SP500/DOW, but from a
+                // different cache window; letting it win here is what made
+                // the ticker disagree with the Piyasalar rail.
+                if (GLOBAL_INDEX_SYMBOLS.has(key) && existing) continue;
                 if (!existing || existing.price == null || item.price != null) {
                     map.set(key, item);
                     map.set(key.replace('/', ''), item);
@@ -350,9 +294,10 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                 const norm = normalizeSymbol(item.symbol);
                 if (norm && !seenIndices.has(norm)) {
                     seenIndices.add(norm);
+                    // Route every symbol through the merged lookup so
+                    // NASDAQ/SP500/DOW keep the global snapshot.
                     const lookupItem = lookup.get(norm);
-                    const best = (item.price == null && lookupItem?.price != null) ? lookupItem : item;
-                    indices.push(best);
+                    indices.push(lookupItem || item);
                 }
             }
         }
@@ -431,8 +376,8 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
         return [...oneHalf, ...oneHalf];
     }, [orderedItems]);
 
-    const isInitialLoading = loading && !payload && !globalPayload;
-    const delayNote = payload?.delay_note || DEFAULT_DELAY_NOTE;
+    const isInitialLoading = !payload && !globalPayload && !error;
+    const delayNote = payload?.delay_note || globalPayload?.delay_note || DEFAULT_DELAY_NOTE;
 
     if (variant === 'compact') {
         return (
@@ -448,7 +393,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                         ))}
                     </div>
                 )}
-                {!isInitialLoading && !payload && error && (
+                {!isInitialLoading && !payload && !globalPayload && error && (
                     <div className="mw-compact-state mw-compact-error">{error}</div>
                 )}
                 {(payload || !isInitialLoading) && (
@@ -534,7 +479,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                         type="button"
                         className="mw-refresh"
                         onClick={() => {
-                            void loadWatch({ refresh: true });
+                            void refresh();
                         }}
                         disabled={loading}
                     >
@@ -572,14 +517,14 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                 </div>
             )}
 
-            {!isInitialLoading && !payload && error && (
+            {!isInitialLoading && !payload && !globalPayload && error && (
                 <div className="mw-state mw-state-error">
                     <span>{error}</span>
                     <button
                         type="button"
                         className="mw-refresh"
                         onClick={() => {
-                            void loadWatch({ refresh: true });
+                            void refresh();
                         }}
                         disabled={loading}
                     >
@@ -588,7 +533,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                 </div>
             )}
 
-            {payload && (
+            {(payload || globalPayload) && (
                 <>
                     <div className="mw-grid mw-grid-main">
                         {primaryItems.map((item) => {
