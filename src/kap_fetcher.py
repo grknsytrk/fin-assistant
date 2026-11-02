@@ -107,9 +107,9 @@ COMPANY_QUERY_ALIASES: Dict[str, List[str]] = {
     "TOASO": ["TOASO", "TOFAS"],
     "TUPRS": ["TUPRS", "TUPRAS"],
     "YKBNK": ["YKBNK", "YAPI KREDI"],
-    "KRDMA": ["KRDMA", "KRDMD", "KARDEMIR"],
-    "KRDMB": ["KRDMB", "KRDMD", "KARDEMIR"],
-    "KRDMD": ["KRDMD", "KARDEMIR"],
+    "KRDMA": ["KRDMA", "KRDMB", "KRDMD", "KARDEMIR"],
+    "KRDMB": ["KRDMB", "KRDMA", "KRDMD", "KARDEMIR"],
+    "KRDMD": ["KRDMD", "KRDMA", "KRDMB", "KARDEMIR"],
     "DENGE": ["DENGE", "DENGE YATIRIM"],
     "INVEO": ["INVEO", "INVEO YATIRIM"],
 }

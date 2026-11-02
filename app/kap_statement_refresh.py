@@ -191,8 +191,9 @@ def _get_kap_statement_refresh_job(job_id: str) -> Optional[Dict[str, Any]]:
     if str(payload.get("status") or "") in {"queued", "running"} and _kap_statement_job_is_stale(payload):
         now_iso = _kap_statement_now_iso()
         started_dt = _kap_statement_parse_iso(payload.get("started_at") or payload.get("requested_at"))
+        last_dt = _kap_statement_parse_iso(payload.get("updated_at")) or datetime.now(timezone.utc)
         duration = (
-            round((datetime.now(timezone.utc) - started_dt).total_seconds(), 1)
+            round(max(0.0, (last_dt - started_dt).total_seconds()), 1)
             if started_dt is not None
             else None
         )
@@ -503,7 +504,7 @@ def _process_kap_statement_symbol(
         force_refresh=False,
         max_quarters=fetch_depth,
         use_cache_when_complete=(mode == "incremental"),
-        allow_criteria_fallback=False,
+        allow_criteria_fallback=(mode == "full"),
     )
     if not isinstance(raw, dict) or not raw.get("ok"):
         error = str((raw or {}).get("error") or "KAP snapshot unavailable")
@@ -725,6 +726,7 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
     active_ttl = max(120, min(_KAP_STATEMENT_JOB_TTL_SECONDS, budget_seconds + 900))
     owner_marker = {"job_id": job_id, "owner_token": owner_token}
     heartbeat_stop = threading.Event()
+    job_lock = threading.Lock()
 
     def _heartbeat_worker() -> None:
         interval = _KAP_STATEMENT_HEARTBEAT_INTERVAL_SECONDS
@@ -737,8 +739,9 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
                     owner_marker,
                     ttl_seconds=active_ttl,
                 )
-                job["updated_at"] = _kap_statement_now_iso()
-                _set_kap_statement_refresh_job(job)
+                with job_lock:
+                    job["updated_at"] = _kap_statement_now_iso()
+                    _set_kap_statement_refresh_job(job)
             except Exception:
                 LOGGER.debug("KAP statement refresh heartbeat pulse failed: %s", job_id, exc_info=True)
 
@@ -764,8 +767,9 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
                 break
 
             window = symbols[cursor:cursor + concurrency]
-            job["current_symbol"] = ",".join(window)
-            job["updated_at"] = _kap_statement_now_iso()
+            with job_lock:
+                job["current_symbol"] = ",".join(window)
+                job["updated_at"] = _kap_statement_now_iso()
             will_fetch = any(
                 (mode == "full" and _statement_cache_state(symbol, max_quarters) != "ready")
                 or (mode != "full" and _statement_cache_state(symbol, max_quarters) == "ready")
@@ -773,7 +777,8 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
             )
             now_before = time.monotonic()
             if will_fetch or (now_before - last_flush >= 1.0):
-                _set_kap_statement_refresh_job(job)
+                with job_lock:
+                    _set_kap_statement_refresh_job(job)
                 last_flush = now_before
 
             results = list(
@@ -792,63 +797,64 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
 
             window_blocked = 0
             window_failed = 0
-            for result in results:
-                outcome = str(result.get("outcome") or "failed")
-                skip_field = _SKIP_OUTCOME_FIELDS.get(outcome)
-                if skip_field:
-                    job[skip_field] = int(job.get(skip_field) or 0) + 1
-                elif outcome == "updated":
-                    job["updated"] = int(job.get("updated") or 0) + 1
-                    job["fetched"] = int(job.get("fetched") or 0) + 1
-                elif outcome == "unchanged":
-                    job["unchanged"] = int(job.get("unchanged") or 0) + 1
-                    job["fetched"] = int(job.get("fetched") or 0) + 1
-                elif outcome == "blocked":
-                    job["blocked"] = int(job.get("blocked") or 0) + 1
-                    job["fetched"] = int(job.get("fetched") or 0) + 1
-                    window_blocked += 1
-                else:
-                    job["failed"] = int(job.get("failed") or 0) + 1
-                    job["fetched"] = int(job.get("fetched") or 0) + 1
-                    window_failed += 1
-                if result.get("error"):
-                    errors = list(job.get("errors") or [])
-                    if len(errors) < _KAP_STATEMENT_MAX_ERRORS:
-                        errors.append(
-                            {
-                                "symbol": result.get("symbol"),
-                                "outcome": outcome,
-                                "error": str(result.get("error") or "")[:240],
-                            }
-                        )
-                        job["errors"] = errors
+            with job_lock:
+                for result in results:
+                    outcome = str(result.get("outcome") or "failed")
+                    skip_field = _SKIP_OUTCOME_FIELDS.get(outcome)
+                    if skip_field:
+                        job[skip_field] = int(job.get(skip_field) or 0) + 1
+                    elif outcome == "updated":
+                        job["updated"] = int(job.get("updated") or 0) + 1
+                        job["fetched"] = int(job.get("fetched") or 0) + 1
+                    elif outcome == "unchanged":
+                        job["unchanged"] = int(job.get("unchanged") or 0) + 1
+                        job["fetched"] = int(job.get("fetched") or 0) + 1
+                    elif outcome == "blocked":
+                        job["blocked"] = int(job.get("blocked") or 0) + 1
+                        job["fetched"] = int(job.get("fetched") or 0) + 1
+                        window_blocked += 1
+                    else:
+                        job["failed"] = int(job.get("failed") or 0) + 1
+                        job["fetched"] = int(job.get("fetched") or 0) + 1
+                        window_failed += 1
+                    if result.get("error"):
+                        errors = list(job.get("errors") or [])
+                        if len(errors) < _KAP_STATEMENT_MAX_ERRORS:
+                            errors.append(
+                                {
+                                    "symbol": result.get("symbol"),
+                                    "outcome": outcome,
+                                    "error": str(result.get("error") or "")[:240],
+                                }
+                            )
+                            job["errors"] = errors
 
-            block_streak = block_streak + window_blocked if window_blocked else 0
-            failure_streak = failure_streak + window_failed if window_failed else 0
-            if not window_blocked and not window_failed:
-                block_streak = 0
-                failure_streak = 0
+                block_streak = block_streak + window_blocked if window_blocked else 0
+                failure_streak = failure_streak + window_failed if window_failed else 0
+                if not window_blocked and not window_failed:
+                    block_streak = 0
+                    failure_streak = 0
 
-            cursor += len(window)
-            job["cursor"] = cursor
-            job["processed"] = cursor
-            job["remaining"] = max(0, total - cursor)
-            job["last_symbol"] = ",".join(
-                f"{result.get('symbol')}:{result.get('outcome')}" for result in results
-            )
-            job["updated_at"] = _kap_statement_now_iso()
+                cursor += len(window)
+                job["cursor"] = cursor
+                job["processed"] = cursor
+                job["remaining"] = max(0, total - cursor)
+                job["last_symbol"] = ",".join(
+                    f"{result.get('symbol')}:{result.get('outcome')}" for result in results
+                )
+                job["updated_at"] = _kap_statement_now_iso()
 
-            if block_streak >= _KAP_STATEMENT_BLOCK_STREAK_LIMIT:
-                stop_reason = "provider_blocked"
-                break
-            if failure_streak >= _KAP_STATEMENT_FAILURE_STREAK_LIMIT:
-                stop_reason = "provider_failures"
-                break
+                if block_streak >= _KAP_STATEMENT_BLOCK_STREAK_LIMIT:
+                    stop_reason = "provider_blocked"
+                    break
+                if failure_streak >= _KAP_STATEMENT_FAILURE_STREAK_LIMIT:
+                    stop_reason = "provider_failures"
+                    break
 
-            now = time.monotonic()
-            if will_fetch or (now - last_flush >= 1.0):
-                _set_kap_statement_refresh_job(job)
-                last_flush = now
+                now = time.monotonic()
+                if will_fetch or (now - last_flush >= 1.0):
+                    _set_kap_statement_refresh_job(job)
+                    last_flush = now
             pause_seconds = (
                 _KAP_STATEMENT_BLOCK_COOLDOWN_SECONDS
                 if window_blocked
@@ -858,11 +864,12 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
                 time.sleep(min(pause_seconds, max(0.0, deadline - now)))
     except Exception as exc:  # noqa: BLE001 - never leave the job stuck in "running"
         LOGGER.exception("KAP statement refresh job failed: %s", job_id)
-        job["failed"] = int(job.get("failed") or 0) + 1
-        job["errors"] = list(job.get("errors") or [])[:_KAP_STATEMENT_MAX_ERRORS - 1] + [
-            {"symbol": None, "outcome": "job_error", "error": str(exc or "")[:240]}
-        ]
-        stop_reason = "job_error"
+        with job_lock:
+            job["failed"] = int(job.get("failed") or 0) + 1
+            job["errors"] = list(job.get("errors") or [])[:_KAP_STATEMENT_MAX_ERRORS - 1] + [
+                {"symbol": None, "outcome": "job_error", "error": str(exc or "")[:240]}
+            ]
+            stop_reason = "job_error"
     finally:
         heartbeat_stop.set()
         heartbeat_thread.join(timeout=2.0)

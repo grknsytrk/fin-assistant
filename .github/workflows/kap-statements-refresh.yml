@@ -274,6 +274,12 @@ jobs:
                   echo "::error::resume refresh reported errors: failed=$failed blocked=$blocked" >&2
                   exit 1
                 fi
+                skipped_missing="$(echo "$response" | jq -r '.refresh_job.skipped_missing_cache // 0')"
+                skipped_shallow="$(echo "$response" | jq -r '.refresh_job.skipped_shallow_cache // 0')"
+                skipped_schema="$(echo "$response" | jq -r '.refresh_job.skipped_schema // 0')"
+                if [[ "${job_mode:-$MODE}" == "incremental" ]] && (( skipped_missing + skipped_shallow + skipped_schema > 0 )); then
+                  echo "needs_backfill=true" >> "$GITHUB_OUTPUT"
+                fi
                 echo "resume refresh succeeded: updated=$updated coverage_ready=$coverage_ready"
                 exit 0
                 ;;
@@ -302,7 +308,7 @@ jobs:
           exit 0
 
       - name: backfill missing or outdated caches after incremental check
-        if: steps.wait_primary.outputs.needs_backfill == 'true'
+        if: steps.wait_primary.outputs.needs_backfill == 'true' || steps.resume_interrupted.outputs.needs_backfill == 'true'
         shell: bash
         run: |
           set -euo pipefail

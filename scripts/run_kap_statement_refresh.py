@@ -126,21 +126,31 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.local:
-        result = _run_local(
-            mode=args.mode,
-            universe=args.universe,
-            symbols=args.symbols,
-            max_quarters=args.max_quarters,
-            budget_seconds=args.budget_seconds,
-            concurrency=args.concurrency,
-        )
-        job = result.get("refresh_job", {})
-        status = str(job.get("status") or "")
-        failed = int(job.get("failed") or 0)
-        blocked = int(job.get("blocked") or 0)
-        if status == "succeeded" or (status == "partial" and failed <= args.max_allowed_failures and blocked == 0):
-            return 0
-        return 1
+        resumes_left = args.max_resumes
+        while True:
+            result = _run_local(
+                mode=args.mode,
+                universe=args.universe,
+                symbols=args.symbols,
+                max_quarters=args.max_quarters,
+                budget_seconds=args.budget_seconds,
+                concurrency=args.concurrency,
+            )
+            job = result.get("refresh_job", {})
+            status = str(job.get("status") or "")
+            stop_reason = str(job.get("stop_reason") or "")
+            failed = int(job.get("failed") or 0)
+            blocked = int(job.get("blocked") or 0)
+            if status == "succeeded" or (status == "partial" and stop_reason != "worker_interrupted" and failed <= args.max_allowed_failures and blocked == 0):
+                return 0
+            if status == "partial" and stop_reason == "worker_interrupted":
+                if resumes_left > 0:
+                    resumes_left -= 1
+                    print(f"Warning: local worker was interrupted; starting resume pass ({resumes_left} resumes left)...")
+                    continue
+                print("Error: local worker was interrupted and resume passes exhausted.", file=sys.stderr)
+                return 1
+            return 1
 
     resumes_left = args.max_resumes
     while True:
@@ -210,8 +220,8 @@ def main() -> int:
                         resumes_left -= 1
                         print(f"Warning: worker was interrupted; starting resume pass ({resumes_left} resumes left)...")
                         break
-                    print("Warning: worker was interrupted and resume passes exhausted. Next run will continue.")
-                    return 0
+                    print("Error: worker was interrupted and resume passes exhausted.", file=sys.stderr)
+                    return 1
                 if stop_reason in {"completed_with_errors", "budget_exhausted"}:
                     print(f"Statement refresh stopped ({stop_reason}): processed={processed}/{total} remaining={remaining}. Progress saved.")
                     return 0

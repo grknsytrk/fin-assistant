@@ -628,3 +628,70 @@ def test_member_resolution_for_kardemir_denge_inveo_doco() -> None:
     doco = _resolve_member("DOCO", CONFIG.kap)
     assert doco is not None
     assert "DO & CO" in doco["title"]
+
+
+def test_kardemir_share_classes_cross_share_cache(statement_env) -> None:
+    # When KRDMA cache is ready, KRDMB and KRDMD must recognize it as ready
+    # and skip redundant downloads in full mode.
+    from src.kap_fetcher import KAP_CACHE_SCHEMA_VERSION
+    _write_statement_cache(
+        statement_env.cache_dir,
+        "KRDMA",
+        quarters=1,
+        schema_version=KAP_CACHE_SCHEMA_VERSION,
+    )
+    assert statement_module._statement_cache_state("KRDMA", 1) == "ready"
+    assert statement_module._statement_cache_state("KRDMB", 1) == "ready"
+    assert statement_module._statement_cache_state("KRDMD", 1) == "ready"
+
+    res_b = statement_module._process_kap_statement_symbol("KRDMB", mode="full", max_quarters=1)
+    assert res_b["outcome"] == "skipped_ready"
+    res_d = statement_module._process_kap_statement_symbol("KRDMD", mode="full", max_quarters=1)
+    assert res_d["outcome"] == "skipped_ready"
+
+
+def test_interrupted_job_duration_anchored_to_heartbeat(statement_env) -> None:
+    stale_job = {
+        "job_id": "job-duration-check",
+        "status": "running",
+        "mode": "full",
+        "universe": "all",
+        "budget_seconds": 21600,
+        "started_at": "2026-11-02T16:00:00+00:00",
+        "updated_at": "2026-11-02T16:15:30+00:00",
+        "current_symbol": "KRDMB",
+        "last_symbol": "KRDMA:updated",
+        "processed": 319,
+        "remaining": 248,
+        "owner_token": "owner-dur",
+    }
+    statement_module._set_kap_statement_refresh_job(stale_job)
+    recovered = statement_module._get_kap_statement_refresh_job("job-duration-check")
+    assert recovered is not None
+    assert recovered["status"] == "partial"
+    assert recovered["stop_reason"] == "worker_interrupted"
+    # Exactly 15 minutes and 30 seconds = 930.0s
+    assert recovered["duration_seconds"] == 930.0
+
+
+def test_process_kap_statement_symbol_passes_criteria_fallback_true(
+    statement_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured_kwargs: Dict[str, Any] = {}
+
+    def mock_snapshot(**kwargs: Any) -> Dict[str, Any]:
+        captured_kwargs.update(kwargs)
+        return {
+            "ok": True,
+            "schema_version": 15,
+            "live_period_count": 1,
+            "quarters": [
+                {"year": 2026, "period": 1, "disclosure_index": 100}
+            ],
+        }
+
+    monkeypatch.setattr("app.kap_service.get_kap_snapshot", mock_snapshot)
+    res = statement_module._process_kap_statement_symbol("DOCO", mode="full", max_quarters=1)
+    assert captured_kwargs.get("allow_criteria_fallback") is True
+    assert res["symbol"] == "DOCO"
+
