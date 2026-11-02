@@ -3993,6 +3993,9 @@ export default function MarketsView({
 
     const handleSelectIndex = (index: MarketIndexCode | null) => {
         setSelectedIndex(index);
+        if (index) {
+            setActiveSection('indices');
+        }
         onNavigateIndexDetail?.(index);
     };
 
@@ -4190,16 +4193,11 @@ export default function MarketsView({
                     <div className="market-session-bar">
                         <div className="market-session-date">
                             <span className="market-session-dot" aria-label="Piyasa izleme aktif" />
-                            <strong className="market-session-status">Piyasa Özeti</strong>
-                            <span className="market-session-divider">/</span>
                             <span>{formatTerminalDate(terminalNow)}</span>
                             <time className="market-session-clock">{formatTerminalClock(terminalNow)}</time>
                         </div>
-                        <div className="market-session-hint">
-                            <span>Canlı Akış · İmleç ile durdurabilirsiniz</span>
-                        </div>
                     </div>
-                    <MarketWatchStrip variant="compact" />
+                    <MarketWatchStrip variant="compact" onSelectIndex={handleSelectIndex} />
                 </div>
             )}
 

@@ -295,11 +295,6 @@
     animation: mw-ticker-scroll 45s linear infinite;
 }
 
-.mw-ticker-viewport:hover .mw-ticker-track,
-.mw-ticker-viewport:focus-within .mw-ticker-track {
-    animation-play-state: paused;
-}
-
 @keyframes mw-ticker-scroll {
     from {
         transform: translate3d(0, 0, 0);
@@ -331,6 +326,45 @@
 
 .mw-ticker-item:hover {
     background: rgba(255, 255, 255, 0.04);
+}
+
+.mw-ticker-item.is-clickable {
+    cursor: pointer;
+}
+
+.mw-ticker-item.is-clickable:hover {
+    background: rgba(255, 255, 255, 0.09);
+}
+
+.mw-ticker-item.is-clickable:hover .mw-ticker-symbol {
+    color: #ffffff;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.mw-ticker-item.is-clickable:focus-visible {
+    outline: 1.5px solid var(--accent-color);
+    outline-offset: -1px;
+}
+
+.mw-card.is-clickable {
+    cursor: pointer;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.mw-card.is-clickable:hover {
+    border-color: rgba(255, 255, 255, 0.22);
+}
+
+.mw-card.is-clickable:hover .mw-symbol {
+    color: #ffffff;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.mw-card.is-clickable:focus-visible {
+    outline: 1.5px solid var(--accent-color);
+    outline-offset: 1px;
 }
 
 .mw-ticker-item.is-muted {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiClient } from '../api/client';
-import type { MarketWatchItem, MarketWatchResponse } from '../api/types';
+import type { MarketIndexCode, MarketWatchItem, MarketWatchResponse } from '../api/types';
 import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
 import { getAdaptiveRefreshMs } from '../utils/marketHours';
 import './MarketWatchStrip.css';
@@ -9,6 +9,11 @@ const PRIMARY_SYMBOLS = ['XUTUM', 'XU100', 'XU030', 'USD/TRY', 'EUR/TRY'] as con
 const COMMODITY_SYMBOLS = ['BRENT', 'ALTIN', 'GUMUS', 'DOGALGAZ'] as const;
 const DEFAULT_DELAY_NOTE = 'Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).';
 let marketWatchMemoryCache: MarketWatchResponse | null = null;
+
+function isIndexSymbol(raw: string): raw is MarketIndexCode {
+    const norm = normalizeSymbol(raw);
+    return norm === 'XU100' || norm === 'XU030' || norm === 'XUTUM';
+}
 
 const FALLBACK_LABELS: Record<string, string> = {
     XUTUM: 'BIST Tüm',
@@ -127,8 +132,9 @@ function watchItemKind(symbol: string): SymbolLogoKind {
 function FlashMarketCard({
     item,
     className = '',
+    onClick,
     children,
-}: React.PropsWithChildren<{ item: MarketWatchItem; className?: string }>) {
+}: React.PropsWithChildren<{ item: MarketWatchItem; className?: string; onClick?: () => void }>) {
     const prevPriceRef = useRef(item.price);
     const [flashClass, setFlashClass] = useState('');
 
@@ -145,6 +151,19 @@ function FlashMarketCard({
     return (
         <article
             className={`mw-card ${className} ${item.price == null ? 'mw-card-muted' : ''} ${flashClass}`.trim()}
+            onClick={onClick}
+            role={onClick ? 'button' : undefined}
+            tabIndex={onClick ? 0 : undefined}
+            onKeyDown={
+                onClick
+                    ? (e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              onClick();
+                          }
+                      }
+                    : undefined
+            }
         >
             {children}
         </article>
@@ -153,9 +172,10 @@ function FlashMarketCard({
 
 interface MarketWatchStripProps {
     variant?: 'panel' | 'compact';
+    onSelectIndex?: (index: MarketIndexCode) => void;
 }
 
-export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStripProps) {
+export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: MarketWatchStripProps) {
     const [payload, setPayload] = useState<MarketWatchResponse | null>(() => marketWatchMemoryCache);
     const [loading, setLoading] = useState(() => !marketWatchMemoryCache);
     const [error, setError] = useState<string | null>(null);
@@ -382,19 +402,45 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
                 {(payload || !isInitialLoading) && (
                     <div
                         className="mw-ticker-viewport"
-                        tabIndex={0}
                         role="region"
-                        aria-label="Canlı borsa ve döviz akış bandı. İmleç ile durdurabilirsiniz."
+                        aria-label="Canlı borsa ve döviz akış bandı"
                     >
                         <div className="mw-ticker-track">
                             {marqueeItems.map((item, index) => {
                                 const isPositive = item.change_pct != null && item.change_pct > 0;
                                 const isNegative = item.change_pct != null && item.change_pct < 0;
+                                const isIndex = isIndexSymbol(item.symbol);
+                                const isClickable = isIndex && Boolean(onSelectIndex);
                                 return (
                                     <div
                                         key={`seg-item-${item.symbol}-${index}`}
-                                        className={`mw-ticker-item ${item.price == null ? 'is-muted' : ''}`}
-                                        title={`${item.label} · Son güncelleme: ${itemMetaLabel(item)}`}
+                                        className={`mw-ticker-item ${item.price == null ? 'is-muted' : ''} ${isClickable ? 'is-clickable' : ''}`}
+                                        title={
+                                            isClickable
+                                                ? `${item.label} (${item.symbol}) endeks detayını aç`
+                                                : `${item.label} · Son güncelleme: ${itemMetaLabel(item)}`
+                                        }
+                                        role={isClickable ? 'button' : undefined}
+                                        tabIndex={isClickable ? 0 : undefined}
+                                        onClick={
+                                            isClickable
+                                                ? (e) => {
+                                                      e.stopPropagation();
+                                                      onSelectIndex?.(normalizeSymbol(item.symbol) as MarketIndexCode);
+                                                  }
+                                                : undefined
+                                        }
+                                        onKeyDown={
+                                            isClickable
+                                                ? (e) => {
+                                                      if (e.key === 'Enter' || e.key === ' ') {
+                                                          e.preventDefault();
+                                                          e.stopPropagation();
+                                                          onSelectIndex?.(normalizeSymbol(item.symbol) as MarketIndexCode);
+                                                      }
+                                                  }
+                                                : undefined
+                                        }
                                     >
                                         <div className="mw-ticker-identity">
                                             <SymbolLogo
@@ -492,33 +538,42 @@ export default function MarketWatchStrip({ variant = 'panel' }: MarketWatchStrip
             {payload && (
                 <>
                     <div className="mw-grid mw-grid-main">
-                        {primaryItems.map((item) => (
-                            <FlashMarketCard
-                                key={item.symbol}
-                                item={item}
-                                className="mw-card-main"
-                            >
-                                <div className="mw-card-head">
-                                    <span className="mw-card-symbol">
-                                        <SymbolLogo
-                                            symbol={item.symbol}
-                                            name={item.label}
-                                            kind={watchItemKind(item.symbol)}
-                                            logoUrl={item.logo_url}
-                                            size="xs"
-                                            className="mw-symbol-logo"
-                                        />
-                                        <span className="mw-symbol">{item.symbol}</span>
-                                    </span>
-                                    <span className="mw-label">{item.label}</span>
-                                </div>
-                                <div className="mw-card-price">{formatPrice(item)}</div>
-                                <div className={`mw-card-change ${changeClass(item.change_pct)}`}>
-                                    {formatPct(item.change_pct)}
-                                </div>
-                                <div className="mw-card-meta">{itemMetaLabel(item)}</div>
-                            </FlashMarketCard>
-                        ))}
+                        {primaryItems.map((item) => {
+                            const isIndex = isIndexSymbol(item.symbol);
+                            const isClickable = isIndex && Boolean(onSelectIndex);
+                            return (
+                                <FlashMarketCard
+                                    key={item.symbol}
+                                    item={item}
+                                    className={`mw-card-main ${isClickable ? 'is-clickable' : ''}`}
+                                    onClick={
+                                        isClickable
+                                            ? () => onSelectIndex?.(normalizeSymbol(item.symbol) as MarketIndexCode)
+                                            : undefined
+                                    }
+                                >
+                                    <div className="mw-card-head">
+                                        <span className="mw-card-symbol">
+                                            <SymbolLogo
+                                                symbol={item.symbol}
+                                                name={item.label}
+                                                kind={watchItemKind(item.symbol)}
+                                                logoUrl={item.logo_url}
+                                                size="xs"
+                                                className="mw-symbol-logo"
+                                            />
+                                            <span className="mw-symbol">{item.symbol}</span>
+                                        </span>
+                                        <span className="mw-label">{item.label}</span>
+                                    </div>
+                                    <div className="mw-card-price">{formatPrice(item)}</div>
+                                    <div className={`mw-card-change ${changeClass(item.change_pct)}`}>
+                                        {formatPct(item.change_pct)}
+                                    </div>
+                                    <div className="mw-card-meta">{itemMetaLabel(item)}</div>
+                                </FlashMarketCard>
+                            );
+                        })}
                     </div>
 
                     <div className="mw-grid mw-grid-commodities">

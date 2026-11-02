@@ -225,38 +225,11 @@
 }
 
 .market-session-dot {
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     border-radius: 999px;
     background: #10b981;
-    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
-    animation: mw-dot-pulse 2s infinite ease-in-out;
     flex-shrink: 0;
-}
-
-@keyframes mw-dot-pulse {
-    0%, 100% {
-        opacity: 1;
-        transform: scale(1);
-    }
-    50% {
-        opacity: 0.5;
-        transform: scale(0.85);
-    }
-}
-
-.market-session-status {
-    color: var(--text-primary);
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    font-family: inherit;
-}
-
-.market-session-divider {
-    color: rgba(255, 255, 255, 0.2);
-    font-size: 0.8rem;
 }
 
 .market-session-date span,
@@ -270,16 +243,7 @@
     letter-spacing: 0.02em;
 }
 
-.market-session-hint {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    opacity: 0.75;
-    letter-spacing: 0.02em;
-}
+
 
 .market-content-terminal {
     grid-template-columns: 1fr !important;
@@ -3286,10 +3250,6 @@
         flex-wrap: nowrap;
         gap: 0.5rem;
         font-size: 0.72rem;
-    }
-
-    .market-session-hint {
-        display: none;
     }
 
     .market-watch-slot {
