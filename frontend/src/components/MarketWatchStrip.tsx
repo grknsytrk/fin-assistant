@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiClient } from '../api/client';
-import type { MarketIndexCode, MarketWatchItem, MarketWatchResponse } from '../api/types';
+import type { MarketIndexCode, MarketWatchItem, MarketWatchResponse, MarketWatchGlobalResponse } from '../api/types';
 import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
 import { getAdaptiveRefreshMs } from '../utils/marketHours';
 import './MarketWatchStrip.css';
@@ -9,6 +9,7 @@ const PRIMARY_SYMBOLS = ['XUTUM', 'XU100', 'XU030', 'NASDAQ', 'SP500', 'DOW', 'U
 const COMMODITY_SYMBOLS = ['BRENT', 'ALTIN', 'GUMUS', 'DOGALGAZ'] as const;
 const DEFAULT_DELAY_NOTE = 'Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).';
 let marketWatchMemoryCache: MarketWatchResponse | null = null;
+let marketWatchGlobalMemoryCache: MarketWatchGlobalResponse | null = null;
 
 function isIndexSymbol(raw: string): raw is MarketIndexCode {
     const norm = normalizeSymbol(raw);
@@ -89,7 +90,7 @@ function formatPrice(item: MarketWatchItem): string {
 }
 
 function formatPct(changePct: number | null): string {
-    if (changePct == null) return 'Veri bekleniyor';
+    if (changePct == null) return '%0,00';
     const sign = changePct > 0 ? '+' : '';
     return `%${sign}${changePct.toLocaleString('tr-TR', {
         minimumFractionDigits: 2,
@@ -185,7 +186,8 @@ interface MarketWatchStripProps {
 
 export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: MarketWatchStripProps) {
     const [payload, setPayload] = useState<MarketWatchResponse | null>(() => marketWatchMemoryCache);
-    const [loading, setLoading] = useState(() => !marketWatchMemoryCache);
+    const [globalPayload, setGlobalPayload] = useState<MarketWatchGlobalResponse | null>(() => marketWatchGlobalMemoryCache);
+    const [loading, setLoading] = useState(() => !marketWatchMemoryCache && !marketWatchGlobalMemoryCache);
     const [error, setError] = useState<string | null>(null);
     const inFlightRef = useRef(false);
 
@@ -198,9 +200,23 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
             setError(null);
         }
         try {
-            const response = await apiClient.marketWatch({ refresh: options?.refresh });
-            marketWatchMemoryCache = response;
-            setPayload(response);
+            const [watchRes, globalRes] = await Promise.allSettled([
+                apiClient.marketWatch({ refresh: options?.refresh }),
+                apiClient.marketWatchGlobal({ refresh: options?.refresh }),
+            ]);
+            if (watchRes.status === 'fulfilled') {
+                marketWatchMemoryCache = watchRes.value;
+                setPayload(watchRes.value);
+            }
+            if (globalRes.status === 'fulfilled') {
+                marketWatchGlobalMemoryCache = globalRes.value;
+                setGlobalPayload(globalRes.value);
+            }
+            if (watchRes.status === 'rejected' && globalRes.status === 'rejected' && !silent) {
+                const err = watchRes.reason;
+                const msg = err instanceof Error ? err.message : 'Borsa izleme verisi alınamadı.';
+                setError(msg);
+            }
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'Borsa izleme verisi alınamadı.';
             if (!silent) setError(msg);
@@ -247,22 +263,38 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
 
     const lookup = useMemo(() => {
         const map = new Map<string, MarketWatchItem>();
-        if (!payload?.sections) return map;
 
-        const merged = [
-            ...(payload.sections.indices || []),
-            ...(payload.sections.fx || []),
-            ...(payload.sections.commodities || []),
-        ];
-
-        for (const item of merged) {
-            const key = normalizeSymbol(item.symbol);
-            if (!key) continue;
-            map.set(key, item);
-            map.set(key.replace('/', ''), item);
+        // 1. Seed with global indices from marketWatchGlobal (SP500, NASDAQ, DOW, DAX, etc.)
+        if (globalPayload?.items) {
+            for (const item of globalPayload.items) {
+                const key = normalizeSymbol(item.symbol);
+                if (!key) continue;
+                map.set(key, item);
+                map.set(key.replace('/', ''), item);
+            }
         }
+
+        // 2. Merge items from market watch sections
+        if (payload?.sections) {
+            const merged = [
+                ...(payload.sections.indices || []),
+                ...(payload.sections.fx || []),
+                ...(payload.sections.commodities || []),
+            ];
+
+            for (const item of merged) {
+                const key = normalizeSymbol(item.symbol);
+                if (!key) continue;
+                const existing = map.get(key);
+                if (!existing || existing.price == null || item.price != null) {
+                    map.set(key, item);
+                    map.set(key.replace('/', ''), item);
+                }
+            }
+        }
+
         return map;
-    }, [payload]);
+    }, [payload, globalPayload]);
 
     const primaryItems = useMemo(
         () => PRIMARY_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
@@ -318,7 +350,9 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                 const norm = normalizeSymbol(item.symbol);
                 if (norm && !seenIndices.has(norm)) {
                     seenIndices.add(norm);
-                    indices.push(item);
+                    const lookupItem = lookup.get(norm);
+                    const best = (item.price == null && lookupItem?.price != null) ? lookupItem : item;
+                    indices.push(best);
                 }
             }
         }
@@ -397,7 +431,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
         return [...oneHalf, ...oneHalf];
     }, [orderedItems]);
 
-    const isInitialLoading = loading && !payload;
+    const isInitialLoading = loading && !payload && !globalPayload;
     const delayNote = payload?.delay_note || DEFAULT_DELAY_NOTE;
 
     if (variant === 'compact') {
