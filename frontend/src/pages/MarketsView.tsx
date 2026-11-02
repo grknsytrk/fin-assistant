@@ -1940,7 +1940,7 @@ function StockCardMiniChart({
                 {chartToolbar}
                 <div ref={canvasWrapRef} className="stock-card-chart-canvas-wrap">
                     <div className="stock-card-inline-chart-skeleton" aria-hidden="true">
-                        <div className="stock-card-inline-chart-track stock-card-inline-skeleton-pulse">
+                        <div className="stock-card-inline-chart-track">
                             <svg
                                 className="stock-card-inline-chart-svg"
                                 viewBox={`0 0 ${width} ${height}`}
@@ -1949,8 +1949,8 @@ function StockCardMiniChart({
                             >
                                 <defs>
                                     <linearGradient id={skeletonAreaGradientId} x1="0%" y1="0%" x2="0%" y2="100%">
-                                        <stop offset="0%" stopColor="rgba(148,163,184,0.18)" />
-                                        <stop offset="100%" stopColor="rgba(148,163,184,0)" />
+                                        <stop offset="0%" stopColor="rgba(255,255,255,0.04)" />
+                                        <stop offset="100%" stopColor="rgba(255,255,255,0)" />
                                     </linearGradient>
                                 </defs>
                                 <line className="stock-card-inline-chart-gridline" x1={0} x2={width} y1={height * 0.52} y2={height * 0.52} />

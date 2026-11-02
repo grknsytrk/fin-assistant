@@ -1072,6 +1072,7 @@
     width: 100%;
     height: 100%;
     padding: 0;
+    background: transparent;
 }
 
 .stock-card-inline-chart-track {
@@ -1080,11 +1081,7 @@
     height: 100%;
     border-radius: 0;
     overflow: hidden;
-    background: linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--surface-border) 44%, transparent),
-        color-mix(in srgb, var(--surface-border) 22%, transparent)
-    );
+    background: transparent;
 }
 
 .stock-card-inline-chart-svg {
@@ -1092,22 +1089,23 @@
     inset: 0;
     width: 100%;
     height: 100%;
+    background: transparent;
 }
 
 .stock-card-inline-chart-gridline {
-    stroke: color-mix(in srgb, var(--surface-border) 54%, rgba(148, 163, 184, 0.35));
+    stroke: rgba(255, 255, 255, 0.06);
     stroke-width: 1;
     stroke-dasharray: 4 5;
 }
 
 .stock-card-inline-chart-area {
-    opacity: 0.82;
+    opacity: 0.5;
 }
 
 .stock-card-inline-chart-line {
     fill: none;
-    stroke: color-mix(in srgb, var(--text-secondary) 78%, #dbe4f0);
-    stroke-width: 2.15;
+    stroke: rgba(255, 255, 255, 0.28);
+    stroke-width: 2;
     stroke-linecap: round;
     stroke-linejoin: round;
     stroke-dasharray: 100;
