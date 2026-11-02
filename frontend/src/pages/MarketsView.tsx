@@ -1299,6 +1299,7 @@ const StockTableRow = memo(function StockTableRow({
 
     return (
         <tr
+            aria-rowindex={rank + 1}
             className={flashClass}
             onClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
                 if (event.button !== 0) return;
@@ -4812,7 +4813,10 @@ export default function MarketsView({
                                     <div className="no-results">Aranan kritere uyan hisse bulunamadı.</div>
                                 ) : (
                                     <div className="stocks-table-wrap" ref={stockTableWrapCallbackRef}>
-                                        <table className={`stocks-table${stockTableMode === 'fundamentals' ? ' stocks-fundamental-table' : ''}`}>
+                                        <table
+                                            className={`stocks-table${stockTableMode === 'fundamentals' ? ' stocks-fundamental-table' : ''}`}
+                                            aria-rowcount={sortedStocks.length + 1}
+                                        >
                                             <colgroup>
                                                 <col style={{ width: '44px', minWidth: '44px' }} />
                                                 {(stockTableMode === 'fundamentals' ? STOCK_FUNDAMENTAL_COLUMNS : STOCK_COLUMNS).map((column) => (
@@ -5203,7 +5207,10 @@ export default function MarketsView({
                                 </div>
 
                                 <div className="stocks-table-wrap indices-constituent-wrap" ref={indexConstituentTableWrapCallbackRef}>
-                                    <table className="stocks-table indices-constituent-table">
+                                    <table
+                                        className="stocks-table indices-constituent-table"
+                                        aria-rowcount={sortedIndexConstituents.length + 1}
+                                    >
                                         <thead>
                                             <tr>
                                                 {INDEX_CONSTITUENT_COLUMNS.map((column) => {
@@ -5247,9 +5254,10 @@ export default function MarketsView({
                                                     />
                                                 </tr>
                                             )}
-                                            {visibleIndexConstituents.map((row) => (
+                                            {visibleIndexConstituents.map((row, index) => (
                                                 <tr
                                                     key={row.symbol}
+                                                    aria-rowindex={indexConstituentStartIndex + index + 2}
                                                     onClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
                                                         if (event.button !== 0) return;
                                                         onCompanyClick(row.symbol);

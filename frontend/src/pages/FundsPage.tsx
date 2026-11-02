@@ -949,9 +949,11 @@ type FundsTableProps = {
 
 const FundTableRow = memo(function FundTableRow({
     row,
+    rowIndex,
     onOpenFund,
 }: {
     row: FundSummary;
+    rowIndex: number;
     onOpenFund: (fundCode: string, tab?: FundTab) => void;
 }) {
     const handleOpen = useCallback(() => {
@@ -960,6 +962,7 @@ const FundTableRow = memo(function FundTableRow({
 
     return (
         <tr
+            aria-rowindex={rowIndex}
             onClick={(event: ReactMouseEvent<HTMLTableRowElement>) => {
                 if (event.button !== 0) return;
                 handleOpen();
@@ -1052,7 +1055,7 @@ const FundsTable = memo(function FundsTable({
 
     return (
         <div className="funds-table-wrap" ref={tableWrapCallbackRef}>
-            <table className="funds-table">
+            <table className="funds-table" aria-rowcount={rows.length + 1}>
                 <thead>
                     <tr>
                         {renderSortHeader('fund_code', 'Fon')}
@@ -1071,8 +1074,13 @@ const FundsTable = memo(function FundsTable({
                             <td colSpan={8} style={{ height: `${topSpacerHeight}px` }} />
                         </tr>
                     )}
-                    {visibleRows.map((row) => (
-                        <FundTableRow key={row.fund_code} row={row} onOpenFund={onOpenFund} />
+                    {visibleRows.map((row, index) => (
+                        <FundTableRow
+                            key={row.fund_code}
+                            row={row}
+                            rowIndex={startIndex + index + 2}
+                            onOpenFund={onOpenFund}
+                        />
                     ))}
                     {bottomSpacerHeight > 0 && (
                         <tr key="funds-bottom-spacer" className="funds-spacer-row" style={{ height: `${bottomSpacerHeight}px` }} aria-hidden="true">
