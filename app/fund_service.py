@@ -253,20 +253,21 @@ def close_shared_http_clients() -> None:
     """Close any shared HTTP connection pools cleanly."""
     global _KAP_CLIENT, _FINTABLES_PROXY_CLIENT
     with _CLIENT_LOCK:
-        if _KAP_CLIENT is not None:
-            try:
-                _KAP_CLIENT.close()
-            except Exception:
-                LOGGER.debug("error closing KAP HTTP client", exc_info=True)
-            finally:
-                _KAP_CLIENT = None
-        if _FINTABLES_PROXY_CLIENT is not None:
-            try:
-                _FINTABLES_PROXY_CLIENT.close()
-            except Exception:
-                LOGGER.debug("error closing Fintables proxy HTTP client", exc_info=True)
-            finally:
-                _FINTABLES_PROXY_CLIENT = None
+        client_kap = _KAP_CLIENT
+        _KAP_CLIENT = None
+        client_proxy = _FINTABLES_PROXY_CLIENT
+        _FINTABLES_PROXY_CLIENT = None
+
+    if client_kap is not None:
+        try:
+            client_kap.close()
+        except Exception:
+            LOGGER.debug("error closing KAP HTTP client", exc_info=True)
+    if client_proxy is not None:
+        try:
+            client_proxy.close()
+        except Exception:
+            LOGGER.debug("error closing Fintables proxy HTTP client", exc_info=True)
 
 
 atexit.register(close_shared_http_clients)
@@ -1933,6 +1934,7 @@ def _fintables_proxy_payload(
         "Accept": "application/json",
         "Authorization": f"Bearer {FINTABLES_PROXY_TOKEN}",
     }
+    effective_timeout = timeout_seconds if timeout_seconds is not None else FINTABLES_TIMEOUT_SECONDS
     client = _get_fintables_proxy_client(timeout_seconds)
     try:
         try:
@@ -1940,12 +1942,14 @@ def _fintables_proxy_payload(
                 proxy_url,
                 params=params,
                 headers=headers,
+                timeout=effective_timeout,
             )
         except httpx.RemoteProtocolError:
             response = client.get(
                 proxy_url,
                 params=params,
                 headers=headers,
+                timeout=effective_timeout,
             )
     except httpx.HTTPError as exc:
         raise FintablesUpstreamError(f"{context}: Fintables proxy request failed: {exc}") from exc

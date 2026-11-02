@@ -19,8 +19,9 @@ def test_fastapi_app_uses_orjson_as_default_response_class() -> None:
 
 
 def test_fastapi_endpoints_serialize_with_orjson() -> None:
-    app.add_api_route("/api/test-orjson-decimal", lambda: {"val": decimal.Decimal("123.456"), "status": "ok"})
-    client = TestClient(app)
+    test_app = FastAPI(default_response_class=ORJSONResponse)
+    test_app.add_api_route("/api/test-orjson-decimal", lambda: {"val": decimal.Decimal("123.456"), "status": "ok"})
+    client = TestClient(test_app)
     response = client.get("/api/test-orjson-decimal")
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
@@ -251,4 +252,56 @@ def test_fintables_proxy_payload_retries_once_on_remote_protocol_error(monkeypat
     assert len(calls) == 2
     assert calls[0][0] == "https://proxy.example.com/internal/fintables/udf/history"
     assert calls[0][1]["headers"]["Authorization"] == "Bearer test-token"
+    assert calls[0][1]["timeout"] == 8.0
     assert result == {"s": "ok", "t": [1700000000], "c": [10.5]}
+
+
+def test_concurrent_threads_client_getter_and_teardown() -> None:
+    """Stress test concurrent access to client getters during rapid teardown."""
+    import concurrent.futures
+
+    errors: List[Exception] = []
+
+    def worker(worker_id: int) -> None:
+        try:
+            for _ in range(5):
+                client = fund_service._get_kap_client()
+                assert isinstance(client, httpx.Client)
+                if worker_id % 2 == 0:
+                    fund_service.close_shared_http_clients()
+        except Exception as exc:
+            errors.append(exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(worker, i) for i in range(4)]
+        concurrent.futures.wait(futures)
+
+    fund_service.close_shared_http_clients()
+    assert errors == []
+
+
+def test_kap_request_get_keeps_headers_dynamic(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    class MockClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def get(self, url: str, **kwargs: Any) -> Any:
+            calls.append((url, kwargs))
+            if "pdf" in url:
+                return httpx.Response(200, content=b"%PDF", request=httpx.Request("GET", url))
+            elif "html" in url:
+                return httpx.Response(200, text="ok", request=httpx.Request("GET", url))
+            return httpx.Response(200, json={"status": "ok"}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(fund_service.httpx, "Client", MockClient)
+
+    fund_service._kap_get_json("/test/json")
+    fund_service._kap_get_text("/test/html")
+    fund_service._kap_get_bytes("/test/pdf")
+
+    assert len(calls) == 3
+    assert calls[0][1]["headers"]["Accept"] == "application/json, text/plain, */*"
+    assert calls[1][1]["headers"]["Accept"] == "text/html,*/*"
+    assert calls[2][1]["headers"]["Accept"] == "application/pdf,*/*"

@@ -90,13 +90,13 @@ def bootstrap_application_storage() -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     try:
-        await asyncio.to_thread(bootstrap_application_storage)
-    except Exception:
-        LOGGER.exception("application storage bootstrap failed")
-        if database_enabled():
-            raise
-    await _start_fund_price_collector()
-    try:
+        try:
+            await asyncio.to_thread(bootstrap_application_storage)
+        except Exception:
+            LOGGER.exception("application storage bootstrap failed")
+            if database_enabled():
+                raise
+        await _start_fund_price_collector()
         yield
     finally:
         await _stop_fund_price_collector()
