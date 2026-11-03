@@ -45,17 +45,30 @@ const initialSnapshot: MarketWatchDataSnapshot = {
 let snapshot = initialSnapshot;
 const listeners = new Set<() => void>();
 
+type ChannelKey = 'watch' | 'global' | 'commodities' | 'fx';
+
 interface ChannelRuntime {
     inFlight: boolean;
     lastStartedAt: number;
+    pendingForce?: boolean;
 }
 
-const channelRuntime: Record<'watch' | 'global' | 'commodities' | 'fx', ChannelRuntime> = {
+const channelRuntime: Record<ChannelKey, ChannelRuntime> = {
     watch: { inFlight: false, lastStartedAt: 0 },
     global: { inFlight: false, lastStartedAt: 0 },
     commodities: { inFlight: false, lastStartedAt: 0 },
     fx: { inFlight: false, lastStartedAt: 0 },
 };
+
+const subscriberCounts: Record<ChannelKey, number> = {
+    watch: 0,
+    global: 0,
+    commodities: 0,
+    fx: 0,
+};
+
+let masterTimer: number | null = null;
+let visibilityHandlerAttached = false;
 
 function emitChange(): void {
     for (const listener of listeners) listener();
@@ -87,7 +100,10 @@ function canStart(lastStartedAt: number, minIntervalMs: number): boolean {
 
 async function fetchWatch(options?: { force?: boolean }): Promise<void> {
     const runtime = channelRuntime.watch;
-    if (runtime.inFlight) return;
+    if (runtime.inFlight) {
+        if (options?.force) runtime.pendingForce = true;
+        return;
+    }
     if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
 
     const showLoading = Boolean(options?.force) || snapshot.watch == null;
@@ -104,12 +120,19 @@ async function fetchWatch(options?: { force?: boolean }): Promise<void> {
     } finally {
         runtime.inFlight = false;
         if (showLoading) updateSnapshot({ watchLoading: false });
+        if (runtime.pendingForce) {
+            runtime.pendingForce = false;
+            void fetchWatch({ force: true });
+        }
     }
 }
 
 async function fetchGlobal(options?: { force?: boolean }): Promise<void> {
     const runtime = channelRuntime.global;
-    if (runtime.inFlight) return;
+    if (runtime.inFlight) {
+        if (options?.force) runtime.pendingForce = true;
+        return;
+    }
     if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
 
     const showLoading = Boolean(options?.force) || snapshot.global == null;
@@ -126,12 +149,19 @@ async function fetchGlobal(options?: { force?: boolean }): Promise<void> {
     } finally {
         runtime.inFlight = false;
         if (showLoading) updateSnapshot({ globalLoading: false });
+        if (runtime.pendingForce) {
+            runtime.pendingForce = false;
+            void fetchGlobal({ force: true });
+        }
     }
 }
 
 async function fetchCommodities(options?: { force?: boolean }): Promise<void> {
     const runtime = channelRuntime.commodities;
-    if (runtime.inFlight) return;
+    if (runtime.inFlight) {
+        if (options?.force) runtime.pendingForce = true;
+        return;
+    }
     if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
 
     const showLoading = Boolean(options?.force) || snapshot.commodities == null;
@@ -148,12 +178,19 @@ async function fetchCommodities(options?: { force?: boolean }): Promise<void> {
     } finally {
         runtime.inFlight = false;
         if (showLoading) updateSnapshot({ commoditiesLoading: false });
+        if (runtime.pendingForce) {
+            runtime.pendingForce = false;
+            void fetchCommodities({ force: true });
+        }
     }
 }
 
 async function fetchFx(options?: { force?: boolean }): Promise<void> {
     const runtime = channelRuntime.fx;
-    if (runtime.inFlight) return;
+    if (runtime.inFlight) {
+        if (options?.force) runtime.pendingForce = true;
+        return;
+    }
     if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
 
     const showLoading = Boolean(options?.force) || snapshot.fx == null;
@@ -170,6 +207,93 @@ async function fetchFx(options?: { force?: boolean }): Promise<void> {
     } finally {
         runtime.inFlight = false;
         if (showLoading) updateSnapshot({ fxLoading: false });
+        if (runtime.pendingForce) {
+            runtime.pendingForce = false;
+            void fetchFx({ force: true });
+        }
+    }
+}
+
+function masterTick(opts?: { isPolling?: boolean }): void {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    if (opts?.isPolling && getAdaptiveRefreshMs('global_fx') === null) return;
+
+    if (subscriberCounts.watch > 0) void fetchWatch();
+    if (subscriberCounts.global > 0) void fetchGlobal();
+    if (subscriberCounts.commodities > 0) void fetchCommodities();
+    if (subscriberCounts.fx > 0) void fetchFx();
+}
+
+function handleVisibilityChange(): void {
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible' && getAdaptiveRefreshMs('global_fx') !== null) {
+        masterTick({ isPolling: true });
+    }
+}
+
+function updateMasterTimer(): void {
+    const total =
+        subscriberCounts.watch +
+        subscriberCounts.global +
+        subscriberCounts.commodities +
+        subscriberCounts.fx;
+
+    if (total > 0) {
+        if (masterTimer === null && typeof window !== 'undefined') {
+            masterTimer = window.setInterval(() => masterTick({ isPolling: true }), MARKET_REFRESH_MS);
+        }
+        if (!visibilityHandlerAttached && typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', handleVisibilityChange);
+            visibilityHandlerAttached = true;
+        }
+    } else {
+        if (masterTimer !== null && typeof window !== 'undefined') {
+            window.clearInterval(masterTimer);
+            masterTimer = null;
+        }
+        if (visibilityHandlerAttached && typeof document !== 'undefined') {
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            visibilityHandlerAttached = false;
+        }
+    }
+}
+
+function registerChannels(channels: ChannelKey[]): void {
+    for (const ch of channels) {
+        const wasZero = subscriberCounts[ch] === 0;
+        subscriberCounts[ch] += 1;
+        if (wasZero) {
+            if (ch === 'watch') void fetchWatch();
+            else if (ch === 'global') void fetchGlobal();
+            else if (ch === 'commodities') void fetchCommodities();
+            else if (ch === 'fx') void fetchFx();
+        }
+    }
+    updateMasterTimer();
+}
+
+function unregisterChannels(channels: ChannelKey[]): void {
+    for (const ch of channels) {
+        subscriberCounts[ch] = Math.max(0, subscriberCounts[ch] - 1);
+    }
+    updateMasterTimer();
+}
+
+export function _resetMarketWatchStoreForTesting(): void {
+    snapshot = initialSnapshot;
+    listeners.clear();
+    for (const key of Object.keys(channelRuntime) as ChannelKey[]) {
+        channelRuntime[key].inFlight = false;
+        channelRuntime[key].lastStartedAt = 0;
+        channelRuntime[key].pendingForce = false;
+        subscriberCounts[key] = 0;
+    }
+    if (masterTimer !== null && typeof window !== 'undefined') {
+        window.clearInterval(masterTimer);
+        masterTimer = null;
+    }
+    if (visibilityHandlerAttached && typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+        visibilityHandlerAttached = false;
     }
 }
 
@@ -204,30 +328,17 @@ export function useMarketWatchData(options: UseMarketWatchDataOptions): MarketWa
     const wantsFx = enabled && Boolean(options.fx);
 
     useEffect(() => {
-        if (!wantsWatch && !wantsGlobal && !wantsCommodities && !wantsFx) return undefined;
+        const keys: ChannelKey[] = [];
+        if (wantsWatch) keys.push('watch');
+        if (wantsGlobal) keys.push('global');
+        if (wantsCommodities) keys.push('commodities');
+        if (wantsFx) keys.push('fx');
 
-        const tick = (opts?: { isPolling?: boolean }) => {
-            if (document.visibilityState === 'hidden') return;
-            if (opts?.isPolling && getAdaptiveRefreshMs('global_fx') === null) return;
-            if (wantsWatch) void fetchWatch();
-            if (wantsGlobal) void fetchGlobal();
-            if (wantsCommodities) void fetchCommodities();
-            if (wantsFx) void fetchFx();
-        };
+        if (keys.length === 0) return undefined;
 
-        tick();
-
-        const timer = window.setInterval(() => tick({ isPolling: true }), MARKET_REFRESH_MS);
-        const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible' && getAdaptiveRefreshMs('global_fx') !== null) {
-                tick({ isPolling: true });
-            }
-        };
-        document.addEventListener('visibilitychange', onVisibilityChange);
-
+        registerChannels(keys);
         return () => {
-            window.clearInterval(timer);
-            document.removeEventListener('visibilitychange', onVisibilityChange);
+            unregisterChannels(keys);
         };
     }, [wantsCommodities, wantsFx, wantsGlobal, wantsWatch]);
 

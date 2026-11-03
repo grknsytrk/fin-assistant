@@ -1,17 +1,20 @@
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { apiClient } from '../api/client';
-import { useMarketWatchData } from './useMarketWatchData';
+import { useMarketWatchData, _resetMarketWatchStoreForTesting } from './useMarketWatchData';
+import { latestAsOf } from '../components/MarketWatchStrip';
 import type { CommodityQuote, FxQuote } from '../api/types';
 
 describe('useMarketWatchData', () => {
     beforeEach(() => {
         vi.restoreAllMocks();
+        _resetMarketWatchStoreForTesting();
     });
 
     afterEach(() => {
         cleanup();
         vi.restoreAllMocks();
+        _resetMarketWatchStoreForTesting();
     });
 
     it('shares commodities snapshot across multiple hook instances without duplicate calls', async () => {
@@ -102,5 +105,55 @@ describe('useMarketWatchData', () => {
         });
 
         expect(fxSpy).toHaveBeenCalledWith({ refresh: true });
+    });
+
+    it('queues pending force refresh when refresh is triggered while a request is in flight', async () => {
+        let resolveFirstCall: (value: { items: FxQuote[]; source: string; delay_note: string; as_of: string }) => void = () => {};
+        const firstPromise = new Promise<{ items: FxQuote[]; source: string; delay_note: string; as_of: string }>((res) => {
+            resolveFirstCall = res;
+        });
+
+        const fxSpy = vi.spyOn(apiClient, 'marketFx')
+            .mockImplementationOnce(() => firstPromise)
+            .mockResolvedValue({
+                items: [],
+                source: 'yahoo',
+                delay_note: '',
+                as_of: '2026-11-03T15:01:00Z',
+            });
+
+        const { result } = renderHook(() =>
+            useMarketWatchData({ fx: true, enabled: true }),
+        );
+
+        // Initial fetch is now in flight
+        expect(fxSpy).toHaveBeenCalledTimes(1);
+        expect(fxSpy).toHaveBeenLastCalledWith(undefined);
+
+        // While first is in flight, user triggers force refresh
+        act(() => {
+            result.current.refresh();
+        });
+
+        // Resolve first request
+        await act(async () => {
+            resolveFirstCall({
+                items: [],
+                source: 'yahoo',
+                delay_note: '',
+                as_of: '2026-11-03T15:00:00Z',
+            });
+            await Promise.resolve();
+        });
+
+        // The queued pendingForce refresh must execute with { refresh: true }
+        expect(fxSpy).toHaveBeenCalledTimes(2);
+        expect(fxSpy).toHaveBeenLastCalledWith({ refresh: true });
+    });
+
+    it('correctly picks latest timestamp with latestAsOf', () => {
+        expect(latestAsOf(null, undefined)).toBeNull();
+        expect(latestAsOf('2026-11-03T14:00:00Z', '2026-11-03T14:05:00Z')).toBe('2026-11-03T14:05:00Z');
+        expect(latestAsOf('2026-11-03T15:00:00Z', '2026-11-03T14:59:00Z', '2026-11-03T14:30:00Z')).toBe('2026-11-03T15:00:00Z');
     });
 });

@@ -111,6 +111,20 @@ function formatClock(rawIso: string | null | undefined): string {
     return dt.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
 }
 
+export function latestAsOf(...timestamps: Array<string | null | undefined>): string | null {
+    let latest: string | null = null;
+    let latestMs = -Infinity;
+    for (const ts of timestamps) {
+        if (!ts) continue;
+        const ms = new Date(ts).getTime();
+        if (!Number.isNaN(ms) && ms > latestMs) {
+            latestMs = ms;
+            latest = ts;
+        }
+    }
+    return latest;
+}
+
 function itemMetaLabel(item: MarketWatchItem): string {
     if (item.error) return 'Veri alınamadı';
     if (item.as_of) return `Saat ${formatClock(item.as_of)}`;
@@ -202,7 +216,12 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
         refresh,
     } = useMarketWatchData({ watch: true, global: true, commodities: true, fx: true });
     const loading = watchLoading || globalLoading || commoditiesLoading || fxLoading;
-    const hasData = Boolean(payload || globalPayload || commodities || fx);
+    const hasData = Boolean(
+        payload?.sections ||
+        (globalPayload?.items && globalPayload.items.length > 0) ||
+        (commodities && commodities.length > 0) ||
+        (fx && fx.length > 0),
+    );
     // The strip is usable when any feed is alive. Only report an error when
     // every feed failed and there is nothing to render.
     const error = hasData ? null : watchError || globalError || commoditiesError || fxError;
@@ -500,7 +519,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                     <p>XUTUM, XU100, XU030, döviz ve emtia özetleri 3 saniyede bir otomatik güncellenir.</p>
                 </div>
                 <div className="mw-meta">
-                    <span className="mw-updated">Son güncelleme: {formatClock(payload?.as_of || globalPayload?.as_of || commodities?.[0]?.as_of || fx?.[0]?.as_of)}</span>
+                    <span className="mw-updated">Son güncelleme: {formatClock(latestAsOf(payload?.as_of, globalPayload?.as_of, commodities?.[0]?.as_of, fx?.[0]?.as_of))}</span>
                     <button
                         type="button"
                         className="mw-refresh"
