@@ -355,6 +355,59 @@ def test_budget_exhaustion_marks_job_partial(statement_env, monkeypatch: pytest.
     assert job["cursor"] == job["processed"]
 
 
+def test_blocked_symbol_is_retried_once_and_job_succeeds(
+    statement_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import urllib.error
+
+    attempts: Dict[str, int] = {}
+
+    def fake_process(symbol: str, **_kwargs: Any) -> Dict[str, Any]:
+        attempts[symbol] = attempts.get(symbol, 0) + 1
+        if symbol == "BLK" and attempts[symbol] == 1:
+            raise urllib.error.HTTPError("https://kap", 429, "Too Many Requests", {}, None)
+        return {"symbol": symbol, "outcome": "unchanged"}
+
+    monkeypatch.setattr(statement_module, "_process_kap_statement_symbol", fake_process)
+    monkeypatch.setattr(statement_module, "_KAP_STATEMENT_BLOCK_COOLDOWN_SECONDS", 0.0)
+
+    job = _seed_and_run_job(mode="incremental", symbols=["AAA", "BLK", "BBB"])
+
+    assert attempts["BLK"] == 2
+    assert job["status"] == "succeeded"
+    assert job["blocked"] == 0
+    assert job["failed"] == 0
+    assert job["processed"] == 3
+    assert job["fetched"] == 3
+    assert job["unchanged"] == 3
+    assert not job.get("errors")
+
+
+def test_symbol_still_blocked_after_retry_stays_counted(
+    statement_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import urllib.error
+
+    attempts: Dict[str, int] = {}
+
+    def fake_process(symbol: str, **_kwargs: Any) -> Dict[str, Any]:
+        attempts[symbol] = attempts.get(symbol, 0) + 1
+        raise urllib.error.HTTPError("https://kap", 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setattr(statement_module, "_process_kap_statement_symbol", fake_process)
+    monkeypatch.setattr(statement_module, "_KAP_STATEMENT_BLOCK_COOLDOWN_SECONDS", 0.0)
+
+    job = _seed_and_run_job(mode="incremental", symbols=["BLK"])
+
+    assert attempts["BLK"] == 2
+    assert job["status"] == "partial"
+    assert job["stop_reason"] == "completed_with_errors"
+    assert job["blocked"] == 1
+    assert job["failed"] == 0
+    assert job["processed"] == 1
+    assert job["errors"][0]["outcome"] == "blocked"
+
+
 def test_repeated_provider_blocks_abort_the_job(statement_env, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(statement_module, "_KAP_STATEMENT_BLOCK_STREAK_LIMIT", 2)
     monkeypatch.setattr(statement_module, "_KAP_STATEMENT_BLOCK_COOLDOWN_SECONDS", 0.0)

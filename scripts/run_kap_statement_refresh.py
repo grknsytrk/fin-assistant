@@ -118,6 +118,12 @@ def main() -> int:
     parser.add_argument("--budget-seconds", type=int, default=5400)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--max-allowed-failures", type=int, default=10)
+    parser.add_argument(
+        "--max-allowed-blocked",
+        type=int,
+        default=int(os.getenv("RAGFIN_KAP_STATEMENT_MAX_ALLOWED_BLOCKED", "5") or 5),
+        help="Exit successfully when at most this many symbols were blocked by KAP",
+    )
     parser.add_argument("--max-resumes", type=int, default=1)
     parser.add_argument("--api-base-url", type=str, default=os.getenv("FIN_API_BASE_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--admin-token", type=str, default=os.getenv("FIN_API_ADMIN_TOKEN", os.getenv("RAGFIN_ADMIN_REFRESH_TOKEN", "")))
@@ -141,7 +147,18 @@ def main() -> int:
             stop_reason = str(job.get("stop_reason") or "")
             failed = int(job.get("failed") or 0)
             blocked = int(job.get("blocked") or 0)
-            if status == "succeeded" or (status == "partial" and stop_reason != "worker_interrupted" and failed <= args.max_allowed_failures and blocked == 0):
+            if status == "succeeded" or (
+                status == "partial"
+                and stop_reason != "worker_interrupted"
+                and failed <= args.max_allowed_failures
+                and blocked <= args.max_allowed_blocked
+            ):
+                if blocked > 0:
+                    print(
+                        f"Warning: {blocked} symbol(s) were blocked by KAP "
+                        f"(within tolerance of {args.max_allowed_blocked}); "
+                        "the next run will retry them."
+                    )
                 return 0
             if status == "partial" and stop_reason == "worker_interrupted":
                 if resumes_left > 0:
@@ -200,8 +217,12 @@ def main() -> int:
             )
 
             if status == "succeeded":
-                if blocked > 0 or failed > args.max_allowed_failures:
-                    print(f"Error: succeeded with excessive errors: failed={failed} blocked={blocked}", file=sys.stderr)
+                if blocked > args.max_allowed_blocked or failed > args.max_allowed_failures:
+                    print(
+                        f"Error: succeeded with excessive errors: failed={failed} "
+                        f"blocked={blocked} (allowed blocked={args.max_allowed_blocked})",
+                        file=sys.stderr,
+                    )
                     return 1
                 if failed > 0:
                     print(f"Warning: succeeded with {failed} non-fatal company failure(s) (within tolerance of {args.max_allowed_failures})")
@@ -209,8 +230,12 @@ def main() -> int:
                 return 0
 
             if status == "partial":
-                if blocked > 0:
-                    print(f"Error: statement refresh aborted due to provider blocking (blocked={blocked})", file=sys.stderr)
+                if blocked > args.max_allowed_blocked:
+                    print(
+                        f"Error: statement refresh hit provider blocking for {blocked} "
+                        f"symbol(s) (limit {args.max_allowed_blocked}, stop={stop_reason})",
+                        file=sys.stderr,
+                    )
                     return 1
                 if failed > args.max_allowed_failures:
                     print(f"Error: statement refresh failed with errors exceeding threshold ({failed} > {args.max_allowed_failures})", file=sys.stderr)
@@ -222,6 +247,12 @@ def main() -> int:
                         break
                     print("Error: worker was interrupted and resume passes exhausted.", file=sys.stderr)
                     return 1
+                if blocked > 0:
+                    print(
+                        f"Warning: {blocked} symbol(s) were blocked by KAP "
+                        f"(within tolerance of {args.max_allowed_blocked}); "
+                        "the next run will retry them."
+                    )
                 if stop_reason in {"completed_with_errors", "budget_exhausted"}:
                     print(f"Statement refresh stopped ({stop_reason}): processed={processed}/{total} remaining={remaining}. Progress saved.")
                     return 0

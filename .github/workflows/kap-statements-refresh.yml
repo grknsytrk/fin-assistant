@@ -44,6 +44,10 @@ on:
         description: "İzin verilen maksimum tekil şirket hata sayısı (varsayılan: 10)"
         type: string
         default: "10"
+      max_allowed_blocked:
+        description: "İzin verilen maksimum KAP engeli (429/403) sayısı (varsayılan: 5)"
+        type: string
+        default: "5"
 
 permissions: {}
 
@@ -65,6 +69,7 @@ jobs:
       BUDGET_SECONDS: ${{ inputs.budget_seconds || '5400' }}
       CONCURRENCY: ${{ inputs.concurrency || '1' }}
       MAX_ALLOWED_FAILURES: ${{ inputs.max_allowed_failures || '10' }}
+      MAX_ALLOWED_BLOCKED: ${{ inputs.max_allowed_blocked || '5' }}
     steps:
       - name: validate inputs
         shell: bash
@@ -151,6 +156,7 @@ jobs:
             job_mode="$(echo "$response" | jq -r '.refresh_job.mode // empty')"
             echo "statement refresh: job_id=$JOB_ID status=${status:-unknown} processed=$processed/$total current=$current_symbol last=$last_symbol fetched=$fetched updated=$updated unchanged=$unchanged skipped_ready=$skipped_ready skipped_missing=$skipped_missing skipped_shallow=$skipped_shallow skipped_schema=$skipped_schema failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
             max_allowed_failures="${MAX_ALLOWED_FAILURES:-10}"
+            max_allowed_blocked="${MAX_ALLOWED_BLOCKED:-5}"
             case "$status" in
               succeeded)
                 if (( blocked > 0 )); then
@@ -176,8 +182,8 @@ jobs:
                 exit 0
                 ;;
               partial)
-                if (( blocked > 0 )); then
-                  echo "::error::statement refresh aborted due to provider blocking: blocked=$blocked stop_reason=${stop_reason:-unknown}" >&2
+                if (( blocked > max_allowed_blocked )); then
+                  echo "::error::statement refresh hit provider blocking for $blocked symbol(s) (limit $max_allowed_blocked) stop_reason=${stop_reason:-unknown}" >&2
                   echo "$response" >&2
                   exit 1
                 fi
@@ -186,13 +192,19 @@ jobs:
                   echo "$response" >&2
                   exit 1
                 fi
+                if (( blocked > 0 )); then
+                  echo "::warning::statement refresh finished with $blocked blocked symbol(s) (within tolerance of $max_allowed_blocked); the next run will retry them"
+                fi
                 if [[ "$stop_reason" == "worker_interrupted" ]]; then
                   echo "::warning::statement refresh was interrupted (stop_reason=worker_interrupted); processed=$processed/$total remaining=$remaining. Initiating automatic resume pass..."
                   echo "needs_resume=true" >> "$GITHUB_OUTPUT"
                   exit 0
                 fi
                 if [[ "$stop_reason" == "completed_with_errors" ]]; then
-                  echo "::warning::statement refresh completed with $failed non-fatal symbol error(s) (within threshold of $max_allowed_failures); processed=$processed/$total"
+                  if [[ "${job_mode:-$MODE}" == "incremental" ]] && (( skipped_missing + skipped_shallow + skipped_schema > 0 )); then
+                    echo "needs_backfill=true" >> "$GITHUB_OUTPUT"
+                  fi
+                  echo "::warning::statement refresh completed with failed=$failed blocked=$blocked (within tolerance); processed=$processed/$total"
                   exit 0
                 fi
                 echo "::warning::statement refresh stopped early (stop_reason=${stop_reason:-budget_exhausted}); processed=$processed/$total remaining=$remaining. Next run will continue automatically."
@@ -248,6 +260,7 @@ jobs:
           fi
           echo "resume refresh requested: job_id=$job_id"
           max_allowed_failures="${MAX_ALLOWED_FAILURES:-10}"
+          max_allowed_blocked="${MAX_ALLOWED_BLOCKED:-5}"
           poll_deadline=$((SECONDS + BUDGET_SECONDS + 180))
           max_attempts=$(((BUDGET_SECONDS + 180) / 30 + 2))
           for attempt in $(seq 1 "$max_attempts"); do
@@ -270,8 +283,8 @@ jobs:
             echo "resume refresh: job_id=$job_id status=${status:-unknown} processed=$processed/$total current=$current_symbol last=$last_symbol updated=$updated skipped_ready=$skipped_ready failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
             case "$status" in
               succeeded)
-                if (( blocked > 0 || failed > max_allowed_failures )); then
-                  echo "::error::resume refresh reported errors: failed=$failed blocked=$blocked" >&2
+                if (( blocked > max_allowed_blocked || failed > max_allowed_failures )); then
+                  echo "::error::resume refresh reported errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)" >&2
                   exit 1
                 fi
                 skipped_missing="$(echo "$response" | jq -r '.refresh_job.skipped_missing_cache // 0')"
@@ -284,9 +297,12 @@ jobs:
                 exit 0
                 ;;
               partial)
-                if (( blocked > 0 || failed > max_allowed_failures )); then
-                  echo "::error::resume refresh completed with errors: failed=$failed blocked=$blocked" >&2
+                if (( blocked > max_allowed_blocked || failed > max_allowed_failures )); then
+                  echo "::error::resume refresh completed with errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)" >&2
                   exit 1
+                fi
+                if (( blocked > 0 )); then
+                  echo "::warning::resume refresh finished with $blocked blocked symbol(s) (within tolerance); the next run will retry them"
                 fi
                 echo "::warning::resume refresh stopped early (stop_reason=${stop_reason:-budget_exhausted}); remaining=$remaining. Next scheduled run will continue."
                 exit 0
@@ -331,6 +347,7 @@ jobs:
           fi
           echo "backfill refresh requested: job_id=$job_id"
           max_allowed_failures="${MAX_ALLOWED_FAILURES:-10}"
+          max_allowed_blocked="${MAX_ALLOWED_BLOCKED:-5}"
           poll_deadline=$((SECONDS + BUDGET_SECONDS + 180))
           max_attempts=$(((BUDGET_SECONDS + 180) / 30 + 2))
           for attempt in $(seq 1 "$max_attempts"); do
@@ -353,17 +370,20 @@ jobs:
             echo "backfill refresh: job_id=$job_id status=${status:-unknown} processed=$processed/$total current=$current_symbol last=$last_symbol updated=$updated skipped_ready=$skipped_ready failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
             case "$status" in
               succeeded)
-                if (( blocked > 0 || failed > max_allowed_failures )); then
-                  echo "::error::backfill refresh reported errors: failed=$failed blocked=$blocked" >&2
+                if (( blocked > max_allowed_blocked || failed > max_allowed_failures )); then
+                  echo "::error::backfill refresh reported errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)" >&2
                   exit 1
                 fi
                 echo "backfill refresh succeeded: updated=$updated coverage_ready=$coverage_ready"
                 exit 0
                 ;;
               partial)
-                if (( blocked > 0 || failed > max_allowed_failures )); then
-                  echo "::error::backfill refresh completed with errors: failed=$failed blocked=$blocked" >&2
+                if (( blocked > max_allowed_blocked || failed > max_allowed_failures )); then
+                  echo "::error::backfill refresh completed with errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)" >&2
                   exit 1
+                fi
+                if (( blocked > 0 )); then
+                  echo "::warning::backfill refresh finished with $blocked blocked symbol(s) (within tolerance); the next run will retry them"
                 fi
                 echo "::warning::backfill refresh stopped early (stop_reason=${stop_reason:-budget_exhausted}); remaining=$remaining"
                 exit 0

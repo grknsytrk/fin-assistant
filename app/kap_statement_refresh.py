@@ -10,6 +10,8 @@ is therefore deliberately conservative:
   cursor lets the next run continue where this one stopped,
 * a circuit breaker that aborts after repeated provider blocks instead of
   hammering KAP,
+* a single best-effort retry pass over symbols that hit a transient block, so a
+  short 429 burst does not have to wait a whole day for the next run,
 * ``incremental`` only re-checks companies whose cache is already current
   (schema version and requested depth). A missing, shallow, or outdated cache
   is reported as skipped and is *never* expanded into a full history download,
@@ -71,11 +73,13 @@ _KAP_STATEMENT_REQUEST_GAP_SECONDS = float(
 )
 
 # Minimum start-to-start gap between KAP JSON requests while a batch job runs.
-# Keep batch traffic around 9 JSON requests per minute by default so sustained
-# runs stay below KAP's ~35-40 request / 5-minute sliding window.
+# KAP allows roughly 35-40 requests per five-minute sliding window, i.e. about
+# 7 requests/minute. A 6.5s gap is ~9.2 requests/minute (~46 per window), so a
+# long run drifts over the budget and ends with scattered 429s. 9.0s keeps batch
+# traffic at ~6.7 requests/minute (~33 per window) with some headroom.
 _KAP_STATEMENT_REQUEST_INTERVAL_SECONDS = max(
     0.0,
-    float(os.getenv("RAGFIN_KAP_STATEMENT_REQUEST_INTERVAL_SECONDS", "6.5") or 0.0),
+    float(os.getenv("RAGFIN_KAP_STATEMENT_REQUEST_INTERVAL_SECONDS", "9.0") or 0.0),
 )
 
 _KAP_STATEMENT_BLOCK_COOLDOWN_SECONDS = max(
@@ -609,6 +613,95 @@ def _guarded_process_kap_statement_symbol(
         }
 
 
+def _retry_blocked_kap_statement_symbols(
+    symbols: List[str],
+    *,
+    job: Dict[str, Any],
+    job_lock: threading.Lock,
+    mode: str,
+    max_quarters: int,
+    deadline: float,
+) -> None:
+    """Give symbols that hit a transient KAP block one more chance.
+
+    A blocked symbol was already counted in ``blocked`` and ``fetched`` by the
+    first pass, so a successful retry only moves it from ``blocked`` to
+    ``updated``/``unchanged``; ``processed`` and ``fetched`` stay untouched.
+    The retry is best-effort: it stops at the run deadline and never aborts the
+    job, because the next scheduled run is the final safety net.
+    """
+    pending = [symbol for symbol in symbols if symbol]
+    if not pending:
+        return
+    LOGGER.info(
+        "KAP statement refresh retrying %s blocked symbol(s): %s",
+        len(pending),
+        ",".join(pending),
+    )
+    for symbol in pending:
+        if time.monotonic() >= deadline:
+            LOGGER.info("KAP statement refresh retry pass hit the job deadline")
+            return
+        result = _guarded_process_kap_statement_symbol(
+            symbol,
+            mode=mode,
+            max_quarters=max_quarters,
+        )
+        outcome = str(result.get("outcome") or "failed")
+        if outcome == "budget_exhausted":
+            LOGGER.info("KAP statement refresh retry pass hit the pacing deadline")
+            return
+        with job_lock:
+            blocked_before = int(job.get("blocked") or 0)
+            skip_field = _SKIP_OUTCOME_FIELDS.get(outcome)
+            resolved = outcome in {"updated", "unchanged"} or bool(skip_field)
+            if resolved:
+                job["blocked"] = max(0, blocked_before - 1)
+                if skip_field:
+                    job[skip_field] = int(job.get(skip_field) or 0) + 1
+                else:
+                    job[outcome] = int(job.get(outcome) or 0) + 1
+                job["errors"] = [
+                    entry
+                    for entry in job.get("errors") or []
+                    if str(entry.get("symbol") or "") != symbol
+                ]
+            elif outcome == "blocked":
+                # Still blocked: keep the count and refresh the recorded reason.
+                errors = list(job.get("errors") or [])
+                message = str(result.get("error") or "")[:240]
+                replaced = False
+                for entry in errors:
+                    if str(entry.get("symbol") or "") == symbol:
+                        entry["outcome"] = "blocked"
+                        entry["error"] = message
+                        replaced = True
+                        break
+                if not replaced and len(errors) < _KAP_STATEMENT_MAX_ERRORS:
+                    errors.append(
+                        {"symbol": symbol, "outcome": "blocked", "error": message}
+                    )
+                job["errors"] = errors
+            else:
+                job["blocked"] = max(0, blocked_before - 1)
+                job["failed"] = int(job.get("failed") or 0) + 1
+                errors = list(job.get("errors") or [])
+                if len(errors) < _KAP_STATEMENT_MAX_ERRORS:
+                    errors.append(
+                        {
+                            "symbol": symbol,
+                            "outcome": outcome,
+                            "error": str(result.get("error") or "")[:240],
+                        }
+                    )
+                job["errors"] = errors
+            if resolved:
+                job["last_symbol"] = f"{symbol}:{outcome}"
+            job["updated_at"] = _kap_statement_now_iso()
+            _set_kap_statement_refresh_job(job)
+        LOGGER.info("KAP statement refresh retry result: %s -> %s", symbol, outcome)
+
+
 def _statement_coverage(symbols: List[str], max_quarters: int) -> Dict[str, int]:
     coverage = {
         "ready": 0,
@@ -713,6 +806,7 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
     cursor = 0
     block_streak = 0
     failure_streak = 0
+    blocked_symbols: List[str] = []
     last_flush = started_monotonic
     stop_reason = "completed"
     superseded = False
@@ -813,6 +907,9 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
                         job["blocked"] = int(job.get("blocked") or 0) + 1
                         job["fetched"] = int(job.get("fetched") or 0) + 1
                         window_blocked += 1
+                        blocked_symbol = str(result.get("symbol") or "").strip()
+                        if blocked_symbol and blocked_symbol not in blocked_symbols:
+                            blocked_symbols.append(blocked_symbol)
                     else:
                         job["failed"] = int(job.get("failed") or 0) + 1
                         job["fetched"] = int(job.get("fetched") or 0) + 1
@@ -862,6 +959,16 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
             )
             if now < deadline and pause_seconds > 0:
                 time.sleep(min(pause_seconds, max(0.0, deadline - now)))
+
+        if stop_reason == "completed" and blocked_symbols and not superseded:
+            _retry_blocked_kap_statement_symbols(
+                blocked_symbols,
+                job=job,
+                job_lock=job_lock,
+                mode=mode,
+                max_quarters=max_quarters,
+                deadline=deadline,
+            )
     except Exception as exc:  # noqa: BLE001 - never leave the job stuck in "running"
         LOGGER.exception("KAP statement refresh job failed: %s", job_id)
         with job_lock:
