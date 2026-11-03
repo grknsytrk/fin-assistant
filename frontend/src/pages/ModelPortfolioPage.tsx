@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
+import type { CSSProperties, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import {
     AlertTriangle,
     Award,
@@ -1837,12 +1837,18 @@ function ModelPortfolioPerformanceChart({
     const measureCenterX = visibleMeasureRange
         ? (toX(visibleMeasureRange.start) + toX(visibleMeasureRange.end)) / 2
         : 0;
-    const tooltipAbove = Number.isFinite(measureLineTop) && (measureLineTop / height) * 100 > 46;
-    const measureTooltipStyle = {
+    const roomAbove = Number.isFinite(measureLineTop) ? Math.max(0, measureLineTop - padTop) : 0;
+    const roomBelow = Number.isFinite(measureLineBottom) ? Math.max(0, padTop + plotH - measureLineBottom) : 0;
+    const tooltipAbove = roomAbove >= roomBelow || roomAbove >= 110;
+    const measureTooltipStyle: CSSProperties = {
         left: `clamp(8px, calc(${(measureCenterX / width) * 100}% - 90px), calc(100% - 188px))`,
         ...(tooltipAbove
-            ? { top: `calc(${(measureLineTop / height) * 100}% - 14px)`, transform: 'translateY(-100%)' }
-            : { top: `calc(${(Math.min(measureLineBottom, padTop + plotH) / height) * 100}% + 14px)` }),
+            ? roomAbove >= 140
+                ? { bottom: `calc(${Math.max(8, 100 - (measureLineTop / height) * 100)}% + 12px)` }
+                : { top: '8px' }
+            : roomBelow >= 140
+              ? { top: `calc(${(Math.min(measureLineBottom, padTop + plotH) / height) * 100}% + 12px)` }
+              : { bottom: '8px' }),
     };    const toggleSeries = (series: PerformanceSeries) => {
         setVisibleSeries((current) => ({ ...current, [series]: !current[series] }));
     };
