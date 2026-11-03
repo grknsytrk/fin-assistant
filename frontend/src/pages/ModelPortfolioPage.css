@@ -718,7 +718,7 @@
 }
 
 .mp-chart-baseline-text {
-    fill: var(--text-muted);
+    fill: var(--text-muted, #8B949E);
     font-family: var(--font-mono);
     font-size: 11px;
     font-weight: 500;
@@ -761,7 +761,7 @@
     stroke-dasharray: 6 5;
 }
 .mp-chart-no-series {
-    fill: var(--text-muted);
+    fill: var(--text-muted, #8B949E);
     font-size: 12px;
 }
 
