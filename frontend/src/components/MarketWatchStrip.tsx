@@ -189,16 +189,23 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
     const {
         watch: payload,
         global: globalPayload,
+        commodities,
+        fx,
         watchLoading,
         globalLoading,
+        commoditiesLoading,
+        fxLoading,
         watchError,
         globalError,
+        commoditiesError,
+        fxError,
         refresh,
-    } = useMarketWatchData({ watch: true, global: true });
-    const loading = watchLoading || globalLoading;
-    // The strip is usable when either feed is alive. Only report an error when
-    // both feeds failed and there is nothing to render.
-    const error = watchError && globalError ? watchError : null;
+    } = useMarketWatchData({ watch: true, global: true, commodities: true, fx: true });
+    const loading = watchLoading || globalLoading || commoditiesLoading || fxLoading;
+    const hasData = Boolean(payload || globalPayload || commodities || fx);
+    // The strip is usable when any feed is alive. Only report an error when
+    // every feed failed and there is nothing to render.
+    const error = hasData ? null : watchError || globalError || commoditiesError || fxError;
 
     const lookup = useMemo(() => {
         const map = new Map<string, MarketWatchItem>();
@@ -237,8 +244,22 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
             }
         }
 
+        // 3. Live commodity/FX quotes win over the copies embedded in
+        // /market/watch. Those copies sit behind an extra 3 second cache, which
+        // is exactly what made the ticker trail the Piyasalar rail. Both
+        // widgets now read these shared arrays, so they always agree.
+        for (const items of [commodities, fx]) {
+            if (!items) continue;
+            for (const item of items) {
+                const key = normalizeSymbol(item.symbol);
+                if (!key || item.price == null) continue;
+                map.set(key, item);
+                map.set(key.replace('/', ''), item);
+            }
+        }
+
         return map;
-    }, [payload, globalPayload]);
+    }, [commodities, fx, payload, globalPayload]);
 
     const primaryItems = useMemo(
         () => PRIMARY_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
@@ -376,7 +397,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
         return [...oneHalf, ...oneHalf];
     }, [orderedItems]);
 
-    const isInitialLoading = !payload && !globalPayload && !error;
+    const isInitialLoading = !hasData && !error;
     const delayNote = payload?.delay_note || globalPayload?.delay_note || DEFAULT_DELAY_NOTE;
 
     if (variant === 'compact') {
@@ -393,10 +414,10 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                         ))}
                     </div>
                 )}
-                {!isInitialLoading && !payload && !globalPayload && error && (
+                {!isInitialLoading && !hasData && error && (
                     <div className="mw-compact-state mw-compact-error">{error}</div>
                 )}
-                {(payload || !isInitialLoading) && (
+                {hasData && (
                     <div
                         className="mw-ticker-viewport"
                         role="region"
@@ -517,7 +538,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                 </div>
             )}
 
-            {!isInitialLoading && !payload && !globalPayload && error && (
+            {!isInitialLoading && !hasData && error && (
                 <div className="mw-state mw-state-error">
                     <span>{error}</span>
                     <button
@@ -533,7 +554,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                 </div>
             )}
 
-            {(payload || globalPayload) && (
+            {hasData && (
                 <>
                     <div className="mw-grid mw-grid-main">
                         {primaryItems.map((item) => {

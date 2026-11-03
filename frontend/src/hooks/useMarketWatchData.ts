@@ -1,40 +1,61 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { apiClient } from '../api/client';
-import type { MarketWatchGlobalResponse, MarketWatchResponse } from '../api/types';
+import type {
+    CommodityQuote,
+    FxQuote,
+    MarketWatchGlobalResponse,
+    MarketWatchResponse,
+} from '../api/types';
 import { getAdaptiveRefreshMs } from '../utils/marketHours';
 
-// The backend rebuilds /market/watch on a 3 second cache window.
-const WATCH_REFRESH_MS = 3_000;
-// /market/watch/global is cached longer upstream, but the widget still polls
-// at the same cadence so it picks up a refreshed snapshot immediately after
-// the stale-while-revalidate cycle completes.
-const GLOBAL_REFRESH_MS = 3_000;
+// The backend rebuilds /market/watch and the live quote endpoints on a 3
+// second cache window, so every channel polls at the same cadence.
+const MARKET_REFRESH_MS = 3_000;
 
 export interface MarketWatchDataSnapshot {
     watch: MarketWatchResponse | null;
     global: MarketWatchGlobalResponse | null;
+    commodities: CommodityQuote[] | null;
+    fx: FxQuote[] | null;
     watchLoading: boolean;
     globalLoading: boolean;
+    commoditiesLoading: boolean;
+    fxLoading: boolean;
     watchError: string | null;
     globalError: string | null;
+    commoditiesError: string | null;
+    fxError: string | null;
 }
 
 const initialSnapshot: MarketWatchDataSnapshot = {
     watch: null,
     global: null,
+    commodities: null,
+    fx: null,
     watchLoading: false,
     globalLoading: false,
+    commoditiesLoading: false,
+    fxLoading: false,
     watchError: null,
     globalError: null,
+    commoditiesError: null,
+    fxError: null,
 };
 
 let snapshot = initialSnapshot;
 const listeners = new Set<() => void>();
 
-let watchInFlight = false;
-let globalInFlight = false;
-let watchLastStartedAt = 0;
-let globalLastStartedAt = 0;
+interface ChannelRuntime {
+    inFlight: boolean;
+    lastStartedAt: number;
+}
+
+const channelRuntime: Record<'watch' | 'global' | 'commodities' | 'fx', ChannelRuntime> = {
+    watch: { inFlight: false, lastStartedAt: 0 },
+    global: { inFlight: false, lastStartedAt: 0 },
+    commodities: { inFlight: false, lastStartedAt: 0 },
+    fx: { inFlight: false, lastStartedAt: 0 },
+};
 
 function emitChange(): void {
     for (const listener of listeners) listener();
@@ -65,12 +86,13 @@ function canStart(lastStartedAt: number, minIntervalMs: number): boolean {
 }
 
 async function fetchWatch(options?: { force?: boolean }): Promise<void> {
-    if (watchInFlight) return;
-    if (!options?.force && !canStart(watchLastStartedAt, WATCH_REFRESH_MS)) return;
+    const runtime = channelRuntime.watch;
+    if (runtime.inFlight) return;
+    if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
 
     const showLoading = Boolean(options?.force) || snapshot.watch == null;
-    watchInFlight = true;
-    watchLastStartedAt = Date.now();
+    runtime.inFlight = true;
+    runtime.lastStartedAt = Date.now();
     if (showLoading) updateSnapshot({ watchLoading: true });
 
     try {
@@ -79,18 +101,19 @@ async function fetchWatch(options?: { force?: boolean }): Promise<void> {
     } catch (error) {
         updateSnapshot({ watchError: toErrorMessage(error, 'Borsa izleme verisi alınamadı.') });
     } finally {
-        watchInFlight = false;
+        runtime.inFlight = false;
         if (showLoading) updateSnapshot({ watchLoading: false });
     }
 }
 
 async function fetchGlobal(options?: { force?: boolean }): Promise<void> {
-    if (globalInFlight) return;
-    if (!options?.force && !canStart(globalLastStartedAt, GLOBAL_REFRESH_MS)) return;
+    const runtime = channelRuntime.global;
+    if (runtime.inFlight) return;
+    if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
 
     const showLoading = Boolean(options?.force) || snapshot.global == null;
-    globalInFlight = true;
-    globalLastStartedAt = Date.now();
+    runtime.inFlight = true;
+    runtime.lastStartedAt = Date.now();
     if (showLoading) updateSnapshot({ globalLoading: true });
 
     try {
@@ -99,14 +122,58 @@ async function fetchGlobal(options?: { force?: boolean }): Promise<void> {
     } catch (error) {
         updateSnapshot({ globalError: toErrorMessage(error, 'Endeks verisi alınamadı.') });
     } finally {
-        globalInFlight = false;
+        runtime.inFlight = false;
         if (showLoading) updateSnapshot({ globalLoading: false });
+    }
+}
+
+async function fetchCommodities(options?: { force?: boolean }): Promise<void> {
+    const runtime = channelRuntime.commodities;
+    if (runtime.inFlight) return;
+    if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
+
+    const showLoading = Boolean(options?.force) || snapshot.commodities == null;
+    runtime.inFlight = true;
+    runtime.lastStartedAt = Date.now();
+    if (showLoading) updateSnapshot({ commoditiesLoading: true });
+
+    try {
+        const payload = await apiClient.marketCommodities();
+        updateSnapshot({ commodities: payload.items || [], commoditiesError: null });
+    } catch (error) {
+        updateSnapshot({ commoditiesError: toErrorMessage(error, 'Emtia verisi alınamadı.') });
+    } finally {
+        runtime.inFlight = false;
+        if (showLoading) updateSnapshot({ commoditiesLoading: false });
+    }
+}
+
+async function fetchFx(options?: { force?: boolean }): Promise<void> {
+    const runtime = channelRuntime.fx;
+    if (runtime.inFlight) return;
+    if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
+
+    const showLoading = Boolean(options?.force) || snapshot.fx == null;
+    runtime.inFlight = true;
+    runtime.lastStartedAt = Date.now();
+    if (showLoading) updateSnapshot({ fxLoading: true });
+
+    try {
+        const payload = await apiClient.marketFx();
+        updateSnapshot({ fx: payload.items || [], fxError: null });
+    } catch (error) {
+        updateSnapshot({ fxError: toErrorMessage(error, 'Döviz verisi alınamadı.') });
+    } finally {
+        runtime.inFlight = false;
+        if (showLoading) updateSnapshot({ fxLoading: false });
     }
 }
 
 interface UseMarketWatchDataOptions {
     watch?: boolean;
     global?: boolean;
+    commodities?: boolean;
+    fx?: boolean;
     enabled?: boolean;
 }
 
@@ -117,31 +184,39 @@ export interface MarketWatchDataResult extends MarketWatchDataSnapshot {
 /**
  * Single shared data source for the market ticker and the Piyasalar rail.
  *
- * Both widgets previously polled /market/watch/global independently, which
- * doubled the request volume and let the same index show two different
- * prices at the same time. Requests, caches and polling now live here, so
- * every consumer renders the exact same snapshot.
+ * Both widgets previously polled /market/watch/global (and, for commodities and
+ * FX, separate endpoints with their own timers), which doubled the request
+ * volume and let the same instrument show two different prices at the same
+ * time: /market/watch wraps its commodity/FX sections in an extra 3 second
+ * cache, so the ticker lagged a few seconds behind the rail. Requests, caches
+ * and polling now live here, so every consumer renders the exact same snapshot.
  */
 export function useMarketWatchData(options: UseMarketWatchDataOptions): MarketWatchDataResult {
     const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
     const enabled = options.enabled !== false;
     const wantsWatch = enabled && Boolean(options.watch);
     const wantsGlobal = enabled && Boolean(options.global);
+    const wantsCommodities = enabled && Boolean(options.commodities);
+    const wantsFx = enabled && Boolean(options.fx);
 
     useEffect(() => {
-        if (!wantsWatch) return undefined;
+        if (!wantsWatch && !wantsGlobal && !wantsCommodities && !wantsFx) return undefined;
 
-        void fetchWatch();
-
-        const timer = window.setInterval(() => {
+        const tick = () => {
             if (document.visibilityState === 'hidden') return;
             if (getAdaptiveRefreshMs('global_fx') === null) return;
-            void fetchWatch();
-        }, WATCH_REFRESH_MS);
+            if (wantsWatch) void fetchWatch();
+            if (wantsGlobal) void fetchGlobal();
+            if (wantsCommodities) void fetchCommodities();
+            if (wantsFx) void fetchFx();
+        };
 
+        tick();
+
+        const timer = window.setInterval(tick, MARKET_REFRESH_MS);
         const onVisibilityChange = () => {
             if (document.visibilityState === 'visible' && getAdaptiveRefreshMs('global_fx') !== null) {
-                void fetchWatch();
+                tick();
             }
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
@@ -150,36 +225,14 @@ export function useMarketWatchData(options: UseMarketWatchDataOptions): MarketWa
             window.clearInterval(timer);
             document.removeEventListener('visibilitychange', onVisibilityChange);
         };
-    }, [wantsWatch]);
-
-    useEffect(() => {
-        if (!wantsGlobal) return undefined;
-
-        void fetchGlobal();
-
-        const timer = window.setInterval(() => {
-            if (document.visibilityState === 'hidden') return;
-            if (getAdaptiveRefreshMs('global_fx') === null) return;
-            void fetchGlobal();
-        }, GLOBAL_REFRESH_MS);
-
-        const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible' && getAdaptiveRefreshMs('global_fx') !== null) {
-                void fetchGlobal();
-            }
-        };
-        document.addEventListener('visibilitychange', onVisibilityChange);
-
-        return () => {
-            window.clearInterval(timer);
-            document.removeEventListener('visibilitychange', onVisibilityChange);
-        };
-    }, [wantsGlobal]);
+    }, [wantsCommodities, wantsFx, wantsGlobal, wantsWatch]);
 
     const refresh = useCallback(() => {
         if (wantsWatch) void fetchWatch({ force: true });
         if (wantsGlobal) void fetchGlobal({ force: true });
-    }, [wantsGlobal, wantsWatch]);
+        if (wantsCommodities) void fetchCommodities({ force: true });
+        if (wantsFx) void fetchFx({ force: true });
+    }, [wantsCommodities, wantsFx, wantsGlobal, wantsWatch]);
 
     return { ...state, refresh };
 }
