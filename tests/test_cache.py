@@ -593,3 +593,222 @@ def test_memory_lock_serialises_concurrent_callers() -> None:
         assert first is True
         with backend.lock("snapshot", timeout=0.05) as second:
             assert second is False
+
+
+def test_market_bounded_memory_cache_max_entries_and_lru_eviction() -> None:
+    cache = cache_module.BoundedMemoryCache(max_entries=3)
+    assert cache.max_entries == 3
+    assert cache.default_ttl is None
+
+    cache["a"] = 1
+    cache["b"] = 2
+    cache["c"] = 3
+    assert len(cache) == 3
+
+    # Access "a" so "b" becomes the oldest (LRU)
+    _ = cache["a"]
+    # Access "c"
+    _ = cache.get("c")
+
+    # Insert "d", which should evict "b"
+    cache["d"] = 4
+    assert len(cache) == 3
+    assert "b" not in cache
+    assert "a" in cache
+    assert "c" in cache
+    assert "d" in cache
+    assert cache["a"] == 1
+    assert cache["c"] == 3
+    assert cache["d"] == 4
+
+
+def test_market_bounded_memory_cache_ttl_expiration(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(cache_module.time, "time", lambda: clock[0])
+
+    cache = cache_module.BoundedMemoryCache(max_entries=5, default_ttl=10.0)
+    assert cache.default_ttl == 10.0
+
+    cache["k1"] = "v1"
+    assert "k1" in cache
+    assert cache["k1"] == "v1"
+    assert cache.get("k1") == "v1"
+    assert len(cache) == 1
+
+    # Advance clock by 5 seconds (not expired yet)
+    clock[0] += 5.0
+    assert "k1" in cache
+    assert cache["k1"] == "v1"
+
+    # Advance clock past TTL (expired)
+    clock[0] += 6.0
+    assert "k1" not in cache
+    assert cache.get("k1") is None
+    assert cache.get("k1", "fallback") == "fallback"
+    with pytest.raises(KeyError):
+        _ = cache["k1"]
+    assert len(cache) == 0
+    assert list(cache) == []
+
+
+def test_market_bounded_memory_cache_mutable_mapping_behavior() -> None:
+    cache = cache_module.BoundedMemoryCache(max_entries=4)
+
+    # __setitem__, __getitem__, __contains__, __len__
+    cache["x"] = 10
+    cache["y"] = 20
+    assert len(cache) == 2
+    assert "x" in cache
+    assert "z" not in cache
+    assert cache["x"] == 10
+
+    # setdefault
+    assert cache.setdefault("x", 99) == 10
+    assert cache.setdefault("z", 30) == 30
+    assert cache["z"] == 30
+
+    # pop
+    assert cache.pop("y") == 20
+    assert "y" not in cache
+    assert cache.pop("y", 999) == 999
+    with pytest.raises(KeyError):
+        cache.pop("y")
+
+    # popitem
+    k, v = cache.popitem(last=True)
+    assert k == "z"
+    assert v == 30
+
+    # update
+    cache.update({"m": 100, "n": 200})
+    assert cache["m"] == 100
+    assert cache["n"] == 200
+
+    # keys, values, items
+    assert set(cache.keys()) == {"x", "m", "n"}
+    assert set(cache.values()) == {10, 100, 200}
+    assert set(cache.items()) == {("x", 10), ("m", 100), ("n", 200)}
+
+    # copy
+    copied = cache.copy()
+    assert copied == {"x": 10, "m": 100, "n": 200}
+
+    # del
+    del cache["x"]
+    assert "x" not in cache
+    with pytest.raises(KeyError):
+        del cache["x"]
+
+    # clear
+    cache.clear()
+    assert len(cache) == 0
+    assert list(cache) == []
+    assert repr(cache).startswith("BoundedMemoryCache")
+
+
+def test_market_bounded_memory_cache_thread_safety() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    cache = cache_module.BoundedMemoryCache(max_entries=50)
+
+    def worker(worker_id: int) -> None:
+        for i in range(100):
+            key = f"key_{worker_id}_{i % 20}"
+            cache[key] = i
+            _ = cache.get(key)
+            if i % 5 == 0:
+                cache.pop(key, None)
+            if i % 10 == 0:
+                _ = len(cache)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(worker, range(8)))
+
+    assert len(cache) <= 50
+
+
+def test_fetch_market_price_map_waiter_does_not_stampede_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import database as database_module
+    from app import market_service
+
+    build_calls: list[int] = []
+
+    def mock_build(_symbols):
+        build_calls.append(1)
+        return {"A1CAP": {"price": 14.18, "currency": "TRY", "as_of": "2026-10-31T10:00:00+00:00"}}
+
+    monkeypatch.setattr(market_service, "_build_market_price_snapshot", mock_build)
+    monkeypatch.setattr(
+        market_service,
+        "_cache_status",
+        lambda: {"cache_backend": "redis", "cache_redis_fallback": False},
+    )
+    monkeypatch.setattr(market_service, "_shared_cache_get_dict", lambda _key: None)
+
+    # Case 1: Pristine cold start, single-flight waiter times out ("pending").
+    # No local cache, database disabled. Waiter must return {} and NOT call _build_market_price_snapshot!
+    monkeypatch.setattr(database_module, "database_enabled", lambda: False)
+    monkeypatch.setattr(
+        market_service,
+        "_get_or_set_single_flight",
+        lambda *_args, **_kwargs: (None, "pending"),
+    )
+    market_service._MARKET_PRICE_CACHE.clear()
+
+    payload_cold = market_service._fetch_market_price_map(["A1CAP"])
+    assert payload_cold == {}
+    assert len(build_calls) == 0, "Waiter must never trigger uncoordinated _build_market_price_snapshot on timeout"
+
+    # Case 2: Stale memory snapshot is present. Waiter times out.
+    # Must serve the stale memory data and NOT call _build_market_price_snapshot!
+    stale_memory_snapshot = {
+        "_ts": time.time() - 300,
+        "items": {"A1CAP": {"price": 12.50, "currency": "TRY", "as_of": "2026-10-31T09:00:00+00:00"}},
+    }
+    market_service._MARKET_PRICE_CACHE[f"snapshot:{market_service._MARKET_QUOTE_SOURCE_INDEX}"] = stale_memory_snapshot
+
+    payload_stale_mem = market_service._fetch_market_price_map(["A1CAP"])
+    assert payload_stale_mem["A1CAP"]["price"] == 12.50
+    assert len(build_calls) == 0, "Waiter must serve stale memory snapshot without triggering upstream scraper"
+
+    # Case 3: Memory is empty, but database has stale snapshot. Waiter times out.
+    # Must serve the stale database data and NOT call _build_market_price_snapshot!
+    market_service._MARKET_PRICE_CACHE.clear()
+    stale_db_snapshot = {
+        "items": {"A1CAP": {"price": 13.00, "currency": "TRY", "as_of": "2026-10-31T08:00:00+00:00"}},
+        "created_at": time.time() - 600,
+        "expires_at": time.time() - 500,
+    }
+    monkeypatch.setattr(database_module, "database_enabled", lambda: True)
+    monkeypatch.setattr(database_module, "read_json_cache", lambda _path: stale_db_snapshot)
+
+    payload_stale_db = market_service._fetch_market_price_map(["A1CAP"])
+    assert payload_stale_db["A1CAP"]["price"] == 13.00
+    assert len(build_calls) == 0, "Waiter must serve stale database snapshot without triggering upstream scraper"
+
+
+def test_fetch_market_price_map_failed_owner_does_not_stampede_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import database as database_module
+    from app import market_service
+
+    build_calls: list[int] = []
+
+    def failing_build(_symbols):
+        build_calls.append(1)
+        return None
+
+    monkeypatch.setattr(market_service, "_build_market_price_snapshot", failing_build)
+    monkeypatch.setattr(
+        market_service,
+        "_cache_status",
+        lambda: {"cache_backend": "redis", "cache_redis_fallback": False},
+    )
+    monkeypatch.setattr(market_service, "_shared_cache_get_dict", lambda _key: None)
+    monkeypatch.setattr(database_module, "database_enabled", lambda: False)
+    market_service._MARKET_PRICE_CACHE.clear()
+
+    # When lock holder attempts build and fails, singleflight_status is "miss" and snapshot is None.
+    # Must not fall through to run another build call.
+    payload = market_service._fetch_market_price_map(["A1CAP"])
+    assert payload == {}
+    assert len(build_calls) == 1, "Only the single-flight factory should run, no second uncoordinated build"

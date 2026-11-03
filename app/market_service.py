@@ -5,6 +5,7 @@ import json
 import threading
 import uuid
 
+from app.cache import BoundedMemoryCache
 from app import database as _market_database
 from app.api_runtime import *
 from app.kap_financials import *
@@ -213,7 +214,7 @@ def _market_cap_from_quote_and_meta(
         return market_cap
     return None
 
-_UNIVERSE_CACHE: Dict[str, Any] = {}
+_UNIVERSE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=6 * 60 * 60)
 
 def _market_universe_payload(*, index_name: str = "XUTUM", force_refresh: bool = False) -> Dict[str, Any]:
     started_at = time.perf_counter()
@@ -357,11 +358,11 @@ _GEFAS_GYF_ALIAS_MAP: Dict[str, Dict[str, str]] = {
     },
 }
 
-_GEFAS_GYF_QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
+_GEFAS_GYF_QUOTE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=24 * 60 * 60)
 
 _GEFAS_GYF_QUOTE_CACHE_TTL = 24 * 60 * 60
 
-_FOREIGN_HOLDING_QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
+_FOREIGN_HOLDING_QUOTE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=15 * 60)
 
 _FOREIGN_HOLDING_QUOTE_CACHE_TTL = 15 * 60
 
@@ -381,11 +382,11 @@ _FOREIGN_HOLDING_KNOWN_NAMES_BY_PROVIDER = {
     "SLV": "iShares Silver Trust",
 }
 
-_PRICE_CACHE: Dict[str, Any] = {}
+_PRICE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=512, default_ttl=300)
 
 _PRICE_CACHE_TTL = 300
 
-_MARKET_PRICE_CACHE: Dict[str, Any] = {}
+_MARKET_PRICE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=16, default_ttl=300)
 
 _MARKET_PRICE_CACHE_TTL = 3
 
@@ -403,17 +404,17 @@ _MARKET_PRICE_DATABASE_WAIT_TIMEOUT_SECONDS = 30.0
 
 _MARKET_PRICE_DATABASE_POLL_MAX_SECONDS = 0.25
 
-_INFOYATIRIM_STOCK_PAGE_CACHE: Dict[str, Any] = {}
+_INFOYATIRIM_STOCK_PAGE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=60)
 
 _INFOYATIRIM_STOCK_PAGE_CACHE_TTL = 60
 
 _INFOYATIRIM_STOCK_PAGE_FALLBACK_LIMIT = 12
 
-_STOCKS_CACHE: Dict[str, Any] = {}
+_STOCKS_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
 _STOCKS_CACHE_TTL = 3
 
-_MARKET_STOCK_CARD_CHART_CACHE: Dict[str, Any] = {}
+_MARKET_STOCK_CARD_CHART_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=512, default_ttl=3600)
 
 _MARKET_STOCK_CARD_CHART_CACHE_TTL = 45
 
@@ -430,7 +431,7 @@ _MARKET_STOCK_CARDS_RESPONSE_CACHE_TTL = int(
 
 _MARKET_STOCK_CARD_PREVIOUS_SESSION_LOOKBACK_DAYS = 10
 
-_STOCK_CARD_VALUATION_CACHE: Dict[str, Any] = {}
+_STOCK_CARD_VALUATION_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=512, default_ttl=6 * 60 * 60)
 
 _STOCK_CARD_VALUATION_CACHE_TTL = int(os.getenv("RAGFIN_STOCK_CARD_VALUATION_CACHE_TTL_SECONDS", str(6 * 60 * 60)))
 
@@ -449,21 +450,21 @@ _MARKET_STOCK_CARD_CHART_RANGES: Dict[str, Dict[str, Any]] = {
     "5y": {"interval": "1wk", "range": "5y", "ttl": 3600},
 }
 
-_STOCK_RETURN_BASE_CACHE: Dict[str, Any] = {}
+_STOCK_RETURN_BASE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=512, default_ttl=900)
 
 _STOCK_RETURN_BASE_CACHE_TTL = 900
 
 _STOCK_RETURN_BASE_CACHE_VERSION = "v2"
 
-_ISYATIRIM_CACHE: Dict[str, Any] = {}
+_ISYATIRIM_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=900)
 
 _ISYATIRIM_CACHE_TTL = 900
 
-_ISYATIRIM_BASIC_SUMMARY_CACHE: Dict[str, Any] = {}
+_ISYATIRIM_BASIC_SUMMARY_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=300)
 
 _ISYATIRIM_BASIC_SUMMARY_CACHE_TTL = 60
 _ISYATIRIM_BASIC_SUMMARY_PERSIST_LOCK = threading.Lock()
-_ISYATIRIM_BASIC_SUMMARY_PERSISTED_SIGNATURES: Dict[str, str] = {}
+_ISYATIRIM_BASIC_SUMMARY_PERSISTED_SIGNATURES: BoundedMemoryCache = BoundedMemoryCache(max_entries=512, default_ttl=3600)
 
 _MARKET_STOCK_INDEX_ORDER = ["XUTUM", "XU100", "XU030"]
 
@@ -501,15 +502,15 @@ _MARKET_INDEX_ORDER = _MARKET_STOCK_INDEX_ORDER + _MARKET_SECTOR_INDEX_ORDER
 
 _MARKET_STOCK_INDEXES = set(_MARKET_STOCK_INDEX_ORDER)
 
-_MARKET_INDICES_CACHE: Dict[str, Any] = {}
+_MARKET_INDICES_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
-_MARKET_INDEX_DETAIL_CACHE: Dict[str, Any] = {}
+_MARKET_INDEX_DETAIL_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
-_MARKET_INDEX_QUOTE_CACHE: Dict[str, Any] = {}
+_MARKET_INDEX_QUOTE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
-_MARKET_INDEX_INTRADAY_CACHE: Dict[str, Any] = {}
+_MARKET_INDEX_INTRADAY_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
-_MARKET_INDEX_RETURN_CACHE: Dict[str, Any] = {}
+_MARKET_INDEX_RETURN_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=1800)
 
 _MARKET_INDICES_CACHE_TTL = 3
 
@@ -1090,27 +1091,46 @@ def _fetch_market_price_map(
             )
         except Exception:
             snapshot, singleflight_status = None, "pending"
-        source_attempted = singleflight_status == "miss"
+
+        if _market_price_snapshot_is_fresh(snapshot):
+            _remember_market_price_snapshot(snapshot)
+            return project_items(snapshot["items"])
+
+        # When Redis single-flight is used, waiters ("pending") and failed owners ("miss")
+        # must NEVER execute uncoordinated upstream builds. Check local memory and database
+        # for any previously recorded (stale) snapshot; serve stale if available, otherwise return {}.
+        local_stale = _MARKET_PRICE_CACHE.get(f"snapshot:{_MARKET_QUOTE_SOURCE_INDEX}")
+        if isinstance(local_stale, dict) and isinstance(local_stale.get("items"), dict):
+            LOGGER.warning("Serving stale memory snapshot due to single-flight %s", singleflight_status)
+            return project_items(local_stale["items"])
+
+        if _market_database.database_enabled():
+            try:
+                db_stale = _market_database.read_json_cache(_MARKET_PRICE_DATABASE_CACHE_PATH)
+                if isinstance(db_stale, dict) and isinstance(db_stale.get("items"), dict):
+                    LOGGER.warning("Serving stale DB snapshot due to single-flight %s", singleflight_status)
+                    _remember_market_price_snapshot(db_stale)
+                    return project_items(db_stale["items"])
+            except Exception:
+                pass
+
+        return {}
     else:
         snapshot, source_attempted = _market_price_snapshot_with_database_lease(normalized_symbols)
+        if _market_price_snapshot_is_fresh(snapshot):
+            _remember_market_price_snapshot(snapshot)
+            return project_items(snapshot["items"])
+        if source_attempted:
+            return {}
 
-    if _market_price_snapshot_is_fresh(snapshot):
+        # Fail-open fallback: only reached when Redis is disabled/unavailable and database lease timed out with no cached data
+        items = _build_market_price_snapshot(normalized_symbols)
+        if items is None:
+            return {}
+        snapshot = _market_price_snapshot_payload(items)
         _remember_market_price_snapshot(snapshot)
-        return project_items(snapshot["items"])
-    if source_attempted:
-        return {}
-
-    # A timed-out shared waiter must retain the previous fail-open behavior.
-    # Publish only the successful result; never replace a snapshot with a provider error.
-    items = _build_market_price_snapshot(normalized_symbols)
-    if items is None:
-        return {}
-    snapshot = _market_price_snapshot_payload(items)
-    _remember_market_price_snapshot(snapshot)
-    _market_price_snapshot_database_write(snapshot)
-    if redis_available:
-        _shared_cache_set(cache_key, snapshot, ttl_seconds=_MARKET_PRICE_CACHE_TTL)
-    return project_items(items)
+        _market_price_snapshot_database_write(snapshot)
+        return project_items(items)
 
 def _pick_series_value_at_or_before(
     points: List[tuple[datetime, float]],
@@ -2336,7 +2356,7 @@ def _resolve_market_card_multiples(symbol: str, multiples_payload: Dict[str, Any
 
     return {"fk": fk, "pd_dd": pd_dd, "fd_favok": fd_favok}
 
-_STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE: Dict[str, Any] = {}
+_STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=6 * 60 * 60)
 
 _STOCK_CARD_FINANCIAL_SNAPSHOT_CACHE_TTL = 6 * 60 * 60
 
@@ -3253,7 +3273,7 @@ def _fetch_kap_price_payload(symbol: str) -> Dict[str, Any]:
             "error": f"Yahoo Finance veri parse hatası: {exc}",
         }
 
-_XU030_CACHE: Dict[str, Any] = {}
+_XU030_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=16, default_ttl=300)
 
 _XU030_CACHE_TTL = 120
 
@@ -3330,7 +3350,7 @@ def _xu030_payload() -> Dict[str, Any]:
     _XU030_CACHE["payload"] = {"_ts": now, "data": data}
     return data
 
-_COMMODITY_CACHE: Dict[str, Any] = {}
+_COMMODITY_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
 _COMMODITY_CACHE_TTL = 3
 
@@ -4467,11 +4487,11 @@ def _market_commodities_payload(*, force_refresh: bool = False) -> Dict[str, Any
         refresh_pending=refresh_pending,
     )
 
-_FX_CACHE: Dict[str, Any] = {}
+_FX_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
 _FX_CACHE_TTL = 3
 
-_FX_RETURN_CACHE: Dict[str, Any] = {}
+_FX_RETURN_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=15 * 60)
 
 _FX_RETURN_CACHE_TTL = 15 * 60
 
@@ -4736,11 +4756,11 @@ def _market_fx_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
         refresh_pending=refresh_pending,
     )
 
-_WATCH_CACHE: Dict[str, Any] = {}
+_WATCH_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
 _WATCH_CACHE_TTL = 3
 
-_WATCH_GLOBAL_CACHE: Dict[str, Any] = {}
+_WATCH_GLOBAL_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
 _WATCH_GLOBAL_CACHE_TTL = 60
 

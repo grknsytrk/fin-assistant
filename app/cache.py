@@ -16,6 +16,8 @@ up, it can never break the existing flow.
 
 from __future__ import annotations
 
+import collections.abc
+from collections import OrderedDict
 import json
 import copy
 import logging
@@ -30,6 +32,140 @@ from functools import wraps
 from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+ 
+ 
+class BoundedMemoryCache(collections.abc.MutableMapping):
+    """Thread-safe bounded in-memory cache with LRU eviction and optional TTL.
+
+    Implements collections.abc.MutableMapping (dict-like interface) so existing
+    call sites and test fixtures calling .clear(), .get(), [key], etc. work seamlessly.
+    """
+
+    def __init__(self, max_entries: int = 512, default_ttl: Optional[float] = None) -> None:
+        self._max_entries = max(1, int(max_entries))
+        self._default_ttl = float(default_ttl) if default_ttl is not None and float(default_ttl) > 0 else None
+        self._store: OrderedDict[Any, Tuple[Optional[float], Any]] = OrderedDict()
+        self._lock = threading.RLock()
+
+    @property
+    def max_entries(self) -> int:
+        return self._max_entries
+
+    @property
+    def default_ttl(self) -> Optional[float]:
+        return self._default_ttl
+
+    def __getitem__(self, key: Any) -> Any:
+        with self._lock:
+            if key not in self._store:
+                raise KeyError(key)
+            expires_at, value = self._store[key]
+            if expires_at is not None and expires_at <= time.time():
+                del self._store[key]
+                raise KeyError(key)
+            self._store.move_to_end(key)
+            return value
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        expires_at = (time.time() + self._default_ttl) if self._default_ttl is not None else None
+        with self._lock:
+            if key in self._store:
+                del self._store[key]
+            elif len(self._store) >= self._max_entries:
+                now = time.time()
+                expired = [k for k, (exp, _) in self._store.items() if exp is not None and exp <= now]
+                for exp_key in expired:
+                    del self._store[exp_key]
+                if len(self._store) >= self._max_entries:
+                    self._store.popitem(last=False)
+            self._store[key] = (expires_at, value)
+
+    def __delitem__(self, key: Any) -> None:
+        with self._lock:
+            del self._store[key]
+
+    def __iter__(self) -> Iterator[Any]:
+        with self._lock:
+            now = time.time()
+            valid_keys = [
+                k for k, (exp, _) in self._store.items()
+                if exp is None or exp > now
+            ]
+            return iter(valid_keys)
+
+    def __len__(self) -> int:
+        with self._lock:
+            now = time.time()
+            expired = [k for k, (exp, _) in self._store.items() if exp is not None and exp <= now]
+            for k in expired:
+                del self._store[k]
+            return len(self._store)
+
+    def __contains__(self, key: object) -> bool:
+        with self._lock:
+            if key not in self._store:
+                return False
+            expires_at, _ = self._store[key]
+            if expires_at is not None and expires_at <= time.time():
+                del self._store[key]
+                return False
+            return True
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        with self._lock:
+            try:
+                return self[key]
+            except KeyError:
+                return default
+
+    def pop(self, key: Any, *args: Any) -> Any:
+        with self._lock:
+            has_default = len(args) > 0
+            default = args[0] if has_default else None
+            if key not in self._store:
+                if has_default:
+                    return default
+                raise KeyError(key)
+            expires_at, value = self._store[key]
+            del self._store[key]
+            if expires_at is not None and expires_at <= time.time():
+                if has_default:
+                    return default
+                raise KeyError(key)
+            return value
+
+    def popitem(self, last: bool = True) -> Tuple[Any, Any]:
+        with self._lock:
+            now = time.time()
+            while self._store:
+                k, (exp, v) = self._store.popitem(last=last)
+                if exp is None or exp > now:
+                    return k, v
+            raise KeyError("popitem(): dictionary is empty")
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        with self._lock:
+            try:
+                return self[key]
+            except KeyError:
+                self[key] = default
+                return default
+
+    def clear(self) -> None:
+        with self._lock:
+            self._store.clear()
+
+    def copy(self) -> Dict[Any, Any]:
+        with self._lock:
+            now = time.time()
+            return {
+                k: v for k, (exp, v) in self._store.items()
+                if exp is None or exp > now
+            }
+
+    def __repr__(self) -> str:
+        with self._lock:
+            return f"BoundedMemoryCache(max_entries={self._max_entries}, default_ttl={self._default_ttl}, size={len(self)})"
 
 _RESPONSE_REFRESH_SLOTS = threading.BoundedSemaphore(4)
 _RESPONSE_REFRESH_MUTEX = threading.Lock()
