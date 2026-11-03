@@ -208,6 +208,31 @@ KAP_HOLDINGS_LOOKBACK_DAYS = int(os.getenv("RAGFIN_KAP_HOLDINGS_LOOKBACK_DAYS", 
 KAP_HOLDINGS_ATTACHMENT_TEXT_CACHE_VERSION = 2
 
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
+try:
+    _MEMORY_CACHE_MAX_ENTRIES = max(
+        16,
+        int(os.getenv("RAGFIN_FUNDS_MEMORY_CACHE_MAX_ENTRIES", "256")),
+    )
+except ValueError:
+    _MEMORY_CACHE_MAX_ENTRIES = 256
+
+
+def _memory_cache_put(cache_key: str, value: Dict[str, Any]) -> None:
+    """Insert into the process-local cache, evicting oldest entries first.
+
+    This is FIFO, not LRU: reads do not refresh insertion order. 256 entries is
+    far above the number of distinct fund list/detail views a single process
+    serves between deploys, so eviction should stay rare.
+    """
+    _MEMORY_CACHE.pop(cache_key, None)
+    _MEMORY_CACHE[cache_key] = value
+    overflow = len(_MEMORY_CACHE) - _MEMORY_CACHE_MAX_ENTRIES
+    if overflow <= 0:
+        return
+    for stale_key in list(_MEMORY_CACHE.keys())[:overflow]:
+        _MEMORY_CACHE.pop(stale_key, None)
+
+
 _SNAPSHOT_REFRESH_LOCK = threading.Lock()
 _FUND_PRICES_SCHEMA_LOCK = threading.Lock()
 _FUND_PRICES_SCHEMA_READY = False
@@ -3152,7 +3177,7 @@ def read_latest_fund_price_points(
         return {}
 
     points = {code: _fund_price_storage_row_to_point(row) for code, row in selected.items()}
-    _MEMORY_CACHE[cache_key] = {"cached_at": time.time(), "points": points}
+    _memory_cache_put(cache_key, {"cached_at": time.time(), "points": points})
     return {code: dict(point) for code, point in points.items()}
 
 
@@ -6528,11 +6553,11 @@ def load_funds_snapshot(
         else:
             payload = dict(_read_json(path) or _empty_snapshot_payload("fund snapshot cache is empty"))
             if stat:
-                _MEMORY_CACHE[cache_key] = {
+                _memory_cache_put(cache_key, {
                     "file_signature": file_signature,
                     "mtime": stat.st_mtime,
                     "payload": payload,
-                }
+                })
         if not include_rows:
             payload.pop("rows", None)
     initial_metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}

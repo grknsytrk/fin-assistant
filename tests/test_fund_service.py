@@ -3962,3 +3962,27 @@ def test_get_fund_detail_payload_includes_category_rankings(tmp_path) -> None:
     assert monthly["rank"] == 4
     assert monthly["total"] == 5
     assert monthly["top_percentile"] == 40
+
+
+def test_memory_cache_evicts_oldest_entries(monkeypatch) -> None:
+    from app import fund_service
+
+    fund_service.reset_fund_caches_for_tests()
+    monkeypatch.setattr(fund_service, "_MEMORY_CACHE_MAX_ENTRIES", 4)
+
+    for index in range(6):
+        fund_service._memory_cache_put(f"key-{index}", {"value": index})
+
+    assert len(fund_service._MEMORY_CACHE) == 4
+    assert "key-0" not in fund_service._MEMORY_CACHE
+    assert "key-1" not in fund_service._MEMORY_CACHE
+    assert "key-2" in fund_service._MEMORY_CACHE
+    assert "key-5" in fund_service._MEMORY_CACHE
+
+    # Updating existing key does not evict extra entries
+    fund_service._memory_cache_put("key-2", {"value": 999})
+    assert len(fund_service._MEMORY_CACHE) == 4
+    assert fund_service._MEMORY_CACHE["key-2"]["value"] == 999
+
+    fund_service.reset_fund_caches_for_tests()
+
