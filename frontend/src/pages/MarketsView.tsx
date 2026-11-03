@@ -27,6 +27,7 @@ import MarketWatchRail from '../components/MarketWatchRail';
 import MarketWatchStrip from '../components/MarketWatchStrip';
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import SymbolLogo from '../components/SymbolLogo';
+import { TerminalClock } from '../components/TerminalClock';
 import { buildDocumentTitle, formatTitleNumber, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { MAX_WATCHLIST_ITEMS, normalizeWatchlistSymbol, useWatchlist, type WatchlistItem } from '../hooks/useWatchlist';
 import { useTableVirtualizer } from '../hooks/useTableVirtualizer';
@@ -507,23 +508,6 @@ function formatDateTime(iso: string | null | undefined): string {
         day: '2-digit',
         month: 'long',
         year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-    });
-}
-
-function formatTerminalDate(date: Date): string {
-    const dayMonth = date.toLocaleDateString('tr-TR', {
-        day: 'numeric',
-        month: 'long',
-    });
-    const weekday = date.toLocaleDateString('tr-TR', { weekday: 'long' });
-    return `${dayMonth}, ${weekday.charAt(0).toUpperCase()}${weekday.slice(1)}`;
-}
-
-function formatTerminalClock(date: Date): string {
-    return date.toLocaleTimeString('tr-TR', {
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
@@ -3057,7 +3041,6 @@ export default function MarketsView({
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [screenerModalOpen]);
-    const [terminalNow, setTerminalNow] = useState(() => new Date());
     const [stockCardSymbols, setStockCardSymbols] = useState<string[]>(readStoredStockCards);
     const [stockCards, setStockCards] = useState<MarketStockCardsResponse | null>(() => {
         const symbols = readStoredStockCards();
@@ -3275,15 +3258,6 @@ export default function MarketsView({
 
         previousStockCardSymbolsRef.current = stockCardSymbols;
     }, [stockCardSymbols, stockCardSymbolsKey]);
-
-    useEffect(() => {
-        if (activeSection !== 'markets') return;
-        const intervalId = window.setInterval(
-            () => setTerminalNow(new Date()),
-            isMobileViewport ? 10000 : 1000,
-        );
-        return () => window.clearInterval(intervalId);
-    }, [activeSection, isMobileViewport]);
 
     useEffect(() => {
         if (activeSection !== 'markets') return;
@@ -4204,8 +4178,7 @@ export default function MarketsView({
                     <div className="market-session-bar">
                         <div className="market-session-date">
                             <span className="market-session-dot" aria-label="Piyasa izleme aktif" />
-                            <span>{formatTerminalDate(terminalNow)}</span>
-                            <time className="market-session-clock">{formatTerminalClock(terminalNow)}</time>
+                            <TerminalClock intervalMs={isMobileViewport ? 10000 : 1000} />
                         </div>
                     </div>
                     <MarketWatchStrip variant="compact" onSelectIndex={handleSelectIndex} />
