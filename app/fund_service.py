@@ -120,6 +120,7 @@ TEFAS_HTTP_RETRY_BASE_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_BASE_SE
 TEFAS_HTTP_RETRY_MAX_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_MAX_SECONDS", "45"))
 TEFAS_HTTP_RETRY_AFTER_MAX_SECONDS = float(os.getenv("RAGFIN_TEFAS_HTTP_RETRY_AFTER_MAX_SECONDS", "300"))
 TEFAS_FUND_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_TEFAS_FUND_HISTORY_CHUNK_DAYS", "31"))
+TEFAS_HISTORY_CHUNK_MAX_DAYS = int(os.getenv("RAGFIN_TEFAS_HISTORY_CHUNK_MAX_DAYS", "90"))
 TEFAS_DIRECT_PAGE_SIZE = int(os.getenv("RAGFIN_TEFAS_DIRECT_PAGE_SIZE", "1000"))
 TEFAS_DIRECT_PAGE_DELAY_SECONDS = float(os.getenv("RAGFIN_TEFAS_DIRECT_PAGE_DELAY_SECONDS", "1"))
 TEFAS_DIRECT_CHUNK_DELAY_SECONDS = float(os.getenv("RAGFIN_TEFAS_DIRECT_CHUNK_DELAY_SECONDS", "2"))
@@ -4817,6 +4818,24 @@ def _is_tefasfon_adapter_unavailable(exc: BaseException) -> bool:
     )
 
 
+def _generate_date_chunks(
+    start_date: date,
+    end_date: date,
+    max_chunk_days: int = TEFAS_HISTORY_CHUNK_MAX_DAYS,
+) -> List[Tuple[date, date]]:
+    """Partition [start_date, end_date] into contiguous, non-overlapping slices of at most max_chunk_days."""
+    if start_date > end_date:
+        return []
+    span_limit = max(1, int(max_chunk_days))
+    chunks: List[Tuple[date, date]] = []
+    current_start = start_date
+    while current_start <= end_date:
+        current_end = min(end_date, current_start + timedelta(days=span_limit - 1))
+        chunks.append((current_start, current_end))
+        current_start = current_end + timedelta(days=1)
+    return chunks
+
+
 class TefasFonClient:
     def __init__(self, *, fund_types: Iterable[str] = TEFAS_FUND_TYPES) -> None:
         normalized_types = [
@@ -5350,63 +5369,74 @@ class TefasFonClient:
             return [
                 row
                 for row in rows
-                if normalize_fund_code(str(row.get("fonKodu") or row.get("fund_code") or "")) == normalized
+                if isinstance(row, dict)
+                and normalize_fund_code(str(row.get("fonKodu") or row.get("fund_code") or "")) == normalized
             ]
 
-        day_span = (end_date - start_date).days
-        if day_span <= 120:
-            try:
-                direct_rows = TefasClient().fetch_fund_history(
-                    fund_codes=[normalized],
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-            except TefasUpstreamError:
-                direct_rows = []
-            if direct_rows:
-                return matching_rows(direct_rows)
-            return matching_rows(self.fetch_funds(start_date=start_date, end_date=end_date, fund_codes=[normalized]))
-
+        chunks = _generate_date_chunks(start_date, end_date, max_chunk_days=TEFAS_HISTORY_CHUNK_MAX_DAYS)
         rows_by_date: Dict[str, Dict[str, Any]] = {}
+        chunk_errors: List[TefasUpstreamError] = []
+        direct_client = TefasClient()
 
         def add_rows(rows: Iterable[Dict[str, Any]]) -> None:
             for row in matching_rows(rows):
                 point_date = _fund_date(_first_present(row, "date", "tarih", "TARIH", "TARIHSTR"))
                 if point_date:
-                    rows_by_date[point_date] = row
+                    if point_date in rows_by_date:
+                        rows_by_date[point_date].update(row)
+                    else:
+                        rows_by_date[point_date] = dict(row)
 
-        recent_start = max(start_date, end_date - timedelta(days=35))
-        recent_error: Optional[TefasUpstreamError] = None
-        try:
-            add_rows(self.fetch_funds(start_date=recent_start, end_date=end_date, fund_codes=[normalized]))
-        except TefasUpstreamError as exc:
-            recent_error = exc
+        for chunk_start, chunk_end in chunks:
+            chunk_success = False
+            last_chunk_error: Optional[TefasUpstreamError] = None
 
-        current_month = _month_start(start_date)
-        while current_month <= end_date:
-            target_date = min(_month_end(current_month), end_date)
-            if target_date >= recent_start:
-                current_month = _shift_month(current_month, 1)
-                continue
-            lower_bound = max(current_month, target_date - timedelta(days=max(0, FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS)))
-            current = target_date
-            while current >= lower_bound:
-                if current.weekday() >= 5:
-                    current -= timedelta(days=1)
-                    continue
+            # 1. Primary: fast direct single-fund query
+            try:
+                direct_rows = direct_client.fetch_fund_history(
+                    fund_codes=[normalized],
+                    start_date=chunk_start,
+                    end_date=chunk_end,
+                )
+                matched_direct = matching_rows(direct_rows)
+                if matched_direct:
+                    add_rows(matched_direct)
+                    chunk_success = True
+            except TefasRateLimitError:
+                raise
+            except TefasUpstreamError as exc:
+                last_chunk_error = exc
+
+            # 2. Fallback: bounded to <=90 days so tefasfon doesn't stall
+            if not chunk_success:
                 try:
-                    snapshot_rows = self.fetch_daily_funds_snapshot(current)
-                except TefasUpstreamError:
-                    break
-                matched = matching_rows(snapshot_rows)
-                if matched:
-                    add_rows(matched)
-                    break
-                current -= timedelta(days=1)
-            current_month = _shift_month(current_month, 1)
+                    fallback_rows = self.fetch_funds(
+                        start_date=chunk_start,
+                        end_date=chunk_end,
+                        fund_codes=[normalized],
+                    )
+                    matched_fallback = matching_rows(fallback_rows)
+                    if matched_fallback:
+                        add_rows(matched_fallback)
+                        chunk_success = True
+                except TefasRateLimitError:
+                    raise
+                except TefasUpstreamError as exc:
+                    last_chunk_error = exc
 
-        if not rows_by_date and recent_error is not None:
-            raise recent_error
+            if not chunk_success and last_chunk_error is not None:
+                LOGGER.warning(
+                    "TEFAS history chunk failed for %s [%s to %s]: %s",
+                    normalized,
+                    chunk_start.isoformat(),
+                    chunk_end.isoformat(),
+                    last_chunk_error,
+                )
+                chunk_errors.append(last_chunk_error)
+
+        if not rows_by_date and chunk_errors:
+            raise chunk_errors[-1]
+
         return [rows_by_date[point_date] for point_date in sorted(rows_by_date)]
 
     def fetch_latest_fund_list_snapshot_result(
@@ -6749,13 +6779,25 @@ def _fetch_tefasfon_history_for_codes(
     client: Optional[TefasFonClient] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     codes = sorted({normalize_fund_code(code) for code in fund_codes if normalize_fund_code(code)})
-    if not codes:
+    if not codes or start_date > end_date:
         return [], []
     tefas = client or TefasFonClient()
-    try:
-        return tefas.fetch_funds(start_date=start_date, end_date=end_date, fund_codes=codes), []
-    except TefasUpstreamError as exc:
-        return [], [f"tefasfon_funds failed: {exc}"]
+    chunks = _generate_date_chunks(start_date, end_date, max_chunk_days=TEFAS_HISTORY_CHUNK_MAX_DAYS)
+    all_rows: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+
+    for chunk_start, chunk_end in chunks:
+        try:
+            batch = tefas.fetch_funds(start_date=chunk_start, end_date=chunk_end, fund_codes=codes)
+            all_rows.extend(batch)
+        except TefasRateLimitError:
+            raise
+        except TefasUpstreamError as exc:
+            warnings.append(
+                f"tefasfon_funds chunk [{chunk_start.isoformat()} - {chunk_end.isoformat()}] failed: {exc}"
+            )
+
+    return all_rows, warnings
 
 
 def _fetch_tefasfon_daily_snapshots_for_codes(
