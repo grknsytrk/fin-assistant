@@ -42,6 +42,12 @@ _KAP_FLOW_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="kap-flow-refresh-watchdog",
 )
 
+
+def shutdown_background_refresh_executor() -> None:
+    """Stop accepting new KAP refresh jobs during application shutdown."""
+    _KAP_FLOW_REFRESH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
 def _kap_flow_refresh_age_seconds(
     status: Optional[Dict[str, Any]] = None,
     *,

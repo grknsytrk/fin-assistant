@@ -47,6 +47,7 @@ from app import model_portfolio_api_service as _model_portfolio_api_service
 from app import kap_service as _kap_service
 from app.fund_api_service import _start_fund_price_collector, _stop_fund_price_collector
 from app.fund_service import close_shared_http_clients
+from app.kap_api_service import shutdown_background_refresh_executor
 
 
 # The Gradio Space entrypoint imports this callable directly and invokes it
@@ -100,6 +101,7 @@ async def _lifespan(_app: FastAPI):
         yield
     finally:
         await _stop_fund_price_collector()
+        shutdown_background_refresh_executor()
         close_postgres_pool()
         close_shared_http_clients()
 
