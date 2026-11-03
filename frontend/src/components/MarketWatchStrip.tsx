@@ -252,9 +252,12 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
             if (!items) continue;
             for (const item of items) {
                 const key = normalizeSymbol(item.symbol);
-                if (!key || item.price == null) continue;
-                map.set(key, item);
-                map.set(key.replace('/', ''), item);
+                if (!key) continue;
+                const existing = map.get(key);
+                if (!existing || existing.price == null || item.price != null) {
+                    map.set(key, item as unknown as MarketWatchItem);
+                    map.set(key.replace('/', ''), item as unknown as MarketWatchItem);
+                }
             }
         }
 
@@ -336,7 +339,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
         });
 
         // 2. Forex / Currencies
-        const fx: MarketWatchItem[] = [];
+        const fxItems: MarketWatchItem[] = [];
         const seenFx = new Set<string>();
         if (payload?.sections?.fx) {
             for (const item of payload.sections.fx) {
@@ -344,7 +347,8 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                 if (norm && !seenFx.has(norm)) {
                     seenFx.add(norm);
                     seenFx.add(norm.replace('/', ''));
-                    fx.push(item);
+                    const lookupItem = lookup.get(norm) || lookup.get(norm.replace('/', ''));
+                    fxItems.push(lookupItem || item);
                 }
             }
         }
@@ -353,24 +357,25 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
             if (!seenFx.has(norm)) {
                 seenFx.add(norm);
                 seenFx.add(norm.replace('/', ''));
-                fx.push(lookup.get(norm) || placeholderItem(sym));
+                fxItems.push(lookup.get(norm) || lookup.get(norm.replace('/', '')) || placeholderItem(sym));
             }
         }
-        fx.sort((a, b) => {
+        fxItems.sort((a, b) => {
             const pA = fxOrder[normalizeSymbol(a.symbol)] ?? fxOrder[normalizeSymbol(a.symbol).replace('/', '')] ?? 99;
             const pB = fxOrder[normalizeSymbol(b.symbol)] ?? fxOrder[normalizeSymbol(b.symbol).replace('/', '')] ?? 99;
             return pA - pB;
         });
 
         // 3. Commodities
-        const commodities: MarketWatchItem[] = [];
+        const commodityList: MarketWatchItem[] = [];
         const seenCommodities = new Set<string>();
         if (payload?.sections?.commodities) {
             for (const item of payload.sections.commodities) {
                 const norm = normalizeSymbol(item.symbol);
                 if (norm && !seenCommodities.has(norm)) {
                     seenCommodities.add(norm);
-                    commodities.push(item);
+                    const lookupItem = lookup.get(norm);
+                    commodityList.push(lookupItem || item);
                 }
             }
         }
@@ -378,16 +383,16 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
             const norm = normalizeSymbol(sym);
             if (!seenCommodities.has(norm)) {
                 seenCommodities.add(norm);
-                commodities.push(lookup.get(norm) || placeholderItem(sym));
+                commodityList.push(lookup.get(norm) || placeholderItem(sym));
             }
         }
-        commodities.sort((a, b) => {
+        commodityList.sort((a, b) => {
             const pA = commodityOrder[normalizeSymbol(a.symbol)] ?? 99;
             const pB = commodityOrder[normalizeSymbol(b.symbol)] ?? 99;
             return pA - pB;
         });
 
-        return [...indices, ...fx, ...commodities];
+        return [...indices, ...fxItems, ...commodityList];
     }, [payload, lookup]);
 
     const marqueeItems = useMemo(() => {
@@ -495,7 +500,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                     <p>XUTUM, XU100, XU030, döviz ve emtia özetleri 3 saniyede bir otomatik güncellenir.</p>
                 </div>
                 <div className="mw-meta">
-                    <span className="mw-updated">Son güncelleme: {formatClock(payload?.as_of)}</span>
+                    <span className="mw-updated">Son güncelleme: {formatClock(payload?.as_of || globalPayload?.as_of || commodities?.[0]?.as_of || fx?.[0]?.as_of)}</span>
                     <button
                         type="button"
                         className="mw-refresh"

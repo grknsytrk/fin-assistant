@@ -774,8 +774,18 @@ export const apiClient = {
         return fetchApi<MarketWatchGlobalResponse>(query ? `/market/watch/global?${query}` : '/market/watch/global');
     },
     marketXu030: () => fetchApi<MarketIndexResponse>('/market/xu030'),
-    marketCommodities: () => fetchApi<MarketCommoditiesResponse>('/market/commodities'),
-    marketFx: () => fetchApi<MarketFxResponse>('/market/fx'),
+    marketCommodities: (options?: { refresh?: boolean }) => {
+        const params = new URLSearchParams();
+        if (options?.refresh) params.append('refresh', 'true');
+        const query = params.toString();
+        return fetchApi<MarketCommoditiesResponse>(query ? `/market/commodities?${query}` : '/market/commodities');
+    },
+    marketFx: (options?: { refresh?: boolean }) => {
+        const params = new URLSearchParams();
+        if (options?.refresh) params.append('refresh', 'true');
+        const query = params.toString();
+        return fetchApi<MarketFxResponse>(query ? `/market/fx?${query}` : '/market/fx');
+    },
 
     funds: (options?: {
         q?: string;

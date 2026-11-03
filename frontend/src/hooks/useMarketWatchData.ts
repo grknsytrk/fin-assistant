@@ -97,7 +97,8 @@ async function fetchWatch(options?: { force?: boolean }): Promise<void> {
 
     try {
         const payload = await apiClient.marketWatch(options?.force ? { refresh: true } : undefined);
-        updateSnapshot({ watch: payload, watchError: null });
+        const watchPayload = payload?.sections ? payload : (snapshot.watch || payload);
+        updateSnapshot({ watch: watchPayload, watchError: null });
     } catch (error) {
         updateSnapshot({ watchError: toErrorMessage(error, 'Borsa izleme verisi alınamadı.') });
     } finally {
@@ -118,7 +119,8 @@ async function fetchGlobal(options?: { force?: boolean }): Promise<void> {
 
     try {
         const payload = await apiClient.marketWatchGlobal(options?.force ? { refresh: true } : undefined);
-        updateSnapshot({ global: payload, globalError: null });
+        const globalPayload = payload?.items && payload.items.length > 0 ? payload : (snapshot.global || payload);
+        updateSnapshot({ global: globalPayload, globalError: null });
     } catch (error) {
         updateSnapshot({ globalError: toErrorMessage(error, 'Endeks verisi alınamadı.') });
     } finally {
@@ -138,8 +140,9 @@ async function fetchCommodities(options?: { force?: boolean }): Promise<void> {
     if (showLoading) updateSnapshot({ commoditiesLoading: true });
 
     try {
-        const payload = await apiClient.marketCommodities();
-        updateSnapshot({ commodities: payload.items || [], commoditiesError: null });
+        const payload = await apiClient.marketCommodities(options?.force ? { refresh: true } : undefined);
+        const items = payload?.items && payload.items.length > 0 ? payload.items : (snapshot.commodities || []);
+        updateSnapshot({ commodities: items, commoditiesError: null });
     } catch (error) {
         updateSnapshot({ commoditiesError: toErrorMessage(error, 'Emtia verisi alınamadı.') });
     } finally {
@@ -159,8 +162,9 @@ async function fetchFx(options?: { force?: boolean }): Promise<void> {
     if (showLoading) updateSnapshot({ fxLoading: true });
 
     try {
-        const payload = await apiClient.marketFx();
-        updateSnapshot({ fx: payload.items || [], fxError: null });
+        const payload = await apiClient.marketFx(options?.force ? { refresh: true } : undefined);
+        const items = payload?.items && payload.items.length > 0 ? payload.items : (snapshot.fx || []);
+        updateSnapshot({ fx: items, fxError: null });
     } catch (error) {
         updateSnapshot({ fxError: toErrorMessage(error, 'Döviz verisi alınamadı.') });
     } finally {
@@ -202,9 +206,9 @@ export function useMarketWatchData(options: UseMarketWatchDataOptions): MarketWa
     useEffect(() => {
         if (!wantsWatch && !wantsGlobal && !wantsCommodities && !wantsFx) return undefined;
 
-        const tick = () => {
+        const tick = (opts?: { isPolling?: boolean }) => {
             if (document.visibilityState === 'hidden') return;
-            if (getAdaptiveRefreshMs('global_fx') === null) return;
+            if (opts?.isPolling && getAdaptiveRefreshMs('global_fx') === null) return;
             if (wantsWatch) void fetchWatch();
             if (wantsGlobal) void fetchGlobal();
             if (wantsCommodities) void fetchCommodities();
@@ -213,10 +217,10 @@ export function useMarketWatchData(options: UseMarketWatchDataOptions): MarketWa
 
         tick();
 
-        const timer = window.setInterval(tick, MARKET_REFRESH_MS);
+        const timer = window.setInterval(() => tick({ isPolling: true }), MARKET_REFRESH_MS);
         const onVisibilityChange = () => {
             if (document.visibilityState === 'visible' && getAdaptiveRefreshMs('global_fx') !== null) {
-                tick();
+                tick({ isPolling: true });
             }
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
