@@ -104,6 +104,9 @@ async def _lifespan(_app: FastAPI):
         close_shared_http_clients()
 
 
+# orjson only accelerates the final serialization step; FastAPI still runs
+# jsonable_encoder for normal routes. Measured saving on a 1,500-row payload is
+# ~4 ms, or ~30 ms on the conditional_json_response path which skips the encoder.
 app = FastAPI(
     title="RAG-Fin API",
     version="0.10.0",

@@ -383,8 +383,8 @@ def test_orjson_response_and_conditional_json_response() -> None:
     assert resp.headers["x-custom"] == "yes"
     assert resp.body == b'{"hello":"world"}'
 
-    empty_resp = ORJSONResponse(content=None)
-    assert empty_resp.body == b""
+    null_resp = ORJSONResponse(content=None)
+    assert null_resp.body == b"null"
 
     bytes_resp = ORJSONResponse(content=b'{"raw":true}')
     assert bytes_resp.body == b'{"raw":true}'

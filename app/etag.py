@@ -126,7 +126,7 @@ class ORJSONResponse(Response):
 
     def render(self, content: Any) -> bytes:
         if content is None:
-            return b""
+            return b"null"
         if isinstance(content, (bytes, memoryview)):
             return bytes(content)
         return orjson_dumps(content)
