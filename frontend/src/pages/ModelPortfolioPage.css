@@ -2771,3 +2771,207 @@
     }
 }
 
+/* Mobile: tables become stacked position cards instead of a wide scroll surface. */
+@media (max-width: 780px) {
+    .mp-table-scroll-hint {
+        display: none;
+    }
+
+    .mp-table-wrap {
+        overflow: visible;
+    }
+
+    .mp-table,
+    .mp-active-table,
+    .mp-closed-table {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        border-collapse: separate;
+    }
+
+    .mp-table thead {
+        display: none;
+    }
+
+    .mp-table tbody {
+        display: flex;
+        flex-direction: column;
+        gap: 0.65rem;
+        padding: 0.75rem;
+    }
+
+    .mp-table tr,
+    .mp-table .mp-row {
+        display: block;
+        padding: 0.8rem 0.85rem;
+        border: 1px solid var(--surface-border);
+        border-radius: 8px;
+        background: var(--surface-color);
+    }
+
+    .mp-table tr:last-child td {
+        border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 70%, transparent);
+    }
+
+    .mp-table td,
+    .mp-active-table td,
+    .mp-closed-table td {
+        display: block;
+        width: auto;
+        padding: 0.42rem 0 !important;
+        border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 70%, transparent);
+        text-align: right;
+    }
+
+    .mp-table td::before {
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 0.14rem;
+        color: var(--text-muted);
+        font-family: var(--font-sans);
+        font-size: 0.7rem;
+        font-weight: 500;
+        line-height: 1.3;
+        text-align: left;
+    }
+
+    .mp-table td:first-child,
+    .mp-active-table td:first-child,
+    .mp-closed-table td:first-child {
+        position: static;
+        z-index: auto;
+        display: block;
+        padding: 0 0 0.62rem !important;
+        border-bottom: 1px solid var(--surface-border);
+        background: transparent !important;
+        box-shadow: none;
+        text-align: left;
+    }
+
+    .mp-table td:first-child::before {
+        content: none;
+    }
+
+    .mp-table td:last-child {
+        border-bottom: 0;
+    }
+
+    .mp-table td.mp-col-target {
+        display: block;
+        text-align: left;
+    }
+
+    .mp-table td.mp-col-target::before {
+        display: block;
+        max-width: none;
+        margin-bottom: 0.38rem;
+    }
+
+    .mp-table td.act {
+        display: flex;
+        width: 100%;
+        justify-content: flex-end;
+        padding: 0.55rem 0 0 !important;
+        border-bottom: 0;
+    }
+
+    .mp-table td.act::before {
+        content: none;
+    }
+
+    .mp-table .mp-row:hover td,
+    .mp-table .mp-row:hover td:first-child,
+    .mp-table .mp-row.is-selected td,
+    .mp-table .mp-row.is-selected td:first-child {
+        background: transparent;
+    }
+
+    .mp-table tr:hover,
+    .mp-table .mp-row:hover,
+    .mp-table .mp-row.is-selected {
+        background: var(--surface-hover);
+    }
+
+    .mp-stock-cell {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .mp-stock-meta {
+        min-width: 0;
+    }
+
+    .mp-company-name,
+    .mp-changelog-company {
+        max-width: 100%;
+    }
+
+    .mp-col-target {
+        min-width: 0;
+    }
+
+    .mp-target-cell {
+        width: 100%;
+    }
+
+    .mp-target-top {
+        gap: 0.6rem;
+    }
+
+    .mp-close-reason {
+        text-align: right;
+    }
+
+    .mp-row-actions {
+        width: 100%;
+    }
+}
+
+/* Mobile: measurement summary sits below the chart instead of covering it. */
+@media (max-width: 780px) {
+    .mp-chart-stage {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .mp-perf-svg {
+        touch-action: pan-y;
+    }
+
+    .mp-chart-measure-tooltip {
+        position: static !important;
+        top: auto !important;
+        right: auto !important;
+        bottom: auto !important;
+        left: auto !important;
+        width: 100%;
+        max-height: none;
+        margin-top: 0.55rem;
+        overflow: visible;
+        padding: 0.55rem 0.65rem;
+    }
+
+    .mp-chart-measure-tooltip-header {
+        margin-bottom: 0.45rem;
+        font-size: 0.7rem;
+        white-space: normal;
+    }
+
+    .mp-chart-measure-tooltip-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.32rem 0.85rem;
+    }
+
+    .mp-chart-measure-tooltip-list li {
+        gap: 0.35rem;
+        font-size: 0.7rem;
+    }
+
+    .mp-chart-measure-tooltip-list strong {
+        font-size: 0.72rem;
+        white-space: nowrap;
+    }
+}
+

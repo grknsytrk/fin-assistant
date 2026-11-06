@@ -11,6 +11,23 @@ type TooltipState = {
 };
 
 const MAX_VISIBLE_X_LABELS = 8;
+const TOOLTIP_HALF_WIDTH = 112;
+const TOOLTIP_TOP_MARGIN = 100;
+
+/**
+ * Keep the floating tooltip inside the card on narrow screens. The tooltip is
+ * horizontally centered on the pointer, so clamping the anchor point prevents
+ * long values such as "1.234,56 milyar TL" from running off the screen.
+ */
+function clampTooltipPosition(event: MouseEvent<SVGElement>, cardRect: DOMRect) {
+    const x = event.clientX - cardRect.left;
+    const y = event.clientY - cardRect.top;
+    const halfWidth = Math.min(TOOLTIP_HALF_WIDTH, Math.max(40, cardRect.width / 2 - 4));
+    return {
+        x: Math.min(Math.max(x, halfWidth), Math.max(halfWidth, cardRect.width - halfWidth)),
+        y: Math.max(y, TOOLTIP_TOP_MARGIN),
+    };
+}
 
 function formatYAxisTick(value: number, series: SeriesPoint[]): string {
     const sample = series.find((point) => point.display)?.display.trim() || '';
@@ -100,9 +117,10 @@ export function BarChartCard({
         if (!cardRect) {
             return;
         }
+        const position = clampTooltipPosition(event, cardRect);
         setTooltip({
-            x: event.clientX - cardRect.left,
-            y: event.clientY - cardRect.top,
+            x: position.x,
+            y: position.y,
             label: point.label,
             value: point.display,
         });
@@ -322,9 +340,10 @@ export function LineChartCard({
         if (!cardRect) {
             return;
         }
+        const position = clampTooltipPosition(event, cardRect);
         setTooltip({
-            x: event.clientX - cardRect.left,
-            y: event.clientY - cardRect.top,
+            x: position.x,
+            y: position.y,
             label: point.label,
             value: point.display,
             average: averageSeries?.find((averagePoint) => averagePoint.key === point.key)?.display,

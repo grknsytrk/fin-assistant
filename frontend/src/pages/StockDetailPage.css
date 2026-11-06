@@ -14,10 +14,16 @@
 }
 
 @media (max-width: 760px) {
-    .stock-detail-shell {
+    .stock-detail-shell,
+    .stock-detail-shell.mn-layout {
         --mn-sidebar-width: 0px;
         padding-left: 0;
-        padding-bottom: calc(66px + env(safe-area-inset-bottom));
+        padding-bottom: 0;
+    }
+
+    .stock-detail-shell .stock-detail-page {
+        padding-bottom: calc(82px + env(safe-area-inset-bottom));
+        scroll-padding-bottom: calc(82px + env(safe-area-inset-bottom));
     }
 }
 
@@ -629,7 +635,7 @@
     }
 
     .stock-detail-page {
-        padding: 0.75rem 0.75rem 1.25rem;
+        padding: 0.75rem 0.75rem calc(82px + env(safe-area-inset-bottom));
         overflow-x: hidden;
     }
 

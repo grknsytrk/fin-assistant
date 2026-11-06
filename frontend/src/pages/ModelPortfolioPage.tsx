@@ -1149,7 +1149,7 @@ export default function ModelPortfolioPage() {
                                                                 </div>
                                                             </div>
                                                         </td>
-                                                        <td className="num mp-mono">
+                                                        <td className="num mp-mono" data-label="Giriş">
                                                             <div>{formatPrice(pos.entry_price)}</div>
                                                             <span className="mp-sub-cell">
                                                                 {formatCompactDateTR(pos.entry_date)} · {pos.holding_days} gün
@@ -1157,6 +1157,7 @@ export default function ModelPortfolioPage() {
                                                         </td>
                                                         <td
                                                             className="num mp-mono"
+                                                            data-label="Güncel"
                                                             title={pos.price_as_of ? `Fiyat zamanı: ${formatCompactDateTimeTR(pos.price_as_of)}` : undefined}
                                                         >
                                                             <div className="mp-price-main">{formatPrice(pos.current_price)}</div>
@@ -1166,7 +1167,7 @@ export default function ModelPortfolioPage() {
                                                                 </span>
                                                             )}
                                                         </td>
-                                                        <td className="mp-col-target">
+                                                        <td className="mp-col-target" data-label="Hedef ve potansiyel">
                                                             <div className="mp-target-cell">
                                                                 <div className="mp-target-top">
                                                                     <span className="mp-mono mp-target-price">
@@ -1193,13 +1194,13 @@ export default function ModelPortfolioPage() {
                                                                 </div>
                                                             </div>
                                                         </td>
-                                                        <td className="num mp-mono">
+                                                        <td className="num mp-mono" data-label="Ağırlık">
                                                             %{pos.weight_pct.toLocaleString('tr-TR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                                                         </td>
-                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.return_pct)}`}>
+                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.return_pct)}`} data-label="Net getiri">
                                                             {formatPct(pos.return_pct)}
                                                         </td>
-                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.relative_return_pct)}`}>
+                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.relative_return_pct)}`} data-label="XU100’e göre">
                                                             {formatPct(pos.relative_return_pct)}
                                                         </td>
                                                         <td className="act" onClick={(e) => e.stopPropagation()}>
@@ -1351,21 +1352,21 @@ export default function ModelPortfolioPage() {
                                                                 </div>
                                                             </div>
                                                         </td>
-                                                        <td className="num mp-mono">
+                                                        <td className="num mp-mono" data-label="Tarih">
                                                             <div>
                                                                 {formatDateTR(pos.entry_date)} → {formatDateTR(pos.closed_date)}
                                                             </div>
                                                             <span className="mp-sub-cell">{pos.holding_days} gün tutuldu</span>
                                                         </td>
-                                                        <td className="num mp-mono">{formatPrice(pos.entry_price)}</td>
-                                                        <td className="num mp-mono">{formatPrice(pos.exit_price)}</td>
-                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.return_pct)}`}>
+                                                        <td className="num mp-mono" data-label="Giriş">{formatPrice(pos.entry_price)}</td>
+                                                        <td className="num mp-mono" data-label="Çıkış">{formatPrice(pos.exit_price)}</td>
+                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.return_pct)}`} data-label="Net getiri">
                                                             {formatPct(pos.return_pct)}
                                                         </td>
-                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.relative_return_pct)}`}>
+                                                        <td className={`num mp-mono mp-bold ${toneClass(pos.relative_return_pct)}`} data-label="XU100’e göre">
                                                             {formatPct(pos.relative_return_pct)}
                                                         </td>
-                                                        <td>
+                                                        <td data-label="Gerekçe">
                                                             <span className="mp-close-reason">
                                                                 {pos.close_reason || 'Portföy Değişikliği'}
                                                             </span>

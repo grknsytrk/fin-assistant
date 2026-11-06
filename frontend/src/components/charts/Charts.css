@@ -223,6 +223,7 @@
     box-shadow: var(--shadow-md);
     z-index: 10;
     min-width: 120px;
+    max-width: min(230px, calc(100% - 0.5rem));
     text-align: center;
 }
 
@@ -238,6 +239,7 @@
     color: var(--text-primary);
     font-weight: 700;
     font-family: var(--font-mono);
+    overflow-wrap: anywhere;
 }
 
 .kap-chart-tooltip-average {
@@ -347,6 +349,20 @@
 
     .kap-chart-card-expanded .kap-chart-svg {
         max-height: 62dvh;
+    }
+
+    .kap-chart-tooltip {
+        min-width: 0;
+        padding: 0.42rem 0.6rem;
+        transform: translate(-50%, -112%);
+    }
+
+    .kap-chart-tooltip-label {
+        font-size: 0.7rem;
+    }
+
+    .kap-chart-tooltip-value {
+        font-size: 0.86rem;
     }
 }
 
