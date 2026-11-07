@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import StockDetailPage from './StockDetailPage';
@@ -48,6 +48,12 @@ const renderComponent = (customProps = {}) =>
             <StockDetailPage {...props} {...customProps} />
         </MemoryRouter>
     );
+
+beforeAll(() => {
+    if (!window.HTMLElement.prototype.scrollIntoView) {
+        window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    }
+});
 
 beforeEach(() => {
     vi.useFakeTimers();

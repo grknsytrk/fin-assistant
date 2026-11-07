@@ -687,12 +687,18 @@ export default function StockDetailPage({
     const [error, setError] = useState<string | null>(null);
     const [navCollapsed, setNavCollapsed] = useState(false);
     const [marketCard, setMarketCard] = useState<MarketStockCardItem | null>(null);
+    const tabsNavRef = useRef<HTMLElement | null>(null);
     const watchlist = useWatchlist();
     const normalizedTicker = ticker.trim().toUpperCase();
 
     useEffect(() => {
         setSelectedTab(activeTab);
     }, [activeTab]);
+
+    useEffect(() => {
+        const activeLink = tabsNavRef.current?.querySelector<HTMLElement>('.active');
+        activeLink?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
+    }, [selectedTab]);
 
     const handleTabChange = (tab: TabType) => {
         setSelectedTab(tab);
@@ -937,7 +943,7 @@ export default function StockDetailPage({
                             <div><span>Son Dönem</span><strong>{snapshot?.latest_quarter || '-'}</strong></div>
                         </div>
 
-                        <nav className="stock-tabs" aria-label="Hisse detay sekmeleri">
+                        <nav ref={tabsNavRef} className="stock-tabs" aria-label="Hisse detay sekmeleri">
                             {STOCK_DETAIL_TABS.map((tab) => {
                                 const Icon = tab.icon;
                                 return (

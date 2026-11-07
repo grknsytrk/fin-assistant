@@ -76,6 +76,7 @@ interface MarketWatchRailProps {
     mobilePanelOpen?: boolean;
     onMobilePanelOpenChange?: (open: boolean) => void;
     onCollapseChange?: (collapsed: boolean) => void;
+    showMobileToggle?: boolean;
 }
 
 const RAIL_TABS: Array<{ id: RailTab; label: string }> = [
@@ -303,9 +304,10 @@ export default function MarketWatchRail({
     mobilePanelOpen,
     onMobilePanelOpenChange,
     onCollapseChange,
+    showMobileToggle = true,
 }: MarketWatchRailProps) {
     const [isCollapsed, setIsCollapsed] = useState(() => (
-        typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
+        typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches
     ));
     const panelCollapsed = mobilePanelOpen === undefined ? isCollapsed : !mobilePanelOpen;
 
@@ -772,7 +774,7 @@ export default function MarketWatchRail({
 
         const isStockTab = activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030';
         const marketKind = isStockTab ? 'bist' : 'global_fx';
-        const activeMs = window.matchMedia('(max-width: 767px)').matches
+        const activeMs = window.matchMedia('(max-width: 760px)').matches
             ? LIVE_RAIL_REFRESH_MOBILE_MS
             : LIVE_RAIL_REFRESH_DESKTOP_MS;
 
@@ -876,6 +878,7 @@ export default function MarketWatchRail({
     return (
         <div className={`mwr-shell${panelCollapsed ? ' mwr-shell-collapsed' : ''}`}>
             <aside
+                id="market-watch-rail-panel"
                 className={`mwr-panel${panelCollapsed ? ' is-collapsed' : ''}`}
                 aria-label="İzleme listesi"
                 aria-hidden={panelCollapsed}
@@ -1316,15 +1319,19 @@ export default function MarketWatchRail({
                 </button>
             </nav>
 
-            <button
-                type="button"
-                className="mwr-mobile-toggle"
-                onClick={() => updateCollapsed(!panelCollapsed)}
-                aria-label={panelCollapsed ? 'Piyasalar panelini aç' : 'Piyasalar panelini kapat'}
-                title={panelCollapsed ? 'Piyasalar panelini aç' : 'Piyasalar panelini kapat'}
-            >
-                {panelCollapsed ? <ChevronLeft size={18} aria-hidden="true" /> : <ChevronRight size={18} aria-hidden="true" />}
-            </button>
+            {showMobileToggle && (
+                <button
+                    type="button"
+                    className="mwr-mobile-toggle"
+                    onClick={() => updateCollapsed(!panelCollapsed)}
+                    aria-expanded={!panelCollapsed}
+                    aria-controls="market-watch-rail-panel"
+                    aria-label={panelCollapsed ? 'Piyasalar panelini aç' : 'Piyasalar panelini kapat'}
+                    title={panelCollapsed ? 'Piyasalar panelini aç' : 'Piyasalar panelini kapat'}
+                >
+                    {panelCollapsed ? <ChevronLeft size={18} aria-hidden="true" /> : <ChevronRight size={18} aria-hidden="true" />}
+                </button>
+            )}
         </div>
     );
 }
