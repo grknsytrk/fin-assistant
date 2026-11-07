@@ -193,6 +193,7 @@ async def market_stream(
 
     async def event_generator():
         prev_snapshot: Dict[str, tuple[Any, ...]] = {}
+        prev_benchmarks_snapshot: Dict[str, tuple[Any, ...]] = {}
         last_rows: Optional[List[Dict[str, Any]]] = None
         last_heartbeat = time.monotonic()
         tick = 0
@@ -208,13 +209,25 @@ async def market_stream(
                 else:
                     changed, prev_snapshot = _compute_market_stocks_delta(prev_snapshot, rows)
                     last_rows = rows
-                if changed or tick == 0:
+
+                benchmarks = payload.get("benchmarks") if isinstance(payload.get("benchmarks"), dict) else {}
+                benchmarks_snapshot = {
+                    k: (v.get("price"), v.get("change"), v.get("change_pct"), v.get("as_of"))
+                    for k, v in benchmarks.items()
+                    if isinstance(v, dict)
+                }
+                benchmarks_changed = benchmarks_snapshot != prev_benchmarks_snapshot
+                if benchmarks_changed:
+                    prev_benchmarks_snapshot = benchmarks_snapshot
+
+                if changed or benchmarks_changed or tick == 0:
                     data = {
                         "index": normalized_index,
                         "as_of": payload.get("as_of") or datetime.now(timezone.utc).isoformat(),
                         "market_open": market_open,
                         "count": len(changed),
                         "rows": changed,
+                        "benchmarks": benchmarks,
                     }
                     yield f"event: stocks_delta\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
                     last_heartbeat = time.monotonic()

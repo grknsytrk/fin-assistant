@@ -5710,6 +5710,20 @@ def test_market_stocks_payload_extends_rows_and_uses_cache(monkeypatch: pytest.M
     monkeypatch.setattr(api_module, "_fetch_stock_return_bases_bulk", fake_return_bases)
     monkeypatch.setattr(
         api_module,
+        "_fetch_index_quote",
+        lambda index: {
+            "symbol": index,
+            "label": f"BIST {index}",
+            "price": 110.0 if index == "XU100" else 220.0,
+            "prev_close": 110.0 if index == "XU100" else 220.0,
+            "change": 0.0,
+            "change_pct": 0.0,
+            "as_of": "2026-04-24T12:00:00+00:00",
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        api_module,
         "_kap_logo_payload_for_symbol",
         lambda symbol: pytest.fail(f"market stock rows should not resolve logos over KAP: {symbol}"),
     )
@@ -7787,3 +7801,263 @@ def test_cached_kap_normalization_never_calls_inflation_provider(monkeypatch):
              "metrics": {"ozkaynaklar": 100}, "metrics_quarterly": {"net_kar": 10}}
             for p in (1, 2, 3)]}, allow_network=False)
     assert len(result["quarters"]) == 3
+
+
+# region Market Index Sync (Milestone M1 / Finding 2.2)
+
+
+def test_market_stocks_benchmarks_uses_live_quote_and_calculates_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bases = {
+        "XUTUM": {
+            "base_1w": 9500.0,
+            "base_1m": 9000.0,
+            "base_3m": 8500.0,
+            "base_6m": 8000.0,
+            "base_ytd": 8800.0,
+            "base_1y": 7000.0,
+            "latest_close": 10000.0,
+            "as_of": "2026-11-06T18:10:00+03:00",
+        },
+        "XU100": {
+            "base_1w": 9500.0,
+            "base_1m": 9000.0,
+            "base_3m": 8500.0,
+            "base_6m": 8000.0,
+            "base_ytd": 8800.0,
+            "base_1y": 7000.0,
+            "latest_close": 10000.0,
+            "as_of": "2026-11-06T18:10:00+03:00",
+        },
+        "XU030": {
+            "base_1w": 10500.0,
+            "base_1m": 10000.0,
+            "base_3m": 9500.0,
+            "base_6m": 9000.0,
+            "base_ytd": 9800.0,
+            "base_1y": 8000.0,
+            "latest_close": 11000.0,
+            "as_of": "2026-11-06T18:10:00+03:00",
+        },
+    }
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_stock_return_bases_bulk",
+        lambda symbols: {s: fake_bases[s] for s in symbols if s in fake_bases},
+    )
+
+    def fake_live_quote(index_name: str) -> Dict[str, Any]:
+        if index_name == "XU100":
+            return {
+                "symbol": "XU100",
+                "label": "BIST 100",
+                "yahoo_symbol": "XU100.IS",
+                "price": 10500.0,
+                "prev_close": 10000.0,
+                "change": 500.0,
+                "change_pct": 5.0,
+                "high": 10550.0,
+                "low": 9950.0,
+                "volume": 120_000_000.0,
+                "currency": "TRY",
+                "market_state": "REGULAR",
+                "as_of": "2026-11-07T14:30:00+03:00",
+                "error": None,
+            }
+        return {
+            "symbol": index_name,
+            "label": f"BIST {index_name}",
+            "yahoo_symbol": f"{index_name}.IS",
+            "price": 11500.0 if index_name == "XU030" else 10200.0,
+            "prev_close": 11000.0 if index_name == "XU030" else 10000.0,
+            "change": 500.0 if index_name == "XU030" else 200.0,
+            "change_pct": 4.55 if index_name == "XU030" else 2.0,
+            "as_of": "2026-11-07T14:30:00+03:00",
+            "error": None,
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_index_quote", fake_live_quote)
+
+    benchmarks = api_module._market_stock_benchmarks()
+
+    assert "XU100" in benchmarks
+    xu100 = benchmarks["XU100"]
+    # Check that price, prev_close, change, change_pct fields are present
+    assert xu100["price"] == 10500.0
+    assert xu100["prev_close"] == 10000.0
+    assert xu100["change"] == 500.0
+    assert xu100["change_pct"] == 5.0
+    assert xu100["as_of"] == "2026-11-07T14:30:00+03:00"
+
+    # Verify non-zero intraday returns calculated from live quote 10500.0 instead of latest_close 10000.0
+    # (10500 - 9500) / 9500 * 100 = 10.53%
+    # With latest_close (10000 - 9500) / 9500 * 100 = 5.26%
+    assert xu100["return_1w_pct"] == 10.53
+    assert xu100["return_1m_pct"] == 16.67
+    assert xu100["return_1y_pct"] == 50.0
+
+
+def test_market_stocks_benchmarks_fallback_to_latest_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_bases = {
+        "XUTUM": {
+            "base_1w": 9500.0,
+            "latest_close": 10000.0,
+            "as_of": "2026-11-06T18:10:00+03:00",
+        },
+        "XU100": {
+            "base_1w": 9500.0,
+            "latest_close": 10000.0,
+            "as_of": "2026-11-06T18:10:00+03:00",
+        },
+        "XU030": {
+            "base_1w": 10500.0,
+            "latest_close": 11000.0,
+            "as_of": "2026-11-06T18:10:00+03:00",
+        },
+    }
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_stock_return_bases_bulk",
+        lambda symbols: {s: fake_bases[s] for s in symbols if s in fake_bases},
+    )
+
+    # Simulate upstream quote failure (empty quote or non-positive price)
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_index_quote",
+        lambda index_name: {
+            "symbol": index_name,
+            "price": None,
+            "prev_close": None,
+            "change": None,
+            "change_pct": None,
+            "error": "upstream_timeout",
+        },
+    )
+
+    benchmarks = api_module._market_stock_benchmarks()
+
+    assert "XU100" in benchmarks
+    xu100 = benchmarks["XU100"]
+    # Fallback price is latest_close (10000.0), prev_close is latest_close
+    assert xu100["price"] == 10000.0
+    assert xu100["prev_close"] == 10000.0
+    assert xu100["change"] is None
+    assert xu100["change_pct"] is None
+    # Returns calculated from latest_close: (10000 - 9500) / 9500 * 100 = 5.26%
+    assert xu100["return_1w_pct"] == 5.26
+    assert xu100["as_of"] == "2026-11-06T18:10:00+03:00"
+
+
+def test_market_watch_and_indices_consume_unified_index_quotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_module._WATCH_CACHE.clear()
+    api_module._MARKET_INDEX_QUOTE_CACHE.clear()
+    api_module._MARKET_INDICES_CACHE.clear()
+
+    quote_calls = []
+
+    def tracking_fetch_index_quote(index_code: str) -> Dict[str, Any]:
+        quote_calls.append(index_code)
+        return {
+            "symbol": index_code,
+            "label": f"BIST {index_code}",
+            "yahoo_symbol": f"{index_code}.IS",
+            "price": 10555.0,
+            "prev_close": 10400.0,
+            "change": 155.0,
+            "change_pct": 1.49,
+            "high": 10600.0,
+            "low": 10350.0,
+            "volume": 50_000_000.0,
+            "currency": "TRY",
+            "market_state": "REGULAR",
+            "as_of": "2026-11-07T15:00:00+03:00",
+            "error": None,
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_index_quote", tracking_fetch_index_quote)
+    monkeypatch.setattr(api_module, "_fetch_index_return_bases", lambda _code: {})
+    monkeypatch.setattr(api_module, "_market_fx_payload", lambda: {"items": []})
+    monkeypatch.setattr(api_module, "_market_commodities_payload", lambda: {"items": []})
+
+    client = TestClient(app)
+
+    # 1. Call /market/watch
+    watch_res = client.get("/market/watch?refresh=true")
+    assert watch_res.status_code == 200
+    watch_indices = {r["symbol"]: r for r in watch_res.json()["sections"]["indices"]}
+    assert "XU100" in watch_indices
+    assert watch_indices["XU100"]["price"] == 10555.0
+    assert watch_indices["XU100"]["change"] == 155.0
+    assert watch_indices["XU100"]["change_pct"] == 1.49
+
+    # 2. Call /market/indices
+    indices_res = client.get("/market/indices?refresh=true")
+    assert indices_res.status_code == 200
+    indices_rows = {r["symbol"]: r for r in indices_res.json()["rows"]}
+    assert "XU100" in indices_rows
+    assert indices_rows["XU100"]["price"] == 10555.0
+    assert indices_rows["XU100"]["change"] == 155.0
+    assert indices_rows["XU100"]["change_pct"] == 1.49
+
+    # Both endpoints received identical quote data
+    assert watch_indices["XU100"]["price"] == indices_rows["XU100"]["price"]
+    assert watch_indices["XU100"]["change"] == indices_rows["XU100"]["change"]
+    assert watch_indices["XU100"]["change_pct"] == indices_rows["XU100"]["change_pct"]
+
+
+def test_market_stocks_stream_emits_benchmarks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_market_stocks_payload",
+        lambda index_name="XUTUM": {
+            "index": index_name,
+            "as_of": "2026-11-07T15:00:00+03:00",
+            "rows": [
+                {
+                    "symbol": "THYAO",
+                    "price": 310.0,
+                    "change": 5.0,
+                    "volume": 1000.0,
+                    "as_of": "2026-11-07T15:00:00+03:00",
+                }
+            ],
+            "benchmarks": {
+                "XU100": {
+                    "price": 10500.0,
+                    "prev_close": 10000.0,
+                    "change": 500.0,
+                    "change_pct": 5.0,
+                    "return_1w_pct": 10.53,
+                    "as_of": "2026-11-07T15:00:00+03:00",
+                }
+            },
+        },
+    )
+
+    client = TestClient(app)
+    response = client.get("/market/stream?index=XUTUM&once=true")
+    assert response.status_code == 200
+
+    content = response.text
+    assert "event: stocks_delta" in content
+    # Parse json line after data:
+    for line in content.split("\n"):
+        if line.startswith("data: "):
+            payload = json.loads(line[len("data: ") :])
+            assert "benchmarks" in payload
+            assert payload["benchmarks"]["XU100"]["price"] == 10500.0
+            assert payload["benchmarks"]["XU100"]["change_pct"] == 5.0
+            break
+    else:
+        pytest.fail("stocks_delta event data not found in stream response")
+
+
+# endregion

@@ -1321,10 +1321,86 @@ def _market_stock_benchmarks() -> Dict[str, Dict[str, Any]]:
     benchmarks: Dict[str, Dict[str, Any]] = {}
     for index_name in _MARKET_STOCK_INDEX_ORDER:
         bases = base_map.get(index_name, {})
-        current_for_returns = bases.get("latest_close")
+        try:
+            live_quote = _fetch_index_quote(index_name)
+        except Exception as exc:
+            LOGGER.debug("market stock benchmark live quote lookup failed for %s: %s", index_name, exc)
+            live_quote = {}
+
+        live_price_raw = live_quote.get("price") if isinstance(live_quote, dict) else None
+        live_price: Optional[float] = None
+        if live_price_raw is not None and not isinstance(live_price_raw, bool):
+            try:
+                candidate = float(live_price_raw)
+                if math.isfinite(candidate) and candidate > 0:
+                    live_price = candidate
+            except (TypeError, ValueError):
+                live_price = None
+
+        if live_price is not None:
+            current_for_returns = live_price
+        else:
+            current_for_returns = bases.get("latest_close")
+
+        price_val: Optional[float] = None
+        if current_for_returns is not None and not isinstance(current_for_returns, bool):
+            try:
+                numeric_price = float(current_for_returns)
+                if math.isfinite(numeric_price):
+                    price_val = numeric_price
+            except (TypeError, ValueError):
+                price_val = None
+
+        prev_close_val: Optional[float] = None
+        raw_prev = live_quote.get("prev_close") if isinstance(live_quote, dict) else None
+        if raw_prev is None:
+            raw_prev = bases.get("latest_close")
+        if raw_prev is not None and not isinstance(raw_prev, bool):
+            try:
+                numeric_prev = float(raw_prev)
+                if math.isfinite(numeric_prev):
+                    prev_close_val = numeric_prev
+            except (TypeError, ValueError):
+                prev_close_val = None
+
+        change_val: Optional[float] = None
+        raw_change = live_quote.get("change") if isinstance(live_quote, dict) else None
+        if raw_change is not None and not isinstance(raw_change, bool):
+            try:
+                numeric_change = float(raw_change)
+                if math.isfinite(numeric_change):
+                    change_val = numeric_change
+            except (TypeError, ValueError):
+                change_val = None
+
+        change_pct_val: Optional[float] = None
+        raw_change_pct = live_quote.get("change_pct") if isinstance(live_quote, dict) else None
+        if raw_change_pct is not None and not isinstance(raw_change_pct, bool):
+            try:
+                numeric_change_pct = float(raw_change_pct)
+                if math.isfinite(numeric_change_pct):
+                    change_pct_val = numeric_change_pct
+            except (TypeError, ValueError):
+                change_pct_val = None
+
+        if live_price is not None and prev_close_val is not None:
+            if change_val is None:
+                change_val = round(live_price - prev_close_val, 2)
+            if change_pct_val is None and prev_close_val > 0:
+                change_pct_val = round(((live_price - prev_close_val) / prev_close_val) * 100, 2)
+
+        as_of_val = (
+            (live_quote.get("as_of") if isinstance(live_quote, dict) else None)
+            or bases.get("as_of")
+        )
+
         benchmarks[index_name] = {
+            "price": price_val,
+            "prev_close": prev_close_val,
+            "change": change_val,
+            "change_pct": change_pct_val,
+            "as_of": as_of_val,
             **_returns_from_bases(current_for_returns, bases),
-            "as_of": bases.get("as_of"),
         }
     return benchmarks
 
@@ -4890,6 +4966,33 @@ def _watch_index_item(
     *,
     fallback_currency: str = "TRY",
 ) -> Dict[str, Any]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    if normalized_symbol in _MARKET_INDEX_META:
+        quote = _fetch_index_quote(normalized_symbol)
+        if quote.get("price") is not None:
+            return {
+                "symbol": symbol,
+                "label": label or quote.get("label") or symbol,
+                "yahoo_symbol": quote.get("yahoo_symbol"),
+                "price": quote.get("price"),
+                "prev_close": quote.get("prev_close"),
+                "change": quote.get("change"),
+                "change_pct": quote.get("change_pct"),
+                "currency": quote.get("currency") or fallback_currency,
+                "market_state": quote.get("market_state") or "",
+                "as_of": quote.get("as_of"),
+                "error": None,
+                "logo_url": None,
+                "logo_source": None,
+            }
+        return _empty_watch_item(
+            symbol=symbol,
+            label=label or quote.get("label") or symbol,
+            currency=fallback_currency,
+            error=quote.get("error") or "quote_unavailable",
+            yahoo_symbol=quote.get("yahoo_symbol"),
+        )
+
     errors: List[str] = []
     for yahoo_symbol in yahoo_candidates:
         quote = _fetch_yahoo_quote(yahoo_symbol)
