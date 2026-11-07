@@ -6,11 +6,11 @@ import type {
     MarketWatchGlobalResponse,
     MarketWatchResponse,
 } from '../api/types';
-import { getAdaptiveRefreshMs } from '../utils/marketHours';
+import { getAdaptiveRefreshMs, isGlobalFxTradingHours } from '../utils/marketHours';
 
-// The backend rebuilds /market/watch and the live quote endpoints on a 3
-// second cache window, so every channel polls at the same cadence.
-const MARKET_REFRESH_MS = 3_000;
+// Rationalized polling cadence: global macro / delayed external feeds refresh every 30s
+export const GLOBAL_MACRO_REFRESH_MS = 30_000;
+export const MARKET_REFRESH_MS = GLOBAL_MACRO_REFRESH_MS;
 
 export interface MarketWatchDataSnapshot {
     watch: MarketWatchResponse | null;
@@ -104,7 +104,7 @@ async function fetchWatch(options?: { force?: boolean }): Promise<void> {
         if (options?.force) runtime.pendingForce = true;
         return;
     }
-    if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
+    if (!options?.force && !canStart(runtime.lastStartedAt, GLOBAL_MACRO_REFRESH_MS)) return;
 
     const showLoading = Boolean(options?.force) || snapshot.watch == null;
     runtime.inFlight = true;
@@ -133,7 +133,7 @@ async function fetchGlobal(options?: { force?: boolean }): Promise<void> {
         if (options?.force) runtime.pendingForce = true;
         return;
     }
-    if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
+    if (!options?.force && !canStart(runtime.lastStartedAt, GLOBAL_MACRO_REFRESH_MS)) return;
 
     const showLoading = Boolean(options?.force) || snapshot.global == null;
     runtime.inFlight = true;
@@ -162,7 +162,7 @@ async function fetchCommodities(options?: { force?: boolean }): Promise<void> {
         if (options?.force) runtime.pendingForce = true;
         return;
     }
-    if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
+    if (!options?.force && !canStart(runtime.lastStartedAt, GLOBAL_MACRO_REFRESH_MS)) return;
 
     const showLoading = Boolean(options?.force) || snapshot.commodities == null;
     runtime.inFlight = true;
@@ -191,7 +191,7 @@ async function fetchFx(options?: { force?: boolean }): Promise<void> {
         if (options?.force) runtime.pendingForce = true;
         return;
     }
-    if (!options?.force && !canStart(runtime.lastStartedAt, MARKET_REFRESH_MS)) return;
+    if (!options?.force && !canStart(runtime.lastStartedAt, GLOBAL_MACRO_REFRESH_MS)) return;
 
     const showLoading = Boolean(options?.force) || snapshot.fx == null;
     runtime.inFlight = true;
@@ -215,8 +215,8 @@ async function fetchFx(options?: { force?: boolean }): Promise<void> {
 }
 
 function masterTick(opts?: { isPolling?: boolean }): void {
-    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-    if (opts?.isPolling && getAdaptiveRefreshMs('global_fx') === null) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    if (opts?.isPolling && (!isGlobalFxTradingHours() || getAdaptiveRefreshMs('global_fx') === null)) return;
 
     if (subscriberCounts.watch > 0) void fetchWatch();
     if (subscriberCounts.global > 0) void fetchGlobal();
@@ -225,7 +225,7 @@ function masterTick(opts?: { isPolling?: boolean }): void {
 }
 
 function handleVisibilityChange(): void {
-    if (typeof document !== 'undefined' && document.visibilityState === 'visible' && getAdaptiveRefreshMs('global_fx') !== null) {
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible' && isGlobalFxTradingHours() && getAdaptiveRefreshMs('global_fx') !== null) {
         masterTick({ isPolling: true });
     }
 }
@@ -239,7 +239,7 @@ function updateMasterTimer(): void {
 
     if (total > 0) {
         if (masterTimer === null && typeof window !== 'undefined') {
-            masterTimer = window.setInterval(() => masterTick({ isPolling: true }), MARKET_REFRESH_MS);
+            masterTimer = window.setInterval(() => masterTick({ isPolling: true }), GLOBAL_MACRO_REFRESH_MS);
         }
         if (!visibilityHandlerAttached && typeof document !== 'undefined') {
             document.addEventListener('visibilitychange', handleVisibilityChange);

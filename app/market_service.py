@@ -512,13 +512,13 @@ _MARKET_INDEX_INTRADAY_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entrie
 
 _MARKET_INDEX_RETURN_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=1800)
 
-_MARKET_INDICES_CACHE_TTL = 3
+_MARKET_INDICES_CACHE_TTL = 30
 
-_MARKET_INDEX_DETAIL_CACHE_TTL = 3
+_MARKET_INDEX_DETAIL_CACHE_TTL = 30
 
-_MARKET_INDEX_QUOTE_CACHE_TTL = 3
+_MARKET_INDEX_QUOTE_CACHE_TTL = 30
 
-_MARKET_INDEX_INTRADAY_CACHE_TTL = 3
+_MARKET_INDEX_INTRADAY_CACHE_TTL = 30
 
 _MARKET_INDEX_RETURN_CACHE_TTL = 900
 
@@ -1742,7 +1742,12 @@ _MARKET_STOCK_DELTA_PAYLOAD_KEYS = (
 
 def _is_bist_market_open(now: Optional[datetime] = None) -> bool:
     """Return True during BIST equity trading + auction window (Mon-Fri 09:50-18:20 TRT)."""
-    current = (now or datetime.now(_TURKEY_TIMEZONE)).astimezone(_TURKEY_TIMEZONE)
+    if now is None:
+        current = datetime.now(_TURKEY_TIMEZONE)
+    elif now.tzinfo is None:
+        current = now.replace(tzinfo=_TURKEY_TIMEZONE)
+    else:
+        current = now.astimezone(_TURKEY_TIMEZONE)
     if current.weekday() >= 5:
         return False
     minute_of_day = (current.hour * 60) + current.minute
@@ -1753,6 +1758,46 @@ def _effective_market_quotes_fresh_ttl(now: Optional[datetime] = None) -> int:
     if _is_bist_market_open(now):
         return max(1, int(_MARKET_QUOTES_FRESH_TTL))
     return max(1, int(_MARKET_QUOTES_FRESH_TTL), int(_MARKET_QUOTES_OFFHOURS_FRESH_TTL))
+
+_MACRO_ACTIVE_TTL_SECONDS = int(os.getenv("RAGFIN_MACRO_FRESH_TTL_SECONDS", "30"))
+_MACRO_OFFHOURS_TTL_SECONDS = int(os.getenv("RAGFIN_MACRO_OFFHOURS_FRESH_TTL_SECONDS", "300"))
+_BIST_INDEX_ACTIVE_TTL_SECONDS = int(os.getenv("RAGFIN_BIST_INDEX_FRESH_TTL_SECONDS", "30"))
+_BIST_INDEX_OFFHOURS_TTL_SECONDS = int(os.getenv("RAGFIN_BIST_INDEX_OFFHOURS_FRESH_TTL_SECONDS", "300"))
+
+
+def _is_global_fx_market_open(now: Optional[datetime] = None) -> bool:
+    """Return True during 24/5 Global FX/Commodities/Macro window (Sun 23:55 - Sat 01:00 TRT)."""
+    if now is None:
+        current = datetime.now(_TURKEY_TIMEZONE)
+    elif now.tzinfo is None:
+        current = now.replace(tzinfo=_TURKEY_TIMEZONE)
+    else:
+        current = now.astimezone(_TURKEY_TIMEZONE)
+
+    weekday = current.weekday()
+    minute_of_day = (current.hour * 60) + current.minute
+
+    # Saturday: closed from 01:00 TRT (minute 60) onwards
+    if weekday == 5 and minute_of_day >= 60:
+        return False
+    # Sunday: closed until 23:55 TRT (minute 1435)
+    if weekday == 6 and minute_of_day < (23 * 60 + 55):
+        return False
+    return True
+
+
+def _effective_macro_fresh_ttl(now: Optional[datetime] = None) -> int:
+    """Return 30s during active trading hours and 300s during off-hours/weekends."""
+    if _is_global_fx_market_open(now):
+        return max(1, _MACRO_ACTIVE_TTL_SECONDS)
+    return max(1, _MACRO_ACTIVE_TTL_SECONDS, _MACRO_OFFHOURS_TTL_SECONDS)
+
+
+def _effective_bist_index_fresh_ttl(now: Optional[datetime] = None) -> int:
+    """Return 30s during BIST trading hours and 300s during off-hours/weekends."""
+    if _is_bist_market_open(now):
+        return max(1, _BIST_INDEX_ACTIVE_TTL_SECONDS)
+    return max(1, _BIST_INDEX_ACTIVE_TTL_SECONDS, _BIST_INDEX_OFFHOURS_TTL_SECONDS)
 
 def _compute_market_stocks_delta(
     prev_snapshot: Dict[str, tuple[Any, ...]],
@@ -3428,7 +3473,7 @@ def _xu030_payload() -> Dict[str, Any]:
 
 _COMMODITY_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
-_COMMODITY_CACHE_TTL = 3
+_COMMODITY_CACHE_TTL = 30
 
 _COMMODITY_MAP: List[tuple[str, str, str, Optional[str]]] = [
     ("BRENT", "BZ=F", "Brent Petrol", "USD"),
@@ -3738,7 +3783,7 @@ def _fetch_index_quote(index_code: str) -> Dict[str, Any]:
     normalized = _normalize_market_index(index_code)
     now = time.time()
     cached = _MARKET_INDEX_QUOTE_CACHE.get(normalized)
-    if cached and now - cached.get("_ts", 0) < _MARKET_INDEX_QUOTE_CACHE_TTL:
+    if cached and now - cached.get("_ts", 0) < _effective_bist_index_fresh_ttl():
         return dict(cached.get("data") or {})
 
     meta = _MARKET_INDEX_META[normalized]
@@ -4193,7 +4238,7 @@ def _market_indices_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
     payload, cache_status, stale, refresh_pending = _shared_swr_payload(
         cache_key="api:market:indices:v2",
         factory=build,
-        fresh_ttl_seconds=_MARKET_INDICES_CACHE_TTL,
+        fresh_ttl_seconds=_effective_bist_index_fresh_ttl(),
         stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
         local_cache=_MARKET_INDICES_CACHE,
         local_key="payload",
@@ -4487,7 +4532,7 @@ def _market_index_detail_payload(index_code: str, *, force_refresh: bool = False
     payload, cache_status, stale, refresh_pending = _shared_swr_payload(
         cache_key=f"api:market:index-detail:{normalized}:v2",
         factory=build,
-        fresh_ttl_seconds=_MARKET_INDEX_DETAIL_CACHE_TTL,
+        fresh_ttl_seconds=_effective_bist_index_fresh_ttl(),
         stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
         local_cache=_MARKET_INDEX_DETAIL_CACHE,
         local_key=normalized,
@@ -4543,7 +4588,7 @@ def _market_commodities_payload(*, force_refresh: bool = False) -> Dict[str, Any
     payload, cache_status, stale, refresh_pending = _shared_swr_payload(
         cache_key="api:market:commodities:v2",
         factory=build,
-        fresh_ttl_seconds=_COMMODITY_CACHE_TTL,
+        fresh_ttl_seconds=_effective_macro_fresh_ttl(),
         stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
         local_cache=_COMMODITY_CACHE,
         local_key="payload",
@@ -4565,7 +4610,7 @@ def _market_commodities_payload(*, force_refresh: bool = False) -> Dict[str, Any
 
 _FX_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
-_FX_CACHE_TTL = 3
+_FX_CACHE_TTL = 30
 
 _FX_RETURN_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=15 * 60)
 
@@ -4812,7 +4857,7 @@ def _market_fx_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
     payload, cache_status, stale, refresh_pending = _shared_swr_payload(
         cache_key="api:market:fx:v2",
         factory=build,
-        fresh_ttl_seconds=_FX_CACHE_TTL,
+        fresh_ttl_seconds=_effective_macro_fresh_ttl(),
         stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
         local_cache=_FX_CACHE,
         local_key="payload",
@@ -4834,7 +4879,7 @@ def _market_fx_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
 
 _WATCH_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
-_WATCH_CACHE_TTL = 3
+_WATCH_CACHE_TTL = 30
 
 _WATCH_GLOBAL_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
 
@@ -5125,7 +5170,7 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
     payload, cache_status, stale, refresh_pending = _shared_swr_payload(
         cache_key="api:market:watch:v4",
         factory=build,
-        fresh_ttl_seconds=_WATCH_CACHE_TTL,
+        fresh_ttl_seconds=_effective_macro_fresh_ttl(),
         stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
         local_cache=_WATCH_CACHE,
         local_key="payload",
