@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import type { MarketIndexCode, MarketWatchItem } from '../api/types';
 import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
 import { useMarketStore } from '../stores/marketStore';
@@ -7,6 +8,8 @@ import './MarketWatchStrip.css';
 const PRIMARY_SYMBOLS = ['XUTUM', 'XU100', 'XU030', 'NASDAQ', 'SP500', 'DOW', 'USD/TRY', 'EUR/TRY'] as const;
 const COMMODITY_SYMBOLS = ['BRENT', 'ALTIN', 'GUMUS', 'DOGALGAZ'] as const;
 const DEFAULT_DELAY_NOTE = 'Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).';
+// Constant scroll speed regardless of item count (~40px/s for ~230px items).
+const TICKER_SECONDS_PER_ITEM = 6;
 
 function isIndexSymbol(raw: string): raw is MarketIndexCode {
     const norm = normalizeSymbol(raw);
@@ -375,7 +378,10 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                         role="region"
                         aria-label="Canlı borsa ve döviz akış bandı"
                     >
-                        <div className="mw-ticker-track">
+                        <div
+                            className="mw-ticker-track"
+                            style={{ '--mw-ticker-duration': `${Math.max(60, (marqueeItems.length / 2) * TICKER_SECONDS_PER_ITEM)}s` } as CSSProperties}
+                        >
                             {marqueeItems.map((item, index) => {
                                 const isPositive = item.change_pct != null && item.change_pct > 0;
                                 const isNegative = item.change_pct != null && item.change_pct < 0;

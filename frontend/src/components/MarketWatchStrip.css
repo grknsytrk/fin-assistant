@@ -292,7 +292,7 @@
     align-items: center;
     width: max-content;
     will-change: transform;
-    animation: mw-ticker-scroll 45s linear infinite;
+    animation: mw-ticker-scroll var(--mw-ticker-duration, 120s) linear infinite;
 }
 
 .mw-ticker-viewport:hover .mw-ticker-track {
