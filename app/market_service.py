@@ -4885,6 +4885,8 @@ _WATCH_GLOBAL_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, def
 
 _WATCH_GLOBAL_CACHE_TTL = 60
 
+_WATCH_UNIFIED_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=32, default_ttl=300)
+
 _WATCH_DELAY_NOTE = "Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk)."
 
 _WATCH_INDEX_CANDIDATES: List[tuple[str, str, List[str]]] = [
@@ -5178,6 +5180,81 @@ def _market_watch_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
     )
     if payload is None:
         payload = {"sections": {}, "source": "yahoo_finance_chart", "as_of": datetime.now(timezone.utc).isoformat()}
+    return _with_market_cache_metadata(
+        payload,
+        cache_status=cache_status,
+        stale=stale,
+        refresh_pending=refresh_pending,
+    )
+
+def _market_watch_unified_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
+    def build() -> Dict[str, Any]:
+        fx_payload = _market_fx_payload(force_refresh=force_refresh)
+        commodities_payload = _market_commodities_payload(force_refresh=force_refresh)
+        global_indices_payload = _market_watch_global_payload(force_refresh=force_refresh)
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _watch_index(entry: tuple[str, str, List[str]]) -> Dict[str, Any]:
+            symbol, label, yahoo_candidates = entry
+            return _watch_index_item(
+                symbol=symbol,
+                label=label,
+                yahoo_candidates=yahoo_candidates,
+                fallback_currency="TRY",
+            )
+
+        try:
+            with ThreadPoolExecutor(max_workers=min(4, len(_WATCH_BIST_INDEX_CANDIDATES))) as pool:
+                bist_indices = list(pool.map(_watch_index, _WATCH_BIST_INDEX_CANDIDATES))
+        except Exception:
+            bist_indices = [_watch_index(entry) for entry in _WATCH_BIST_INDEX_CANDIDATES]
+
+        seen_symbols: set[str] = set()
+        unified_indices: List[Dict[str, Any]] = []
+        for item in bist_indices + list(global_indices_payload.get("items") or []):
+            sym = str(item.get("symbol") or "").strip().upper()
+            if sym and sym not in seen_symbols:
+                seen_symbols.add(sym)
+                unified_indices.append(item)
+
+        fx_items = list(fx_payload.get("items") or [])
+        commodity_items = list(commodities_payload.get("items") or [])
+        unified_as_of = datetime.now(timezone.utc).isoformat()
+
+        return {
+            "indices": unified_indices,
+            "fx": fx_items,
+            "commodities": commodity_items,
+            "sections": {
+                "indices": unified_indices,
+                "fx": fx_items,
+                "commodities": commodity_items,
+            },
+            "source": "yahoo_finance_chart",
+            "delay_note": _WATCH_DELAY_NOTE,
+            "as_of": unified_as_of,
+        }
+
+    payload, cache_status, stale, refresh_pending = _shared_swr_payload(
+        cache_key="api:market:watch:unified:v1",
+        factory=build,
+        fresh_ttl_seconds=_effective_macro_fresh_ttl(),
+        stale_ttl_seconds=_MARKET_SWR_STALE_TTL_SECONDS,
+        local_cache=_WATCH_UNIFIED_CACHE,
+        local_key="payload",
+        force_revalidate=force_refresh,
+    )
+    if payload is None:
+        payload = {
+            "indices": [],
+            "fx": [],
+            "commodities": [],
+            "sections": {"indices": [], "fx": [], "commodities": []},
+            "source": "yahoo_finance_chart",
+            "delay_note": _WATCH_DELAY_NOTE,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
     return _with_market_cache_metadata(
         payload,
         cache_status=cache_status,

@@ -7,6 +7,7 @@ from app.etag import conditional_json_response
 from app.market_service import *
 from app.kap_api_service import *
 from app.kap_service import *
+from app.market_broadcaster import get_market_broadcaster
 
 router = APIRouter()
 
@@ -189,62 +190,10 @@ async def market_stream(
     index: str = Query("XUTUM"),
     once: bool = Query(False),
 ) -> StreamingResponse:
-    normalized_index = _normalize_stock_index(index)
-
-    async def event_generator():
-        prev_snapshot: Dict[str, tuple[Any, ...]] = {}
-        prev_benchmarks_snapshot: Dict[str, tuple[Any, ...]] = {}
-        last_rows: Optional[List[Dict[str, Any]]] = None
-        last_heartbeat = time.monotonic()
-        tick = 0
-        while True:
-            if not once and await request.is_disconnected():
-                break
-            market_open = _is_bist_market_open()
-            try:
-                payload = await asyncio.to_thread(_market_stocks_payload, index_name=normalized_index)
-                rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
-                if rows is last_rows:
-                    changed = []
-                else:
-                    changed, prev_snapshot = _compute_market_stocks_delta(prev_snapshot, rows)
-                    last_rows = rows
-
-                benchmarks = payload.get("benchmarks") if isinstance(payload.get("benchmarks"), dict) else {}
-                benchmarks_snapshot = {
-                    k: (v.get("price"), v.get("change"), v.get("change_pct"), v.get("as_of"))
-                    for k, v in benchmarks.items()
-                    if isinstance(v, dict)
-                }
-                benchmarks_changed = benchmarks_snapshot != prev_benchmarks_snapshot
-                if benchmarks_changed:
-                    prev_benchmarks_snapshot = benchmarks_snapshot
-
-                if changed or benchmarks_changed or tick == 0:
-                    data = {
-                        "index": normalized_index,
-                        "as_of": payload.get("as_of") or datetime.now(timezone.utc).isoformat(),
-                        "market_open": market_open,
-                        "count": len(changed),
-                        "rows": changed,
-                        "benchmarks": benchmarks,
-                    }
-                    yield f"event: stocks_delta\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-                    last_heartbeat = time.monotonic()
-            except Exception as exc:
-                LOGGER.debug("market stream tick failed: %s", exc)
-            tick += 1
-            if once:
-                break
-            now_mono = time.monotonic()
-            if now_mono - last_heartbeat >= 15.0:
-                yield ": heartbeat\n\n"
-                last_heartbeat = now_mono
-            sleep_seconds = 3.0 if market_open else 30.0
-            await asyncio.sleep(sleep_seconds)
+    broadcaster = get_market_broadcaster()
 
     return StreamingResponse(
-        event_generator(),
+        broadcaster.subscribe(index=index, once=once, request=request),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -334,5 +283,9 @@ def market_watch(refresh: bool = Query(False)) -> Dict[str, Any]:
 @router.get("/market/watch/global")
 def market_watch_global(refresh: bool = Query(False)) -> Dict[str, Any]:
     return _market_watch_global_payload(force_refresh=refresh)
+
+@router.get("/market/watch/unified")
+def market_watch_unified(refresh: bool = Query(False)) -> Dict[str, Any]:
+    return _market_watch_unified_payload(force_refresh=refresh)
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -23,6 +23,7 @@ EXPECTED_METHOD_PATHS = {
     ("GET", "/market/fx"),
     ("GET", "/market/watch"),
     ("GET", "/market/watch/global"),
+    ("GET", "/market/watch/unified"),
     ("GET", "/funds"),
     ("GET", "/funds/search"),
     ("GET", "/funds/categories"),
