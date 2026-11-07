@@ -37,18 +37,6 @@ interface StockDetailPageProps {
 
 type TabType = StockTab;
 
-type StockPriceData = {
-    ok: boolean;
-    symbol: string;
-    price: number | null;
-    change: number | null;
-    change_pct: number | null;
-    currency: string;
-    market_state: string;
-    as_of?: string | null;
-    error?: string;
-};
-
 const STOCK_DETAIL_TABS: Array<{ key: StockTab; label: string; icon: typeof Info }> = [
     { key: 'overview', label: 'Genel Bakış', icon: Info },
     { key: 'financials', label: 'Finansal Tablolar', icon: FileText },
@@ -698,7 +686,6 @@ export default function StockDetailPage({
     const [historyLoading, setHistoryLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [navCollapsed, setNavCollapsed] = useState(false);
-    const [priceData, setPriceData] = useState<StockPriceData | null>(null);
     const [marketCard, setMarketCard] = useState<MarketStockCardItem | null>(null);
     const watchlist = useWatchlist();
     const normalizedTicker = ticker.trim().toUpperCase();
@@ -795,26 +782,6 @@ export default function StockDetailPage({
     }, [ticker]);
 
     useEffect(() => {
-        let cancelled = false;
-        setPriceData(null);
-        apiClient.kapPrice(ticker)
-            .then((response) => {
-                if (!cancelled) {
-                    setPriceData(response as StockPriceData);
-                }
-            })
-            .catch(() => {
-                if (!cancelled) {
-                    setPriceData(null);
-                }
-            });
-
-        return () => {
-            cancelled = true;
-        };
-    }, [ticker]);
-
-    useEffect(() => {
         const controller = new AbortController();
         setMarketCard(null);
         apiClient.marketStockCards({ symbols: [normalizedTicker], signal: controller.signal })
@@ -859,10 +826,11 @@ export default function StockDetailPage({
     };
 
     const valuation = snapshot?.valuation;
-    const displayPrice = priceData?.ok && priceData.price != null ? priceData.price : valuation?.price;
-    const displayCurrency = priceData?.currency || valuation?.price_currency;
-    const displayAsOf = priceData?.as_of || valuation?.price_as_of;
-    const displayChangePct = priceData?.ok ? priceData.change_pct : null;
+    const displayPrice = marketCard?.price != null ? marketCard.price : valuation?.price;
+    const displayCurrency = marketCard?.currency || valuation?.price_currency || 'TRY';
+    const displayAsOf = marketCard?.as_of || valuation?.price_as_of;
+    const displayChangePct = marketCard?.change_pct ?? null;
+    const displayMarketCap = marketCard?.market_cap ?? valuation?.market_cap;
     const displayFk = marketCard ? marketCard.fk : valuation?.fk;
     const displayPdDd = marketCard ? marketCard.pd_dd : valuation?.pd_dd;
     const selectedTabLabel = STOCK_DETAIL_TABS.find((tab) => tab.key === selectedTab)?.label;
@@ -963,7 +931,7 @@ export default function StockDetailPage({
                         </div>
 
                         <div className="stock-market-stats">
-                            <div><span>Piyasa Değeri</span><strong>{formatCompactCurrency(valuation?.market_cap)}</strong></div>
+                            <div><span>Piyasa Değeri</span><strong>{formatCompactCurrency(displayMarketCap)}</strong></div>
                             <div><span>F/K</span><strong>{formatRatio(displayFk)}</strong></div>
                             <div><span>PD/DD</span><strong>{formatRatio(displayPdDd)}</strong></div>
                             <div><span>Son Dönem</span><strong>{snapshot?.latest_quarter || '-'}</strong></div>
