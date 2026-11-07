@@ -426,3 +426,14 @@
         font-size: 2.5rem;
     }
 }
+
+@media (max-width: 760px) {
+    .hero-search {
+        min-height: var(--touch-target, 44px);
+        height: auto;
+    }
+
+    .hero-search input {
+        font-size: 1rem;
+    }
+}

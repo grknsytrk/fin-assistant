@@ -1,4 +1,5 @@
 import { useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
+import { useMobileChartLayout } from '../../hooks/useMobileChartLayout';
 import type { SeriesPoint } from '../../utils/chartBuilders';
 import './Charts.css';
 
@@ -10,7 +11,6 @@ type TooltipState = {
     average?: string;
 };
 
-const MAX_VISIBLE_X_LABELS = 8;
 const TOOLTIP_HALF_WIDTH = 112;
 const TOOLTIP_TOP_MARGIN = 100;
 
@@ -52,16 +52,17 @@ function formatYAxisTick(value: number, series: SeriesPoint[]): string {
     return `${formatted}${scale}${unit}`;
 }
 
-function shouldShowXAxisLabel(index: number, total: number): boolean {
-    if (total <= 10) {
-        return true;
+function shouldShowXAxisLabel(index: number, total: number, isMobile = false): boolean {
+    if (isMobile) {
+        if (total <= 4) return true;
+        const step = Math.ceil(total / 3);
+        if (index === total - 1) return true;
+        if (total - 1 - index < Math.ceil(step / 2)) return false;
+        return index === 0 || index % step === 0;
     }
-    if (index === 0 || index === total - 1) {
-        return true;
-    }
-    const visibleLabels = total > 16 ? 6 : MAX_VISIBLE_X_LABELS;
-    const interval = Math.max(2, Math.ceil((total - 1) / (visibleLabels - 1)));
-    return index % interval === 0;
+    if (total <= 6) return true;
+    const step = total <= 10 ? 2 : total <= 16 ? 3 : 4;
+    return index === 0 || index === total - 1 || index % step === 0;
 }
 
 export function BarChartCard({
@@ -85,6 +86,7 @@ export function BarChartCard({
 }) {
     const cardRef = useRef<HTMLDivElement | null>(null);
     const [tooltip, setTooltip] = useState<TooltipState | null>(null);
+    const isMobileChart = useMobileChartLayout();
 
     if (!series.length) {
         return null;
@@ -230,7 +232,7 @@ export function BarChartCard({
                                 className={`${point.value < 0 ? 'kap-bar-negative' : 'kap-bar-positive'} ${isFocus ? 'kap-bar-highlighted' : ''} ${isFaded ? 'kap-bar-faded' : ''}`}
                                 onMouseEnter={(event) => onHover(event, point, idx)}
                             />
-                            {shouldShowXAxisLabel(idx, series.length) && (
+                            {shouldShowXAxisLabel(idx, series.length, isMobileChart) && (
                                 <text x={x + barWidth / 2} y={height - 16} textAnchor="middle" className="kap-x-label">
                                     {point.label}
                                 </text>
@@ -279,6 +281,7 @@ export function LineChartCard({
 }) {
     const cardRef = useRef<HTMLDivElement | null>(null);
     const [tooltip, setTooltip] = useState<TooltipState | null>(null);
+    const isMobileChart = useMobileChartLayout();
 
     if (!series.length) {
         return null;
@@ -476,7 +479,7 @@ export function LineChartCard({
                                 className={`kap-line-point ${isFocus ? 'kap-point-highlighted' : ''} ${isFaded ? 'kap-point-faded' : ''}`}
                                 onMouseEnter={(event) => onHover(event, point, idx)}
                             />
-                            {shouldShowXAxisLabel(idx, series.length) && (
+                            {shouldShowXAxisLabel(idx, series.length, isMobileChart) && (
                                 <text x={point.x} y={height - 16} textAnchor="middle" className="kap-x-label">
                                     {point.label}
                                 </text>

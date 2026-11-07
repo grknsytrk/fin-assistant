@@ -9,6 +9,7 @@ import {
     _resolveMetricYtdValue,
     _resolveMetricYtdDisplay,
 } from '../utils/formatters';
+import './kap-shared.css';
 import './KapPage.css';
 
 /* ── Yahoo Finance Price Ticker ── */

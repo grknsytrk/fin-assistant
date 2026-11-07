@@ -6582,7 +6582,17 @@ export default function FundsPage({
                                 {loading ? (
                                     <FundsListLoader />
                                 ) : error ? (
-                                    <div className="funds-state funds-state-error">{error}</div>
+                                    <div className="funds-state funds-state-error">
+                                        <span>{error}</span>
+                                        <button
+                                            type="button"
+                                            className="funds-retry-btn"
+                                            onClick={() => void refreshSnapshot()}
+                                            disabled={refreshing}
+                                        >
+                                            {refreshing ? 'Yenileniyor…' : 'Tekrar Dene'}
+                                        </button>
+                                    </div>
                                 ) : filteredFunds.length === 0 ? (
                                     <div className="funds-state">
                                         Fon bulunamadı.

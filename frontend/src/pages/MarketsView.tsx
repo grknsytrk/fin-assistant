@@ -796,18 +796,18 @@ function MobileMarketOverview({
                         <div>
                             <strong>XU100</strong>
                             <span>BIST 100</span>
-                            <small>{formatUpdateTime(index?.as_of)}</small>
+                            <small>{index ? formatUpdateTime(index.as_of) : 'Güncelleniyor…'}</small>
                         </div>
                     </div>
                     <div className="mobile-market-index-quote">
-                        <span>G</span>
+                        <span title="Günlük">Günlük</span>
                         <strong>{formatIndexPrice(index?.price ?? null)}</strong>
                         <b className={getTableChangeClass(index?.change_pct ?? null)}>
                             {formatTablePct(index?.change_pct ?? null)}
                         </b>
                     </div>
                 </div>
-                <div className={`mobile-market-index-chart ${getTableChangeClass(index?.change_pct ?? null)}`} aria-hidden="true">
+                <div className={`mobile-market-index-chart ${getTableChangeClass(index?.change_pct ?? null)}${!sparkline && !index ? ' is-loading' : ''}`} aria-hidden="true">
                     {sparkline ? (
                         <svg viewBox="0 0 220 52" preserveAspectRatio="none">
                             <path d={sparkline} />
@@ -867,7 +867,7 @@ function MobileMarketOverview({
                                             <small>{formatUpdateTime(asOf)}</small>
                                         </span>
                                         <span className="mobile-market-watchlist-price">
-                                            <small>G</small>
+                                            <small title="Günlük">Günlük</small>
                                             {formatIndexPrice(price)}
                                         </span>
                                         <span className={`mobile-market-watchlist-chart ${getTableChangeClass(changePct)}`} aria-hidden="true">
@@ -2992,7 +2992,7 @@ export default function MarketsView({
     const collapsedMenuCount = (navCollapsed ? 1 : 0) + (railCollapsed ? 1 : 0);
     const [activeSection, setActiveSection] = useState<MarketSection>(routeSection);
     const [isMobileViewport, setIsMobileViewport] = useState(() => (
-        typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
+        typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches
     ));
     const [mobileMarketPanelOpen, setMobileMarketPanelOpen] = useState(false);
     const [mobileWatchlistSearchOpen, setMobileWatchlistSearchOpen] = useState(false);
@@ -3101,7 +3101,7 @@ export default function MarketsView({
     }, [stockCards]);
 
     useEffect(() => {
-        const mediaQuery = window.matchMedia('(max-width: 767px)');
+        const mediaQuery = window.matchMedia('(max-width: 760px)');
         const updateViewport = () => setIsMobileViewport(mediaQuery.matches);
         updateViewport();
         mediaQuery.addEventListener('change', updateViewport);
@@ -3879,7 +3879,11 @@ export default function MarketsView({
     const netImpactPct = netPointEffect != null && indexImpactLevel && indexImpactLevel > 0 ? (netPointEffect / indexImpactLevel) * 100 : null;
     const pageTitle =
         activeSection === 'indices'
-            ? 'Borsa İstanbul Endeksleri'
+            ? selectedIndex
+                ? indexDetail
+                    ? `${indexDetail.symbol} — ${indexDetail.label}`
+                    : `${selectedIndex} Endeks Detayı`
+                : 'Borsa İstanbul Endeksleri'
             : activeSection === 'stocks'
               ? 'BIST Hisseleri'
               : 'Piyasa Görünümü';
@@ -4880,7 +4884,9 @@ export default function MarketsView({
                             <div>
                                 <h2>Endeksler</h2>
                                 <span className="panel-kicker">
-                                    {filteredIndices.length || indices?.rows.length || 0} endeks
+                                    {indicesLoading && !indices
+                                        ? 'Yükleniyor…'
+                                        : `${filteredIndices.length || indices?.rows.length || 0} endeks`}
                                 </span>
                             </div>
                             <div className="stocks-panel-actions">

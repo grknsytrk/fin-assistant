@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { KapQuarter } from '../../../api/types';
 import { _periodLabel, intSafe } from '../../../utils/formatters';
+import '../../kap-shared.css';
 
 export default function StockKAP({ ticker, quarters }: { ticker: string, quarters: KapQuarter[] }) {
     // Gelecekte buraya KAP haber akışını ekleyebiliriz.
@@ -26,16 +27,14 @@ export default function StockKAP({ ticker, quarters }: { ticker: string, quarter
                 {sortedQuarters.length > 0 ? (
                     <div className="coverage-list">
                         {sortedQuarters.map((q, i) => (
-                            <div key={i} className="coverage-item" style={{ cursor: 'default' }}>
-                                <span className="ci-company" style={{ width: '80px' }}>
+                            <div key={i} className="coverage-item coverage-item-report">
+                                <span className="ci-company">
                                     {_periodLabel(intSafe(q.year), intSafe(q.period), q.quarter)}
                                 </span>
-                                <div className="ci-bar-container" style={{ background: 'transparent' }}>
-                                    <span style={{ fontSize: '0.9rem', color: 'var(--text-primary)' }}>
-                                        Finansal Rapor Yayınlandı
-                                    </span>
+                                <div className="ci-report-label">
+                                    Finansal Rapor Yayınlandı
                                 </div>
-                                <span className="ci-value" style={{ minWidth: '120px' }}>
+                                <span className="ci-value">
                                     {q.publish_date ? new Date(q.publish_date).toLocaleDateString('tr-TR') : '-'}
                                 </span>
                             </div>

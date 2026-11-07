@@ -1086,7 +1086,7 @@
     }
 }
 
-@media (max-width: 767px) {
+@media (max-width: 760px) {
     .mwr-shell,
     .mwr-shell.mwr-shell-collapsed {
         --mwr-panel-width: 100vw;
@@ -1109,6 +1109,18 @@
 
     .mwr-tab {
         flex: 0 0 auto;
+        min-height: var(--touch-target, 44px);
+    }
+
+    .mwr-sort-button {
+        position: relative;
+        min-height: 40px;
+    }
+
+    .mwr-sort-button::after {
+        content: '';
+        position: absolute;
+        inset: -6px -4px;
     }
 
     .mwr-dock {
@@ -1148,21 +1160,21 @@
 
     .mwr-mobile-toggle {
         position: fixed;
-        top: 50%;
-        right: 0;
-        z-index: 55;
+        top: auto;
+        bottom: calc(66px + 12px + env(safe-area-inset-bottom));
+        right: 12px;
+        z-index: 130;
         display: grid;
         place-items: center;
-        width: 30px;
-        height: 58px;
+        width: 44px;
+        height: 44px;
         padding: 0;
         border: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
-        border-right: 0;
-        border-radius: 12px 0 0 12px;
+        border-radius: 12px;
         background: color-mix(in srgb, var(--surface-color) 96%, black);
         color: var(--text-primary);
-        box-shadow: -5px 8px 20px rgba(0, 0, 0, 0.22);
-        transform: translateY(-50%);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+        transform: none;
     }
 
     .mwr-mobile-toggle:active {

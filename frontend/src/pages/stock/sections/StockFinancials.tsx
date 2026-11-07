@@ -3,6 +3,7 @@ import {
     _resolveMetricValue, _resolveMetricDisplay, intSafe, _periodLabel,
     FLOW_METRICS, INVERSE_METRICS, KAP_FINANCIAL_TABLE_KEYS
 } from '../../../utils/formatters';
+import '../../kap-shared.css';
 
 export default function StockFinancials({
     quarters,
@@ -20,7 +21,8 @@ export default function StockFinancials({
             <div className="kap-table-container panel">
                 <h3>Çeyrek Bazlı Karşılaştırma</h3>
                 {analysisNote ? <p className="kap-analysis-note">{analysisNote}</p> : null}
-                <div className="kap-table-scroll">
+                <div className="kap-table-scroll-hint" aria-hidden="true">← Kaydırarak tüm dönemleri görüntüleyin →</div>
+                <div className="kap-table-scroll" role="region" aria-label="Çeyrek bazlı finansal tablo" tabIndex={0}>
                     <table className="kap-table">
                         <thead>
                             <tr>

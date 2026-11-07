@@ -274,99 +274,6 @@
     }
 }
 
-/* Quarterly Table */
-.kap-table-container {
-    margin-bottom: 2rem;
-}
-
-.kap-table-container h3 {
-    margin: 0 0 0.75rem;
-    font-size: 1rem;
-}
-
-.kap-table-scroll {
-    overflow-x: auto;
-    border: 1px solid var(--surface-border);
-    border-radius: var(--border-radius);
-    background: var(--surface-color);
-}
-
-.kap-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.88rem;
-}
-
-.kap-table th,
-.kap-table td {
-    padding: 0.65rem 0.9rem;
-    text-align: right;
-    border-bottom: 1px solid var(--surface-border);
-    white-space: nowrap;
-}
-
-.kap-table th {
-    background: var(--bg-color);
-    color: var(--text-secondary);
-    font-weight: 600;
-    font-size: 0.82rem;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    position: sticky;
-    top: 0;
-}
-
-.kap-table th:first-child,
-.kap-table td:first-child {
-    text-align: left;
-    position: sticky;
-    left: 0;
-    background: var(--surface-color);
-    z-index: 1;
-}
-
-.kap-row-label {
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.kap-table td.negative {
-    color: var(--danger-color);
-}
-
-/* Heatmap cell coloring */
-.kap-table td.heatmap-up {
-    background: rgba(34, 197, 94, 0.08);
-}
-
-.kap-table td.heatmap-down {
-    background: rgba(239, 68, 68, 0.08);
-}
-
-[data-theme="light"] .kap-table td.heatmap-up {
-    background: rgba(34, 197, 94, 0.12);
-}
-
-[data-theme="light"] .kap-table td.heatmap-down {
-    background: rgba(239, 68, 68, 0.12);
-}
-
-.kap-table tbody tr:hover {
-    background: rgba(37, 99, 235, 0.08);
-}
-
-.kap-table tbody tr:hover td:first-child {
-    background: rgba(37, 99, 235, 0.08);
-}
-
-[data-theme='dark'] .kap-table tbody tr:hover {
-    background: rgba(148, 163, 184, 0.12);
-}
-
-[data-theme='dark'] .kap-table tbody tr:hover td:first-child {
-    background: rgba(148, 163, 184, 0.12);
-}
-
 /* Charts */
 .kap-charts-grid {
     display: grid;
@@ -635,12 +542,6 @@
     color: var(--text-secondary, #888);
 }
 
-.kap-empty {
-    text-align: center;
-    padding: 2rem;
-    color: var(--text-secondary, #888);
-    font-size: 0.92rem;
-}
 
 .kap-search-warn {
     background: rgba(245, 158, 11, 0.12);

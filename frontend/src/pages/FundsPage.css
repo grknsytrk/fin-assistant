@@ -434,7 +434,33 @@
 }
 
 .funds-state-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
     color: var(--danger-color);
+}
+
+.funds-retry-btn {
+    min-height: 38px;
+    padding: 0.45rem 0.9rem;
+    border: 1px solid color-mix(in srgb, var(--danger-color) 48%, var(--surface-border));
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--danger-color) 12%, var(--surface-color));
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.funds-retry-btn:hover:not(:disabled) {
+    border-color: var(--danger-color);
+}
+
+.funds-retry-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
 }
 
 .fund-detail {
@@ -3794,13 +3820,46 @@
     }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 760px) {
     .mn-layout {
         --mn-sidebar-width: 0px;
         padding-left: 0;
         padding-bottom: calc(66px + env(safe-area-inset-bottom));
     }
 
+    .funds-page {
+        padding-bottom: 1.4rem;
+    }
+
+    .funds-search {
+        min-height: var(--touch-target, 44px);
+        height: var(--touch-target, 44px);
+    }
+
+    .funds-search input {
+        height: 100%;
+        min-height: var(--touch-target, 44px);
+    }
+
+    .funds-filter select,
+    .funds-sort-order,
+    .fund-detail-actions a,
+    .fund-back-button,
+    .fund-tabs :is(a, button),
+    .fund-holdings-filters button,
+    .fund-holdings-change-filters button,
+    .fund-history-tabs button {
+        min-height: var(--touch-target, 44px);
+        height: var(--touch-target, 44px);
+    }
+
+    .funds-th-sort,
+    .fund-holdings-th-sort {
+        min-height: 40px;
+    }
+}
+
+@media (max-width: 640px) {
     .funds-page {
         padding: 0.85rem 0.75rem 1.4rem;
     }
@@ -3848,7 +3907,25 @@
         padding: 0 0.85rem;
     }
 
-    .funds-header-stats,
+    .funds-header-stats {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        min-width: 0;
+        gap: 0.45rem;
+    }
+
+    .funds-header-stats > div {
+        padding: 0.5rem 0.6rem;
+        min-width: 0;
+    }
+
+    .funds-header-stats span {
+        font-size: 0.6rem;
+    }
+
+    .funds-header-stats strong {
+        font-size: 0.85rem;
+    }
+
     .fund-metrics-grid,
     .fund-overview-metrics-row,
     .fund-category-ranking-grid,

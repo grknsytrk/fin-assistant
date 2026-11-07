@@ -191,7 +191,12 @@ export default function MarketsNavigation({
                 >
                     <div className="mn-item-main">
                         <BriefcaseBusiness size={18} className="mn-icon" />
-                        {!collapsed && <span className="mn-text">Model Portföy</span>}
+                        {!collapsed && (
+                            <span className="mn-text">
+                                <span className="mn-text-long">Model Portföy</span>
+                                <span className="mn-text-short">Portföy</span>
+                            </span>
+                        )}
                     </div>
                 </NavLink>
                 <button

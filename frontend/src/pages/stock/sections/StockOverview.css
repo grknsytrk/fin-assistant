@@ -1542,6 +1542,11 @@
 }
 
 @media (max-width: 640px) {
+    .overview-charts-quarter-btn {
+        min-height: var(--touch-target, 44px);
+        padding: 0.45rem 0.75rem;
+    }
+
     .overview-ai-loading-svg-desktop {
         display: none;
     }

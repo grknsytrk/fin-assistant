@@ -2689,13 +2689,32 @@
     }
 }
 
-@media (max-width: 780px) {
+@media (max-width: 760px) {
     .model-portfolio-page {
-        padding: 1rem 0.9rem 2rem;
+        padding: 0.75rem 0.7rem 1.4rem;
+    }
+
+    .mp-header {
+        margin-bottom: 0.75rem;
+    }
+
+    .mp-range-btn {
+        min-height: var(--touch-target, 44px);
+        padding: 0 0.75rem;
+    }
+
+    .mp-thesis-btn,
+    .mp-icon-btn,
+    .mp-founder-trigger,
+    .mp-tab-btn {
+        min-height: var(--touch-target, 44px);
     }
 
     .mp-kpi-strip {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.55rem 0.65rem;
+        padding: 0.7rem 0.75rem;
+        margin-bottom: 0.85rem;
     }
 
     .mp-kpi-item:nth-child(3n + 1) {
@@ -2772,7 +2791,7 @@
 }
 
 /* Mobile: tables become stacked position cards instead of a wide scroll surface. */
-@media (max-width: 780px) {
+@media (max-width: 760px) {
     .mp-table-scroll-hint {
         display: none;
     }
@@ -2797,14 +2816,16 @@
     .mp-table tbody {
         display: flex;
         flex-direction: column;
-        gap: 0.65rem;
-        padding: 0.75rem;
+        gap: 0.45rem;
+        padding: 0.5rem;
     }
 
     .mp-table tr,
     .mp-table .mp-row {
-        display: block;
-        padding: 0.8rem 0.85rem;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.25rem 0.5rem;
+        padding: 0.55rem 0.65rem;
         border: 1px solid var(--surface-border);
         border-radius: 8px;
         background: var(--surface-color);
@@ -2819,20 +2840,20 @@
     .mp-closed-table td {
         display: block;
         width: auto;
-        padding: 0.42rem 0 !important;
+        padding: 0.2rem 0 !important;
         border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 70%, transparent);
-        text-align: right;
+        text-align: left;
     }
 
     .mp-table td::before {
         content: attr(data-label);
         display: block;
-        margin-bottom: 0.14rem;
+        margin-bottom: 0.08rem;
         color: var(--text-muted);
         font-family: var(--font-sans);
-        font-size: 0.7rem;
+        font-size: 0.64rem;
         font-weight: 500;
-        line-height: 1.3;
+        line-height: 1.2;
         text-align: left;
     }
 
@@ -2842,7 +2863,8 @@
         position: static;
         z-index: auto;
         display: block;
-        padding: 0 0 0.62rem !important;
+        grid-column: 1 / -1;
+        padding: 0 0 0.42rem !important;
         border-bottom: 1px solid var(--surface-border);
         background: transparent !important;
         box-shadow: none;
@@ -2859,20 +2881,22 @@
 
     .mp-table td.mp-col-target {
         display: block;
+        grid-column: 1 / -1;
         text-align: left;
     }
 
     .mp-table td.mp-col-target::before {
         display: block;
         max-width: none;
-        margin-bottom: 0.38rem;
+        margin-bottom: 0.22rem;
     }
 
     .mp-table td.act {
         display: flex;
+        grid-column: 1 / -1;
         width: 100%;
         justify-content: flex-end;
-        padding: 0.55rem 0 0 !important;
+        padding: 0.35rem 0 0 !important;
         border-bottom: 0;
     }
 
@@ -2929,7 +2953,7 @@
 }
 
 /* Mobile: measurement summary sits below the chart instead of covering it. */
-@media (max-width: 780px) {
+@media (max-width: 760px) {
     .mp-chart-stage {
         display: flex;
         flex-direction: column;

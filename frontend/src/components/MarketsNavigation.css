@@ -733,9 +733,9 @@
         overflow: hidden;
         max-width: 100%;
         color: #94a3b8;
-        font-size: 0.6rem;
+        font-size: 0.68rem;
         font-weight: 700;
-        line-height: 1.1;
+        line-height: 1.15;
         text-align: center;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -748,5 +748,19 @@
     .mn-menu-item.active .mn-icon,
     .mn-menu-item.active .mn-text {
         color: #e2e8f0;
+    }
+}
+
+.mn-text-short {
+    display: none;
+}
+
+@media (max-width: 440px) {
+    .mn-text-long {
+        display: none;
+    }
+
+    .mn-text-short {
+        display: inline;
     }
 }

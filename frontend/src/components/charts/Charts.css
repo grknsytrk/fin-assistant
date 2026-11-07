@@ -366,6 +366,13 @@
     }
 }
 
+@media (max-width: 480px) {
+    .kap-y-label,
+    .kap-x-label {
+        font-size: 16px;
+    }
+}
+
 @media (min-width: 901px) and (max-width: 1180px) {
     .kap-charts-grid-3 {
         grid-template-columns: repeat(2, minmax(0, 1fr));

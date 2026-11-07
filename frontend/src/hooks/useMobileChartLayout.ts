@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-const MOBILE_CHART_QUERY = '(max-width: 640px)';
+const MOBILE_CHART_QUERY = '(max-width: 760px)';
 
 export function useMobileChartLayout(): boolean {
     const [isMobile, setIsMobile] = useState(() => (
