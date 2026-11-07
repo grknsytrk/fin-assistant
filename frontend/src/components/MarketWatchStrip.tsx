@@ -1,15 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MarketIndexCode, MarketWatchItem } from '../api/types';
 import SymbolLogo, { type SymbolLogoKind } from './SymbolLogo';
-import { useMarketWatchData } from '../hooks/useMarketWatchData';
+import { useMarketStore } from '../stores/marketStore';
 import './MarketWatchStrip.css';
 
 const PRIMARY_SYMBOLS = ['XUTUM', 'XU100', 'XU030', 'NASDAQ', 'SP500', 'DOW', 'USD/TRY', 'EUR/TRY'] as const;
 const COMMODITY_SYMBOLS = ['BRENT', 'ALTIN', 'GUMUS', 'DOGALGAZ'] as const;
-// These indices are owned by /market/watch/global. /market/watch returns the
-// same symbols from a separate cache, so prefer the global snapshot to keep
-// the ticker and the Piyasalar rail numerically identical.
-const GLOBAL_INDEX_SYMBOLS = new Set(['SP500', 'NASDAQ', 'DOW']);
 const DEFAULT_DELAY_NOTE = 'Yahoo Finance sağlayıcı gecikmeli veri (ortalama ~15dk).';
 
 function isIndexSymbol(raw: string): raw is MarketIndexCode {
@@ -201,87 +197,27 @@ interface MarketWatchStripProps {
 
 export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: MarketWatchStripProps) {
     const {
-        watch: payload,
-        global: globalPayload,
-        commodities,
+        indices,
         fx,
-        watchLoading,
-        globalLoading,
-        commoditiesLoading,
-        fxLoading,
-        watchError,
-        globalError,
-        commoditiesError,
-        fxError,
+        commodities,
+        itemsBySymbol,
+        as_of,
+        delay_note: storeDelayNote,
+        loading,
+        error: storeError,
         refresh,
-    } = useMarketWatchData({ watch: true, global: true, commodities: true, fx: true });
-    const loading = watchLoading || globalLoading || commoditiesLoading || fxLoading;
+    } = useMarketStore();
+
     const hasData = Boolean(
-        payload?.sections ||
-        (globalPayload?.items && globalPayload.items.length > 0) ||
-        (commodities && commodities.length > 0) ||
-        (fx && fx.length > 0),
+        indices.length > 0 ||
+        fx.length > 0 ||
+        commodities.length > 0 ||
+        itemsBySymbol.size > 0,
     );
     // The strip is usable when any feed is alive. Only report an error when
     // every feed failed and there is nothing to render.
-    const error = hasData ? null : watchError || globalError || commoditiesError || fxError;
-
-    const lookup = useMemo(() => {
-        const map = new Map<string, MarketWatchItem>();
-
-        // 1. Seed with global indices from marketWatchGlobal (SP500, NASDAQ, DOW, DAX, etc.)
-        if (globalPayload?.items) {
-            for (const item of globalPayload.items) {
-                const key = normalizeSymbol(item.symbol);
-                if (!key) continue;
-                map.set(key, item);
-                map.set(key.replace('/', ''), item);
-            }
-        }
-
-        // 2. Merge items from market watch sections
-        if (payload?.sections) {
-            const merged = [
-                ...(payload.sections.indices || []),
-                ...(payload.sections.fx || []),
-                ...(payload.sections.commodities || []),
-            ];
-
-            for (const item of merged) {
-                const key = normalizeSymbol(item.symbol);
-                if (!key) continue;
-                const existing = map.get(key);
-                // World indices have a single owner: /market/watch/global.
-                // /market/watch also returns NASDAQ/SP500/DOW, but from a
-                // different cache window; letting it win here is what made
-                // the ticker disagree with the Piyasalar rail.
-                if (GLOBAL_INDEX_SYMBOLS.has(key) && existing) continue;
-                if (!existing || existing.price == null || item.price != null) {
-                    map.set(key, item);
-                    map.set(key.replace('/', ''), item);
-                }
-            }
-        }
-
-        // 3. Live commodity/FX quotes win over the copies embedded in
-        // /market/watch. Those copies sit behind an extra 3 second cache, which
-        // is exactly what made the ticker trail the Piyasalar rail. Both
-        // widgets now read these shared arrays, so they always agree.
-        for (const items of [commodities, fx]) {
-            if (!items) continue;
-            for (const item of items) {
-                const key = normalizeSymbol(item.symbol);
-                if (!key) continue;
-                const existing = map.get(key);
-                if (!existing || existing.price == null || item.price != null) {
-                    map.set(key, item as unknown as MarketWatchItem);
-                    map.set(key.replace('/', ''), item as unknown as MarketWatchItem);
-                }
-            }
-        }
-
-        return map;
-    }, [commodities, fx, payload, globalPayload]);
+    const error = hasData ? null : storeError;
+    const lookup = itemsBySymbol;
 
     const primaryItems = useMemo(
         () => PRIMARY_SYMBOLS.map((symbol) => lookup.get(normalizeSymbol(symbol)) || placeholderItem(symbol)),
@@ -330,28 +266,24 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
         };
 
         // 1. Indices (BIST & Global)
-        const indices: MarketWatchItem[] = [];
+        const orderedIndices: MarketWatchItem[] = [];
         const seenIndices = new Set<string>();
-        if (payload?.sections?.indices) {
-            for (const item of payload.sections.indices) {
-                const norm = normalizeSymbol(item.symbol);
-                if (norm && !seenIndices.has(norm)) {
-                    seenIndices.add(norm);
-                    // Route every symbol through the merged lookup so
-                    // NASDAQ/SP500/DOW keep the global snapshot.
-                    const lookupItem = lookup.get(norm);
-                    indices.push(lookupItem || item);
-                }
+        for (const item of indices) {
+            const norm = normalizeSymbol(item.symbol);
+            if (norm && !seenIndices.has(norm)) {
+                seenIndices.add(norm);
+                const lookupItem = lookup.get(norm);
+                orderedIndices.push(lookupItem || item);
             }
         }
         for (const sym of ['XU100', 'XU030', 'XUTUM', 'NASDAQ', 'SP500', 'DOW']) {
             const norm = normalizeSymbol(sym);
             if (!seenIndices.has(norm)) {
                 seenIndices.add(norm);
-                indices.push(lookup.get(norm) || placeholderItem(sym));
+                orderedIndices.push(lookup.get(norm) || placeholderItem(sym));
             }
         }
-        indices.sort((a, b) => {
+        orderedIndices.sort((a, b) => {
             const pA = indexOrder[normalizeSymbol(a.symbol)] ?? 99;
             const pB = indexOrder[normalizeSymbol(b.symbol)] ?? 99;
             return pA - pB;
@@ -360,15 +292,13 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
         // 2. Forex / Currencies
         const fxItems: MarketWatchItem[] = [];
         const seenFx = new Set<string>();
-        if (payload?.sections?.fx) {
-            for (const item of payload.sections.fx) {
-                const norm = normalizeSymbol(item.symbol);
-                if (norm && !seenFx.has(norm)) {
-                    seenFx.add(norm);
-                    seenFx.add(norm.replace('/', ''));
-                    const lookupItem = lookup.get(norm) || lookup.get(norm.replace('/', ''));
-                    fxItems.push(lookupItem || item);
-                }
+        for (const item of fx) {
+            const norm = normalizeSymbol(item.symbol);
+            if (norm && !seenFx.has(norm)) {
+                seenFx.add(norm);
+                seenFx.add(norm.replace('/', ''));
+                const lookupItem = lookup.get(norm) || lookup.get(norm.replace('/', ''));
+                fxItems.push(lookupItem || item);
             }
         }
         for (const sym of ['USD/TRY', 'EUR/TRY', 'GBP/TRY', 'EUR/USD']) {
@@ -388,14 +318,12 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
         // 3. Commodities
         const commodityList: MarketWatchItem[] = [];
         const seenCommodities = new Set<string>();
-        if (payload?.sections?.commodities) {
-            for (const item of payload.sections.commodities) {
-                const norm = normalizeSymbol(item.symbol);
-                if (norm && !seenCommodities.has(norm)) {
-                    seenCommodities.add(norm);
-                    const lookupItem = lookup.get(norm);
-                    commodityList.push(lookupItem || item);
-                }
+        for (const item of commodities) {
+            const norm = normalizeSymbol(item.symbol);
+            if (norm && !seenCommodities.has(norm)) {
+                seenCommodities.add(norm);
+                const lookupItem = lookup.get(norm);
+                commodityList.push(lookupItem || item);
             }
         }
         for (const sym of ['ALTIN', 'GUMUS', 'BRENT', 'DOGALGAZ']) {
@@ -411,8 +339,8 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
             return pA - pB;
         });
 
-        return [...indices, ...fxItems, ...commodityList];
-    }, [payload, lookup]);
+        return [...orderedIndices, ...fxItems, ...commodityList];
+    }, [indices, fx, commodities, lookup]);
 
     const marqueeItems = useMemo(() => {
         if (orderedItems.length === 0) return [];
@@ -422,7 +350,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
     }, [orderedItems]);
 
     const isInitialLoading = !hasData && !error;
-    const delayNote = payload?.delay_note || globalPayload?.delay_note || DEFAULT_DELAY_NOTE;
+    const delayNote = storeDelayNote || DEFAULT_DELAY_NOTE;
 
     if (variant === 'compact') {
         return (
@@ -519,7 +447,7 @@ export default function MarketWatchStrip({ variant = 'panel', onSelectIndex }: M
                     <p>XUTUM, XU100, XU030, döviz ve emtia özetleri 3 saniyede bir otomatik güncellenir.</p>
                 </div>
                 <div className="mw-meta">
-                    <span className="mw-updated">Son güncelleme: {formatClock(latestAsOf(payload?.as_of, globalPayload?.as_of, commodities?.[0]?.as_of, fx?.[0]?.as_of))}</span>
+                    <span className="mw-updated">Son güncelleme: {formatClock(as_of)}</span>
                     <button
                         type="button"
                         className="mw-refresh"

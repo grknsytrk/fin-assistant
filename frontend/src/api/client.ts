@@ -28,6 +28,7 @@ import type {
     MarketStockCardChartResponse,
     MarketWatchResponse,
     MarketWatchGlobalResponse,
+    UnifiedMarketWatchResponse,
     MarketCommoditiesResponse,
     MarketIndexResponse,
     MarketFxResponse,
@@ -768,6 +769,15 @@ export const apiClient = {
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
         return fetchApi<MarketWatchResponse>(query ? `/market/watch?${query}` : '/market/watch');
+    },
+    marketWatchUnified: (options?: { refresh?: boolean; signal?: AbortSignal }) => {
+        const params = new URLSearchParams();
+        if (options?.refresh) params.append('refresh', 'true');
+        const query = params.toString();
+        return fetchApi<UnifiedMarketWatchResponse>(
+            query ? `/market/watch/unified?${query}` : '/market/watch/unified',
+            { signal: options?.signal },
+        );
     },
     marketWatchGlobal: (options?: { refresh?: boolean }) => {
         const params = new URLSearchParams();

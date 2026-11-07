@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { apiClient } from '../api/client';
+import { useMarketStore, _resetMarketStoreForTesting } from '../stores/marketStore';
 import type {
     CommodityQuote,
     FxQuote,
@@ -279,6 +280,7 @@ function unregisterChannels(channels: ChannelKey[]): void {
 }
 
 export function _resetMarketWatchStoreForTesting(): void {
+    _resetMarketStoreForTesting();
     snapshot = initialSnapshot;
     listeners.clear();
     for (const key of Object.keys(channelRuntime) as ChannelKey[]) {
@@ -310,16 +312,11 @@ export interface MarketWatchDataResult extends MarketWatchDataSnapshot {
 }
 
 /**
- * Single shared data source for the market ticker and the Piyasalar rail.
- *
- * Both widgets previously polled /market/watch/global (and, for commodities and
- * FX, separate endpoints with their own timers), which doubled the request
- * volume and let the same instrument show two different prices at the same
- * time: /market/watch wraps its commodity/FX sections in an extra 3 second
- * cache, so the ticker lagged a few seconds behind the rail. Requests, caches
- * and polling now live here, so every consumer renders the exact same snapshot.
+ * Shared data source for market watch data, adapted to read from centralized marketStore
+ * while maintaining backward compatibility for legacy channel-based callers.
  */
-export function useMarketWatchData(options: UseMarketWatchDataOptions): MarketWatchDataResult {
+export function useMarketWatchData(options: UseMarketWatchDataOptions = {}): MarketWatchDataResult {
+    const store = useMarketStore();
     const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
     const enabled = options.enabled !== false;
     const wantsWatch = enabled && Boolean(options.watch);
@@ -343,11 +340,42 @@ export function useMarketWatchData(options: UseMarketWatchDataOptions): MarketWa
     }, [wantsCommodities, wantsFx, wantsGlobal, wantsWatch]);
 
     const refresh = useCallback(() => {
+        store.refresh();
         if (wantsWatch) void fetchWatch({ force: true });
         if (wantsGlobal) void fetchGlobal({ force: true });
         if (wantsCommodities) void fetchCommodities({ force: true });
         if (wantsFx) void fetchFx({ force: true });
-    }, [wantsCommodities, wantsFx, wantsGlobal, wantsWatch]);
+    }, [store, wantsCommodities, wantsFx, wantsGlobal, wantsWatch]);
 
-    return { ...state, refresh };
+    const hasStoreData = Boolean(store.as_of);
+
+    return {
+        watch: state.watch || (hasStoreData ? {
+            sections: {
+                indices: store.indices,
+                fx: store.fx,
+                commodities: store.commodities,
+            },
+            source: store.source,
+            delay_note: store.delay_note,
+            as_of: store.as_of || '',
+        } : null),
+        global: state.global || (hasStoreData ? {
+            items: store.indices,
+            source: store.source,
+            delay_note: store.delay_note,
+            as_of: store.as_of || '',
+        } : null),
+        commodities: state.commodities ?? (store.commodities.length > 0 ? (store.commodities as unknown as CommodityQuote[]) : null),
+        fx: state.fx ?? (store.fx.length > 0 ? (store.fx as unknown as FxQuote[]) : null),
+        watchLoading: state.watchLoading || (!state.watch && store.loading),
+        globalLoading: state.globalLoading || (!state.global && store.loading),
+        commoditiesLoading: state.commoditiesLoading || (!state.commodities && store.loading),
+        fxLoading: state.fxLoading || (!state.fx && store.loading),
+        watchError: state.watchError || (!state.watch ? store.error : null),
+        globalError: state.globalError || (!state.global ? store.error : null),
+        commoditiesError: state.commoditiesError || (!state.commodities ? store.error : null),
+        fxError: state.fxError || (!state.fx ? store.error : null),
+        refresh,
+    };
 }

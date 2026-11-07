@@ -858,6 +858,19 @@ export interface MarketWatchGlobalResponse {
   as_of: string;
 }
 
+export interface UnifiedMarketWatchResponse {
+  indices: MarketWatchItem[];
+  fx: MarketWatchItem[];
+  commodities: MarketWatchItem[];
+  sections?: MarketWatchSections;
+  source: string;
+  delay_note: string;
+  as_of: string;
+  cache_status?: string;
+  stale?: boolean;
+  refresh_pending?: boolean;
+}
+
 export interface FxQuote {
   symbol: string;
   label: string;

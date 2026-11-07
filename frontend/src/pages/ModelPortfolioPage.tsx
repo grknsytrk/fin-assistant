@@ -38,7 +38,7 @@ import MarketsNavigation, { type MarketsNavigationSection } from '../components/
 import MarketWatchRail from '../components/MarketWatchRail';
 import SymbolLogo from '../components/SymbolLogo';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
-import { useMarketWatchData } from '../hooks/useMarketWatchData';
+import { useMarketStore } from '../stores/marketStore';
 import {
     DEFAULT_FUND_TAB,
     DEFAULT_MARKET_INDEX,
@@ -466,8 +466,8 @@ export default function ModelPortfolioPage() {
 
     // Live benchmark pipeline (M3)
     const [liveXu100, setLiveXu100] = useState<number | null>(null);
-    const { watch } = useMarketWatchData({ watch: true, enabled: true });
-    const watchXu100 = watch?.sections?.indices?.find((i) => i.symbol === 'XU100')?.price ?? null;
+    const { itemsBySymbol } = useMarketStore();
+    const watchXu100 = itemsBySymbol.get('XU100')?.price ?? null;
     const effectiveXu100 = liveXu100 ?? watchXu100 ?? portfolioData?.current_xu100 ?? null;
 
     // Performance chart state (loaded separately for instant table first-paint)

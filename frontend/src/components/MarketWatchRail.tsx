@@ -16,7 +16,7 @@ import type {
     MarketWatchItem,
 } from '../api/types';
 import { normalizeWatchlistSymbol, useWatchlist, watchlistItemKey, type WatchlistItem } from '../hooks/useWatchlist';
-import { useMarketWatchData } from '../hooks/useMarketWatchData';
+import { useMarketStore } from '../stores/marketStore';
 import { cacheWatchlistFund, fetchWatchlistFund, getCachedWatchlistFund, searchWatchlistFunds } from '../utils/watchlistData';
 import MarketFlowPanel from './MarketFlowPanel';
 import { getAdaptiveRefreshMs, isBistTradingHours } from '../utils/marketHours';
@@ -321,21 +321,12 @@ export default function MarketWatchRail({
         direction: null,
     });
     const {
-        global: globalPayload,
-        globalLoading,
-        globalError,
-        commodities: commodityRows,
-        commoditiesLoading,
-        commoditiesError,
-        fx: fxRows,
-        fxLoading,
-        fxError,
-    } = useMarketWatchData({
-        global: activeTab === 'global',
-        commodities: activeTab === 'commodities',
-        fx: activeTab === 'fx',
-        enabled: !panelCollapsed && activeTool === 'markets',
-    });
+        indices: globalIndices,
+        commodities: storeCommodities,
+        fx: storeFx,
+        loading: storeLoading,
+        error: storeError,
+    } = useMarketStore();
     const [xutumPayload, setXutumPayload] = useState<MarketStocksResponse | null>(() => railCache.stocks.xutum ?? null);
     const [xu100Payload, setXu100Payload] = useState<MarketStocksResponse | null>(() => railCache.stocks.xu100 ?? null);
     const [xu030Payload, setXu030Payload] = useState<MarketStocksResponse | null>(() => railCache.stocks.xu030 ?? null);
@@ -823,9 +814,9 @@ export default function MarketWatchRail({
 
     const rawRows = useMemo<RailRow[]>(() => {
         let mapped: RailRow[] = [];
-        if (activeTab === 'global') mapped = (globalPayload?.items || []).map((item) => fromWatchItem(item, 'index'));
-        else if (activeTab === 'commodities') mapped = (commodityRows || []).map((item) => fromWatchItem(item, 'commodity'));
-        else if (activeTab === 'fx') mapped = (fxRows || []).map((item) => fromWatchItem(item, 'fx'));
+        if (activeTab === 'global') mapped = globalIndices.map((item) => fromWatchItem(item, 'index'));
+        else if (activeTab === 'commodities') mapped = storeCommodities.map((item) => fromWatchItem(item, 'commodity'));
+        else if (activeTab === 'fx') mapped = storeFx.map((item) => fromWatchItem(item, 'fx'));
         else if (activeTab === 'xutum') mapped = (xutumPayload?.rows || xu100Rows).map(fromStockRow);
         else if (activeTab === 'xu030') mapped = (xu030Payload?.rows || []).map(fromStockRow);
         else mapped = (xu100Payload?.rows || []).map(fromStockRow);
@@ -850,7 +841,7 @@ export default function MarketWatchRail({
             });
         }
         return mapped;
-    }, [activeTab, commodityRows, fxRows, globalPayload?.items, xutumPayload?.rows, xu030Payload?.rows, xu100Payload?.rows, xu100Rows]);
+    }, [activeTab, globalIndices, storeCommodities, storeFx, xutumPayload?.rows, xu030Payload?.rows, xu100Payload?.rows, xu100Rows]);
 
     const rows = useMemo<RailRow[]>(() => {
         const sorted = [...rawRows];
@@ -859,22 +850,20 @@ export default function MarketWatchRail({
         return sorted;
     }, [rawRows, sort.direction, sort.key]);
 
-    const tabLoading =
+    const isMacroTab = activeTab === 'global' || activeTab === 'commodities' || activeTab === 'fx';
+    const macroHasData =
         activeTab === 'global'
-            ? globalLoading || (!globalPayload && !globalError)
+            ? globalIndices.length > 0
             : activeTab === 'commodities'
-              ? commoditiesLoading || (!commodityRows && !commoditiesError)
-              : activeTab === 'fx'
-                ? fxLoading || (!fxRows && !fxError)
-                : Boolean(loading[activeTab]);
-    const tabError =
-        activeTab === 'global'
-            ? globalError
-            : activeTab === 'commodities'
-              ? commoditiesError
-              : activeTab === 'fx'
-                ? fxError
-                : errors[activeTab];
+              ? storeCommodities.length > 0
+              : storeFx.length > 0;
+
+    const tabLoading = isMacroTab
+        ? storeLoading && !macroHasData
+        : Boolean(loading[activeTab]);
+    const tabError = isMacroTab
+        ? (!macroHasData ? storeError : null)
+        : errors[activeTab];
     return (
         <div className={`mwr-shell${panelCollapsed ? ' mwr-shell-collapsed' : ''}`}>
             <aside
