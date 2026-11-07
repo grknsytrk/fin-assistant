@@ -33,6 +33,7 @@ from app.api_runtime import (
     ensure_reference_data_schema,
     ensure_refresh_lease_schema,
     hydrate_json_cache,
+    shutdown_market_swr_executor,
     sync_financial_snapshots_from_kap_cache,
     sync_reference_data_from_caches,
 )
@@ -45,9 +46,15 @@ from app import kap_financials as _kap_financials
 from app import market_service as _market_service
 from app import model_portfolio_api_service as _model_portfolio_api_service
 from app import kap_service as _kap_service
-from app.fund_api_service import _start_fund_price_collector, _stop_fund_price_collector
+from app.fund_api_service import (
+    _start_fund_price_collector,
+    _stop_fund_price_collector,
+    shutdown_fund_executors,
+)
 from app.fund_service import close_shared_http_clients
 from app.kap_api_service import shutdown_background_refresh_executor
+from app.kap_statement_refresh import shutdown_kap_statement_executor
+from app.market_broadcaster import get_market_broadcaster
 
 
 # The Gradio Space entrypoint imports this callable directly and invokes it
@@ -101,7 +108,14 @@ async def _lifespan(_app: FastAPI):
         yield
     finally:
         await _stop_fund_price_collector()
+        try:
+            await get_market_broadcaster().stop()
+        except Exception:
+            pass
         shutdown_background_refresh_executor()
+        shutdown_market_swr_executor()
+        shutdown_fund_executors()
+        shutdown_kap_statement_executor()
         close_postgres_pool()
         close_shared_http_clients()
 

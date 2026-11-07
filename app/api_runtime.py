@@ -145,6 +145,13 @@ _MARKET_SWR_REVALIDATION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="market-cache-revalidate",
 )
 
+def shutdown_market_swr_executor() -> None:
+    """Terminate the market SWR revalidation thread pool."""
+    try:
+        _MARKET_SWR_REVALIDATION_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+
 def _truthy_env(name: str, default: str = "1") -> bool:
     value = os.getenv(name, default).strip().lower()
     return value not in {"0", "false", "no", "off"}

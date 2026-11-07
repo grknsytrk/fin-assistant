@@ -113,6 +113,13 @@ _KAP_STATEMENT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="kap-statement-refresh",
 )
 
+def shutdown_kap_statement_executor() -> None:
+    """Terminate the KAP financial statement refresh thread pool."""
+    try:
+        _KAP_STATEMENT_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+
 _SKIP_OUTCOME_FIELDS = {
     "missing": "skipped_missing_cache",
     "shallow": "skipped_shallow_cache",
