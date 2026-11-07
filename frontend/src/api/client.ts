@@ -47,6 +47,7 @@ import type {
     KapOverviewCommentaryResponse,
     KapOverviewModelsResponse,
 } from './types';
+import { BoundedMemoryCache } from '../utils/lruCache';
 
 const rawApiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
 const DEFAULT_API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:8000';
@@ -59,12 +60,13 @@ const SERVER_ERROR_MESSAGE = 'Islem su an tamamlanamiyor. Lutfen daha sonra tekr
 const REQUEST_TIMEOUT_MS = 15000;
 const OVERVIEW_COMMENTARY_TIMEOUT_MS = Number(import.meta.env.VITE_KAP_OVERVIEW_COMMENTARY_TIMEOUT_MS || 300000);
 const TIMEOUT_MESSAGE = 'Istek suresi asildi. Lutfen tekrar deneyin.';
+
 const FUND_HOLDINGS_MEMORY_CACHE_TTL_MS = 15_000;
-const fundHoldingsMemoryCache = new Map<string, { payload: FundHoldingsResponse; fetchedAt: number }>();
+const fundHoldingsMemoryCache = new BoundedMemoryCache<string, { payload: FundHoldingsResponse; fetchedAt: number }>(64);
 const fundHoldingsInFlight = new Map<string, Promise<FundHoldingsResponse>>();
 const fundHoldingsLiveInFlight = new Map<string, Promise<FundHoldingsLiveResponse>>();
 const MARKET_FLOW_MEMORY_CACHE_TTL_MS = 15_000;
-const marketFlowMemoryCache = new Map<string, { payload: MarketFlowResponse; fetchedAt: number }>();
+const marketFlowMemoryCache = new BoundedMemoryCache<string, { payload: MarketFlowResponse; fetchedAt: number }>(32);
 const marketFlowInFlight = new Map<string, Promise<MarketFlowResponse>>();
 const MARKET_UNIVERSE_MEMORY_CACHE_TTL_MS = 60_000;
 const marketUniverseMemoryCache = new Map<string, { payload: MarketUniverseResponse; fetchedAt: number }>();

@@ -37,6 +37,7 @@ import {
 } from '../utils/stockCardData';
 import { searchWatchlistFunds } from '../utils/watchlistData';
 import { isBistTradingHours } from '../utils/marketHours';
+import { BoundedMemoryCache } from '../utils/lruCache';
 import './MarketsView.css';
 
 type MarketSection = MarketsNavigationSection;
@@ -1003,7 +1004,7 @@ type MarketStockCardsMemoryCache = { data: MarketStockCardsResponse; fetchedAt: 
 // backend still refreshes in the background, so this is a stale-while-
 // revalidate UX cache rather than a replacement for server-side freshness.
 let marketUniverseMemoryCache: MarketUniverseMemoryCache | null = null;
-const marketStockCardsMemoryCache = new Map<string, MarketStockCardsMemoryCache>();
+const marketStockCardsMemoryCache = new BoundedMemoryCache<string, MarketStockCardsMemoryCache>(50);
 
 function stockCardsMemoryKey(symbols: string[]): string {
     return symbols.join(',');
