@@ -468,16 +468,18 @@ def upsert_financial_snapshots(processed_dir: Path, records: Iterable[Dict[str, 
     updates[updates.index("share_source = excluded.share_source")] = (
         "share_source = COALESCE(excluded.share_source, company_financial_snapshots.share_source)"
     )
-    with _connection(processed_dir) as conn:
-        conn.executemany(
-            f"""
-            INSERT INTO company_financial_snapshots ({', '.join(columns)})
-            VALUES ({placeholders})
-            ON CONFLICT(symbol) DO UPDATE SET {', '.join(updates)}
-            """,
-            [tuple(record.get(column) for column in columns) for record in normalized_records],
-        )
-        conn.commit()
+    query = f"""
+        INSERT INTO company_financial_snapshots ({', '.join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(symbol) DO UPDATE SET {', '.join(updates)}
+    """
+    params_list = [tuple(record.get(column) for column in columns) for record in normalized_records]
+    chunk_size = 100
+    for start in range(0, len(params_list), chunk_size):
+        chunk = params_list[start : start + chunk_size]
+        with _connection(processed_dir) as conn:
+            conn.executemany(query, chunk)
+            conn.commit()
     _invalidate_memory_cache(processed_dir)
     return len(normalized_records)
 

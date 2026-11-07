@@ -147,6 +147,7 @@ def _postgres_pool() -> Any:
             min_size=1,
             max_size=max_size,
             timeout=timeout,
+            check=ConnectionPool.check_connection,
             kwargs={
                 "row_factory": _require_psycopg()[1],
                 # Safe for both Supavisor session mode and transaction mode.
