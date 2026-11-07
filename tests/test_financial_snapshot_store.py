@@ -147,3 +147,168 @@ def test_env_float_parses_snapshot_cache_ttl_override(monkeypatch) -> None:
 
     monkeypatch.setenv("RAGFIN_TEST_TTL", "")
     assert store._env_float("RAGFIN_TEST_TTL", 1800.0) == 1800.0
+
+
+def test_single_worker_invalidation_increments_version_and_clears_cache(tmp_path: Path) -> None:
+    from app.cache import get_cache
+
+    store.reset_financial_snapshot_store_for_tests()
+    processed_dir = tmp_path / "processed"
+    store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Enerji"}})
+
+    # Initial read populates local memory cache
+    data = store.get_financial_snapshots_map(processed_dir, ["AAA"])
+    assert data["AAA"]["sector"] == "Enerji"
+    key = store._cache_key(processed_dir)
+    assert key in store._SNAPSHOT_MEMORY_CACHE
+
+    v1 = store.get_snapshot_cache_version()
+    assert v1
+    assert get_cache().get(store._SNAPSHOT_VERSION_KEY) == v1
+
+    # Invalidate
+    bumped_v = store._invalidate_memory_cache(processed_dir)
+    assert bumped_v
+    assert len(store._SNAPSHOT_MEMORY_CACHE) == 0
+
+    v2 = store.get_snapshot_cache_version()
+    assert v2 != v1
+    assert v2 == bumped_v
+    assert get_cache().get(store._SNAPSHOT_VERSION_KEY) == v2
+    store.reset_financial_snapshot_store_for_tests()
+
+
+def test_local_memory_cache_invalidated_when_redis_version_changes(tmp_path: Path) -> None:
+    from app.cache import get_cache
+
+    store.reset_financial_snapshot_store_for_tests()
+    processed_dir = tmp_path / "processed"
+    store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Enerji"}})
+
+    # Read into local cache
+    initial = store.get_financial_snapshots_map(processed_dir, ["AAA"])
+    assert initial["AAA"]["sector"] == "Enerji"
+
+    # Directly mutate DB without invalidating local cache
+    with store._connection(processed_dir) as conn:
+        conn.execute("UPDATE company_financial_snapshots SET sector = 'Teknoloji' WHERE symbol = 'AAA'")
+        conn.commit()
+
+    # Still returns stale cache because version hasn't changed and TTL not expired
+    cached = store.get_financial_snapshots_map(processed_dir, ["AAA"])
+    assert cached["AAA"]["sector"] == "Enerji"
+
+    # Simulate another worker bumping the shared Redis version
+    new_version = "worker-bump-9999"
+    get_cache().set(store._SNAPSHOT_VERSION_KEY, new_version, ttl_seconds=604800)
+
+    # Next read detects version mismatch and reloads from DB
+    refreshed = store.get_financial_snapshots_map(processed_dir, ["AAA"])
+    assert refreshed["AAA"]["sector"] == "Teknoloji"
+
+    # Memory cache now records the new version
+    key = store._cache_key(processed_dir)
+    assert store._SNAPSHOT_MEMORY_CACHE[key][1] == new_version
+    store.reset_financial_snapshot_store_for_tests()
+
+
+def test_version_bump_invalidates_cache_across_simulated_multi_worker_instances(tmp_path: Path, monkeypatch) -> None:
+    store.reset_financial_snapshot_store_for_tests()
+    processed_dir = tmp_path / "processed"
+    store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Enerji"}})
+
+    # Worker 1 and Worker 2 each have independent in-memory caches
+    worker1_cache: dict = {}
+    worker2_cache: dict = {}
+
+    # Worker 1 reads
+    monkeypatch.setattr(store, "_SNAPSHOT_MEMORY_CACHE", worker1_cache)
+    data1 = store.get_financial_snapshots_map(processed_dir, ["AAA"])
+    assert data1["AAA"]["sector"] == "Enerji"
+    assert len(worker1_cache) == 1
+
+    # Worker 2 reads
+    monkeypatch.setattr(store, "_SNAPSHOT_MEMORY_CACHE", worker2_cache)
+    data2 = store.load_financial_snapshots_map(processed_dir, ["AAA"])
+    assert data2["AAA"]["sector"] == "Enerji"
+    assert len(worker2_cache) == 1
+
+    # Worker 1 updates data and invalidates
+    monkeypatch.setattr(store, "_SNAPSHOT_MEMORY_CACHE", worker1_cache)
+    store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Savunma"}})
+    assert len(worker1_cache) == 0  # Worker 1 cleared its own cache
+
+    # Worker 2 still has its old in-memory cache with sector 'Enerji'
+    assert len(worker2_cache) == 1
+    key = store._cache_key(processed_dir)
+    assert worker2_cache[key][2]["AAA"]["sector"] == "Enerji"
+
+    # Worker 2 reads again using load_financial_snapshots_map / read_financial_snapshots_map
+    monkeypatch.setattr(store, "_SNAPSHOT_MEMORY_CACHE", worker2_cache)
+    fresh_worker2 = store.read_financial_snapshots_map(processed_dir, ["AAA"])
+
+    # Worker 2 automatically detected version mismatch and loaded the updated sector from DB
+    assert fresh_worker2["AAA"]["sector"] == "Savunma"
+    assert worker2_cache[key][2]["AAA"]["sector"] == "Savunma"
+    store.reset_financial_snapshot_store_for_tests()
+
+
+def test_missing_or_expired_version_key_triggers_db_reload(tmp_path: Path) -> None:
+    from app.cache import get_cache
+
+    store.reset_financial_snapshot_store_for_tests()
+    processed_dir = tmp_path / "processed"
+    store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Havacilik"}})
+
+    # Read into memory
+    first = store.get_financial_snapshots_map(processed_dir, ["AAA"])
+    assert first["AAA"]["sector"] == "Havacilik"
+
+    # Directly modify DB
+    with store._connection(processed_dir) as conn:
+        conn.execute("UPDATE company_financial_snapshots SET sector = 'Ulasim' WHERE symbol = 'AAA'")
+        conn.commit()
+
+    # Expire/delete version key from cache backend
+    get_cache().delete(store._SNAPSHOT_VERSION_KEY)
+
+    # Read again: detects missing version, generates new version, and reloads from DB
+    second = store.read_financial_snapshots_map(processed_dir, ["AAA"])
+    assert second["AAA"]["sector"] == "Ulasim"
+    new_v = get_cache().get(store._SNAPSHOT_VERSION_KEY)
+    assert new_v is not None
+    store.reset_financial_snapshot_store_for_tests()
+
+
+def test_graceful_fallback_when_cache_backend_raises(tmp_path: Path, monkeypatch) -> None:
+    store.reset_financial_snapshot_store_for_tests()
+    processed_dir = tmp_path / "processed"
+    store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Finans"}})
+
+    # Simulate broken / unreachable cache backend
+    def failing_get_cache():
+        raise RuntimeError("Redis connection failed")
+
+    import app.cache
+    monkeypatch.setattr(app.cache, "get_cache", failing_get_cache)
+
+    # Read should not raise, fallback to in-memory version tracking
+    data = store.get_financial_snapshots_map(processed_dir, ["AAA"])
+    assert data["AAA"]["sector"] == "Finans"
+
+    # Cached in memory
+    assert "AAA" in store.load_financial_snapshots_map(processed_dir)
+
+    # Invalidate should also not raise
+    bumped = store._invalidate_memory_cache(processed_dir)
+    assert bumped
+    assert len(store._SNAPSHOT_MEMORY_CACHE) == 0
+
+    store.reset_financial_snapshot_store_for_tests()
+
+
+def test_aliases_match_target_functions() -> None:
+    assert store.load_financial_snapshots_map is store.get_financial_snapshots_map
+    assert store.read_financial_snapshots_map is store.get_financial_snapshots_map
+    assert store.invalidate_financial_snapshots_cache is store._invalidate_memory_cache
+    assert store._get_snapshot_cache_version is store.get_snapshot_cache_version

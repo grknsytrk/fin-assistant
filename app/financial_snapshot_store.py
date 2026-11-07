@@ -9,6 +9,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,11 +24,15 @@ FINANCIAL_SNAPSHOT_DB_FILENAME = os.getenv(
     "reference_data.sqlite3",
 )
 
+_SNAPSHOT_VERSION_KEY = "api:financial-snapshots:version"
+_SNAPSHOT_VERSION_TTL_SECONDS = 7 * 86400  # 7 days
+_LOCAL_SNAPSHOT_VERSION: str = ""
+
 _SCHEMA_LOCK = threading.Lock()
 _POSTGRES_SCHEMA_READY = False
 _LOCAL_SCHEMA_READY: set[str] = set()
 _CACHE_LOCK = threading.RLock()
-_SNAPSHOT_MEMORY_CACHE: Dict[str, tuple[float, Dict[str, Dict[str, Any]]]] = {}
+_SNAPSHOT_MEMORY_CACHE: Dict[str, tuple[float, str, Dict[str, Dict[str, Any]]]] = {}
 
 
 def _env_float(name: str, default: float) -> float:
@@ -98,10 +103,59 @@ def _cache_key(processed_dir: Path) -> str:
     return str(financial_snapshot_db_path(processed_dir).resolve())
 
 
-def _invalidate_memory_cache(processed_dir: Path) -> None:
-    key = _cache_key(processed_dir)
+def get_snapshot_cache_version() -> str:
+    """Retrieve shared snapshot version from Redis/cache backend, or generate/fallback."""
+    backend_available = True
+    try:
+        from app.cache import get_cache
+        backend = get_cache()
+        ver = backend.get(_SNAPSHOT_VERSION_KEY)
+        if ver is not None and str(ver).strip():
+            return str(ver).strip()
+    except Exception as exc:
+        LOGGER.debug("cache backend get error for snapshot version: %s", exc)
+        backend_available = False
+
+    global _LOCAL_SNAPSHOT_VERSION
+    new_version = uuid.uuid4().hex
+    if backend_available:
+        try:
+            from app.cache import get_cache
+            backend = get_cache()
+            if backend.set_if_absent(_SNAPSHOT_VERSION_KEY, new_version, ttl_seconds=_SNAPSHOT_VERSION_TTL_SECONDS):
+                _LOCAL_SNAPSHOT_VERSION = new_version
+                return new_version
+            val = backend.get(_SNAPSHOT_VERSION_KEY)
+            if val is not None and str(val).strip():
+                _LOCAL_SNAPSHOT_VERSION = str(val).strip()
+                return _LOCAL_SNAPSHOT_VERSION
+        except Exception as exc:
+            LOGGER.debug("cache backend set error for snapshot version: %s", exc)
+
+    if not _LOCAL_SNAPSHOT_VERSION:
+        _LOCAL_SNAPSHOT_VERSION = new_version
+    return _LOCAL_SNAPSHOT_VERSION
+
+
+_get_snapshot_cache_version = get_snapshot_cache_version
+
+
+def _invalidate_memory_cache(processed_dir: Optional[Path] = None) -> str:
+    global _LOCAL_SNAPSHOT_VERSION
+    new_version = uuid.uuid4().hex
+    _LOCAL_SNAPSHOT_VERSION = new_version
+    try:
+        from app.cache import get_cache
+        backend = get_cache()
+        backend.set(_SNAPSHOT_VERSION_KEY, new_version, ttl_seconds=_SNAPSHOT_VERSION_TTL_SECONDS)
+    except Exception as exc:
+        LOGGER.debug("could not set snapshot version in cache backend: %s", exc)
     with _CACHE_LOCK:
-        _SNAPSHOT_MEMORY_CACHE.pop(key, None)
+        _SNAPSHOT_MEMORY_CACHE.clear()
+    return new_version
+
+
+invalidate_financial_snapshots_cache = _invalidate_memory_cache
 
 
 def _sqlite_connection(processed_dir: Path) -> sqlite3.Connection:
@@ -518,10 +572,15 @@ def get_financial_snapshots_map(
 
     key = _cache_key(processed_dir)
     now = time.monotonic()
+    current_version = get_snapshot_cache_version()
     with _CACHE_LOCK:
         cached = _SNAPSHOT_MEMORY_CACHE.get(key)
-        if cached and cached[0] > now:
-            full_map = cached[1]
+        if cached and len(cached) == 3:
+            expires_at, cached_version, cached_map = cached
+            if expires_at > now and cached_version == current_version:
+                full_map = cached_map
+            else:
+                full_map = None
         else:
             full_map = None
 
@@ -538,6 +597,7 @@ def get_financial_snapshots_map(
         with _CACHE_LOCK:
             _SNAPSHOT_MEMORY_CACHE[key] = (
                 time.monotonic() + _SNAPSHOT_MEMORY_CACHE_TTL_SECONDS,
+                current_version,
                 full_map,
             )
 
@@ -548,6 +608,10 @@ def get_financial_snapshots_map(
         for symbol in requested
         if symbol in full_map
     }
+
+
+load_financial_snapshots_map = get_financial_snapshots_map
+read_financial_snapshots_map = get_financial_snapshots_map
 
 
 def _provider_record(symbol: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -645,8 +709,14 @@ def upsert_provider_fundamentals_bulk(
 def reset_financial_snapshot_store_for_tests() -> None:
     """Reset process-local schema and row caches used by isolated tests."""
 
-    global _POSTGRES_SCHEMA_READY
+    global _POSTGRES_SCHEMA_READY, _LOCAL_SNAPSHOT_VERSION
     _POSTGRES_SCHEMA_READY = False
     _LOCAL_SCHEMA_READY.clear()
+    _LOCAL_SNAPSHOT_VERSION = ""
     with _CACHE_LOCK:
         _SNAPSHOT_MEMORY_CACHE.clear()
+    try:
+        from app.cache import get_cache
+        get_cache().delete(_SNAPSHOT_VERSION_KEY)
+    except Exception:
+        pass
