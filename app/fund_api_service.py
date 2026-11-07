@@ -5,10 +5,12 @@ import hashlib
 import json
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from typing import Callable, Dict, Optional
 
 from app.api_runtime import *
+from app.cache import get_cache as _get_cache
 from app.market_service import *
 from app.etag import orjson_dumps
 
@@ -78,6 +80,18 @@ _FUND_ALLOCATION_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=max(1, int(os.getenv("RAGFIN_FUND_ALLOCATION_HISTORY_WORKERS", "1"))),
     thread_name_prefix="fund-allocation-history-refresh",
 )
+
+def shutdown_fund_executors() -> None:
+    """Terminate all fund-related background thread pools."""
+    for executor in (
+        _FUND_REFRESH_EXECUTOR,
+        _FUND_HISTORY_EXECUTOR,
+        _FUND_ALLOCATION_HISTORY_EXECUTOR,
+    ):
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
 _FUND_REFRESH_STATE_LOCK = threading.Lock()
 
@@ -712,22 +726,82 @@ def _maybe_schedule_fund_snapshot_refresh(payload: Dict[str, Any]) -> Dict[str, 
     out["refresh_job"] = _public_fund_refresh_job(job)
     return out
 
-async def _fund_price_collector_loop() -> None:
+async def _execute_fund_price_collector_cycle(
+    *,
+    interval: Optional[float] = None,
+    lease_ttl: int = 600,
+    heartbeat_interval: float = 30.0,
+) -> bool:
+    """Execute a single cycle of the fund price collector protected by distributed Redis lease."""
     from app.fund_service import collect_daily_fund_prices
 
+    backend = _get_cache()
+    if interval is None:
+        interval = float(os.getenv("RAGFIN_FUND_COLLECTOR_INTERVAL_SECONDS", str(24 * 60 * 60)))
+    lease_key = "lock:fund-price-collector"
+    cooldown_key = "lock:fund-price-collector:cooldown"
+    worker_id = f"worker:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+    # 1. Check if cycle was already completed within current interval cooldown
+    if backend.get(cooldown_key) is not None:
+        LOGGER.debug("Fund price collector cooldown active; skipping cycle")
+        return False
+
+    # 2. Attempt to acquire distributed execution lock
+    if not backend.set_if_absent(lease_key, worker_id, ttl_seconds=lease_ttl):
+        LOGGER.debug("Fund price collector lease held by another worker; skipping cycle")
+        return False
+
+    # 3. Background lease heartbeat renewal
+    heartbeat_stop = asyncio.Event()
+
+    async def _lease_heartbeat() -> None:
+        while not heartbeat_stop.is_set():
+            try:
+                await asyncio.sleep(heartbeat_interval)
+                if heartbeat_stop.is_set():
+                    break
+                backend.renew_if_owner(lease_key, worker_id, ttl_seconds=lease_ttl)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
+    heartbeat_task = asyncio.create_task(_lease_heartbeat())
+    try:
+        LOGGER.info("Acquired fund price collector lease (%s); executing collect_daily_fund_prices", worker_id)
+        result = await asyncio.to_thread(collect_daily_fund_prices, CONFIG.paths.processed_dir)
+        LOGGER.info(
+            "fund price collector completed: valid=%s skipped=%s source=%s",
+            result.get("valid_point_count") if isinstance(result, dict) else None,
+            result.get("skipped_point_count") if isinstance(result, dict) else None,
+            result.get("source") if isinstance(result, dict) else None,
+        )
+        backend.set(cooldown_key, worker_id, ttl_seconds=max(60, int(interval) - 30))
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        LOGGER.exception("fund price collector failed")
+        return False
+    finally:
+        heartbeat_stop.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        backend.release_if_owner(lease_key, worker_id)
+
+
+async def _fund_price_collector_loop() -> None:
     startup_delay = float(os.getenv("RAGFIN_FUND_COLLECTOR_STARTUP_DELAY_SECONDS", "60"))
     interval = float(os.getenv("RAGFIN_FUND_COLLECTOR_INTERVAL_SECONDS", str(24 * 60 * 60)))
     if startup_delay > 0:
         await asyncio.sleep(startup_delay)
     while True:
         try:
-            result = await asyncio.to_thread(collect_daily_fund_prices, CONFIG.paths.processed_dir)
-            LOGGER.info(
-                "fund price collector completed: valid=%s skipped=%s source=%s",
-                result.get("valid_point_count"),
-                result.get("skipped_point_count"),
-                result.get("source"),
-            )
+            await _execute_fund_price_collector_cycle(interval=interval)
         except asyncio.CancelledError:
             raise
         except Exception:
