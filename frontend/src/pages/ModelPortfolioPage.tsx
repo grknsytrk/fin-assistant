@@ -38,6 +38,7 @@ import MarketsNavigation, { type MarketsNavigationSection } from '../components/
 import MarketWatchRail from '../components/MarketWatchRail';
 import SymbolLogo from '../components/SymbolLogo';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
+import { useMarketWatchData } from '../hooks/useMarketWatchData';
 import {
     DEFAULT_FUND_TAB,
     DEFAULT_MARKET_INDEX,
@@ -463,6 +464,12 @@ export default function ModelPortfolioPage() {
     const [loading, setLoading] = useState<boolean>(() => !apiClient.getCachedModelPortfolio());
     const [error, setError] = useState<string | null>(null);
 
+    // Live benchmark pipeline (M3)
+    const [liveXu100, setLiveXu100] = useState<number | null>(null);
+    const { watch } = useMarketWatchData({ watch: true, enabled: true });
+    const watchXu100 = watch?.sections?.indices?.find((i) => i.symbol === 'XU100')?.price ?? null;
+    const effectiveXu100 = liveXu100 ?? watchXu100 ?? portfolioData?.current_xu100 ?? null;
+
     // Performance chart state (loaded separately for instant table first-paint)
     const [perfPoints, setPerfPoints] = useState<ModelPortfolioPerformancePoint[]>([]);
     const [perfLoading, setPerfLoading] = useState(false);
@@ -519,6 +526,12 @@ export default function ModelPortfolioPage() {
         let cancelled = false;
         const applyPayload = (payload: MarketStocksResponse) => {
             setLiveStockMap((prev) => mergeLiveMarketRows(prev, payload));
+            const benchmarkPrice = (payload as any)?.benchmarks?.['XU100']?.price
+                ?? (payload as any)?.benchmarks?.XU100?.price
+                ?? (payload.index === 'XU100' ? ((payload as any).index_price ?? (payload as any).price) : null);
+            if (typeof benchmarkPrice === 'number' && benchmarkPrice > 0) {
+                setLiveXu100(benchmarkPrice);
+            }
         };
         const unsubscribe = apiClient.subscribeMarketStocks((index, payload) => {
             if (index !== 'XUTUM' && index !== 'XU100') return;
@@ -574,10 +587,10 @@ export default function ModelPortfolioPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // Live-enriched active positions using `liveStockMap` from MarketWatchRail
+    // Live-enriched active positions using `liveStockMap` from MarketWatchRail and `effectiveXu100`
     const liveActivePositions = useMemo<ModelPortfolioPosition[]>(() => {
         const rawList = portfolioData?.active_positions || [];
-        const currentXu100 = portfolioData?.current_xu100 ?? null;
+        const currentXu100 = effectiveXu100;
         return rawList.map((pos) => {
             const liveRow = liveStockMap.get(pos.symbol);
             const liveQuoteIsCurrent = Boolean(
@@ -588,26 +601,36 @@ export default function ModelPortfolioPage() {
             const livePrice = liveQuoteIsCurrent ? liveRow!.price : pos.current_price;
             const liveChangePct = liveQuoteIsCurrent ? liveRow!.change_pct : pos.daily_change_pct;
             const livePriceAsOf = liveQuoteIsCurrent ? liveRow!.price_as_of : pos.price_as_of;
-            if (livePrice == null || livePrice === pos.current_price) {
-                if (liveChangePct === pos.daily_change_pct && livePriceAsOf === pos.price_as_of) return pos;
-                return { ...pos, daily_change_pct: liveChangePct, price_as_of: livePriceAsOf };
-            }
-            const retPct = pos.entry_price > 0
-                ? Number((((livePrice - pos.entry_price) / pos.entry_price) * 100).toFixed(2))
+            const effectivePrice = livePrice != null ? livePrice : pos.current_price;
+
+            const retPct = pos.entry_price > 0 && effectivePrice != null
+                ? Number((((effectivePrice - pos.entry_price) / pos.entry_price) * 100).toFixed(2))
                 : pos.return_pct;
             const xuRetPct = pos.entry_xu100 && currentXu100
                 ? Number((((currentXu100 - pos.entry_xu100) / pos.entry_xu100) * 100).toFixed(2))
                 : pos.xu100_return_pct;
             const relRetPct = compoundAlpha(retPct, xuRetPct);
-            const upsidePct = livePrice > 0
-                ? Number((((pos.target_price - livePrice) / livePrice) * 100).toFixed(2))
+            const upsidePct = effectivePrice != null && effectivePrice > 0
+                ? Number((((pos.target_price - effectivePrice) / effectivePrice) * 100).toFixed(2))
                 : pos.target_upside_pct;
-            const progressPct = computeProgress(pos.entry_price, livePrice, pos.target_price);
+            const progressPct = effectivePrice != null
+                ? computeProgress(pos.entry_price, effectivePrice, pos.target_price)
+                : pos.target_progress_pct;
             const attrPct = retPct != null ? Number(((pos.weight_pct * retPct) / 100).toFixed(2)) : 0;
+
+            const priceChanged = livePrice != null && livePrice !== pos.current_price;
+            const changePctChanged = liveChangePct !== pos.daily_change_pct;
+            const asOfChanged = livePriceAsOf !== pos.price_as_of;
+            const xuRetChanged = xuRetPct !== pos.xu100_return_pct;
+            const relRetChanged = relRetPct !== pos.relative_return_pct;
+
+            if (!priceChanged && !changePctChanged && !asOfChanged && !xuRetChanged && !relRetChanged) {
+                return pos;
+            }
 
             return {
                 ...pos,
-                current_price: livePrice,
+                current_price: effectivePrice,
                 daily_change_pct: liveChangePct,
                 price_as_of: livePriceAsOf,
                 return_pct: retPct,
@@ -615,11 +638,11 @@ export default function ModelPortfolioPage() {
                 relative_return_pct: relRetPct,
                 target_upside_pct: upsidePct,
                 target_progress_pct: progressPct,
-                target_reached: livePrice >= pos.target_price,
+                target_reached: effectivePrice != null && effectivePrice >= pos.target_price,
                 attribution_pct: attrPct,
             };
         });
-    }, [liveStockMap, portfolioData]);
+    }, [effectiveXu100, liveStockMap, portfolioData]);
 
     const liveSummary = useMemo(() => {
         const base = portfolioData?.summary;
@@ -655,7 +678,20 @@ export default function ModelPortfolioPage() {
             0,
         );
         const avgUpside = totalW > 0 ? Number((upsideSum / totalW).toFixed(2)) : base.weighted_target_upside_pct;
-        const relRet = compoundAlpha(invRet, base.xu100_return_pct);
+
+        const xu100WeightedSum = liveActivePositions.reduce(
+            (acc, r) => acc + (r.xu100_return_pct != null ? (r.weight_pct || 0) * r.xu100_return_pct : 0),
+            0,
+        );
+        const xu100WeightDenom = liveActivePositions.reduce(
+            (acc, r) => acc + (r.xu100_return_pct != null ? (r.weight_pct || 0) : 0),
+            0,
+        );
+        const liveXu100RetPct = xu100WeightDenom > 0
+            ? Number((xu100WeightedSum / xu100WeightDenom).toFixed(2))
+            : base.xu100_return_pct;
+        const effectiveXu100RetPct = liveXu100RetPct ?? base.xu100_return_pct;
+        const relRet = compoundAlpha(invRet, effectiveXu100RetPct);
 
         return {
             ...base,
@@ -663,6 +699,7 @@ export default function ModelPortfolioPage() {
             cash_weight_pct: cashW,
             portfolio_return_pct: portRet,
             invested_return_pct: invRet,
+            xu100_return_pct: effectiveXu100RetPct,
             relative_return_pct: relRet,
             weighted_target_upside_pct: avgUpside,
         };
@@ -1014,9 +1051,9 @@ export default function ModelPortfolioPage() {
                                 </button>
                             </div>
                             <div className="mp-tabs-meta">
-                                {portfolioData?.current_xu100 && (
+                                {effectiveXu100 && (
                                     <span className="mp-xu100-pill">
-                                        XU100: <b>{portfolioData.current_xu100.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}</b>
+                                        XU100: <b>{effectiveXu100.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}</b>
                                     </span>
                                 )}
                                 <div className="mp-toolbar-actions">
@@ -1473,6 +1510,7 @@ export default function ModelPortfolioPage() {
                     xu100Rows={xu100UniverseRows}
                     onSelectTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
                     onSelectFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
+                    showMobileToggle={false}
                 />
             </div>
 
@@ -1590,7 +1628,7 @@ export default function ModelPortfolioPage() {
                 <ModelPortfolioCloseModal
                     adminToken={adminToken}
                     position={closingPosition}
-                    currentXu100={portfolioData?.current_xu100 ?? null}
+                    currentXu100={effectiveXu100}
                     onClose={() => setClosingPosition(null)}
                     onClosed={(nextData) => {
                         setClosingPosition(null);
