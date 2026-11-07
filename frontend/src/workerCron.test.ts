@@ -1,12 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-vi.mock('cloudflare:workers', () => {
-    return {
-        WorkerEntrypoint: class {},
-    };
-});
-
-import { resolveScheduledRefreshPath, FAST_REFRESH_PATH, DEEP_REFRESH_PATH } from '../../worker/index';
+import { resolveScheduledRefreshPath, FAST_REFRESH_PATH, DEEP_REFRESH_PATH } from '../../worker/cron-schedule';
 
 describe('Worker Cron Collision Resolution', () => {
     it('skips 1-minute cron on 5-minute boundaries', () => {
