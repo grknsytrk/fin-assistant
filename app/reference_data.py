@@ -650,29 +650,60 @@ def sync_reference_data_from_caches(processed_dir: Path) -> Dict[str, Any]:
         return {"db_path": str(reference_data_db_path(processed_dir)), "skipped": True}
     _BOOTSTRAPPED_PROCESSED_DIRS.add(path_key)
 
-    records: List[Dict[str, Any]] = []
-    # The fund catalogue is stored as normalized rows after the snapshot-store
-    # migration, so do not depend on a monolithic JSON file here.
-    from app.fund_service import load_funds_snapshot
+    need_funds = True
+    need_stocks = True
+    if database_enabled():
+        try:
+            with _connect(processed_dir) as conn:
+                count_rows = conn.execute(
+                    "SELECT kind, COUNT(*) AS row_count FROM instruments GROUP BY kind"
+                ).fetchall()
+            counts = {
+                str(r.get("kind") if isinstance(r, dict) else r["kind"]): int(
+                    (r.get("row_count") if isinstance(r, dict) else r["row_count"]) or 0
+                )
+                for r in count_rows
+            }
+            need_funds = counts.get("fund", 0) < 100
+            need_stocks = counts.get("stock", 0) < 50
+        except Exception:
+            need_funds = True
+            need_stocks = True
 
-    funds_payload = load_funds_snapshot(processed_dir)
-    rows = funds_payload.get("rows") if isinstance(funds_payload, dict) else None
-    if isinstance(rows, list):
-        for row in rows:
-            if isinstance(row, dict):
-                record = _fund_record_from_cache_row(row)
+    if not need_funds and not need_stocks:
+        seed_manual_instruments(processed_dir)
+        return {
+            "db_path": str(reference_data_db_path(processed_dir)),
+            "upserted_count": 0,
+            "skipped": True,
+            "record_count": 0,
+        }
+
+    records: List[Dict[str, Any]] = []
+    if need_funds:
+        # The fund catalogue is stored as normalized rows after the snapshot-store
+        # migration, so do not depend on a monolithic JSON file here.
+        from app.fund_service import load_funds_snapshot
+
+        funds_payload = load_funds_snapshot(processed_dir)
+        rows = funds_payload.get("rows") if isinstance(funds_payload, dict) else None
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    record = _fund_record_from_cache_row(row)
+                    if record:
+                        records.append(record)
+
+    if need_stocks:
+        kap_dir = Path(processed_dir) / "kap_cache"
+        if kap_dir.exists():
+            for path in kap_dir.glob("*.json"):
+                payload = _read_json_dict(path)
+                if not payload:
+                    continue
+                record = _stock_record_from_kap_cache(path.stem, payload)
                 if record:
                     records.append(record)
-
-    kap_dir = Path(processed_dir) / "kap_cache"
-    if kap_dir.exists():
-        for path in kap_dir.glob("*.json"):
-            payload = _read_json_dict(path)
-            if not payload:
-                continue
-            record = _stock_record_from_kap_cache(path.stem, payload)
-            if record:
-                records.append(record)
 
     result = upsert_instruments(processed_dir, records)
     result["skipped"] = False

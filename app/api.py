@@ -83,8 +83,9 @@ def bootstrap_application_storage() -> None:
     hydrate_json_cache(
         CONFIG.paths.processed_dir,
         # The catalogue has a row store, while fund history, allocations,
-        # holdings, and daily snapshots are fetched from JSON cache on demand.
-        exclude_key_prefixes=("funds_cache/",),
+        # holdings, daily snapshots, and KAP company payloads are fetched
+        # from JSON cache on demand.
+        exclude_key_prefixes=("funds_cache/", "kap_cache/"),
     )
     ensure_fund_snapshot_store(CONFIG.paths.processed_dir)
     prune_fund_snapshot_rollback_copy(CONFIG.paths.processed_dir)

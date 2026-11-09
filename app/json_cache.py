@@ -18,13 +18,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from app.database import read_json_cache
+import app.database as _database
+from app.database import read_json_cache, read_json_cache_conditional
+
+_DEFAULT_READ_JSON_CACHE = read_json_cache
 
 LOGGER = logging.getLogger(__name__)
 
 JSON_CACHE_LOCAL_READ_TTL_SECONDS = max(
     0,
-    int(os.getenv("RAGFIN_JSON_CACHE_LOCAL_READ_TTL_SECONDS", "60")),
+    int(os.getenv("RAGFIN_JSON_CACHE_LOCAL_READ_TTL_SECONDS", "900")),
 )
 JSON_CACHE_METRICS_FLUSH_SECONDS = max(
     1.0,
@@ -45,6 +48,9 @@ _JSON_CACHE_TELEMETRY_FIELDS = (
 _JSON_CACHE_TELEMETRY_PREFIXES = ("funds_cache", "kap_cache", "other")
 
 _JSON_CACHE_READ_STATE: Dict[str, Tuple[float, Optional[Tuple[int, int]]]] = {}
+_JSON_CACHE_REMOTE_STAMPS: Dict[
+    str, Tuple[Optional[Tuple[int, int]], Tuple[str, int]]
+] = {}
 _JSON_CACHE_READ_STATE_LOCK = threading.RLock()
 
 
@@ -244,24 +250,64 @@ def _remember_json_cache_payload(
 
 def _remember_json_cache_read_state(
     path: Path,
+    *,
+    remote_stamp: Optional[Tuple[str, int]] = None,
 ) -> Tuple[float, Optional[Tuple[int, int]]]:
     key = str(path)
-    state = (time.monotonic(), json_cache_file_signature(path))
+    signature = json_cache_file_signature(path)
+    state = (time.monotonic(), signature)
     evicted_key: Optional[str] = None
     with _JSON_CACHE_READ_STATE_LOCK:
         _JSON_CACHE_READ_STATE.pop(key, None)
         if len(_JSON_CACHE_READ_STATE) >= JSON_CACHE_READ_STATE_MAX_ENTRIES:
             evicted_key = next(iter(_JSON_CACHE_READ_STATE))
             _JSON_CACHE_READ_STATE.pop(evicted_key, None)
+            _JSON_CACHE_REMOTE_STAMPS.pop(evicted_key, None)
         _JSON_CACHE_READ_STATE[key] = state
+        if remote_stamp is not None and remote_stamp[0]:
+            _JSON_CACHE_REMOTE_STAMPS[key] = (signature, (str(remote_stamp[0]), int(remote_stamp[1])))
     if evicted_key is not None:
         with _JSON_CACHE_PAYLOAD_CACHE_LOCK:
             _remove_json_cache_payload_locked(evicted_key)
     return state
 
 
-def remember_json_cache_read(path: Path) -> None:
-    _remember_json_cache_read_state(path)
+def remember_json_cache_remote_stamp(
+    path: Path,
+    stamp: Optional[Tuple[str, int]],
+) -> None:
+    if stamp is None or not stamp[0]:
+        return
+    key = str(path)
+    signature = json_cache_file_signature(path)
+    with _JSON_CACHE_READ_STATE_LOCK:
+        _JSON_CACHE_REMOTE_STAMPS[key] = (signature, (str(stamp[0]), int(stamp[1])))
+
+
+def get_json_cache_remote_stamp(
+    path: Path,
+    signature: Optional[Tuple[int, int]],
+) -> Optional[Tuple[str, int]]:
+    if signature is None:
+        return None
+    key = str(path)
+    with _JSON_CACHE_READ_STATE_LOCK:
+        stored = _JSON_CACHE_REMOTE_STAMPS.get(key)
+        if stored is None:
+            return None
+        stored_signature, stamp = stored
+        if stored_signature != signature:
+            _JSON_CACHE_REMOTE_STAMPS.pop(key, None)
+            return None
+        return stamp
+
+
+def remember_json_cache_read(
+    path: Path,
+    *,
+    remote_stamp: Optional[Tuple[str, int]] = None,
+) -> None:
+    _remember_json_cache_read_state(path, remote_stamp=remote_stamp)
 
 
 def json_cache_metrics_snapshot_locked(
@@ -468,14 +514,50 @@ def read_json_cache_local_first(
             record_json_cache_local_hit(coalesced=True, reader=metric_reader, prefix=key_prefix)
             return local_payload
 
-        try:
-            remote_payload = read_remote(path)
-        except Exception:
-            # app.database.read_json_cache already returns None on failures, but
-            # keep this boundary defensive so a remote problem never hides the
-            # local copy from callers.
-            LOGGER.warning("remote JSON cache read failed; using local copy", exc_info=True)
-            remote_payload = None
+        use_conditional = (
+            read_remote is _DEFAULT_READ_JSON_CACHE
+            and _database.read_json_cache is _DEFAULT_READ_JSON_CACHE
+        )
+        remote_stamp: Optional[Tuple[str, int]] = None
+        if use_conditional:
+            known_stamp = (
+                get_json_cache_remote_stamp(path, signature)
+                if local_payload is not None
+                else None
+            )
+            try:
+                status, remote_payload, remote_stamp = _database.read_json_cache_conditional(
+                    path,
+                    known_stamp=known_stamp,
+                )
+            except Exception:
+                LOGGER.warning("remote JSON cache conditional read failed; using local copy", exc_info=True)
+                status, remote_payload, remote_stamp = ("miss", None, None)
+            if status == "not_modified" and local_payload is not None:
+                read_at, state_signature = _remember_json_cache_read_state(
+                    path, remote_stamp=remote_stamp
+                )
+                if state_signature == signature:
+                    _remember_json_cache_payload(
+                        key, local_payload, state_signature, read_at, ttl_seconds=ttl
+                    )
+                record_json_cache_remote_result(
+                    hit=True,
+                    fallback_local=False,
+                    approx_bytes=0,
+                    reader=metric_reader,
+                    prefix=key_prefix,
+                )
+                return local_payload
+        else:
+            try:
+                remote_payload = read_remote(path)
+            except Exception:
+                # app.database.read_json_cache already returns None on failures, but
+                # keep this boundary defensive so a remote problem never hides the
+                # local copy from callers.
+                LOGGER.warning("remote JSON cache read failed; using local copy", exc_info=True)
+                remote_payload = None
         if remote_payload is None:
             # Remember misses and temporary remote failures too, so a hot key
             # cannot turn into a Supabase query on every concurrent request.
@@ -497,8 +579,12 @@ def read_json_cache_local_first(
                 write_local_json(path, remote_payload)
             except OSError:
                 LOGGER.debug("Could not mirror remote JSON cache locally: %s", path, exc_info=True)
+            if remote_stamp is not None:
+                remember_json_cache_remote_stamp(path, remote_stamp)
         else:
-            read_at, state_signature = _remember_json_cache_read_state(path)
+            read_at, state_signature = _remember_json_cache_read_state(
+                path, remote_stamp=remote_stamp
+            )
             if state_signature == signature:
                 _remember_json_cache_payload(
                     key, local_payload, state_signature, read_at, ttl_seconds=ttl

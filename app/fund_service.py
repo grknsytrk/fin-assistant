@@ -1008,8 +1008,25 @@ def _read_fund_snapshot_category_returns(
     fund_type: str,
     min_aum: Optional[float],
 ) -> List[Dict[str, Any]]:
+    normalized_type = fund_type.strip().lower()
+    cache_key = (
+        f"snapshot-category-returns:{_fund_prices_db_path(processed_dir)}:"
+        f"{normalized_type}:{int(bool(TEFAS_OPEN_ONLY))}:{min_aum}"
+    )
+    cached = _MEMORY_CACHE.get(cache_key)
+    if (
+        isinstance(cached, dict)
+        and isinstance(cached.get("cached_at"), (int, float))
+        and time.time() - float(cached["cached_at"]) <= 300.0
+    ):
+        return [
+            {"period_returns": dict(item.get("period_returns") or {})}
+            for item in list(cached.get("rows") or [])
+            if isinstance(item, dict)
+        ]
+
     conditions = ["fund_type_key = ?"]
-    params: List[Any] = [fund_type.strip().lower()]
+    params: List[Any] = [normalized_type]
     if TEFAS_OPEN_ONLY:
         conditions.append("(tefas_open IS NULL OR tefas_open = 1)")
     if min_aum is not None and min_aum > 0:
@@ -1022,9 +1039,14 @@ def _read_fund_snapshot_category_returns(
             + " ORDER BY row_order ASC",
             tuple(params),
         ).fetchall()
-    return [
+    rows = [
         {"period_returns": _safe_json_loads(record["period_returns_json"], {})}
         for record in records
+    ]
+    _memory_cache_put(cache_key, {"cached_at": time.time(), "rows": rows})
+    return [
+        {"period_returns": dict(item.get("period_returns") or {})}
+        for item in rows
     ]
 
 
@@ -3107,17 +3129,37 @@ def read_latest_fund_price_points(
     if not normalized_codes:
         return {}
 
-    cache_key = (
+    ttl = max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
+    now = time.time()
+    db_key_prefix = (
         f"latest-fund-price-points:{_fund_prices_db_path(processed_dir)}:"
-        f"{end_date.isoformat() if end_date else 'latest'}:{','.join(normalized_codes)}"
+        f"{end_date.isoformat() if end_date else 'latest'}"
     )
+    cache_key = f"{db_key_prefix}:{','.join(normalized_codes)}"
     cached = _MEMORY_CACHE.get(cache_key)
     cached_at = cached.get("cached_at") if isinstance(cached, dict) else None
-    if isinstance(cached_at, (int, float)) and time.time() - float(cached_at) <= max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS):
+    if isinstance(cached_at, (int, float)) and now - float(cached_at) <= ttl:
         return {
             str(code): dict(point)
             for code, point in dict(cached.get("points") or {}).items()
             if isinstance(point, dict)
+        }
+
+    superset_key = f"{db_key_prefix}:__superset__"
+    superset = _MEMORY_CACHE.get(superset_key)
+    superset_at = superset.get("cached_at") if isinstance(superset, dict) else None
+    superset_codes = superset.get("covered_codes") if isinstance(superset, dict) else None
+    if (
+        isinstance(superset_at, (int, float))
+        and now - float(superset_at) <= ttl
+        and isinstance(superset_codes, set)
+        and superset_codes.issuperset(normalized_codes)
+    ):
+        superset_points = dict(superset.get("points") or {})
+        return {
+            code: dict(superset_points[code])
+            for code in normalized_codes
+            if isinstance(superset_points.get(code), dict)
         }
 
     source_placeholders = ", ".join("?" for _ in _DAILY_PRICE_SOURCES)
@@ -3178,7 +3220,22 @@ def read_latest_fund_price_points(
         return {}
 
     points = {code: _fund_price_storage_row_to_point(row) for code, row in selected.items()}
-    _memory_cache_put(cache_key, {"cached_at": time.time(), "points": points})
+    now_stored = time.time()
+    _memory_cache_put(cache_key, {"cached_at": now_stored, "points": points})
+    if (
+        not isinstance(superset_at, (int, float))
+        or now_stored - float(superset_at) > ttl
+        or not isinstance(superset_codes, set)
+        or len(normalized_codes) >= len(superset_codes)
+    ):
+        _memory_cache_put(
+            superset_key,
+            {
+                "cached_at": now_stored,
+                "covered_codes": set(normalized_codes),
+                "points": points,
+            },
+        )
     return {code: dict(point) for code, point in points.items()}
 
 
@@ -6506,12 +6563,31 @@ def _overlay_latest_price_history(
 
 
 def _catalog_price_overlay_metadata(processed_dir: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
-    with _connect_fund_prices_db(processed_dir) as conn:
-        records = conn.execute("SELECT fund_code, as_of FROM fund_snapshots ORDER BY fund_code").fetchall()
-    catalog_dates: Dict[str, Optional[str]] = {}
-    for record in records:
-        code = str(record["fund_code"] or "")
-        catalog_dates[code] = _fund_date(record["as_of"])
+    ttl = max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
+    generation = payload.get("snapshot_generation")
+    original_as_of = _fund_date(payload.get("as_of") or (payload.get("source_metadata") or {}).get("as_of"))
+    dates_cache_key = (
+        f"catalog-dates:{_fund_prices_db_path(processed_dir)}:{generation}:{original_as_of}"
+    )
+    cached_dates_entry = _MEMORY_CACHE.get(dates_cache_key)
+    if (
+        isinstance(cached_dates_entry, dict)
+        and isinstance(cached_dates_entry.get("cached_at"), (int, float))
+        and time.time() - float(cached_dates_entry["cached_at"]) <= ttl
+        and isinstance(cached_dates_entry.get("catalog_dates"), dict)
+    ):
+        catalog_dates: Dict[str, Optional[str]] = dict(cached_dates_entry["catalog_dates"])
+    else:
+        with _connect_fund_prices_db(processed_dir) as conn:
+            records = conn.execute("SELECT fund_code, as_of FROM fund_snapshots ORDER BY fund_code").fetchall()
+        catalog_dates = {}
+        for record in records:
+            code = str(record["fund_code"] or "")
+            catalog_dates[code] = _fund_date(record["as_of"])
+        _memory_cache_put(
+            dates_cache_key,
+            {"cached_at": time.time(), "catalog_dates": catalog_dates},
+        )
     if not catalog_dates:
         return payload
     latest = read_latest_fund_price_points(

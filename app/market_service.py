@@ -59,6 +59,19 @@ def _load_cached_kap_market_metadata(cache_dir: Path, symbol: str) -> Dict[str, 
         return {}
     cache_file = cache_dir / f"{normalized_symbol}.json"
     if not cache_file.exists():
+        try:
+            stored = get_financial_snapshots_map(cache_dir.parent, [normalized_symbol]).get(normalized_symbol)
+        except Exception:
+            stored = None
+        if stored and stored.get("has_kap_cache"):
+            return {
+                "latest_quarter": stored.get("latest_quarter"),
+                "has_kap_cache": True,
+                "shares_outstanding": stored.get("shares_outstanding"),
+                "share_source": stored.get("share_source"),
+                "company_title": stored.get("company_title"),
+                "company": stored.get("symbol") or normalized_symbol,
+            }
         return {}
     cache_key = ""
     signature = None

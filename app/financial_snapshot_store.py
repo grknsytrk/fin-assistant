@@ -491,6 +491,9 @@ def sync_financial_snapshots_from_kap_cache(processed_dir: Path) -> Dict[str, in
     cache_dir = Path(processed_dir) / "kap_cache"
     if not cache_dir.is_dir():
         return {"scanned_count": 0, "upserted_count": 0, "skipped_unchanged_count": 0, "error_count": 0}
+    cache_paths = sorted(cache_dir.glob("*.json"))
+    if not cache_paths:
+        return {"scanned_count": 0, "upserted_count": 0, "skipped_unchanged_count": 0, "error_count": 0}
 
     with _connection(processed_dir) as conn:
         existing_rows = conn.execute(
@@ -507,7 +510,7 @@ def sync_financial_snapshots_from_kap_cache(processed_dir: Path) -> Dict[str, in
     scanned_count = 0
     skipped_count = 0
     error_count = 0
-    for cache_path in sorted(cache_dir.glob("*.json")):
+    for cache_path in cache_paths:
         scanned_count += 1
         symbol = cache_path.stem.strip().upper()
         try:

@@ -1563,11 +1563,12 @@ def _fund_snapshot_row_map() -> Dict[str, Dict[str, Any]]:
 _FUND_SNAPSHOT_ROW_MAP_CACHE: Dict[str, Any] = {}
 
 def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
-    from app.fund_service import load_funds_snapshot, normalize_fund_code
+    from app.fund_service import fund_listing_revision, load_funds_snapshot, normalize_fund_code
 
     snapshot_path = CONFIG.paths.processed_dir / "funds_cache" / "funds_latest.json"
     stat = snapshot_path.stat() if snapshot_path.exists() else None
     cache_key = str(snapshot_path)
+    now_mono = time.monotonic()
     cached = _FUND_SNAPSHOT_ROW_MAP_CACHE.get(cache_key)
     if cached and stat and cached.get("mtime") == stat.st_mtime:
         return dict(cached.get("rows") or {}), {
@@ -1575,14 +1576,37 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
             "row_count": cached.get("row_count", 0),
             "as_of": cached.get("as_of"),
         }
-    stat_version = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)) if stat else None
-    shared_key = f"api:funds:snapshot-row-map:mtime={stat_version}:v1" if stat_version is not None else None
+    if cached and stat is None and cached.get("mtime") is None and float(cached.get("expires_at") or 0.0) > now_mono:
+        return dict(cached.get("rows") or {}), {
+            "cache_hit": True,
+            "row_count": cached.get("row_count", 0),
+            "as_of": cached.get("as_of"),
+        }
+    if stat is not None:
+        stat_version = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
+        version_token: Optional[str] = f"mtime={stat_version}"
+    else:
+        try:
+            rev = fund_listing_revision(CONFIG.paths.processed_dir)
+            version_token = f"gen={int(rev.get('catalog_generation') or 0)}:price={int(rev.get('price_revision') or 0)}"
+        except Exception:
+            version_token = None
+    if cached and stat is None and version_token and cached.get("version_token") == version_token:
+        cached["expires_at"] = now_mono + 60.0
+        return dict(cached.get("rows") or {}), {
+            "cache_hit": True,
+            "row_count": cached.get("row_count", 0),
+            "as_of": cached.get("as_of"),
+        }
+    shared_key = f"api:funds:snapshot-row-map:{version_token}:v1" if version_token is not None else None
     if shared_key:
         shared_cached = _shared_cache_get_dict(shared_key)
         if shared_cached is not None:
             rows = dict(shared_cached.get("rows") or {})
             cache_payload = {
                 "mtime": stat.st_mtime if stat else None,
+                "version_token": version_token,
+                "expires_at": now_mono + 60.0,
                 "rows": rows,
                 "row_count": shared_cached.get("row_count", len(rows)),
                 "as_of": shared_cached.get("as_of"),
@@ -1606,9 +1630,11 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
         code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
         if code:
             rows[code] = row
-    if stat:
+    if stat or rows:
         _FUND_SNAPSHOT_ROW_MAP_CACHE[cache_key] = {
-            "mtime": stat.st_mtime,
+            "mtime": stat.st_mtime if stat else None,
+            "version_token": version_token,
+            "expires_at": now_mono + 60.0,
             "rows": rows,
             "row_count": len(rows),
             "as_of": snapshot.get("as_of"),

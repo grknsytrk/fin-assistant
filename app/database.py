@@ -573,7 +573,7 @@ def commit_json_cache_if_fenced(
                     version = EXCLUDED.version,
                     updated_at = EXCLUDED.updated_at
                 WHERE ragfin_json_cache.version < EXCLUDED.version
-                RETURNING version
+                RETURNING version, updated_at::text AS updated_at
                 """,
                 (_cache_key(path), json.dumps(payload, ensure_ascii=False, default=str), int(generation)),
             ).fetchone()
@@ -581,6 +581,14 @@ def commit_json_cache_if_fenced(
                 conn.rollback()
                 return False
             conn.commit()
+        updated_at = str(row.get("updated_at") or "").strip()
+        if updated_at:
+            try:
+                from app.json_cache import remember_json_cache_remote_stamp
+
+                remember_json_cache_remote_stamp(path, (updated_at, int(row.get("version") or 0)))
+            except Exception:
+                pass
         return True
     except Exception:
         LOGGER.warning("fenced JSON cache commit failed for %s", path, exc_info=True)
@@ -604,6 +612,76 @@ def read_json_cache(path: Path) -> Optional[dict[str, Any]]:
     except Exception:
         LOGGER.warning("remote JSON cache read failed for %s", path, exc_info=True)
         return None
+
+
+def read_json_cache_conditional(
+    path: Path,
+    *,
+    known_stamp: Optional[tuple[str, int]] = None,
+) -> tuple[str, Optional[dict[str, Any]], Optional[tuple[str, int]]]:
+    """Revalidate a JSON cache document against its remote ``(updated_at, version)`` stamp.
+
+    Returns ``(status, payload, stamp)`` where ``status`` is one of:
+    - ``"not_modified"``: remote row matches ``known_stamp``; ``payload`` is ``None``
+      and no JSONB body is transferred over the wire.
+    - ``"hit"``: remote row exists and differs from ``known_stamp`` (or ``known_stamp``
+      was not provided); ``payload`` contains the full document.
+    - ``"miss"``: remote row does not exist or database is unavailable.
+    """
+
+    if not database_enabled():
+        return ("miss", None, None)
+    try:
+        ensure_json_cache_schema()
+        cache_key = _cache_key(path)
+        with connect_postgres() as conn:
+            if known_stamp is not None and known_stamp[0]:
+                known_updated_at, known_version = str(known_stamp[0]), int(known_stamp[1])
+                row = conn.execute(
+                    """
+                    SELECT
+                        updated_at::text AS updated_at,
+                        COALESCE(version, 0) AS version,
+                        CASE
+                            WHEN updated_at::text = ? AND COALESCE(version, 0) = ? THEN FALSE
+                            ELSE TRUE
+                        END AS modified,
+                        CASE
+                            WHEN updated_at::text = ? AND COALESCE(version, 0) = ? THEN NULL
+                            ELSE payload
+                        END AS payload
+                    FROM ragfin_json_cache
+                    WHERE cache_key = ?
+                    """,
+                    (known_updated_at, known_version, known_updated_at, known_version, cache_key),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT
+                        updated_at::text AS updated_at,
+                        COALESCE(version, 0) AS version,
+                        TRUE AS modified,
+                        payload
+                    FROM ragfin_json_cache
+                    WHERE cache_key = ?
+                    """,
+                    (cache_key,),
+                ).fetchone()
+        if not isinstance(row, dict):
+            return ("miss", None, None)
+        updated_at = str(row.get("updated_at") or "").strip()
+        version = int(row.get("version") or 0)
+        stamp = (updated_at, version) if updated_at else None
+        if known_stamp is not None and not bool(row.get("modified", True)):
+            return ("not_modified", None, stamp or known_stamp)
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            return ("miss", None, None)
+        return ("hit", dict(payload), stamp)
+    except Exception:
+        LOGGER.warning("remote JSON cache conditional read failed for %s", path, exc_info=True)
+        return ("miss", None, None)
 
 
 def read_json_cache_history_metadata(path: Path) -> Optional[dict[str, Any]]:
@@ -648,17 +726,28 @@ def write_json_cache(path: Path, payload: dict[str, Any]) -> None:
     try:
         ensure_json_cache_schema()
         with connect_postgres() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO ragfin_json_cache (cache_key, payload, updated_at)
                 VALUES (?, ?::jsonb, NOW())
                 ON CONFLICT (cache_key) DO UPDATE SET
                     payload = EXCLUDED.payload,
                     updated_at = EXCLUDED.updated_at
+                RETURNING updated_at::text AS updated_at, COALESCE(version, 0) AS version
                 """,
                 (_cache_key(path), json.dumps(payload, ensure_ascii=False, default=str)),
             )
+            row = cursor.fetchone() if hasattr(cursor, "fetchone") else None
             conn.commit()
+        if isinstance(row, dict):
+            updated_at = str(row.get("updated_at") or "").strip()
+            if updated_at:
+                try:
+                    from app.json_cache import remember_json_cache_remote_stamp
+
+                    remember_json_cache_remote_stamp(path, (updated_at, int(row.get("version") or 0)))
+                except Exception:
+                    pass
     except Exception:
         # Local cache writes must remain successful even if Supabase is
         # temporarily unavailable.  The next refresh can repair the remote
@@ -709,12 +798,14 @@ def hydrate_json_cache(
                     )
                 )
             rows = conn.execute(
-                f"SELECT cache_key, payload FROM ragfin_json_cache {where_clause} ORDER BY cache_key",
+                f"SELECT cache_key, payload, updated_at::text AS updated_at, COALESCE(version, 0) AS version FROM ragfin_json_cache {where_clause} ORDER BY cache_key",
                 query_params,
             ).fetchall()
         hydrated = 0
         measured_bytes = 0
         root = Path(processed_dir).resolve()
+        from app.json_cache import remember_json_cache_read
+
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -729,12 +820,23 @@ def hydrate_json_cache(
             if root != target and root not in target.parents:
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_suffix(target.suffix + ".remote.tmp")
-            temporary.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
-            )
-            temporary.replace(target)
+            serialized = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+            existing_matches = False
+            if target.exists():
+                try:
+                    existing_matches = target.read_text(encoding="utf-8") == serialized
+                except OSError:
+                    existing_matches = False
+            if not existing_matches:
+                temporary = target.with_suffix(target.suffix + ".remote.tmp")
+                temporary.write_text(
+                    serialized,
+                    encoding="utf-8",
+                )
+                temporary.replace(target)
+            updated_at = str(row.get("updated_at") or "").strip()
+            stamp = (updated_at, int(row.get("version") or 0)) if updated_at else None
+            remember_json_cache_read(target, remote_stamp=stamp)
             hydrated += 1
         LOGGER.info(
             "json_cache_hydrate rows=%d hydrated=%d excluded_rows=%d excluded_prefixes=%s approximate_payload_bytes=%d over_1mib=%s",

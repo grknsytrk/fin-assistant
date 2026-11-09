@@ -22,6 +22,7 @@ def _isolated_read_state(monkeypatch):
     monkeypatch.setattr(json_cache, "JSON_CACHE_METRICS_FLUSH_SECONDS", 3600.0)
     with json_cache._JSON_CACHE_READ_STATE_LOCK:
         json_cache._JSON_CACHE_READ_STATE.clear()
+        json_cache._JSON_CACHE_REMOTE_STAMPS.clear()
     with json_cache._JSON_CACHE_PAYLOAD_CACHE_LOCK:
         json_cache._JSON_CACHE_PAYLOAD_CACHE.clear()
         json_cache._JSON_CACHE_PAYLOAD_CACHE_BYTES = 0
@@ -35,6 +36,7 @@ def _isolated_read_state(monkeypatch):
     finally:
         with json_cache._JSON_CACHE_READ_STATE_LOCK:
             json_cache._JSON_CACHE_READ_STATE.clear()
+            json_cache._JSON_CACHE_REMOTE_STAMPS.clear()
         with json_cache._JSON_CACHE_PAYLOAD_CACHE_LOCK:
             json_cache._JSON_CACHE_PAYLOAD_CACHE.clear()
             json_cache._JSON_CACHE_PAYLOAD_CACHE_BYTES = 0
@@ -491,3 +493,44 @@ def test_payload_lru_skips_files_over_byte_budget(tmp_path, monkeypatch) -> None
     with json_cache._JSON_CACHE_PAYLOAD_CACHE_LOCK:
         assert str(path) not in json_cache._JSON_CACHE_PAYLOAD_CACHE
         assert json_cache._JSON_CACHE_PAYLOAD_CACHE_BYTES == 0
+
+
+def test_conditional_remote_read_skips_payload_when_stamp_unchanged(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "processed" / "kap_cache" / "THYAO.json"
+    conditional_calls: list[tuple[Path, object]] = []
+    remote_state = {
+        "payload": {"company": "THYAO", "version": 1},
+        "stamp": ("2026-11-09 10:00:00+00", 1),
+    }
+
+    def fake_conditional(cache_path: Path, *, known_stamp=None):
+        conditional_calls.append((cache_path, known_stamp))
+        if known_stamp is not None and known_stamp == remote_state["stamp"]:
+            return ("not_modified", None, remote_state["stamp"])
+        return ("hit", copy.deepcopy(remote_state["payload"]), remote_state["stamp"])
+
+    monkeypatch.setattr(json_cache._database, "read_json_cache_conditional", fake_conditional)
+
+    # First read: cold local cache -> full hit, stores stamp.
+    assert json_cache.read_json_cache_local_first(path) == {"company": "THYAO", "version": 1}
+    assert conditional_calls == [(path, None)]
+    first_bytes = _metrics()["remote_bytes"]
+    assert first_bytes > 0
+
+    # Expire TTL; stamp matches -> not_modified, 0 payload bytes transferred.
+    _expire_read_state(path)
+    assert json_cache.read_json_cache_local_first(path) == {"company": "THYAO", "version": 1}
+    assert conditional_calls[-1] == (path, ("2026-11-09 10:00:00+00", 1))
+    assert _metrics()["remote_bytes"] == first_bytes
+    assert _metrics()["remote_hits"] == 2
+
+    # Remote document updates its stamp -> next expired read downloads new payload.
+    remote_state["payload"] = {"company": "THYAO", "version": 2}
+    remote_state["stamp"] = ("2026-11-09 11:00:00+00", 2)
+    _expire_read_state(path)
+    assert json_cache.read_json_cache_local_first(path) == {"company": "THYAO", "version": 2}
+    assert _metrics()["remote_bytes"] > first_bytes
+    assert json.loads(path.read_text(encoding="utf-8")) == {"company": "THYAO", "version": 2}
+
