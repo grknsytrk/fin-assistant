@@ -659,6 +659,102 @@ def test_fetch_snapshot_can_serve_complete_cache_without_live_request(
     assert len(payload["quarters"]) == 20
 
 
+def test_shallow_snapshot_refresh_preserves_cached_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    cache_dir = tmp_path / "kap_cache"
+    cache_dir.mkdir()
+    cached_quarters = [
+        {
+            "quarter": f"{2021 + i // 4}Q{i % 4 + 1}",
+            "year": 2021 + i // 4,
+            "period": i % 4 + 1,
+            "disclosure_index": 1000 + i,
+            "metrics": {"net_kar": float(i)},
+        }
+        for i in range(20)
+    ]
+    cache_file = cache_dir / "ARDYZ.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "schema_version": KAP_CACHE_SCHEMA_VERSION,
+                "company": "ARDYZ",
+                "stock_code": "ARDYZ",
+                "company_title": "ARD GRUP BILISIM TEKNOLOJILERI A.S.",
+                "member_oid": "oid-ardyz",
+                "fetched_at": "2026-10-01T00:00:00+00:00",
+                "quarters": cached_quarters,
+            }
+        ),
+        encoding="utf-8",
+    )
+    live_rows = [
+        {
+            "year": 2026,
+            "period": period,
+            "disclosure_index": 2000 + period,
+            "stock_code": "ARDYZ",
+            "title": "Finansal Rapor",
+        }
+        for period in (3, 2, 1)
+    ] + [
+        {
+            "year": 2025,
+            "period": period,
+            "disclosure_index": 1900 + period,
+            "stock_code": "ARDYZ",
+            "title": "Finansal Rapor",
+        }
+        for period in (4, 3)
+    ]
+
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_resolve_member",
+        lambda *_args, **_kwargs: {
+            "mkk_member_oid": "oid-ardyz",
+            "title": "ARD GRUP BILISIM TEKNOLOJILERI A.S.",
+        },
+    )
+    monkeypatch.setattr(kap_fetcher, "_list_company_disclosures", lambda **_kwargs: live_rows)
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_fetch_attachment_detail",
+        lambda _idx, _cfg_obj: {"disclosure": {"disclosureBasic": {}}},
+    )
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_extract_disclosure_metrics",
+        lambda *_args, **_kwargs: ({"net_kar": 1.0}, {"raw": "TL", "currency": "TL"}),
+    )
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_ensure_insurance_premium_disclosures",
+        lambda **kwargs: kwargs["payload"],
+    )
+    monkeypatch.setattr(kap_fetcher, "write_json_cache", lambda *_args, **_kwargs: None)
+
+    payload = fetch_kap_company_snapshot(
+        company="ARDYZ",
+        cfg=SimpleNamespace(cache_ttl_hours=0.0, timeout_seconds=1.0, user_agent="ragfin-test/1.0"),
+        processed_dir=tmp_path,
+        force_refresh=False,
+        max_quarters=5,
+    )
+
+    saved = json.loads(cache_file.read_text(encoding="utf-8"))
+    saved_periods = {(int(row["year"]), int(row["period"])) for row in saved["quarters"]}
+    assert len(payload["quarters"]) == 20
+    assert (2026, 3) == (payload["quarters"][0]["year"], payload["quarters"][0]["period"])
+    assert kap_fetcher._cached_period_count(saved) == 20
+    assert (2026, 3) in saved_periods
+    assert (2021, 4) in saved_periods
+    assert (2021, 1) not in saved_periods
+
+
 def test_fetch_snapshot_keeps_schema_mismatched_cache_stale_on_live_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

@@ -3574,6 +3574,13 @@ def fetch_kap_company_snapshot(
     cache_path, cached = _read_first_cache(processed_dir, company_norm)
     cache_version = int(cached.get("schema_version", 0)) if isinstance(cached, dict) else 0
     cached_period_count = _cached_period_count(cached)
+    # A shallow request (the UI asks for five quarters first) must not truncate
+    # an existing deeper history. Merge against the cached depth and persist the
+    # full result so the next snapshot request can reuse the older quarters.
+    cached_depth_to_preserve = (
+        cached_period_count if cache_version == KAP_CACHE_SCHEMA_VERSION else 0
+    )
+    cache_write_depth = max(requested_max_quarters, cached_depth_to_preserve)
     try:
         cached_live_period_count = int(cached.get("live_period_count") or 0) if isinstance(cached, dict) else 0
     except (TypeError, ValueError):
@@ -3790,7 +3797,7 @@ def fetch_kap_company_snapshot(
         if not quarter_rows:
             raise RuntimeError("KAP bildirim detayi alindi ancak ceyrek verisi parse edilemedi.")
 
-        quarter_rows = _merge_live_and_cached_quarters(quarter_rows, cached, requested_max_quarters)
+        quarter_rows = _merge_live_and_cached_quarters(quarter_rows, cached, cache_write_depth)
 
         if not allow_criteria_fallback:
             expected_live_periods = min(requested_max_quarters, len(disclosures))
