@@ -33,6 +33,7 @@ _POSTGRES_SCHEMA_READY = False
 _LOCAL_SCHEMA_READY: set[str] = set()
 _CACHE_LOCK = threading.RLock()
 _SNAPSHOT_MEMORY_CACHE: Dict[str, tuple[float, str, Dict[str, Dict[str, Any]]]] = {}
+_SNAPSHOT_DB_STAMPS: Dict[str, tuple[str, int]] = {}
 
 
 def _env_float(name: str, default: float) -> float:
@@ -152,6 +153,7 @@ def _invalidate_memory_cache(processed_dir: Optional[Path] = None) -> str:
         LOGGER.debug("could not set snapshot version in cache backend: %s", exc)
     with _CACHE_LOCK:
         _SNAPSHOT_MEMORY_CACHE.clear()
+        _SNAPSHOT_DB_STAMPS.clear()
     return new_version
 
 
@@ -578,6 +580,8 @@ def get_financial_snapshots_map(
     key = _cache_key(processed_dir)
     now = time.monotonic()
     current_version = get_snapshot_cache_version()
+    stale_same_version_map: Optional[Dict[str, Dict[str, Any]]] = None
+    previous_stamp: Optional[tuple[str, int]] = None
     with _CACHE_LOCK:
         cached = _SNAPSHOT_MEMORY_CACHE.get(key)
         if cached and len(cached) == 3:
@@ -586,25 +590,64 @@ def get_financial_snapshots_map(
                 full_map = cached_map
             else:
                 full_map = None
+                if cached_version == current_version and isinstance(cached_map, dict):
+                    stale_same_version_map = cached_map
+                    previous_stamp = _SNAPSHOT_DB_STAMPS.get(key)
         else:
             full_map = None
 
     if full_map is None:
         with _connection(processed_dir) as conn:
-            rows = conn.execute(
-                "SELECT * FROM company_financial_snapshots ORDER BY symbol"
-            ).fetchall()
-        full_map = {
-            normalized["symbol"]: normalized
-            for row in rows
-            if (normalized := _normalize_database_row(row)).get("symbol")
-        }
+            if stale_same_version_map is not None and previous_stamp is not None:
+                stamp_row = conn.execute(
+                    """
+                    SELECT
+                        COALESCE(MAX(updated_at), '') AS max_updated_at,
+                        COUNT(*) AS row_count
+                    FROM company_financial_snapshots
+                    """
+                ).fetchone()
+                if stamp_row is not None:
+                    max_updated_at = str(
+                        stamp_row.get("max_updated_at")
+                        if isinstance(stamp_row, dict)
+                        else stamp_row["max_updated_at"]
+                        or ""
+                    )
+                    row_count = int(
+                        (
+                            stamp_row.get("row_count")
+                            if isinstance(stamp_row, dict)
+                            else stamp_row["row_count"]
+                        )
+                        or 0
+                    )
+                    if (max_updated_at, row_count) == previous_stamp:
+                        full_map = stale_same_version_map
+            if full_map is None:
+                rows = conn.execute(
+                    "SELECT * FROM company_financial_snapshots ORDER BY symbol"
+                ).fetchall()
+                full_map = {
+                    normalized["symbol"]: normalized
+                    for row in rows
+                    if (normalized := _normalize_database_row(row)).get("symbol")
+                }
+                max_updated_at = max(
+                    (str(record.get("updated_at") or "") for record in full_map.values()),
+                    default="",
+                )
+                current_stamp = (max_updated_at, len(full_map))
+            else:
+                current_stamp = previous_stamp
         with _CACHE_LOCK:
             _SNAPSHOT_MEMORY_CACHE[key] = (
                 time.monotonic() + _SNAPSHOT_MEMORY_CACHE_TTL_SECONDS,
                 current_version,
                 full_map,
             )
+            if current_stamp is not None:
+                _SNAPSHOT_DB_STAMPS[key] = current_stamp
 
     if requested is None:
         return {symbol: dict(record) for symbol, record in full_map.items()}
@@ -720,6 +763,7 @@ def reset_financial_snapshot_store_for_tests() -> None:
     _LOCAL_SNAPSHOT_VERSION = ""
     with _CACHE_LOCK:
         _SNAPSHOT_MEMORY_CACHE.clear()
+        _SNAPSHOT_DB_STAMPS.clear()
     try:
         from app.cache import get_cache
         get_cache().delete(_SNAPSHOT_VERSION_KEY)

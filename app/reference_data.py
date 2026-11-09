@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from app.database import connect_postgres, database_enabled
+from app.database import connect_postgres, database_enabled, lock_down_postgres_tables
 
 REFERENCE_DATA_DB_FILENAME = os.getenv("RAGFIN_REFERENCE_DATA_DB_FILENAME", "reference_data.sqlite3")
 
@@ -164,6 +164,8 @@ def _init_schema(conn: Any) -> None:
         ON instrument_aliases (kind, symbol)
         """
     )
+    if getattr(conn, "is_postgres", False):
+        lock_down_postgres_tables(conn, "instruments", "instrument_aliases")
     conn.commit()
 
 

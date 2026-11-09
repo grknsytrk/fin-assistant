@@ -771,6 +771,49 @@ def test_fund_snapshot_rollback_copy_is_compacted_after_retention(monkeypatch, t
     assert "rows" not in compact_copy
 
 
+def test_fund_snapshot_rollback_copy_postgres_check_avoids_full_payload_read(
+    monkeypatch, tmp_path
+) -> None:
+    executed_queries: list[str] = []
+    written_payloads: list[dict] = []
+
+    class FakeResult:
+        def fetchone(self):
+            return {
+                "updated_at": "2020-01-01T00:00:00+00:00",
+                "row_count": 2124,
+                "expired": False,
+            }
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, _params=()):
+            executed_queries.append(" ".join(str(query).split()))
+            return FakeResult()
+
+    monkeypatch.setattr(fund_service, "database_enabled", lambda: True)
+    monkeypatch.setattr(fund_service, "connect_postgres", lambda: FakeConn())
+    monkeypatch.setattr(
+        fund_service,
+        "write_json_cache",
+        lambda _path, payload: written_payloads.append(dict(payload)),
+    )
+    monkeypatch.setattr(fund_service, "FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS", 5)
+
+    assert fund_service.prune_fund_snapshot_rollback_copy(tmp_path) is True
+    assert len(executed_queries) == 1
+    assert "jsonb_array_length" in executed_queries[0]
+    assert "SELECT payload," not in executed_queries[0]
+    assert len(written_payloads) == 1
+    assert written_payloads[0]["row_count"] == 2124
+    assert written_payloads[0]["rollback_copy_expired"] is True
+
+
 def test_fund_snapshot_sql_list_filter_sort_and_detail_preserve_api_values(tmp_path) -> None:
     rows = [
         {

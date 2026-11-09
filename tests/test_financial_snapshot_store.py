@@ -312,3 +312,56 @@ def test_aliases_match_target_functions() -> None:
     assert store.read_financial_snapshots_map is store.get_financial_snapshots_map
     assert store.invalidate_financial_snapshots_cache is store._invalidate_memory_cache
     assert store._get_snapshot_cache_version is store.get_snapshot_cache_version
+
+
+def test_expired_memory_ttl_with_unchanged_db_stamp_skips_full_table_scan(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from contextlib import contextmanager
+
+    store.reset_financial_snapshot_store_for_tests()
+    processed_dir = tmp_path / "processed"
+    store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Enerji"}})
+
+    class FakeTime:
+        now = 100.0
+
+        @classmethod
+        def monotonic(cls) -> float:
+            return cls.now
+
+    monkeypatch.setattr(store, "time", FakeTime)
+    original_connection = store._connection
+    queries: list[str] = []
+
+    class QueryTrackingConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql: str, *args, **kwargs):
+            queries.append(" ".join(sql.split()))
+            return self._inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str):
+            return getattr(self._inner, name)
+
+    @contextmanager
+    def tracked_connection(path: Path):
+        with original_connection(path) as conn:
+            yield QueryTrackingConn(conn)
+
+    monkeypatch.setattr(store, "_connection", tracked_connection)
+
+    assert store.get_financial_snapshots_map(processed_dir)["AAA"]["sector"] == "Enerji"
+    full_scans = [q for q in queries if "SELECT * FROM company_financial_snapshots" in q]
+    assert len(full_scans) == 1
+
+    # Advance past 1800s TTL without changing version or DB rows: should only run lightweight stamp query
+    FakeTime.now = 1905.0
+    assert store.get_financial_snapshots_map(processed_dir)["AAA"]["sector"] == "Enerji"
+    full_scans_after = [q for q in queries if "SELECT * FROM company_financial_snapshots" in q]
+    stamp_checks = [q for q in queries if "MAX(updated_at)" in q]
+    assert len(full_scans_after) == 1
+    assert len(stamp_checks) == 1
+    store.reset_financial_snapshot_store_for_tests()
+

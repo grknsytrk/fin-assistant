@@ -37,6 +37,7 @@ from app import json_cache as json_cache_store
 from app.database import (
     connect_postgres,
     database_enabled,
+    lock_down_postgres_tables,
     read_json_cache,
     read_json_cache_history_metadata,
     write_json_cache,
@@ -755,7 +756,13 @@ def _init_fund_prices_schema(conn: Any) -> None:
         """
     )
     if getattr(conn, "is_postgres", False):
-        conn.execute("ALTER TABLE fund_listing_state ENABLE ROW LEVEL SECURITY")
+        lock_down_postgres_tables(
+            conn,
+            "fund_prices",
+            "fund_price_warnings",
+            "fund_snapshots",
+            "fund_listing_state",
+        )
     if not getattr(conn, "is_postgres", False):
         conn.execute(
             """
@@ -1237,18 +1244,37 @@ def prune_fund_snapshot_rollback_copy(processed_dir: Path) -> bool:
         try:
             with connect_postgres() as conn:
                 record = conn.execute(
-                    "SELECT payload, updated_at FROM ragfin_json_cache WHERE cache_key = ?",
+                    """
+                    SELECT
+                        updated_at,
+                        CASE
+                            WHEN jsonb_typeof(payload->'rows') = 'array'
+                            THEN jsonb_array_length(payload->'rows')
+                            ELSE 0
+                        END AS row_count,
+                        COALESCE((payload->>'rollback_copy_expired')::boolean, FALSE) AS expired
+                    FROM ragfin_json_cache
+                    WHERE cache_key = ?
+                    """,
                     (_cache_key(path),),
                 ).fetchone()
             if not isinstance(record, dict):
                 return False
-            payload = record.get("payload")
-            if not isinstance(payload, dict) or payload.get("rollback_copy_expired"):
-                return False
-            age = _cache_age_seconds(record.get("updated_at"))
-            if age is None or age < FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS:
-                return False
-            row_count = len(list(payload.get("rows") or []))
+            if "expired" in record or "row_count" in record:
+                if bool(record.get("expired")):
+                    return False
+                age = _cache_age_seconds(record.get("updated_at"))
+                if age is None or age < FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS:
+                    return False
+                row_count = max(0, int(record.get("row_count") or 0))
+            else:
+                payload = record.get("payload")
+                if not isinstance(payload, dict) or payload.get("rollback_copy_expired"):
+                    return False
+                age = _cache_age_seconds(record.get("updated_at"))
+                if age is None or age < FUND_SNAPSHOT_ROLLBACK_TTL_SECONDS:
+                    return False
+                row_count = len(list(payload.get("rows") or []))
         except Exception:
             LOGGER.warning("fund snapshot rollback retention check failed", exc_info=True)
             return False

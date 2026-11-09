@@ -191,6 +191,36 @@ def _cache_key(path: Path) -> str:
     return "/".join(str(part).replace("\\", "/") for part in relative if str(part))
 
 
+def lock_down_postgres_tables(conn: Any, *table_names: str) -> None:
+    """Enable RLS and revoke browser/API role grants on internal Postgres tables."""
+
+    if not getattr(conn, "is_postgres", False):
+        return
+    for raw_name in table_names:
+        table = str(raw_name or "").strip()
+        if not table or not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", table):
+            continue
+        conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+        conn.execute(f"REVOKE ALL ON TABLE {table} FROM PUBLIC")
+        conn.execute(
+            f"""
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+                    EXECUTE 'REVOKE ALL ON TABLE {table} FROM anon';
+                END IF;
+                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+                    EXECUTE 'REVOKE ALL ON TABLE {table} FROM authenticated';
+                END IF;
+                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+                    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {table} TO service_role';
+                END IF;
+            END
+            $$
+            """
+        )
+
+
 def ensure_json_cache_schema() -> None:
     """Create the remote JSON cache table once per process."""
 
@@ -223,6 +253,7 @@ def ensure_json_cache_schema() -> None:
                 ON ragfin_json_cache (updated_at)
                 """
             )
+            lock_down_postgres_tables(conn, "ragfin_json_cache")
             conn.commit()
         _JSON_SCHEMA_READY = True
 
@@ -256,6 +287,7 @@ def ensure_refresh_lease_schema() -> None:
                 ON ragfin_refresh_lease (lease_until)
                 """
             )
+            lock_down_postgres_tables(conn, "ragfin_refresh_lease")
             conn.commit()
         _REFRESH_LEASE_SCHEMA_READY = True
 
@@ -302,7 +334,7 @@ def ensure_kap_flow_schema() -> None:
                 ON ragfin_kap_flow_events (category, published_at DESC, event_key DESC)
                 """
             )
-            conn.execute("ALTER TABLE ragfin_kap_flow_events ENABLE ROW LEVEL SECURITY")
+            lock_down_postgres_tables(conn, "ragfin_kap_flow_events")
             conn.commit()
         _KAP_FLOW_SCHEMA_READY = True
 
