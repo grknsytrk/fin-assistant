@@ -14,10 +14,190 @@ import logging
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
+from app.etag import orjson_dumps
+
 LOGGER = logging.getLogger(__name__)
+
+TARGET_TABLES = (
+    "ragfin_json_cache",
+    "fund_snapshots",
+    "fund_prices",
+    "company_financial_snapshots",
+    "instruments",
+)
+
+OPERATION_RE = re.compile(
+    r"^\s*(?:--[^\n]*\n|\/\*.*?\*\/\s*)*\s*(SELECT|INSERT|UPDATE|DELETE|WITH|CREATE|ALTER|DROP|DO)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+TABLE_RE = re.compile(
+    r"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+(?:(?:IF\s+NOT\s+EXISTS|ONLY)\s+)?[\"\'`]?([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?)[\"\'`]?",
+    re.IGNORECASE,
+)
+
+_DB_METRICS_LOCK = threading.Lock()
+_DB_PROCESS_STARTED = time.monotonic()
+_DB_METRICS_STARTED = time.monotonic()
+
+_DB_TABLE_METRICS: dict[str, dict[str, int]] = {
+    table: {"reads": 0, "bytes": 0} for table in TARGET_TABLES
+}
+_DB_DETAILED_METRICS: dict[tuple[str, str], dict[str, int]] = {}
+
+
+def parse_query_metadata(query: str) -> tuple[str, str]:
+    """Extract (table_name, operation) from SQL string."""
+    op_match = OPERATION_RE.search(query)
+    operation = op_match.group(1).upper() if op_match else "UNKNOWN"
+
+    if operation == "WITH":
+        tail_op = re.search(r"\)\s*(SELECT|INSERT|UPDATE|DELETE)\b", query, re.IGNORECASE)
+        operation = tail_op.group(1).upper() if tail_op else "SELECT"
+
+    matches = TABLE_RE.findall(query)
+    raw_tables = [m.split(".")[-1].lower() for m in matches]
+
+    target = next((t for t in raw_tables if t in TARGET_TABLES), None)
+    if target is None:
+        target = raw_tables[0] if raw_tables else "unknown"
+
+    return target, operation
+
+
+def _record_db_query(table: str, operation: str) -> None:
+    if table not in TARGET_TABLES:
+        return
+    with _DB_METRICS_LOCK:
+        if operation == "SELECT":
+            _DB_TABLE_METRICS[table]["reads"] += 1
+        key = (table, operation)
+        if key not in _DB_DETAILED_METRICS:
+            _DB_DETAILED_METRICS[key] = {"queries": 0, "rows": 0, "bytes": 0}
+        _DB_DETAILED_METRICS[key]["queries"] += 1
+
+
+def _record_db_bytes(table: str, operation: str, byte_count: int, row_count: int = 1) -> None:
+    if table not in TARGET_TABLES or byte_count <= 0:
+        return
+    with _DB_METRICS_LOCK:
+        _DB_TABLE_METRICS[table]["bytes"] += byte_count
+        key = (table, operation)
+        if key not in _DB_DETAILED_METRICS:
+            _DB_DETAILED_METRICS[key] = {"queries": 0, "rows": 0, "bytes": 0}
+        _DB_DETAILED_METRICS[key]["bytes"] += byte_count
+        _DB_DETAILED_METRICS[key]["rows"] += row_count
+
+
+def _record_db_metric(table: str, operation: str = "SELECT", byte_count: int = 0) -> None:
+    """Helper for internal recording and testing."""
+    if table not in TARGET_TABLES:
+        return
+    _record_db_query(table, operation)
+    if byte_count > 0:
+        _record_db_bytes(table, operation, byte_count)
+
+
+def db_metrics_status() -> dict[str, Any]:
+    """Return current window telemetry for Supabase PostgreSQL egress."""
+    now = time.monotonic()
+    with _DB_METRICS_LOCK:
+        return {
+            "window_seconds": round(now - _DB_METRICS_STARTED, 1),
+            "uptime_seconds": round(now - _DB_PROCESS_STARTED, 1),
+            "tables": {
+                table: dict(_DB_TABLE_METRICS[table]) for table in TARGET_TABLES
+            },
+        }
+
+
+def reset_db_metrics() -> None:
+    """Reset the telemetry window and counters for benchmarking and tests."""
+    global _DB_METRICS_STARTED
+    with _DB_METRICS_LOCK:
+        _DB_METRICS_STARTED = time.monotonic()
+        for table in TARGET_TABLES:
+            _DB_TABLE_METRICS[table]["reads"] = 0
+            _DB_TABLE_METRICS[table]["bytes"] = 0
+        _DB_DETAILED_METRICS.clear()
+
+
+class MeteredCursor:
+    """Thin wrapper around psycopg cursor to measure row egress wire bytes."""
+
+    def __init__(self, cursor: Any, table: str, operation: str) -> None:
+        self._cursor = cursor
+        self._table = table
+        self._operation = operation
+        self._is_target = table in TARGET_TABLES
+
+    def fetchone(self) -> Any:
+        row = self._cursor.fetchone()
+        if row is not None and self._is_target:
+            _record_db_bytes(self._table, self._operation, len(orjson_dumps(row)), 1)
+        return row
+
+    def fetchall(self) -> list[Any]:
+        rows = self._cursor.fetchall()
+        if rows and self._is_target:
+            _record_db_bytes(self._table, self._operation, len(orjson_dumps(rows)), len(rows))
+        return rows
+
+    def fetchmany(self, size: Optional[int] = None) -> list[Any]:
+        if size is None:
+            rows = self._cursor.fetchmany()
+        else:
+            rows = self._cursor.fetchmany(size)
+        if rows and self._is_target:
+            _record_db_bytes(self._table, self._operation, len(orjson_dumps(rows)), len(rows))
+        return rows
+
+    def __iter__(self) -> Any:
+        if not self._is_target:
+            return iter(self._cursor)
+        return self
+
+    def __next__(self) -> Any:
+        row = self._cursor.fetchone()
+        if row is None:
+            raise StopIteration
+        if self._is_target:
+            _record_db_bytes(self._table, self._operation, len(orjson_dumps(row)), 1)
+        return row
+
+    def __enter__(self) -> "MeteredCursor":
+        if hasattr(self._cursor, "__enter__"):
+            self._cursor.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        if hasattr(self._cursor, "__exit__"):
+            return self._cursor.__exit__(exc_type, exc_val, exc_tb)
+        return None
+
+    @property
+    def description(self) -> Any:
+        return getattr(self._cursor, "description", None)
+
+    @property
+    def rowcount(self) -> int:
+        return getattr(self._cursor, "rowcount", -1)
+
+    @property
+    def closed(self) -> bool:
+        return getattr(self._cursor, "closed", False)
+
+    def close(self) -> None:
+        if hasattr(self._cursor, "close"):
+            self._cursor.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
 
 _SCHEMA_LOCK = threading.Lock()
 _JSON_SCHEMA_READY = False
@@ -83,12 +263,20 @@ class PostgresConnection:
         # by the application has no literal question marks, so this simple
         # conversion keeps both backends on the same query definitions.
         normalized = re.sub(r"\?", "%s", query)
-        return self._active_connection().execute(normalized, params)
+        raw_cursor = self._active_connection().execute(normalized, params)
+        table, operation = parse_query_metadata(query)
+        if table in TARGET_TABLES:
+            _record_db_query(table, operation)
+        return MeteredCursor(raw_cursor, table=table, operation=operation)
 
     def executemany(self, query: str, params_seq: Any) -> Any:
         normalized = re.sub(r"\?", "%s", query)
+        table, operation = parse_query_metadata(query)
+        if table in TARGET_TABLES:
+            _record_db_query(table, operation)
         with self._active_connection().cursor() as cursor:
-            return cursor.executemany(normalized, params_seq)
+            raw_cursor = cursor.executemany(normalized, params_seq)
+            return MeteredCursor(raw_cursor or cursor, table=table, operation=operation)
 
     def commit(self) -> None:
         self._active_connection().commit()
@@ -891,3 +1079,4 @@ def reset_database_state_for_tests() -> None:
     _JSON_SCHEMA_READY = False
     _REFRESH_LEASE_SCHEMA_READY = False
     _KAP_FLOW_SCHEMA_READY = False
+    reset_db_metrics()

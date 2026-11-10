@@ -38,6 +38,7 @@ from app.api_runtime import (
     sync_reference_data_from_caches,
 )
 from app.json_cache import json_cache_metrics_status
+from app.database import db_metrics_status
 from app import api_runtime as _api_runtime
 from app import fund_api_service as _fund_api_service
 from app import foreign_instruments as _foreign_instruments
@@ -175,6 +176,7 @@ def health() -> Dict[str, Any]:
         "status": "ok",
         **_cache_status(),
         "supabase_json_cache_metrics": json_cache_metrics_status(),
+        "supabase_db_metrics": db_metrics_status(),
     }
 
 
