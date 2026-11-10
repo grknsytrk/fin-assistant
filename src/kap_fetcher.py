@@ -3585,10 +3585,26 @@ def fetch_kap_company_snapshot(
         cached_live_period_count = int(cached.get("live_period_count") or 0) if isinstance(cached, dict) else 0
     except (TypeError, ValueError):
         cached_live_period_count = 0
-    cache_has_requested_depth = cached_period_count >= requested_max_quarters or (
+    try:
+        cached_live_request_depth = (
+            int(cached.get("live_period_request_depth") or 0)
+            if isinstance(cached, dict)
+            else 0
+        )
+    except (TypeError, ValueError):
+        cached_live_request_depth = 0
+    # `live_period_count` is the number of periods returned by KAP. It only
+    # proves the provider has no more history when the request that produced it
+    # asked for more periods than it got back. A cache built with a shallow
+    # request must not satisfy a deeper request just because the two counts are
+    # equal, otherwise the history can never grow beyond the first fetch.
+    provider_total_known = (
         cached_live_period_count > 0
+        and cached_live_request_depth > cached_live_period_count
         and cached_period_count >= cached_live_period_count
-        and cached_period_count > 0
+    )
+    cache_has_requested_depth = cached_period_count >= requested_max_quarters or (
+        provider_total_known and requested_max_quarters >= cached_live_period_count
     )
     if (
         cached
@@ -3821,6 +3837,7 @@ def fetch_kap_company_snapshot(
             "source_url": f"https://www.kap.org.tr/tr/sirket-bilgileri/ozet/{member.get('permalink', '')}",
             "fetched_at": _utc_now().isoformat(),
             "live_period_count": len(disclosures),
+            "live_period_request_depth": requested_max_quarters,
             "quarters": quarter_rows,
         }
         if isinstance(cached, dict):
