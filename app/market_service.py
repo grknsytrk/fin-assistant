@@ -15,12 +15,17 @@ _MARKET_UNIVERSE_CACHE_TTL = int(
     os.getenv("RAGFIN_MARKET_UNIVERSE_CACHE_TTL_SECONDS", str(6 * 60 * 60))
 )
 
-_MARKET_QUOTES_FRESH_TTL = int(os.getenv("RAGFIN_MARKET_QUOTES_FRESH_TTL_SECONDS", "3"))
+# Quote payload freshness. 90s keeps the /market/stocks envelope reusable
+# across several upstream snapshot windows; off-hours it extends to 300s.
+_MARKET_QUOTES_FRESH_TTL = int(os.getenv("RAGFIN_MARKET_QUOTES_FRESH_TTL_SECONDS", "90"))
 
-_MARKET_QUOTES_STALE_TTL = int(os.getenv("RAGFIN_MARKET_QUOTES_STALE_TTL_SECONDS", "120"))
+# Stale window must stay well above the fresh window, otherwise a 90s fresh TTL
+# leaves only seconds of "serve stale" tolerance before the payload is dropped.
+_MARKET_QUOTES_STALE_TTL = int(os.getenv("RAGFIN_MARKET_QUOTES_STALE_TTL_SECONDS", "900"))
 
+# Upstream rebuilds were measured at 65-81s, so the lease must outlive a build.
 _MARKET_QUOTES_LOCK_TTL_SECONDS = float(
-    os.getenv("RAGFIN_MARKET_QUOTES_LOCK_TTL_SECONDS", "60")
+    os.getenv("RAGFIN_MARKET_QUOTES_LOCK_TTL_SECONDS", "180")
 )
 
 _MARKET_QUOTES_WAIT_TIMEOUT_SECONDS = float(
@@ -399,13 +404,42 @@ _PRICE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=512, default_t
 
 _PRICE_CACHE_TTL = 300
 
-_MARKET_PRICE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=16, default_ttl=300)
+_MARKET_PRICE_CACHE_TTL = int(
+    os.getenv("RAGFIN_MARKET_PRICE_CACHE_TTL_SECONDS", "90")
+)
 
-_MARKET_PRICE_CACHE_TTL = 3
+# Snapshot freshness is decided at read time instead of being baked into the
+# payload as `created_at + 3`, because an upstream rebuild can take 65-81s and
+# would otherwise expire the snapshot before it is even persisted.
+_MARKET_PRICE_SNAPSHOT_TRADING_TTL_SECONDS = int(
+    os.getenv("RAGFIN_MARKET_PRICE_SNAPSHOT_TRADING_TTL_SECONDS", "60")
+)
+
+_MARKET_PRICE_SNAPSHOT_OFFHOURS_TTL_SECONDS = int(
+    os.getenv("RAGFIN_MARKET_PRICE_SNAPSHOT_OFFHOURS_TTL_SECONDS", "300")
+)
+
+# How old a snapshot may be before we stop serving it as `stale: true`.
+_MARKET_PRICE_SNAPSHOT_MAX_STALE_SECONDS = int(
+    os.getenv("RAGFIN_MARKET_PRICE_SNAPSHOT_MAX_STALE_SECONDS", str(6 * 60 * 60))
+)
+
+# After a failed rebuild, keep serving the stale snapshot for this long instead
+# of retrying the slow upstream on every request.
+_MARKET_PRICE_SNAPSHOT_RETRY_COOLDOWN_SECONDS = float(
+    os.getenv("RAGFIN_MARKET_PRICE_SNAPSHOT_RETRY_COOLDOWN_SECONDS", "30")
+)
+
+_MARKET_PRICE_CACHE: BoundedMemoryCache = BoundedMemoryCache(
+    max_entries=16,
+    default_ttl=max(3600, _MARKET_PRICE_SNAPSHOT_MAX_STALE_SECONDS),
+)
 
 _MARKET_QUOTE_SOURCE_INDEX = "XUTUM"
 
 _MARKET_PRICE_SHARED_CACHE_KEY = "api:market:price-snapshot:XUTUM:v1"
+
+_MARKET_PRICE_SNAPSHOT_MEMORY_KEY = f"snapshot:{_MARKET_QUOTE_SOURCE_INDEX}"
 
 _MARKET_PRICE_DATABASE_CACHE_PATH = (
     CONFIG.paths.processed_dir / "_shared" / "market_price_snapshot_xutum.json"
@@ -413,7 +447,7 @@ _MARKET_PRICE_DATABASE_CACHE_PATH = (
 
 _MARKET_PRICE_DATABASE_RESOURCE_KEY = "market:price-snapshot:XUTUM:refresh:v1"
 
-_MARKET_PRICE_DATABASE_WAIT_TIMEOUT_SECONDS = 30.0
+_MARKET_PRICE_DATABASE_WAIT_TIMEOUT_SECONDS = 0.0
 
 _MARKET_PRICE_DATABASE_POLL_MAX_SECONDS = 0.25
 
@@ -423,9 +457,12 @@ _INFOYATIRIM_STOCK_PAGE_CACHE_TTL = 60
 
 _INFOYATIRIM_STOCK_PAGE_FALLBACK_LIMIT = 12
 
-_STOCKS_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=300)
+_STOCKS_CACHE: BoundedMemoryCache = BoundedMemoryCache(
+    max_entries=64,
+    default_ttl=max(3600, _MARKET_QUOTES_STALE_TTL),
+)
 
-_STOCKS_CACHE_TTL = 3
+_STOCKS_CACHE_TTL = int(os.getenv("RAGFIN_MARKET_STOCKS_CACHE_TTL_SECONDS", "90"))
 
 _MARKET_STOCK_CARD_CHART_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=512, default_ttl=3600)
 
@@ -812,14 +849,73 @@ def _market_price_source_url(index_name: str) -> str:
         return "https://infoyatirim.com/canli-borsa/xu100-bist-100-hisseleri"
     return "https://infoyatirim.com/canli-borsa/xu100-bist-100-hisseleri"
 
-def _market_price_snapshot_is_fresh(payload: Any, *, now: Optional[float] = None) -> bool:
-    if not isinstance(payload, dict) or not isinstance(payload.get("items"), dict):
-        return False
+def _market_price_snapshot_created_at(payload: Any) -> Optional[float]:
+    if not isinstance(payload, dict):
+        return None
     try:
-        expires_at = float(payload.get("expires_at") or 0.0)
+        created_at = float(payload.get("created_at") or 0.0)
     except (TypeError, ValueError):
+        return None
+    return created_at if created_at > 0 else None
+
+
+def _market_price_snapshot_age(payload: Any, *, now: Optional[float] = None) -> Optional[float]:
+    created_at = _market_price_snapshot_created_at(payload)
+    if created_at is None:
+        return None
+    return max(0.0, (time.time() if now is None else now) - created_at)
+
+
+def _market_price_snapshot_fresh_ttl(now: Optional[float] = None) -> int:
+    """Freshness window evaluated at read time: 60s in session, 300s off-hours."""
+    current = time.time() if now is None else now
+    try:
+        market_open = _is_bist_market_open(datetime.fromtimestamp(current, _TURKEY_TIMEZONE))
+    except Exception:
+        market_open = True
+    if market_open:
+        return max(1, int(_MARKET_PRICE_SNAPSHOT_TRADING_TTL_SECONDS))
+    return max(
+        1,
+        int(_MARKET_PRICE_SNAPSHOT_TRADING_TTL_SECONDS),
+        int(_MARKET_PRICE_SNAPSHOT_OFFHOURS_TTL_SECONDS),
+    )
+
+
+def _market_price_snapshot_is_usable(payload: Any) -> bool:
+    """Accept any snapshot that carries rows, regardless of its `expires_at`.
+
+    Rows persisted before the freshness model changed still carry an
+    `expires_at` in the past. They stay usable so a deploy does not start by
+    rebuilding everything (and re-reading the blob) from scratch.
+    """
+    if not isinstance(payload, dict):
         return False
-    return expires_at > (time.time() if now is None else now)
+    items = payload.get("items")
+    return isinstance(items, dict) and bool(items)
+
+
+def _market_price_snapshot_is_fresh(payload: Any, *, now: Optional[float] = None) -> bool:
+    """Whether the snapshot should be rebuilt from upstream right now."""
+    if not _market_price_snapshot_is_usable(payload):
+        return False
+    current = time.time() if now is None else now
+    created_at = _market_price_snapshot_created_at(payload)
+    raw_expires = payload.get("expires_at")
+    expires_at: Optional[float] = None
+    if raw_expires is not None:
+        try:
+            expires_at = float(raw_expires)
+        except (TypeError, ValueError):
+            expires_at = None
+    if created_at is not None and expires_at is not None and expires_at < created_at:
+        return expires_at > current
+    if created_at is not None:
+        age = max(0.0, current - created_at)
+        return age <= _market_price_snapshot_fresh_ttl(current)
+    if expires_at is not None:
+        return expires_at > current
+    return False
 
 
 def _market_price_snapshot_payload(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -827,32 +923,43 @@ def _market_price_snapshot_payload(items: Dict[str, Dict[str, Any]]) -> Dict[str
     return {
         "items": items,
         "created_at": created_at,
-        "expires_at": created_at + _MARKET_PRICE_CACHE_TTL,
     }
 
 
 def _remember_market_price_snapshot(payload: Dict[str, Any]) -> None:
-    items = payload.get("items")
-    if not isinstance(items, dict):
+    if not _market_price_snapshot_is_usable(payload):
         return
-    try:
-        cached_at = float(payload.get("created_at") or time.time())
-    except (TypeError, ValueError):
-        cached_at = time.time()
-    _MARKET_PRICE_CACHE[f"snapshot:{_MARKET_QUOTE_SOURCE_INDEX}"] = {
-        "_ts": cached_at,
-        "items": items,
+    _MARKET_PRICE_CACHE[_MARKET_PRICE_SNAPSHOT_MEMORY_KEY] = {
+        # `_ts` is when we loaded this into process memory. Using the payload's
+        # `created_at` instead would make an old-but-usable database row look
+        # immediately expired and force a database read on every request.
+        "_ts": time.time(),
+        "created_at": _market_price_snapshot_created_at(payload),
+        "stale": bool(payload.get("stale")),
+        "items": payload["items"],
     }
 
 
-def _market_price_snapshot_database_read() -> Optional[Dict[str, Any]]:
+def _market_price_snapshot_memory_entry() -> Optional[Dict[str, Any]]:
+    entry = _MARKET_PRICE_CACHE.get(_MARKET_PRICE_SNAPSHOT_MEMORY_KEY)
+    if not isinstance(entry, dict) or not isinstance(entry.get("items"), dict):
+        return None
+    return entry
+
+
+def _market_price_snapshot_database_read(*, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Read the persisted snapshot once. Usability, not freshness, gates this."""
     if not _market_database.database_enabled():
         return None
     try:
         payload = _market_database.read_json_cache(_MARKET_PRICE_DATABASE_CACHE_PATH)
     except Exception:
         return None
-    return payload if _market_price_snapshot_is_fresh(payload) else None
+    if not _market_price_snapshot_is_usable(payload):
+        return None
+    result = dict(payload)
+    result["stale"] = not _market_price_snapshot_is_fresh(payload, now=now)
+    return result
 
 
 def _market_price_snapshot_database_write(payload: Dict[str, Any]) -> None:
@@ -873,27 +980,70 @@ def _market_price_redis_available() -> bool:
 
 
 def _market_price_snapshot_remaining_ttl(payload: Dict[str, Any]) -> int:
+    """TTL for the shared cache entry, always at least one second."""
+    age = _market_price_snapshot_age(payload)
+    if age is not None:
+        remaining = _market_price_snapshot_fresh_ttl() - age
+        return max(1, int(math.ceil(remaining)))
     try:
-        remaining = float(payload.get("expires_at") or 0.0) - time.time()
+        legacy_remaining = float(payload.get("expires_at") or 0.0) - time.time()
     except (TypeError, ValueError):
-        return 0
-    return max(0, int(math.ceil(remaining)))
+        legacy_remaining = 0.0
+    if legacy_remaining > 0:
+        return max(1, int(math.ceil(legacy_remaining)))
+    return max(1, int(_MARKET_PRICE_CACHE_TTL))
 
 
-def _market_price_refresh_lease_is_active(lease: Any) -> bool:
-    if not isinstance(lease, dict):
-        return False
-    lease_until = lease.get("lease_until")
-    if isinstance(lease_until, str):
-        try:
-            lease_until = datetime.fromisoformat(lease_until.replace("Z", "+00:00"))
-        except ValueError:
-            return False
-    if not isinstance(lease_until, datetime):
-        return False
-    if lease_until.tzinfo is None:
-        lease_until = lease_until.replace(tzinfo=timezone.utc)
-    return lease_until > datetime.now(timezone.utc)
+def _market_price_snapshot_is_servable_stale(payload: Any) -> bool:
+    """Any usable snapshot (including legacy rows with past expires_at) can be served stale."""
+    return _market_price_snapshot_is_usable(payload)
+
+
+_MARKET_PRICE_SNAPSHOT_REFRESH_LOCK = threading.Lock()
+_MARKET_PRICE_SNAPSHOT_REFRESH_EVENT = threading.Event()
+_MARKET_PRICE_SNAPSHOT_REFRESH_EVENT.set()
+_MARKET_PRICE_SNAPSHOT_STATE_LOCK = threading.Lock()
+_MARKET_PRICE_SNAPSHOT_STATE: Dict[str, float] = {"last_failure_at": 0.0}
+
+
+def _begin_market_price_snapshot_refresh() -> bool:
+    """Claim the process-local rebuild slot. Only one request may build."""
+    with _MARKET_PRICE_SNAPSHOT_REFRESH_LOCK:
+        if _MARKET_PRICE_SNAPSHOT_REFRESH_EVENT.is_set():
+            _MARKET_PRICE_SNAPSHOT_REFRESH_EVENT.clear()
+            return True
+    return False
+
+
+def _end_market_price_snapshot_refresh() -> None:
+    _MARKET_PRICE_SNAPSHOT_REFRESH_EVENT.set()
+
+
+def _wait_for_market_price_snapshot_refresh() -> None:
+    _MARKET_PRICE_SNAPSHOT_REFRESH_EVENT.wait(
+        timeout=max(0.05, float(_MARKET_QUOTES_WAIT_TIMEOUT_SECONDS))
+    )
+
+
+def _market_price_snapshot_retry_allowed(*, has_stale: bool) -> bool:
+    """Never hammer a failing upstream while a stale snapshot can be served."""
+    if not has_stale:
+        return True
+    with _MARKET_PRICE_SNAPSHOT_STATE_LOCK:
+        last_failure_at = _MARKET_PRICE_SNAPSHOT_STATE["last_failure_at"]
+    if last_failure_at <= 0.0:
+        return True
+    return (time.time() - last_failure_at) >= _MARKET_PRICE_SNAPSHOT_RETRY_COOLDOWN_SECONDS
+
+
+def _mark_market_price_snapshot_failure() -> None:
+    with _MARKET_PRICE_SNAPSHOT_STATE_LOCK:
+        _MARKET_PRICE_SNAPSHOT_STATE["last_failure_at"] = time.time()
+
+
+def _clear_market_price_snapshot_failure() -> None:
+    with _MARKET_PRICE_SNAPSHOT_STATE_LOCK:
+        _MARKET_PRICE_SNAPSHOT_STATE["last_failure_at"] = 0.0
 
 
 def _build_market_price_snapshot(
@@ -969,11 +1119,13 @@ def _build_market_price_snapshot(
 
 def _market_price_snapshot_with_database_lease(
     normalized_symbols: List[str],
+    *,
+    initial_cached: Optional[Dict[str, Any]] = None,
 ) -> tuple[Optional[Dict[str, Any]], bool]:
     if not _market_database.database_enabled():
         return None, False
-    cached = _market_price_snapshot_database_read()
-    if cached is not None:
+    cached = initial_cached if initial_cached is not None else _market_price_snapshot_database_read()
+    if _market_price_snapshot_is_fresh(cached):
         return cached, False
 
     owner_token = uuid.uuid4().hex
@@ -990,12 +1142,9 @@ def _market_price_snapshot_with_database_lease(
 
     if lease:
         try:
-            cached = _market_price_snapshot_database_read()
-            if cached is not None:
-                return cached, False
             items = _build_market_price_snapshot(normalized_symbols)
             if items is None:
-                return None, True
+                return (cached if _market_price_snapshot_is_usable(cached) else None), True
             snapshot = _market_price_snapshot_payload(items)
             _market_price_snapshot_database_write(snapshot)
             return snapshot, True
@@ -1009,31 +1158,29 @@ def _market_price_snapshot_with_database_lease(
             except Exception:
                 LOGGER.debug("market price snapshot lease release failed", exc_info=True)
 
-    try:
-        lease = _market_database.get_refresh_lease(_MARKET_PRICE_DATABASE_RESOURCE_KEY)
-    except Exception:
-        lease = None
-    if not _market_price_refresh_lease_is_active(lease):
-        return None, False
-
-    deadline = time.monotonic() + _MARKET_PRICE_DATABASE_WAIT_TIMEOUT_SECONDS
-    poll_interval = 0.05
-    while time.monotonic() < deadline:
-        cached = _market_price_snapshot_database_read()
-        if cached is not None:
-            return cached, False
-        try:
-            lease = _market_database.get_refresh_lease(_MARKET_PRICE_DATABASE_RESOURCE_KEY)
-        except Exception:
-            lease = None
-        if not _market_price_refresh_lease_is_active(lease):
-            return None, False
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        time.sleep(min(poll_interval, remaining))
-        poll_interval = min(poll_interval * 1.5, _MARKET_PRICE_DATABASE_POLL_MAX_SECONDS)
+    # No 30s DB polling loop: return usable stale snapshot immediately if available.
+    if _market_price_snapshot_is_usable(cached):
+        return cached, False
     return None, False
+
+
+def _project_market_price_snapshot(
+    items: Dict[str, Dict[str, Any]],
+    symbols: List[str],
+    *,
+    stale: bool = False,
+) -> Dict[str, Dict[str, Any]]:
+    projected = {
+        symbol: dict(items[symbol])
+        for symbol in symbols
+        if isinstance(items.get(symbol), dict)
+    }
+    if stale:
+        for row in projected.values():
+            # Additive flag only; existing keys are untouched so the public
+            # response contracts stay stable.
+            row["stale"] = True
+    return projected
 
 
 def _fetch_market_price_map(
@@ -1041,7 +1188,13 @@ def _fetch_market_price_map(
     *,
     index_name: str = _MARKET_QUOTE_SOURCE_INDEX,
 ) -> Dict[str, Dict[str, Any]]:
-    """Fetch one canonical XUTUM quote snapshot and project the requested symbols."""
+    """Fetch one canonical XUTUM quote snapshot and project the requested symbols.
+
+    The snapshot is served from process memory, then the shared cache, then the
+    persisted row. Only one request per process may rebuild it; every other
+    request either waits briefly for that rebuild or is served the previous
+    snapshot marked with ``stale=True``.
+    """
     normalized_symbols = sorted({str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()})
     if not normalized_symbols:
         return {}
@@ -1051,46 +1204,58 @@ def _fetch_market_price_map(
     del index_name
     cache_key = _MARKET_PRICE_SHARED_CACHE_KEY
 
-    def project_items(items: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        return {
-            symbol: dict(items[symbol])
-            for symbol in normalized_symbols
-            if symbol in items
-        }
+    def project(items: Dict[str, Dict[str, Any]], *, stale: bool = False) -> Dict[str, Dict[str, Any]]:
+        return _project_market_price_snapshot(items, normalized_symbols, stale=stale)
 
     now = time.time()
-    local_cached = _MARKET_PRICE_CACHE.get(f"snapshot:{_MARKET_QUOTE_SOURCE_INDEX}")
-    if local_cached and now - local_cached.get("_ts", 0) < _MARKET_PRICE_CACHE_TTL:
-        return project_items(local_cached.get("items", {}))
+    fresh_ttl = _market_price_snapshot_fresh_ttl(now)
+    memory_window = max(int(_MARKET_PRICE_CACHE_TTL), int(fresh_ttl))
+
+    local_entry = _market_price_snapshot_memory_entry()
+    if local_entry is not None and now - float(local_entry.get("_ts") or 0.0) < memory_window:
+        created_at = local_entry.get("created_at")
+        age = max(0.0, now - float(created_at)) if created_at else None
+        is_stale = bool(local_entry.get("stale")) or (age is not None and age > fresh_ttl)
+        return project(local_entry["items"], stale=is_stale)
 
     redis_available = _market_price_redis_available()
     if redis_available:
         shared_cached = _shared_cache_get_dict(cache_key)
-        if _market_price_snapshot_is_fresh(shared_cached):
+        if _market_price_snapshot_is_fresh(shared_cached, now=now):
             _remember_market_price_snapshot(shared_cached)
-            return project_items(shared_cached["items"])
+            return project(shared_cached["items"])
 
-    database_cached = _market_price_snapshot_database_read()
-    if database_cached is not None:
+    database_cached = _market_price_snapshot_database_read(now=now)
+    if _market_price_snapshot_is_fresh(database_cached, now=now):
         _remember_market_price_snapshot(database_cached)
         if redis_available:
-            remaining_ttl = _market_price_snapshot_remaining_ttl(database_cached)
-            if remaining_ttl > 0:
-                _shared_cache_set(cache_key, database_cached, ttl_seconds=remaining_ttl)
-        return project_items(database_cached["items"])
+            _shared_cache_set(
+                cache_key,
+                database_cached,
+                ttl_seconds=_market_price_snapshot_remaining_ttl(database_cached),
+            )
+        return project(database_cached["items"])
 
-    def refresh_snapshot() -> Optional[Dict[str, Any]]:
-        cached = _market_price_snapshot_database_read()
-        if cached is not None:
-            return cached
-        items = _build_market_price_snapshot(normalized_symbols)
-        if items is None:
-            return None
-        snapshot = _market_price_snapshot_payload(items)
-        _market_price_snapshot_database_write(snapshot)
-        return snapshot
+    # Prefer the persisted row for stale serving; fall back to memory.
+    stale_snapshot = database_cached if _market_price_snapshot_is_servable_stale(database_cached) else None
+    if stale_snapshot is None and local_entry is not None:
+        memory_snapshot = {
+            "items": local_entry["items"],
+            "created_at": local_entry.get("created_at"),
+            "stale": True,
+        }
+        if _market_price_snapshot_is_servable_stale(memory_snapshot):
+            stale_snapshot = memory_snapshot
 
     if redis_available:
+        def refresh_snapshot() -> Optional[Dict[str, Any]]:
+            items = _build_market_price_snapshot(normalized_symbols)
+            if items is None:
+                return None
+            built = _market_price_snapshot_payload(items)
+            _market_price_snapshot_database_write(built)
+            return built
+
         try:
             snapshot, singleflight_status = _get_or_set_single_flight(
                 cache_key,
@@ -1107,43 +1272,62 @@ def _fetch_market_price_map(
 
         if _market_price_snapshot_is_fresh(snapshot):
             _remember_market_price_snapshot(snapshot)
-            return project_items(snapshot["items"])
+            return project(snapshot["items"])
 
-        # When Redis single-flight is used, waiters ("pending") and failed owners ("miss")
-        # must NEVER execute uncoordinated upstream builds. Check local memory and database
-        # for any previously recorded (stale) snapshot; serve stale if available, otherwise return {}.
-        local_stale = _MARKET_PRICE_CACHE.get(f"snapshot:{_MARKET_QUOTE_SOURCE_INDEX}")
-        if isinstance(local_stale, dict) and isinstance(local_stale.get("items"), dict):
-            LOGGER.warning("Serving stale memory snapshot due to single-flight %s", singleflight_status)
-            return project_items(local_stale["items"])
-
-        if _market_database.database_enabled():
-            try:
-                db_stale = _market_database.read_json_cache(_MARKET_PRICE_DATABASE_CACHE_PATH)
-                if isinstance(db_stale, dict) and isinstance(db_stale.get("items"), dict):
-                    LOGGER.warning("Serving stale DB snapshot due to single-flight %s", singleflight_status)
-                    _remember_market_price_snapshot(db_stale)
-                    return project_items(db_stale["items"])
-            except Exception:
-                pass
-
+        if stale_snapshot is not None:
+            LOGGER.warning("Serving stale snapshot due to single-flight %s", singleflight_status)
+            _remember_market_price_snapshot({**stale_snapshot, "stale": True})
+            return project(stale_snapshot["items"], stale=True)
         return {}
-    else:
-        snapshot, source_attempted = _market_price_snapshot_with_database_lease(normalized_symbols)
+
+    if not _begin_market_price_snapshot_refresh():
+        # Another request owns the rebuild. Wait for it, then serve whatever it
+        # produced; never start a second upstream fetch.
+        if stale_snapshot is not None:
+            LOGGER.warning("Serving stale market snapshot while another request refreshes it")
+            return project(stale_snapshot["items"], stale=True)
+        _wait_for_market_price_snapshot_refresh()
+        refreshed_entry = _market_price_snapshot_memory_entry()
+        if refreshed_entry is not None:
+            return project(refreshed_entry["items"], stale=bool(refreshed_entry.get("stale")))
+        return {}
+
+    try:
+        snapshot, source_attempted = _market_price_snapshot_with_database_lease(
+            normalized_symbols,
+            initial_cached=database_cached,
+        )
         if _market_price_snapshot_is_fresh(snapshot):
             _remember_market_price_snapshot(snapshot)
-            return project_items(snapshot["items"])
+            _clear_market_price_snapshot_failure()
+            return project(snapshot["items"])
         if source_attempted:
+            _mark_market_price_snapshot_failure()
+            if stale_snapshot is not None:
+                LOGGER.warning("Serving stale market snapshot after a failed rebuild")
+                _remember_market_price_snapshot({**stale_snapshot, "stale": True})
+                return project(stale_snapshot["items"], stale=True)
             return {}
+        if _market_price_snapshot_is_usable(snapshot):
+            _remember_market_price_snapshot({**snapshot, "stale": True})
+            return project(snapshot["items"], stale=True)
 
-        # Fail-open fallback: only reached when Redis is disabled/unavailable and database lease timed out with no cached data
+        # Fail-open fallback: reached when Redis is unavailable and database lease was not acquired with no cached data
         items = _build_market_price_snapshot(normalized_symbols)
         if items is None:
+            _mark_market_price_snapshot_failure()
+            if stale_snapshot is not None:
+                LOGGER.warning("Serving stale market snapshot after a failed rebuild")
+                _remember_market_price_snapshot({**stale_snapshot, "stale": True})
+                return project(stale_snapshot["items"], stale=True)
             return {}
         snapshot = _market_price_snapshot_payload(items)
-        _remember_market_price_snapshot(snapshot)
         _market_price_snapshot_database_write(snapshot)
-        return project_items(items)
+        _remember_market_price_snapshot(snapshot)
+        _clear_market_price_snapshot_failure()
+        return project(snapshot["items"])
+    finally:
+        _end_market_price_snapshot_refresh()
 
 def _pick_series_value_at_or_before(
     points: List[tuple[datetime, float]],

@@ -139,6 +139,8 @@ class BenchmarkClient:
         self.mock = mock
         self.base_url = (base_url or "http://127.0.0.1:8000").rstrip("/")
         self.timeout = timeout
+        self._saved_patches: List[Tuple[Any, str, bool, Any]] = []
+        self._saved_routes: List[Tuple[Any, Any]] = []
 
         if self.standalone:
             from starlette.testclient import TestClient
@@ -158,6 +160,12 @@ class BenchmarkClient:
                 timeout=self.timeout,
                 follow_redirects=True,
             )
+
+    def _patch_attr(self, target: Any, name: str, value: Any) -> None:
+        had_attr = hasattr(target, name)
+        old_val = getattr(target, name, None)
+        self._saved_patches.append((target, name, had_attr, old_val))
+        setattr(target, name, value)
 
     def _setup_in_process_mocks(self, app_instance: Any) -> None:
         """Inject lightweight mocks in headless mock mode for fast, deterministic execution."""
@@ -193,42 +201,42 @@ class BenchmarkClient:
                 "count": 2,
             }
 
-            market_router._market_stocks_payload = lambda **kwargs: dict(mock_market)
-            market_router.market_stocks_etag_revision = lambda **kwargs: {"source": "mock-market-v1"}
-            market_router._market_indices_payload = lambda **kwargs: dict(mock_indices)
+            self._patch_attr(market_router, "_market_stocks_payload", lambda **kwargs: dict(mock_market))
+            self._patch_attr(market_router, "market_stocks_etag_revision", lambda **kwargs: {"source": "mock-market-v1"})
+            self._patch_attr(market_router, "_market_indices_payload", lambda **kwargs: dict(mock_indices))
 
             revision_dict = {"catalog_generation": 1, "price_generation": 1, "source": "mock-funds-v1"}
-            funds_router._funds_listing_preflight = lambda **kwargs: (dict(mock_funds), revision_dict)
-            funds_router._funds_listing_payload = lambda *args, **kwargs: dict(mock_funds)
-            funds_router._fund_detail_payload = lambda *args, **kwargs: {
+            self._patch_attr(funds_router, "_funds_listing_preflight", lambda **kwargs: (dict(mock_funds), revision_dict))
+            self._patch_attr(funds_router, "_funds_listing_payload", lambda *args, **kwargs: dict(mock_funds))
+            self._patch_attr(funds_router, "_fund_detail_payload", lambda *args, **kwargs: {
                 "fund_code": kwargs.get("normalized", "TI2"),
                 "name": "İş Portföy",
                 "price": 5.25,
                 "daily_return": 0.5,
                 "aum": 1200000.0,
-            }
-            funds_router._fund_yield_summary_payload = lambda *args, **kwargs: {
+            })
+            self._patch_attr(funds_router, "_fund_yield_summary_payload", lambda *args, **kwargs: {
                 "fund_code": kwargs.get("normalized", "TI2"),
                 "periods": {"1A": 5.0, "3A": 15.0, "YBB": 45.0, "1Y": 70.0},
-            }
-            funds_router._fund_allocations_payload = lambda *args, **kwargs: {
+            })
+            self._patch_attr(funds_router, "_fund_allocations_payload", lambda *args, **kwargs: {
                 "fund_code": kwargs.get("normalized", "TI2"),
                 "allocations": [{"category": "Hisse Senedi", "ratio": 85.0}],
-            }
-            funds_router._funds_search_payload = lambda **kwargs: {
+            })
+            self._patch_attr(funds_router, "_funds_search_payload", lambda **kwargs: {
                 "rows": [{"fund_code": "TI2", "name": "İş Portföy"}],
                 "count": 1,
-            }
-            funds_router._funds_categories_payload = lambda **kwargs: {
+            })
+            self._patch_attr(funds_router, "_funds_categories_payload", lambda **kwargs: {
                 "categories": ["Hisse"],
                 "count": 1,
-            }
+            })
 
-            kap_router._precomputed_kap_companies_payload = lambda **kwargs: {
+            self._patch_attr(kap_router, "_precomputed_kap_companies_payload", lambda **kwargs: {
                 "companies": [{"symbol": "THYAO", "title": "Türk Hava Yolları"}],
                 "count": 1,
                 "as_of": "2026-11-10T18:00:00Z",
-            }
+            })
         except Exception:
             pass
 
@@ -271,6 +279,7 @@ class BenchmarkClient:
 
             for route in app_instance.routes:
                 if getattr(route, "path", None) == "/health" and "GET" in getattr(route, "methods", []):
+                    self._saved_routes.append((route, route.endpoint))
                     route.endpoint = _wrapped_health
 
     def get(
@@ -282,6 +291,15 @@ class BenchmarkClient:
         return self._client.get(path, params=params, headers=headers)
 
     def close(self) -> None:
+        for route, orig_endpoint in reversed(self._saved_routes):
+            route.endpoint = orig_endpoint
+        self._saved_routes.clear()
+        for target, name, had_attr, old_val in reversed(self._saved_patches):
+            if had_attr:
+                setattr(target, name, old_val)
+            elif hasattr(target, name):
+                delattr(target, name)
+        self._saved_patches.clear()
         if hasattr(self._client, "close"):
             self._client.close()
 
