@@ -677,6 +677,38 @@ def test_market_stocks_serves_stale_quote_when_upstream_fails(monkeypatch: pytes
     assert backend.get("api:market:stocks:XUTUM:v4") == stale_entry
 
 
+def test_market_stocks_flags_aged_quotes_as_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A build fed by an aged quote snapshot must not be reported as fresh."""
+    monkeypatch.setattr(api_module, "_build_market_stocks_payload", lambda **_kwargs: {
+        "index": "XUTUM",
+        "rows": [{"company": "YKBNK", "price": 25.0}],
+        "benchmarks": {},
+        "as_of": "old",
+        "quote_stale": True,
+    })
+
+    payload = api_module._market_stocks_payload(index_name="XUTUM")
+
+    assert payload["stale"] is True
+    assert payload["quote_status"] == "stale"
+    assert "quote_stale" not in payload
+
+    entry = cache_module.get_cache().get("api:market:stocks:XUTUM:v4")
+    assert entry["quote_stale"] is True
+    assert "quote_stale" not in entry["payload"]
+
+    # The process-local hit must keep reporting the aged quotes as stale.
+    monkeypatch.setattr(
+        api_module,
+        "_build_market_stocks_payload",
+        lambda **_kwargs: pytest.fail("a fresh envelope entry should not rebuild"),
+    )
+    cached = api_module._market_stocks_payload(index_name="XUTUM")
+    assert cached["stale"] is True
+    assert cached["quote_status"] == "stale"
+    assert "quote_stale" not in cached
+
+
 def test_market_stocks_caches_no_quote_result_for_three_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 

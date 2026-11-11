@@ -1681,6 +1681,14 @@ def _build_market_stocks_payload(
     data = {
         "index": normalized_index,
         "rows": rows,
+        # Internal signal consumed by `_market_stocks_payload`, which turns it
+        # into the public `quote_status`/`stale` envelope fields and removes it
+        # from the response payload.
+        "quote_stale": any(
+            bool(quote.get("stale"))
+            for quote in price_map.values()
+            if isinstance(quote, dict)
+        ),
         "benchmarks": _market_stock_benchmarks(),
         "source": "infoyatirim_yahoo",
         "universe": {
@@ -1949,6 +1957,13 @@ def _market_stocks_payload(
     effective_fresh_ttl = _effective_market_quotes_fresh_ttl()
     effective_stale_ttl = max(effective_fresh_ttl, _MARKET_QUOTES_STALE_TTL)
 
+    def freshness(entry: Any) -> tuple[str, bool]:
+        """Report quotes served from an aged snapshot instead of calling them fresh."""
+
+        if isinstance(entry, dict) and entry.get("quote_stale"):
+            return "stale", True
+        return "fresh", False
+
     def revalidate_factory() -> Optional[Dict[str, Any]]:
         if _market_no_quote_cache_active(normalized_index):
             return None
@@ -1963,6 +1978,9 @@ def _market_stocks_payload(
         if not _market_payload_has_quote(built):
             return None
         _clear_market_no_quote_cache(normalized_index)
+        # The SWR entry schema has no per-build metadata slot, so drop the
+        # signal rather than leaking a non-contract field into the payload.
+        built.pop("quote_stale", None)
         return built
 
     refresh_pending = False
@@ -1980,10 +1998,11 @@ def _market_stocks_payload(
 
     if not force_refresh and _market_quote_entry_is_fresh(local_entry):
         payload = _market_quote_entry_payload(local_entry) or {}
+        quote_status, quote_stale = freshness(local_entry)
         payload.update({
             "cache_status": "hit",
-            "quote_status": "fresh",
-            "stale": False,
+            "quote_status": quote_status,
+            "stale": quote_stale,
             "quote_error": None,
             "refresh_pending": refresh_pending,
         })
@@ -1992,7 +2011,7 @@ def _market_stocks_payload(
             index=normalized_index,
             cache_status="hit",
             upstream_called=False,
-            stale=False,
+            stale=quote_stale,
             started_at=started_at,
         )
         return payload
@@ -2004,10 +2023,11 @@ def _market_stocks_payload(
     if not force_refresh and _market_quote_entry_is_fresh(shared_entry):
         _STOCKS_CACHE[local_key] = {"_ts": time.time(), "entry": shared_entry}
         payload = _market_quote_entry_payload(shared_entry) or {}
+        quote_status, quote_stale = freshness(shared_entry)
         payload.update({
             "cache_status": "shared_hit",
-            "quote_status": "fresh",
-            "stale": False,
+            "quote_status": quote_status,
+            "stale": quote_stale,
             "quote_error": None,
             "refresh_pending": refresh_pending,
         })
@@ -2016,7 +2036,7 @@ def _market_stocks_payload(
             index=normalized_index,
             cache_status="shared_hit",
             upstream_called=False,
-            stale=False,
+            stale=quote_stale,
             started_at=started_at,
         )
         return payload
@@ -2030,6 +2050,9 @@ def _market_stocks_payload(
             force_refresh=force_refresh,
             basic_summary_map=basic_summary_map,
         )
+        # Pop before the fallback copy so the internal signal can never reach a
+        # public payload, including the `unavailable` response below.
+        quote_stale = bool(built.pop("quote_stale", False))
         latest_build = dict(built)
         if _market_payload_is_no_quote(built):
             _store_market_no_quote_cache(normalized_index)
@@ -2040,6 +2063,9 @@ def _market_stocks_payload(
         now = time.time()
         return {
             "payload": built,
+            # Kept beside the payload so the response envelope can flag aged
+            # quotes without storing a non-contract field in the payload.
+            "quote_stale": quote_stale,
             "fresh_until": now + max(1, effective_fresh_ttl),
             "stale_until": now + max(1, effective_stale_ttl),
             "cached_at": datetime.now(timezone.utc).isoformat(),
@@ -2063,10 +2089,11 @@ def _market_stocks_payload(
     if _market_quote_entry_is_fresh(entry):
         _STOCKS_CACHE[local_key] = {"_ts": time.time(), "entry": entry}
         payload = _market_quote_entry_payload(entry) or {}
+        quote_status, quote_stale = freshness(entry)
         payload.update({
             "cache_status": cache_status,
-            "quote_status": "fresh",
-            "stale": False,
+            "quote_status": quote_status,
+            "stale": quote_stale,
             "quote_error": None,
             "refresh_pending": refresh_pending,
         })
@@ -2075,7 +2102,7 @@ def _market_stocks_payload(
             index=normalized_index,
             cache_status=cache_status,
             upstream_called=cache_status == "miss",
-            stale=False,
+            stale=quote_stale,
             started_at=started_at,
         )
         return payload
