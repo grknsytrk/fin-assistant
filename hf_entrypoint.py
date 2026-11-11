@@ -50,7 +50,14 @@ def main() -> None:
     logging.getLogger("app.database").setLevel(logging.INFO)
     # ``include_router`` does not run api_app's FastAPI lifespan on Gradio
     # Spaces. Run the same schema/cache bootstrap before serving routes.
-    bootstrap_application_storage()
+    # Postgres is an optional cold-start seed: when it is unreachable the API
+    # must still come up and serve from process/disk caches.
+    try:
+        bootstrap_application_storage()
+    except Exception:
+        logging.getLogger("app.api").exception(
+            "application storage bootstrap failed; serving from local caches only"
+        )
     if demo is not None:
         demo.launch(
             server_name="0.0.0.0",
