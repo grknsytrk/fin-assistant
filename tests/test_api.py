@@ -36,6 +36,8 @@ def _reset_flow_state(monkeypatch: pytest.MonkeyPatch) -> None:
     api_module._STOCKS_CACHE.clear()
     api_module._UNIVERSE_CACHE.clear()
     api_module._MARKET_PRICE_CACHE.clear()
+    api_module._MARKET_PRICE_SNAPSHOT_REFRESH_EVENT.set()
+    api_module._clear_market_price_snapshot_failure()
     api_module._INFOYATIRIM_STOCK_PAGE_CACHE.clear()
     api_module._STOCK_RETURN_BASE_CACHE.clear()
     api_module._MARKET_STOCK_CARD_CHART_CACHE.clear()
@@ -5305,18 +5307,18 @@ def test_fetch_market_price_map_uses_postgres_snapshot_when_redis_is_unavailable
     assert payload["A1CAP"]["price"] == 14.18
 
 
-def test_fetch_market_price_map_postgres_lease_shares_and_refreshes_snapshot(
+def test_fetch_market_price_map_coalesces_concurrent_rebuilds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot_store: Dict[str, Any] = {"payload": None, "owner": None, "lease_until": None, "writes": 0}
+    """Two concurrent requests must produce exactly one upstream build and one write."""
+    snapshot_store: Dict[str, Any] = {"payload": None, "writes": 0}
     state_lock = threading.Lock()
     first_read_barrier = threading.Barrier(2)
     initial_reads = 0
     build_calls: List[int] = []
 
-    def fake_database_read(path: Any) -> Optional[Dict[str, Any]]:
+    def fake_database_read() -> Optional[Dict[str, Any]]:
         nonlocal initial_reads
-        assert path == api_module._MARKET_PRICE_DATABASE_CACHE_PATH
         with state_lock:
             synchronize = snapshot_store["payload"] is None and initial_reads < 2
             if synchronize:
@@ -5326,47 +5328,10 @@ def test_fetch_market_price_map_postgres_lease_shares_and_refreshes_snapshot(
             first_read_barrier.wait(timeout=3)
         return payload
 
-    def fake_database_write(path: Any, payload: Dict[str, Any]) -> None:
-        assert path == api_module._MARKET_PRICE_DATABASE_CACHE_PATH
+    def fake_database_write(payload: Dict[str, Any]) -> None:
         with state_lock:
             snapshot_store["payload"] = payload
             snapshot_store["writes"] += 1
-
-    def fake_acquire_lease(
-        resource_key: str,
-        *,
-        job_id: str,
-        owner_token: str,
-        ttl_seconds: int,
-    ) -> Optional[Dict[str, Any]]:
-        assert resource_key == api_module._MARKET_PRICE_DATABASE_RESOURCE_KEY
-        assert ttl_seconds >= 1
-        with state_lock:
-            if snapshot_store["owner"] is not None:
-                return None
-            snapshot_store["owner"] = (job_id, owner_token)
-            snapshot_store["lease_until"] = datetime.now(timezone.utc) + timedelta(seconds=60)
-            return {"lease_until": snapshot_store["lease_until"]}
-
-    def fake_get_lease(_resource_key: str) -> Optional[Dict[str, Any]]:
-        with state_lock:
-            if snapshot_store["owner"] is None:
-                return None
-            return {"lease_until": snapshot_store["lease_until"]}
-
-    def fake_release_lease(
-        resource_key: str,
-        *,
-        job_id: str,
-        owner_token: str,
-    ) -> bool:
-        assert resource_key == api_module._MARKET_PRICE_DATABASE_RESOURCE_KEY
-        with state_lock:
-            if snapshot_store["owner"] != (job_id, owner_token):
-                return False
-            snapshot_store["owner"] = None
-            snapshot_store["lease_until"] = None
-            return True
 
     def fake_build(_symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         with state_lock:
@@ -5375,17 +5340,15 @@ def test_fetch_market_price_map_postgres_lease_shares_and_refreshes_snapshot(
         return {"A1CAP": {"price": 14.18, "currency": "TRY", "as_of": "2026-10-31T10:00:00+00:00"}}
 
     monkeypatch.setattr(database_module, "database_enabled", lambda: True)
-    monkeypatch.setattr(database_module, "read_json_cache", fake_database_read)
-    monkeypatch.setattr(database_module, "write_json_cache", fake_database_write)
-    monkeypatch.setattr(database_module, "acquire_refresh_lease", fake_acquire_lease)
-    monkeypatch.setattr(database_module, "get_refresh_lease", fake_get_lease)
-    monkeypatch.setattr(database_module, "release_refresh_lease", fake_release_lease)
+    monkeypatch.setattr(api_module, "_market_price_snapshot_database_read", fake_database_read)
+    monkeypatch.setattr(api_module, "_market_price_snapshot_database_write", fake_database_write)
     monkeypatch.setattr(
         api_module,
         "_cache_status",
-        lambda: {"cache_backend": "redis", "cache_redis_fallback": True},
+        lambda: {"cache_backend": "memory", "cache_redis_fallback": True},
     )
     monkeypatch.setattr(api_module, "_build_market_price_snapshot", fake_build)
+    api_module._MARKET_PRICE_CACHE.clear()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _index: api_module._fetch_market_price_map(["A1CAP"]), range(2)))
@@ -5395,12 +5358,14 @@ def test_fetch_market_price_map_postgres_lease_shares_and_refreshes_snapshot(
     assert len(build_calls) == 1
     assert snapshot_store["writes"] == 1
 
+    # A later request is served from process memory without a rebuild or a read.
     api_module._MARKET_PRICE_CACHE.clear()
     cached = api_module._fetch_market_price_map(["A1CAP"])
     assert cached["A1CAP"]["price"] == 14.18
     assert len(build_calls) == 1
 
-    snapshot_store["payload"]["expires_at"] = time.time() - 1
+    # An aged-out snapshot is refreshed instead of being trusted forever.
+    snapshot_store["payload"]["created_at"] = time.time() - 10_000
     api_module._MARKET_PRICE_CACHE.clear()
     refreshed = api_module._fetch_market_price_map(["A1CAP"])
     assert refreshed["A1CAP"]["price"] == 14.18
@@ -5421,8 +5386,6 @@ def test_fetch_market_price_map_falls_back_when_shared_stores_fail_and_does_not_
     monkeypatch.setattr(database_module, "database_enabled", lambda: True)
     monkeypatch.setattr(database_module, "read_json_cache", lambda _path: (_ for _ in ()).throw(OSError("db down")))
     monkeypatch.setattr(database_module, "write_json_cache", unavailable_database_write)
-    monkeypatch.setattr(database_module, "acquire_refresh_lease", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(database_module, "get_refresh_lease", lambda _key: None)
     monkeypatch.setattr(
         api_module,
         "_cache_status",
@@ -5448,21 +5411,18 @@ def test_fetch_market_price_map_falls_back_when_shared_stores_fail_and_does_not_
     assert len(write_attempts) == 1
 
 
-def test_fetch_market_price_map_falls_back_after_postgres_lease_timeout(
+def test_fetch_market_price_map_builds_when_database_is_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lease_until = datetime.now(timezone.utc) + timedelta(seconds=60)
+    """No persisted snapshot and no lease: the process-local single-flight builds once."""
     builds: List[int] = []
     monkeypatch.setattr(database_module, "database_enabled", lambda: True)
     monkeypatch.setattr(database_module, "read_json_cache", lambda _path: None)
     monkeypatch.setattr(database_module, "write_json_cache", lambda *_args: None)
-    monkeypatch.setattr(database_module, "acquire_refresh_lease", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(database_module, "get_refresh_lease", lambda _key: {"lease_until": lease_until})
-    monkeypatch.setattr(api_module, "_MARKET_PRICE_DATABASE_WAIT_TIMEOUT_SECONDS", 0.0)
     monkeypatch.setattr(
         api_module,
         "_cache_status",
-        lambda: {"cache_backend": "redis", "cache_redis_fallback": True},
+        lambda: {"cache_backend": "memory", "cache_redis_fallback": True},
     )
     monkeypatch.setattr(
         api_module,
@@ -5470,6 +5430,7 @@ def test_fetch_market_price_map_falls_back_after_postgres_lease_timeout(
         lambda _symbols: builds.append(1)
         or {"A1CAP": {"price": 14.18, "currency": "TRY", "as_of": "2026-10-31T10:00:00+00:00"}},
     )
+    api_module._MARKET_PRICE_CACHE.clear()
 
     payload = api_module._fetch_market_price_map(["A1CAP"])
 

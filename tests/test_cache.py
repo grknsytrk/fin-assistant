@@ -741,50 +741,62 @@ def test_fetch_market_price_map_waiter_does_not_stampede_upstream(monkeypatch: p
     monkeypatch.setattr(
         market_service,
         "_cache_status",
-        lambda: {"cache_backend": "redis", "cache_redis_fallback": False},
+        lambda: {"cache_backend": "memory", "cache_redis_fallback": True},
     )
-    monkeypatch.setattr(market_service, "_shared_cache_get_dict", lambda _key: None)
+    monkeypatch.setattr(market_service, "_MARKET_PRICE_SNAPSHOT_WAIT_TIMEOUT_SECONDS", 0.05)
 
-    # Case 1: Pristine cold start, single-flight waiter times out ("pending").
-    # No local cache, database disabled. Waiter must return {} and NOT call _build_market_price_snapshot!
-    monkeypatch.setattr(database_module, "database_enabled", lambda: False)
-    monkeypatch.setattr(
-        market_service,
-        "_get_or_set_single_flight",
-        lambda *_args, **_kwargs: (None, "pending"),
-    )
-    market_service._MARKET_PRICE_CACHE.clear()
+    def reset_snapshot_state() -> None:
+        market_service._MARKET_PRICE_CACHE.clear()
+        market_service._clear_market_price_snapshot_failure()
+        market_service._MARKET_PRICE_SNAPSHOT_REFRESH_EVENT.set()
 
-    payload_cold = market_service._fetch_market_price_map(["A1CAP"])
-    assert payload_cold == {}
-    assert len(build_calls) == 0, "Waiter must never trigger uncoordinated _build_market_price_snapshot on timeout"
+    def hold_refresh_slot() -> None:
+        """Simulate another request already rebuilding the snapshot."""
+        assert market_service._begin_market_price_snapshot_refresh() is True
 
-    # Case 2: Stale memory snapshot is present. Waiter times out.
-    # Must serve the stale memory data and NOT call _build_market_price_snapshot!
-    stale_memory_snapshot = {
-        "_ts": time.time() - 300,
-        "items": {"A1CAP": {"price": 12.50, "currency": "TRY", "as_of": "2026-10-31T09:00:00+00:00"}},
-    }
-    market_service._MARKET_PRICE_CACHE[f"snapshot:{market_service._MARKET_QUOTE_SOURCE_INDEX}"] = stale_memory_snapshot
+    try:
+        # Case 1: pristine cold start while another request owns the rebuild.
+        # The waiter must return {} and NOT call _build_market_price_snapshot.
+        monkeypatch.setattr(database_module, "database_enabled", lambda: False)
+        reset_snapshot_state()
+        hold_refresh_slot()
 
-    payload_stale_mem = market_service._fetch_market_price_map(["A1CAP"])
-    assert payload_stale_mem["A1CAP"]["price"] == 12.50
-    assert len(build_calls) == 0, "Waiter must serve stale memory snapshot without triggering upstream scraper"
+        payload_cold = market_service._fetch_market_price_map(["A1CAP"])
+        assert payload_cold == {}
+        assert len(build_calls) == 0, "Waiter must never trigger uncoordinated _build_market_price_snapshot"
 
-    # Case 3: Memory is empty, but database has stale snapshot. Waiter times out.
-    # Must serve the stale database data and NOT call _build_market_price_snapshot!
-    market_service._MARKET_PRICE_CACHE.clear()
-    stale_db_snapshot = {
-        "items": {"A1CAP": {"price": 13.00, "currency": "TRY", "as_of": "2026-10-31T08:00:00+00:00"}},
-        "created_at": time.time() - 600,
-        "expires_at": time.time() - 500,
-    }
-    monkeypatch.setattr(database_module, "database_enabled", lambda: True)
-    monkeypatch.setattr(database_module, "read_json_cache", lambda _path: stale_db_snapshot)
+        # Case 2: stale memory snapshot + owner in flight. Serve it, never build.
+        reset_snapshot_state()
+        market_service._MARKET_PRICE_CACHE[market_service._MARKET_PRICE_SNAPSHOT_MEMORY_KEY] = {
+            "_ts": time.time() - 5,
+            "created_at": time.time() - 900,
+            "items": {"A1CAP": {"price": 12.50, "currency": "TRY", "as_of": "2026-10-31T09:00:00+00:00"}},
+        }
+        hold_refresh_slot()
 
-    payload_stale_db = market_service._fetch_market_price_map(["A1CAP"])
-    assert payload_stale_db["A1CAP"]["price"] == 13.00
-    assert len(build_calls) == 0, "Waiter must serve stale database snapshot without triggering upstream scraper"
+        payload_stale_mem = market_service._fetch_market_price_map(["A1CAP"])
+        assert payload_stale_mem["A1CAP"]["price"] == 12.50
+        assert payload_stale_mem["A1CAP"]["stale"] is True
+        assert len(build_calls) == 0, "Waiter must serve stale memory snapshot without triggering upstream scraper"
+
+        # Case 3: memory empty, database holds a stale snapshot, owner in flight.
+        reset_snapshot_state()
+        stale_db_snapshot = {
+            "items": {"A1CAP": {"price": 13.00, "currency": "TRY", "as_of": "2026-10-31T08:00:00+00:00"}},
+            "created_at": time.time() - 600,
+            "expires_at": time.time() - 500,
+        }
+        monkeypatch.setattr(database_module, "database_enabled", lambda: True)
+        monkeypatch.setattr(database_module, "read_json_cache", lambda _path: stale_db_snapshot)
+        hold_refresh_slot()
+
+        payload_stale_db = market_service._fetch_market_price_map(["A1CAP"])
+        assert payload_stale_db["A1CAP"]["price"] == 13.00
+        assert payload_stale_db["A1CAP"]["stale"] is True
+        assert len(build_calls) == 0, "Waiter must serve stale database snapshot without triggering upstream scraper"
+    finally:
+        # Always hand the slot back so a failing assertion cannot poison the module.
+        market_service._MARKET_PRICE_SNAPSHOT_REFRESH_EVENT.set()
 
 
 def test_fetch_market_price_map_failed_owner_does_not_stampede_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -807,8 +819,71 @@ def test_fetch_market_price_map_failed_owner_does_not_stampede_upstream(monkeypa
     monkeypatch.setattr(database_module, "database_enabled", lambda: False)
     market_service._MARKET_PRICE_CACHE.clear()
 
-    # When lock holder attempts build and fails, singleflight_status is "miss" and snapshot is None.
-    # Must not fall through to run another build call.
+    # The owner's build fails: the request returns {} instead of retrying inline.
     payload = market_service._fetch_market_price_map(["A1CAP"])
     assert payload == {}
     assert len(build_calls) == 1, "Only the single-flight factory should run, no second uncoordinated build"
+
+
+def test_market_snapshot_serves_stale_during_upstream_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing upstream must not be retried while a stale snapshot can answer."""
+    from app import database as database_module
+    from app import market_service
+
+    build_calls: list[int] = []
+
+    def failing_build(_symbols):
+        build_calls.append(1)
+        return None
+
+    stale_db_snapshot = {
+        "items": {"A1CAP": {"price": 13.0, "currency": "TRY", "as_of": "2026-10-31T08:00:00+00:00"}},
+        "created_at": time.time() - 900,
+    }
+
+    monkeypatch.setattr(market_service, "_build_market_price_snapshot", failing_build)
+    monkeypatch.setattr(
+        market_service,
+        "_cache_status",
+        lambda: {"cache_backend": "memory", "cache_redis_fallback": True},
+    )
+    monkeypatch.setattr(database_module, "database_enabled", lambda: True)
+    monkeypatch.setattr(database_module, "read_json_cache", lambda _path: stale_db_snapshot)
+    monkeypatch.setattr(database_module, "write_json_cache", lambda *_args: None)
+    market_service._MARKET_PRICE_CACHE.clear()
+    market_service._MARKET_PRICE_SNAPSHOT_REFRESH_EVENT.set()
+    market_service._clear_market_price_snapshot_failure()
+
+    first = market_service._fetch_market_price_map(["A1CAP"])
+    assert first["A1CAP"]["price"] == 13.0
+    assert first["A1CAP"]["stale"] is True
+    assert len(build_calls) == 1
+
+    # Inside the cooldown the snapshot is served without another upstream try.
+    market_service._MARKET_PRICE_CACHE.clear()
+    second = market_service._fetch_market_price_map(["A1CAP"])
+    assert second["A1CAP"]["price"] == 13.0
+    assert second["A1CAP"]["stale"] is True
+    assert len(build_calls) == 1
+
+    market_service._MARKET_PRICE_CACHE.clear()
+    market_service._clear_market_price_snapshot_failure()
+
+
+def test_market_snapshot_legacy_expired_row_is_usable_but_not_fresh() -> None:
+    """Rows written before deploy carry a past `expires_at`; they must stay usable."""
+    from app import market_service
+
+    legacy = {
+        "items": {"A1CAP": {"price": 10.0}},
+        "expires_at": time.time() - 1,
+    }
+    assert market_service._market_price_snapshot_is_usable(legacy) is True
+    assert market_service._market_price_snapshot_is_fresh(legacy) is False
+
+    aged_out = {
+        "items": {"A1CAP": {"price": 10.0}},
+        "created_at": time.time() - 5000,
+    }
+    assert market_service._market_price_snapshot_is_usable(aged_out) is True
+    assert market_service._market_price_snapshot_is_fresh(aged_out) is False

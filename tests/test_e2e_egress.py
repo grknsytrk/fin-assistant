@@ -39,9 +39,7 @@ from app.database import (
 from app.market_service import (
     _MARKET_PRICE_CACHE,
     _STOCKS_CACHE,
-    _MARKET_PRICE_CACHE_TTL,
     _MARKET_QUOTES_FRESH_TTL,
-    _STOCKS_CACHE_TTL,
     _market_price_snapshot_is_fresh,
     _is_bist_market_open,
     _effective_market_quotes_fresh_ttl,
@@ -354,9 +352,8 @@ class TestTier1Coverage:
 
     def test_f08_extended_market_ttls(self) -> None:
         """F8: Extended market TTLs (>= 90s) prevent continuous rebuilding."""
-        assert isinstance(_MARKET_PRICE_CACHE_TTL, int)
         assert isinstance(_MARKET_QUOTES_FRESH_TTL, int)
-        assert isinstance(_STOCKS_CACHE_TTL, int)
+        assert _MARKET_QUOTES_FRESH_TTL >= 90
         assert _effective_market_quotes_fresh_ttl() >= 90
 
     def test_f09_fallback_memory_sizing(self) -> None:
