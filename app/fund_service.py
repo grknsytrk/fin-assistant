@@ -8732,7 +8732,8 @@ def _fetch_recent_detail_rows(
     if not rows and processed_dir is not None and hasattr(client, "fetch_daily_funds_snapshot"):
         target_dates = set(missing_dates or [])
         # Prefer the indexed row store: one small query instead of one
-        # multi-megabyte daily snapshot document per date.
+        # multi-megabyte daily snapshot document per date. Dates the store
+        # cannot fill still fall through to the snapshot documents below.
         stored_rows = [
             row
             for row in read_fund_price_points_range(
@@ -8746,13 +8747,17 @@ def _fetch_recent_detail_rows(
         ]
         if stored_rows:
             warnings.append("tefasfon_funds recent detail used fund_prices row store")
+        stored_dates = {str(row.get("date") or "") for row in stored_rows}
+        if stored_dates and (not target_dates or stored_dates >= target_dates):
             return stored_rows, warnings
+        remaining_dates = target_dates - stored_dates
 
-        snapshot_rows: List[Dict[str, Any]] = []
+        snapshot_rows: List[Dict[str, Any]] = list(stored_rows)
         daily_warnings: List[str] = []
+        used_snapshot_fallback = False
         current = start_date
         while current <= end_date:
-            if current.weekday() >= 5 or (target_dates and current.isoformat() not in target_dates):
+            if current.weekday() >= 5 or (remaining_dates and current.isoformat() not in remaining_dates):
                 current += timedelta(days=1)
                 continue
             try:
@@ -8791,12 +8796,14 @@ def _fetch_recent_detail_rows(
                 normalized_match = dict(match)
                 normalized_match["source"] = TEFASFON_FUNDS_SOURCE
                 snapshot_rows.append(normalized_match)
+                used_snapshot_fallback = True
             if not _cache_hit and FUNDS_WEB_HISTORY_SLEEP_SECONDS > 0:
                 time.sleep(FUNDS_WEB_HISTORY_SLEEP_SECONDS)
             current += timedelta(days=1)
         if snapshot_rows:
             rows = snapshot_rows
-            warnings.append("tefasfon_funds recent detail used daily snapshot fallback")
+            if used_snapshot_fallback:
+                warnings.append("tefasfon_funds recent detail used daily snapshot fallback")
             warnings.extend(daily_warnings[:20])
         else:
             warnings.extend(daily_warnings[:20])

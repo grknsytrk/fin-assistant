@@ -3313,6 +3313,71 @@ def test_fetch_recent_detail_rows_reads_fund_prices_first(tmp_path, monkeypatch)
     assert "tefasfon_funds recent detail used fund_prices row store" in warnings
 
 
+def test_fetch_recent_detail_rows_fills_remaining_dates_from_snapshots(tmp_path, monkeypatch) -> None:
+    """A partial row-store hit must not skip the remaining missing dates."""
+    fund_service.reset_fund_caches_for_tests()
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {
+                "fund_code": "TLY",
+                "date": "2026-04-29",
+                "price": 11.0,
+                "aum": 110_000_000.0,
+                "investor_count": 510,
+                "source": "tefasfon_funds",
+            }
+        ],
+        source="tefasfon_funds",
+    )
+
+    class FakeTefasClient:
+        def fetch_fund_history(self, **_kwargs):
+            return []
+
+    class FakeTefasFonClient:
+        def fetch_history(self, *_args):
+            return []
+
+        def fetch_daily_funds_snapshot(self, _as_of):
+            raise AssertionError("daily snapshot should be served by the patched helper")
+
+    snapshot_calls = []
+
+    def fake_daily_snapshot(_processed_dir, _client, as_of, *, force_refresh=False):
+        snapshot_calls.append(as_of.isoformat())
+        return (
+            [
+                {
+                    "fund_code": "TLY",
+                    "date": as_of.isoformat(),
+                    "price": 12.0,
+                    "aum": 120_000_000.0,
+                    "investor_count": 520,
+                }
+            ],
+            False,
+        )
+
+    monkeypatch.setattr(fund_service, "TefasClient", FakeTefasClient)
+    monkeypatch.setattr(fund_service, "_cached_daily_funds_snapshot", fake_daily_snapshot)
+    monkeypatch.setattr(fund_service, "FUNDS_WEB_HISTORY_SLEEP_SECONDS", 0.0)
+
+    rows, warnings = fund_service._fetch_recent_detail_rows(
+        "TLY",
+        start_date=date(2026, 4, 27),
+        end_date=date(2026, 4, 30),
+        client=FakeTefasFonClient(),
+        processed_dir=tmp_path,
+        missing_dates={"2026-04-29", "2026-04-30"},
+    )
+
+    assert [row["date"] for row in rows] == ["2026-04-29", "2026-04-30"]
+    assert snapshot_calls == ["2026-04-30"]
+    assert "tefasfon_funds recent detail used fund_prices row store" in warnings
+    assert "tefasfon_funds recent detail used daily snapshot fallback" in warnings
+
+
 def test_get_fund_performance_payload_backfills_partial_range_overview_metrics(monkeypatch, tmp_path) -> None:
     fund_service.reset_fund_caches_for_tests()
 
