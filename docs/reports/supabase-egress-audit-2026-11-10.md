@@ -361,3 +361,64 @@ curl -s https://grknsytrk-fin-api.hf.space/health | jq '.cache_redis_circuit, .s
 | Instruments batch | `app/reference_data.py:506-527` |
 | KAP companies build | `app/routers/kap.py:129-150` |
 | Edge TTLs | `worker/api-cache.ts` |
+
+---
+
+## 10. Implementation log — 2026-11-12
+
+Measured on the live Space (`grknsytrk/fin-api`) and against the production
+Supabase project unless a row says otherwise.
+
+### M1 — market path (P0 complete)
+
+- Replaced the database lease and the 30 s poll loop with a process-local
+  memory cache plus a `threading.Event` single-flight. Freshness is 60 s
+  intraday / 300 s off-hours; stale payloads are served for up to 6 h, and a
+  snapshot waiter waits at most 1.0 s instead of the 8 s envelope.
+- Live check: four consecutive `/market/stocks` requests after warm-up added
+  **0 B** of Supabase reads. The same sequence previously transferred
+  ~2 × 147 KB per request, and waiters could add ~18 MB each.
+- The Space now boots when Postgres is unreachable; bootstrap failures are
+  logged and the API serves whatever the process cache already holds.
+
+### M2 — fund catalogue and detail
+
+- Detail fallbacks read one fund's rows from `fund_prices` for the requested
+  window before touching the multi-megabyte `daily_snapshots/<date>.json`
+  documents. Live `/funds/TI2/performance`: `fund_prices` +225 KB,
+  `fund_snapshots` +0 B, and the second call +0 B.
+- `present_fields_json` stores only the known fields a row is missing instead
+  of its full key list. For the 2,014 catalogue rows the stored payload drops
+  from **710,942 B to 4,028 B**. A content-hash version prefix forces the next
+  catalogue commit to rewrite every row once, so existing databases pick up the
+  layout without a manual migration.
+- The latest-point overlay requests quote columns only (`metadata_json`,
+  `raw_json`, and `created_at` are omitted); the 2,013-row read is ~262 B/row.
+- `fund_listing_state` now returns the revision counters and the catalogue
+  summary in one query, memoised for 30 s and invalidated by in-process
+  writers. A `/funds` revalidation that matches the ETag performs **0 table
+  reads** inside the memo window and answers in ~1.3 s.
+
+Cold `/funds` measurement, before the compact rows are materialised:
+
+| Read | Rows | Bytes |
+|---|---:|---:|
+| `fund_snapshots` catalogue (`_FUND_SNAPSHOT_READ_COLUMNS`) | 2,014 | 2,419,781 |
+| `fund_prices` return window (`as_of − 5 d`) | 9,900 | 1,285,613 |
+| `fund_prices` latest points | 2,013 | 527,905 |
+| `fund_snapshots` `fund_code/as_of` overlay dates | 2,014 | 82,575 |
+| **Total** | | **4,315,892** |
+
+After the next catalogue commit the `present_fields_json` share falls by
+706,914 B, so the same rebuild should read ~3.61 MB. The remaining largest
+item is the return window below.
+
+### Still open from the P1 list
+
+- `include_missing=True` still makes all ~2,014 funds candidates for the 5-day
+  price window: every catalogue row carries `source=tefasfon_funds`, and 1,047
+  of them also carry `daily_return_source=tefasfon_returns`. Narrowing this
+  safely needs the daily return to be computed and stored when prices are
+  written, not inferred on every rebuild.
+- `company_financial_snapshots` is still read in full (484 KB per real change)
+  instead of incrementally by snapshot date.
