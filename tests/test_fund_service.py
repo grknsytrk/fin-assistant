@@ -879,6 +879,69 @@ def test_fund_snapshot_sql_list_filter_sort_and_detail_preserve_api_values(tmp_p
     assert detail["category_rankings"]["category_total"] == 2
 
 
+def test_fund_snapshot_present_fields_store_only_absent_keys(tmp_path) -> None:
+    cache_dir = tmp_path / "funds_cache"
+    cache_dir.mkdir()
+    initial = {"status": "ok", "rows": [], "as_of": "2026-04-28", "source_metadata": {}}
+    (cache_dir / "funds_latest.json").write_text(json.dumps(initial), encoding="utf-8")
+    fund_service.load_funds_snapshot(tmp_path)
+
+    payload = {
+        "status": "ok",
+        "rows": [
+            {
+                "fund_code": "CMP",
+                "name": "Compact fund",
+                "price": 3.5,
+                "as_of": "2026-04-29",
+                "period_returns": {"1y": 10.0},
+                "isin": "TRACMP001",
+            }
+        ],
+        "as_of": "2026-04-29",
+        "source_metadata": {},
+    }
+    assert fund_service.commit_funds_snapshot(
+        tmp_path, payload, job_id="local", owner_token="local", generation=0
+    ) is True
+
+    with fund_service._connect_fund_prices_db(tmp_path) as conn:
+        stored = conn.execute(
+            "SELECT present_fields_json FROM fund_snapshots WHERE fund_code = 'CMP'"
+        ).fetchone()["present_fields_json"]
+    decoded = json.loads(stored)
+    assert isinstance(decoded, dict)
+    assert "fund_code" not in decoded.get("absent", [])
+    assert "daily_return" in decoded["absent"]
+    assert len(stored) < 200
+    dense = {field: 1 for field in fund_service._FUND_SNAPSHOT_FIELDS}
+    assert fund_service._encode_fund_snapshot_present_fields(dense) == "{}"
+
+    rows = fund_service.load_funds_snapshot(tmp_path)["rows"]
+    row = next(item for item in rows if item["fund_code"] == "CMP")
+    assert row["period_returns"] == {"1y": 10.0}
+    assert row["isin"] == "TRACMP001"
+    assert "daily_return" not in row
+
+
+def test_fund_snapshot_record_accepts_legacy_present_fields_list() -> None:
+    record = {
+        "fund_code": "OLD",
+        "present_fields_json": json.dumps(["fund_code", "name", "price"]),
+        "attributes_json": "{}",
+        "period_returns_json": "{}",
+        "risk_value_json": "null",
+        "name": "Legacy fund",
+        "price": 1.25,
+    }
+
+    assert fund_service._snapshot_row_from_record(record) == {
+        "fund_code": "OLD",
+        "name": "Legacy fund",
+        "price": 1.25,
+    }
+
+
 def test_fund_snapshot_commit_replaces_all_rows_atomically_and_serializes_local_writers(tmp_path) -> None:
     cache_dir = tmp_path / "funds_cache"
     cache_dir.mkdir()

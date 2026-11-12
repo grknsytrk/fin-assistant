@@ -835,11 +835,38 @@ _FUND_SNAPSHOT_READ_COLUMNS = (
 )
 
 
+def _encode_fund_snapshot_present_fields(row: Dict[str, Any]) -> str:
+    """Store the absent snapshot fields instead of the full key list.
+
+    A full key list is dominated by the sixteen well-known snapshot fields and
+    costs roughly 350 bytes per catalogue row. Nearly every row carries all of
+    them, so an explicit ``{"absent": [...]}`` payload is far smaller. Legacy
+    databases still hold a plain list, which the reader keeps accepting.
+    """
+
+    present = {str(key) for key in row}
+    absent = [field for field in _FUND_SNAPSHOT_FIELDS if field not in present]
+    if not absent:
+        return "{}"
+    return _stable_json_dumps({"absent": absent})
+
+
+def _decode_fund_snapshot_present_fields(raw: Any) -> set[str]:
+    parse = _safe_json_loads(raw, None)
+    if isinstance(parse, list):
+        return {str(field) for field in parse}
+    if isinstance(parse, dict):
+        absent = parse.get("absent")
+        absent_fields = {str(field) for field in absent} if isinstance(absent, list) else set()
+        return set(_FUND_SNAPSHOT_FIELDS) - absent_fields
+    return set()
+
+
 def _fund_snapshot_record(row: Dict[str, Any], row_order: int, generation: int) -> Optional[Tuple[Any, ...]]:
     code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
     if not code:
         return None
-    present_fields = sorted(str(key) for key in row)
+    present_fields = _encode_fund_snapshot_present_fields(row)
     attributes = {key: value for key, value in row.items() if key not in _FUND_SNAPSHOT_FIELDS}
     period_returns = row.get("period_returns")
     risk_value = row.get("risk_value")
@@ -879,7 +906,7 @@ def _fund_snapshot_record(row: Dict[str, Any], row_order: int, generation: int) 
         row.get("source"),
         _stable_json_dumps(period_returns),
         _stable_json_dumps(attributes),
-        _stable_json_dumps(present_fields),
+        present_fields,
         search_text,
         *normalized_fields,
         str(code).lower(),
@@ -974,10 +1001,7 @@ def _delete_fund_snapshot_rows_missing_from_stage(conn: Any) -> None:
 
 
 def _snapshot_row_from_record(record: Any) -> Dict[str, Any]:
-    present_fields = _safe_json_loads(record["present_fields_json"], [])
-    if not isinstance(present_fields, list):
-        present_fields = []
-    present = set(str(field) for field in present_fields)
+    present = _decode_fund_snapshot_present_fields(record["present_fields_json"])
     attributes = _safe_json_loads(record["attributes_json"], {})
     row = dict(attributes) if isinstance(attributes, dict) else {}
     for field in _FUND_SNAPSHOT_FIELDS:
