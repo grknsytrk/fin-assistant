@@ -2407,8 +2407,8 @@ _DAILY_PRICE_SOURCES = (
 _NON_DAILY_PRICE_SOURCES = {FINTABLES_YIELD_SUMMARY_SOURCE, TEFASFON_RETURNS_SOURCE, TEFASFON_PORTFOLIO_SOURCE}
 
 
-def _fund_price_storage_row_to_point(row: Any) -> Dict[str, Any]:
-    metadata = _safe_json_loads(row["metadata_json"], {})
+def _fund_price_storage_row_to_point(row: Any, *, include_metadata: bool = True) -> Dict[str, Any]:
+    metadata = _safe_json_loads(row["metadata_json"], {}) if include_metadata else None
     point = {
         "fund_code": str(row["fund_code"]),
         "date": str(row["date"]),
@@ -3167,12 +3167,17 @@ def read_latest_fund_price_points(
     fund_codes: Iterable[str],
     *,
     end_date: Optional[date] = None,
+    include_metadata: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     """Read the latest daily price point for many funds in one query.
 
     The fund catalogue is a point-in-time snapshot, while daily history can
     receive newer rows independently. This bulk reader keeps the catalogue
     overlay cheap enough to use for the list and detail endpoints.
+
+    ``include_metadata=False`` skips the descriptive ``metadata_json`` blob for
+    callers that only overlay quote columns. Both cache namespaces stay
+    separate so a lean read never hides metadata from a later full read.
     """
 
     normalized_codes = sorted({normalize_fund_code(code) for code in fund_codes if normalize_fund_code(code)})
@@ -3181,8 +3186,9 @@ def read_latest_fund_price_points(
 
     ttl = max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
     now = time.time()
+    projection_mode = "full" if include_metadata else "quote"
     db_key_prefix = (
-        f"latest-fund-price-points:{_fund_prices_db_path(processed_dir)}:"
+        f"latest-fund-price-points:{projection_mode}:{_fund_prices_db_path(processed_dir)}:"
         f"{end_date.isoformat() if end_date else 'latest'}"
     )
     cache_key = f"{db_key_prefix}:{','.join(normalized_codes)}"
@@ -3223,12 +3229,13 @@ def read_latest_fund_price_points(
     if end_date:
         inner_conditions.append("date <= ?")
         inner_params.append(end_date.isoformat())
+    metadata_column = ", fp.metadata_json" if include_metadata else ""
     query = f"""
         -- raw_json and created_at are intentionally omitted; the public point
         -- mapper does not use them, and raw_json can dominate these result rows.
         SELECT fp.fund_code, fp.date, fp.source, fp.price, fp.daily_return,
-               fp.aum, fp.investor_count, fp.share_count, fp.metadata_json,
-               fp.fetched_at, fp.updated_at
+               fp.aum, fp.investor_count, fp.share_count,
+               fp.fetched_at, fp.updated_at{metadata_column}
         FROM fund_prices fp
         INNER JOIN (
             SELECT fund_code, MAX(date) AS latest_date
@@ -3269,7 +3276,10 @@ def read_latest_fund_price_points(
         # unavailable, the catalogue snapshot remains the safe fallback.
         return {}
 
-    points = {code: _fund_price_storage_row_to_point(row) for code, row in selected.items()}
+    points = {
+        code: _fund_price_storage_row_to_point(row, include_metadata=include_metadata)
+        for code, row in selected.items()
+    }
     now_stored = time.time()
     _memory_cache_put(cache_key, {"cached_at": now_stored, "points": points})
     if (
@@ -6624,6 +6634,7 @@ def _overlay_latest_price_history(
         processed_dir,
         (str(row.get("fund_code") or "") for row in rows),
         end_date=target_date,
+        include_metadata=False,
     )
     if not latest_points:
         return payload
@@ -6708,6 +6719,7 @@ def _catalog_price_overlay_metadata(processed_dir: Path, payload: Dict[str, Any]
         processed_dir,
         catalog_dates.keys(),
         end_date=_latest_fund_snapshot_target_date(),
+        include_metadata=False,
     )
     newer_dates: List[str] = []
     fetched_at: List[str] = []
