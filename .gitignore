@@ -63,6 +63,10 @@ data/processed/chroma/
 agents_plan/
 .agents/
 WORK_SUMMARY.md
+PROJECT.md
+TEST_INFRA.md
+session-*.md
+scripts/verify_challenger_r2.py
 
 # Temporary Chrome Profiles and Logs
 .tmp-chrome-debug/
