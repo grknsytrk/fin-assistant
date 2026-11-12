@@ -3165,6 +3165,91 @@ def test_get_fund_performance_payload_backfills_missing_overview_metrics(monkeyp
     assert cached_payload["source_metadata"]["overview_metric_backfill"]["attempted"] is False
 
 
+def test_fetch_fund_overview_metric_rows_reads_fund_prices_first(tmp_path) -> None:
+    """One indexed row-store read replaces the per-date snapshot documents."""
+    fund_service.reset_fund_caches_for_tests()
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {
+                "fund_code": "TLY",
+                "date": "2026-04-30",
+                "price": 10.0,
+                "aum": 100_000_000.0,
+                "investor_count": 500,
+                "source": "tefasfon_funds",
+            }
+        ],
+        source="tefasfon_funds",
+    )
+
+    class FakeTefasFonClient:
+        def fetch_daily_funds_snapshot(self, as_of):
+            pytest.fail(f"daily snapshot {as_of.isoformat()} should not be read")
+
+    rows, fetched_months, warnings = fund_service._fetch_fund_overview_metric_rows(
+        "TLY",
+        [{"month": "2026-04", "month_start": date(2026, 4, 1), "target_date": date(2026, 4, 30)}],
+        client=FakeTefasFonClient(),
+        processed_dir=tmp_path,
+    )
+
+    assert fetched_months == {"2026-04": "2026-04-30"}
+    assert rows[0]["aum"] == 100_000_000.0
+    assert warnings == []
+
+
+def test_fetch_recent_detail_rows_reads_fund_prices_first(tmp_path, monkeypatch) -> None:
+    """Missing detail dates are resolved from the row store, not snapshots."""
+    fund_service.reset_fund_caches_for_tests()
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {
+                "fund_code": "TLY",
+                "date": "2026-04-29",
+                "price": 11.0,
+                "aum": 110_000_000.0,
+                "investor_count": 510,
+                "source": "tefasfon_funds",
+            },
+            {
+                "fund_code": "TLY",
+                "date": "2026-04-30",
+                "price": 12.0,
+                "aum": 120_000_000.0,
+                "investor_count": 520,
+                "source": "tefasfon_funds",
+            },
+        ],
+        source="tefasfon_funds",
+    )
+
+    class FakeTefasClient:
+        def fetch_fund_history(self, **_kwargs):
+            return []
+
+    class FakeTefasFonClient:
+        def fetch_history(self, *_args):
+            return []
+
+        def fetch_daily_funds_snapshot(self, as_of):
+            pytest.fail(f"daily snapshot {as_of.isoformat()} should not be read")
+
+    monkeypatch.setattr(fund_service, "TefasClient", FakeTefasClient)
+    rows, warnings = fund_service._fetch_recent_detail_rows(
+        "TLY",
+        start_date=date(2026, 4, 27),
+        end_date=date(2026, 4, 30),
+        client=FakeTefasFonClient(),
+        processed_dir=tmp_path,
+        missing_dates={"2026-04-30"},
+    )
+
+    assert [row["date"] for row in rows] == ["2026-04-30"]
+    assert "tefasfon_funds recent detail used fund_prices row store" in warnings
+
+
 def test_get_fund_performance_payload_backfills_partial_range_overview_metrics(monkeypatch, tmp_path) -> None:
     fund_service.reset_fund_caches_for_tests()
 

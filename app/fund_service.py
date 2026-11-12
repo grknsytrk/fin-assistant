@@ -3265,6 +3265,70 @@ def read_latest_fund_price_points(
     return {code: dict(point) for code, point in points.items()}
 
 
+def read_fund_price_points_range(
+    processed_dir: Path,
+    fund_code: str,
+    *,
+    start_date: date,
+    end_date: date,
+) -> List[Dict[str, Any]]:
+    """Read one fund's daily price points for a date window from the row store.
+
+    Fund detail fallbacks need a single fund's rows for a handful of dates.
+    Reading them here avoids pulling the multi-megabyte
+    ``daily_snapshots/<date>.json`` documents, which contain every fund in the
+    market just to extract one code.
+    """
+
+    normalized = normalize_fund_code(fund_code)
+    if not normalized or start_date > end_date:
+        return []
+
+    source_placeholders = ", ".join("?" for _ in _DAILY_PRICE_SOURCES)
+    query = f"""
+        -- Same projection as the latest-point reader: raw_json and created_at
+        -- are unused by the public point mapper and dominate the row size.
+        SELECT fund_code, date, source, price, daily_return, aum,
+               investor_count, share_count, metadata_json, fetched_at, updated_at
+        FROM fund_prices
+        WHERE fund_code = ?
+          AND date BETWEEN ? AND ?
+          AND price > 0
+          AND source IN ({source_placeholders})
+        ORDER BY date, updated_at DESC
+    """
+    params: List[Any] = [
+        normalized,
+        start_date.isoformat(),
+        end_date.isoformat(),
+        *_DAILY_PRICE_SOURCES,
+    ]
+
+    by_date: Dict[str, Any] = {}
+    try:
+        with _connect_fund_prices_db(processed_dir) as conn:
+            for row in conn.execute(query, params):
+                row_date = str(row["date"])
+                existing = by_date.get(row_date)
+                if existing is None or (
+                    _FUND_PRICE_SOURCE_PRIORITY.get(str(row["source"] or ""), 0),
+                    str(row["updated_at"] or ""),
+                ) > (
+                    _FUND_PRICE_SOURCE_PRIORITY.get(str(existing["source"] or ""), 0),
+                    str(existing["updated_at"] or ""),
+                ):
+                    by_date[row_date] = row
+    except Exception:
+        # The row store is an optional optimization; callers fall back to the
+        # daily snapshot documents when it is unavailable.
+        return []
+
+    return [
+        _fund_price_storage_row_to_point(by_date[day])
+        for day in sorted(by_date)
+    ]
+
+
 def _daily_return_reconciliation_candidates(
     rows: Iterable[Dict[str, Any]],
     *,
@@ -8625,9 +8689,26 @@ def _fetch_recent_detail_rows(
             rows = []
             warnings.append(f"tefasfon_funds recent detail range backfill failed: {exc}")
     if not rows and processed_dir is not None and hasattr(client, "fetch_daily_funds_snapshot"):
+        target_dates = set(missing_dates or [])
+        # Prefer the indexed row store: one small query instead of one
+        # multi-megabyte daily snapshot document per date.
+        stored_rows = [
+            row
+            for row in read_fund_price_points_range(
+                processed_dir,
+                normalized,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if (not target_dates or str(row.get("date") or "") in target_dates)
+            and _has_overview_metrics(row)
+        ]
+        if stored_rows:
+            warnings.append("tefasfon_funds recent detail used fund_prices row store")
+            return stored_rows, warnings
+
         snapshot_rows: List[Dict[str, Any]] = []
         daily_warnings: List[str] = []
-        target_dates = set(missing_dates or [])
         current = start_date
         while current <= end_date:
             if current.weekday() >= 5 or (target_dates and current.isoformat() not in target_dates):
@@ -8733,9 +8814,49 @@ def _fetch_fund_overview_metric_rows(
     fetched_months: Dict[str, str] = {}
     warnings: List[str] = []
 
+    # The same metrics are already persisted in `fund_prices` when the daily
+    # snapshot was captured. One indexed window read covers every target month,
+    # so the slow per-date snapshot documents are only touched when a month is
+    # genuinely missing from the row store.
+    stored_by_month: Dict[str, Dict[str, Any]] = {}
+    if processed_dir is not None and targets:
+        lower_bounds = {
+            str(target["month"]): max(
+                target["month_start"],
+                target["target_date"] - timedelta(days=max(0, FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS)),
+            )
+            for target in targets
+        }
+        stored_points = read_fund_price_points_range(
+            processed_dir,
+            normalized,
+            start_date=min(lower_bounds.values()),
+            end_date=max(target["target_date"] for target in targets),
+        )
+        for target in targets:
+            month = str(target["month"])
+            target_date = target["target_date"]
+            lower_bound = lower_bounds[month]
+            best: Optional[Tuple[date, Dict[str, Any]]] = None
+            for point in stored_points:
+                point_date = _fund_point_date(point)
+                if point_date is None or point_date < lower_bound or point_date > target_date:
+                    continue
+                if not _has_overview_metrics(point):
+                    continue
+                if best is None or point_date > best[0]:
+                    best = (point_date, point)
+            if best is not None:
+                stored_by_month[month] = best[1]
+
     for target in targets:
         month = str(target["month"])
         target_date = target["target_date"]
+        stored_match = stored_by_month.get(month)
+        if stored_match is not None:
+            rows.append(stored_match)
+            fetched_months[month] = str(stored_match.get("date") or "")
+            continue
         lower_bound = max(target["month_start"], target_date - timedelta(days=max(0, FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS)))
         current = target_date
         matched = False
