@@ -195,6 +195,60 @@ def test_fund_listing_revisions_advance_atomically_for_catalog_and_prices(tmp_pa
     assert after_catalog["price_generation"] == after_returns["price_generation"]
 
 
+def test_fund_listing_state_memoizes_and_invalidates_after_writes(monkeypatch, tmp_path) -> None:
+    fund_service_module.invalidate_fund_listing_state_cache()
+    monkeypatch.setattr(fund_service_module, "database_enabled", lambda: True)
+    monkeypatch.setattr(fund_service_module, "ensure_fund_prices_schema", lambda _dir: None)
+
+    state = {
+        "catalog_generation": 3,
+        "price_generation": 7,
+        "metadata_json": fund_service_module._stable_json_dumps({"as_of": "2026-10-16"}),
+    }
+
+    class Result:
+        def fetchone(self):
+            return dict(state)
+
+    class Connection:
+        def __init__(self):
+            self.queries = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, _params=()):
+            self.queries += 1
+            assert "fund_listing_state" in query
+            return Result()
+
+    connection = Connection()
+    monkeypatch.setattr(fund_service_module, "connect_postgres", lambda: connection)
+
+    first = fund_service_module.fund_listing_state(tmp_path)
+    second = fund_service_module.fund_listing_state(tmp_path)
+
+    assert first == second
+    assert first[0] == {"catalog_generation": 3, "price_generation": 7}
+    assert first[1] == {"as_of": "2026-10-16"}
+    assert connection.queries == 1
+
+    class WriteConnection:
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    fund_service_module._bump_fund_listing_price_revision(WriteConnection())
+    assert fund_service_module._fund_listing_state_cache_key(tmp_path) not in fund_service_module._MEMORY_CACHE
+
+    state["price_generation"] = 8
+    revision, _summary = fund_service_module.fund_listing_state(tmp_path)
+    assert revision["price_generation"] == 8
+    assert connection.queries == 2
+
+
 def test_fund_listing_lru_expires_evicts_and_coalesces(monkeypatch) -> None:
     service = fund_api_service_module
     service._FUND_LISTING_CACHE.clear()

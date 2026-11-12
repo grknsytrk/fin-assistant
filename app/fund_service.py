@@ -218,6 +218,13 @@ try:
 except ValueError:
     _MEMORY_CACHE_MAX_ENTRIES = 256
 
+# The `/funds` ETag preflight reads the listing revision and catalogue summary
+# before it can answer a 304, so those two values are memoised briefly instead
+# of costing a Supabase round trip on every revalidation.
+_FUND_LISTING_STATE_MEMO_TTL_SECONDS = float(
+    os.getenv("RAGFIN_FUND_LISTING_STATE_MEMO_SECONDS", "30")
+)
+
 
 def _memory_cache_put(cache_key: str, value: Dict[str, Any]) -> None:
     """Insert into the process-local cache, evicting oldest entries first.
@@ -465,11 +472,93 @@ def reset_fund_caches_for_tests() -> None:
         _AUTO_FETCH_NEGATIVE_CACHE.clear()
 
 
+def _empty_fund_listing_revision() -> Dict[str, int]:
+    return {"catalog_generation": 0, "price_generation": 0}
+
+
+def _fund_listing_state_cache_key(processed_dir: Path) -> str:
+    return f"fund-listing-state:{_fund_prices_db_path(processed_dir)}"
+
+
+def invalidate_fund_listing_state_cache() -> None:
+    """Drop memoised listing revision/summary pairs after a local write."""
+
+    prefix = "fund-listing-state:"
+    for cache_key in [key for key in list(_MEMORY_CACHE.keys()) if str(key).startswith(prefix)]:
+        _MEMORY_CACHE.pop(cache_key, None)
+
+
+def fund_listing_state(
+    processed_dir: Path,
+) -> Tuple[Dict[str, int], Optional[Dict[str, Any]]]:
+    """Read the listing revision and the compact catalogue summary together.
+
+    Both values live in the same ``fund_listing_state`` row and every ``/funds``
+    request needs them, including ETag revalidations. PostgreSQL reads are
+    memoised for a short window so the preflight does not pay a round trip per
+    request; in-process writers invalidate the memo immediately. SQLite mode
+    stays uncached because local tools rewrite the store directly.
+    """
+
+    if not database_enabled():
+        return fund_listing_revision(processed_dir), _snapshot_metadata_from_store(processed_dir)
+
+    cache_key = _fund_listing_state_cache_key(processed_dir)
+    cached = _MEMORY_CACHE.get(cache_key)
+    cached_at = cached.get("cached_at") if isinstance(cached, dict) else None
+    if (
+        isinstance(cached_at, (int, float))
+        and time.time() - float(cached_at) <= _FUND_LISTING_STATE_MEMO_TTL_SECONDS
+    ):
+        cached_revision = cached.get("revision") if isinstance(cached.get("revision"), dict) else {}
+        cached_summary = cached.get("summary")
+        return (
+            {
+                "catalog_generation": int(cached_revision.get("catalog_generation") or 0),
+                "price_generation": int(cached_revision.get("price_generation") or 0),
+            },
+            dict(cached_summary) if isinstance(cached_summary, dict) else None,
+        )
+
+    ensure_fund_prices_schema(processed_dir)
+    with connect_postgres() as conn:
+        row = conn.execute(
+            "SELECT catalog_generation, price_generation, metadata_json "
+            "FROM fund_listing_state WHERE id = 1"
+        ).fetchone()
+
+    revision = _empty_fund_listing_revision()
+    summary: Optional[Dict[str, Any]] = None
+    if isinstance(row, dict):
+        revision = {
+            "catalog_generation": int(row.get("catalog_generation") or 0),
+            "price_generation": int(row.get("price_generation") or 0),
+        }
+        parsed = _safe_json_loads(row.get("metadata_json"), None)
+        if isinstance(parsed, dict):
+            summary = parsed
+    elif row is not None:
+        revision = {
+            "catalog_generation": int(row["catalog_generation"] or 0),
+            "price_generation": int(row["price_generation"] or 0),
+        }
+        parsed = _safe_json_loads(row["metadata_json"], None)
+        if isinstance(parsed, dict):
+            summary = parsed
+
+    _memory_cache_put(
+        cache_key,
+        {"cached_at": time.time(), "revision": revision, "summary": summary},
+    )
+    return dict(revision), dict(summary) if summary is not None else None
+
+
 def fund_listing_revision(processed_dir: Path) -> Dict[str, int]:
     """Read the compact, transactionally maintained list revision counters."""
 
     if database_enabled():
-        ensure_fund_prices_schema(processed_dir)
+        revision, _summary = fund_listing_state(processed_dir)
+        return revision
     with _connect_fund_prices_db(processed_dir) as conn:
         row = conn.execute(
             "SELECT catalog_generation, price_generation FROM fund_listing_state WHERE id = 1"
@@ -484,7 +573,7 @@ def fund_listing_revision(processed_dir: Path) -> Dict[str, int]:
             "catalog_generation": int(row["catalog_generation"] or 0),
             "price_generation": int(row["price_generation"] or 0),
         }
-    return {"catalog_generation": 0, "price_generation": 0}
+    return _empty_fund_listing_revision()
 
 
 def _set_fund_listing_catalog_revision(conn: Any, generation: int, metadata: Dict[str, Any]) -> None:
@@ -500,6 +589,7 @@ def _set_fund_listing_catalog_revision(conn: Any, generation: int, metadata: Dic
         """,
         (int(generation), _stable_json_dumps(metadata), _utc_now_iso()),
     )
+    invalidate_fund_listing_state_cache()
 
 
 def _bump_fund_listing_price_revision(conn: Any) -> None:
@@ -514,6 +604,7 @@ def _bump_fund_listing_price_revision(conn: Any) -> None:
         """,
         (_utc_now_iso(),),
     )
+    invalidate_fund_listing_state_cache()
 
 
 def normalize_fund_code(raw: str | None) -> str:
@@ -1097,15 +1188,10 @@ def _copy_legacy_snapshot(processed_dir: Path, payload: Dict[str, Any]) -> None:
 
 def _snapshot_metadata_from_store(processed_dir: Path) -> Optional[Dict[str, Any]]:
     if database_enabled():
-        with connect_postgres() as conn:
-            state = conn.execute(
-                "SELECT metadata_json FROM fund_listing_state WHERE id = 1"
-            ).fetchone()
-        if isinstance(state, dict):
-            summary = _safe_json_loads(state.get("metadata_json"), None)
-            metadata = summary.get("source_metadata") if isinstance(summary, dict) else None
-            if isinstance(metadata, dict) and metadata.get("catalog_storage") == "fund_snapshots":
-                return summary
+        _revision, summary = fund_listing_state(processed_dir)
+        metadata = summary.get("source_metadata") if isinstance(summary, dict) else None
+        if isinstance(metadata, dict) and metadata.get("catalog_storage") == "fund_snapshots":
+            return summary
 
         # One-time backfill for databases that already have row snapshots but
         # predate fund_listing_state. The existing JSON summary is compact after
@@ -1119,6 +1205,7 @@ def _snapshot_metadata_from_store(processed_dir: Path) -> Optional[Dict[str, Any
                     (_stable_json_dumps(summary), int(summary.get("snapshot_generation") or 0)),
                 )
                 conn.commit()
+            invalidate_fund_listing_state_cache()
             return summary
         return None
     with _connect_fund_prices_db(processed_dir) as conn:
