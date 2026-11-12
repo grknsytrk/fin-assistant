@@ -834,6 +834,11 @@ _FUND_SNAPSHOT_READ_COLUMNS = (
     "present_fields_json",
 )
 
+# Bumping this prefix forces the next catalogue commit to rewrite every row.
+# That is how stored-format changes (such as the compact absent-field list)
+# reach databases whose row content has not otherwise changed.
+_FUND_SNAPSHOT_CONTENT_HASH_VERSION = "v2"
+
 
 def _encode_fund_snapshot_present_fields(row: Dict[str, Any]) -> str:
     """Store the absent snapshot fields instead of the full key list.
@@ -916,7 +921,7 @@ def _fund_snapshot_record(row: Dict[str, Any], row_order: int, generation: int) 
         str(row.get("manager_company") or "").lower(),
         int(row_order),
         int(generation),
-        hashlib.sha256(stable_row.encode("utf-8")).hexdigest(),
+        hashlib.sha256(f"{_FUND_SNAPSHOT_CONTENT_HASH_VERSION}\n{stable_row}".encode("utf-8")).hexdigest(),
     )
 
 
