@@ -1708,6 +1708,7 @@ def test_refresh_funds_snapshot_backfills_daily_return_from_local_prices(monkeyp
     row = payload["rows"][0]
     assert row["fund_code"] == "UCP"
     assert row["daily_return"] == pytest.approx(0.107, rel=1e-2)
+    assert row["daily_return_source"] == fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE
     assert payload["source_metadata"]["daily_return_local_fallback_count"] == 1
 
 
