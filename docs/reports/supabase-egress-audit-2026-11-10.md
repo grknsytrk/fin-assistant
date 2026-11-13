@@ -391,7 +391,8 @@ Supabase project unless a row says otherwise.
   of its full key list. For the 2,014 catalogue rows the stored payload drops
   from **710,942 B to 4,028 B**. A content-hash version prefix forces the next
   catalogue commit to rewrite every row once, so existing databases pick up the
-  layout without a manual migration.
+  layout without a manual migration. The compaction materialised on
+  2026-11-13: 2,015 rows / **4,030 B** total.
 - The latest-point overlay requests quote columns only (`metadata_json`,
   `raw_json`, and `created_at` are omitted); the 2,013-row read is ~262 B/row.
 - `fund_listing_state` now returns the revision counters and the catalogue
@@ -409,9 +410,10 @@ Cold `/funds` measurement, before the compact rows are materialised:
 | `fund_snapshots` `fund_code/as_of` overlay dates | 2,014 | 82,575 |
 | **Total** | | **4,315,892** |
 
-After the next catalogue commit the `present_fields_json` share falls by
-706,914 B, so the same rebuild should read ~3.61 MB. The remaining largest
-item is the return window below.
+After the compact rows materialised on 2026-11-13, the same cold rebuild
+measured **3,685 KB** of Supabase reads: `fund_snapshots` **1,664 KB** across
+3 reads and `fund_prices` **2,021 KB** in one read. The response was 1,285 KB
+and the rebuild took 9.7 s.
 
 ### Still open from the P1 list
 
