@@ -1712,6 +1712,119 @@ def test_refresh_funds_snapshot_backfills_daily_return_from_local_prices(monkeyp
     assert payload["source_metadata"]["daily_return_local_fallback_count"] == 1
 
 
+def test_carry_forward_resolved_daily_returns_only_for_unchanged_price() -> None:
+    existing = [
+        {
+            "fund_code": "CAR",
+            "as_of": "2026-05-26",
+            "price": 10.0,
+            "daily_return": 2.0,
+            "daily_return_source": fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE,
+            "daily_return_basis_date": "2026-05-25",
+        },
+        {
+            "fund_code": "MOV",
+            "as_of": "2026-05-26",
+            "price": 10.0,
+            "daily_return": 2.0,
+            "daily_return_source": fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE,
+        },
+    ]
+    fresh = [
+        {"fund_code": "CAR", "as_of": "2026-05-26", "price": 10.0, "source": "tefasfon_funds"},
+        {"fund_code": "MOV", "as_of": "2026-05-26", "price": 10.5, "source": "tefasfon_funds"},
+    ]
+
+    carried = fund_service._carry_forward_resolved_daily_returns(existing, fresh)
+
+    assert carried == 1
+    assert fresh[0]["daily_return"] == 2.0
+    assert fresh[0]["daily_return_source"] == fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE
+    assert fresh[0]["daily_return_basis_date"] == "2026-05-25"
+    # A moved price must be recomputed, so the row stays a reconciliation candidate.
+    assert "daily_return" not in fresh[1]
+    assert set(
+        fund_service._daily_return_reconciliation_candidates(fresh, include_missing=True)
+    ) == {"MOV"}
+
+
+def test_refresh_funds_snapshot_reuses_resolved_return_for_unchanged_price(
+    monkeypatch, tmp_path
+) -> None:
+    """An unchanged price must not trigger the all-fund price-history read again."""
+
+    assert fund_service.commit_funds_snapshot(
+        tmp_path,
+        {
+            "status": "ok",
+            "as_of": "2026-05-26",
+            "rows": [
+                {
+                    "fund_code": "STL",
+                    "name": "STABLE PORTFOY FONU",
+                    "date": "2026-05-26",
+                    "price": 1.207886,
+                    "daily_return": 0.107,
+                    "daily_return_source": fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE,
+                    "daily_return_basis_date": "2026-05-25",
+                    "tefasDurum": True,
+                    "source": "tefasfon_funds",
+                }
+            ],
+        },
+        job_id="seed",
+        owner_token="seed",
+        generation=1,
+    )
+
+    class FakeTefasFonClient:
+        def fetch_latest_fund_list_snapshot(self, *, as_of, lookback_days):
+            return [
+                {
+                    "fund_code": "STL",
+                    "name": "STABLE PORTFOY FONU",
+                    "founder_company": "STABLE PORTFOY",
+                    "manager_company": "STABLE PORTFOY",
+                    "date": "2026-05-26",
+                    "price": 1.207886,
+                    "aum": 5_000_000.0,
+                    "investor_count": 42,
+                    "tefasDurum": True,
+                    "source": "tefasfon_funds",
+                    "gunlukGetiri": None,
+                    "daily_return": None,
+                }
+            ], []
+
+    candidate_snapshots = []
+
+    def record_candidates(_processed_dir, rows_arg, **kwargs):
+        candidate_snapshots.append(
+            fund_service._daily_return_reconciliation_candidates(
+                rows_arg,
+                include_missing=bool(kwargs.get("include_missing")),
+            )
+        )
+        return {}
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    monkeypatch.setattr(
+        fund_service,
+        "_daily_return_overrides_from_price_history",
+        record_candidates,
+    )
+
+    payload = fund_service.refresh_funds_snapshot(tmp_path, lookback_days=1)
+
+    # The carried return leaves no reconciliation candidate, so the price
+    # history window is never read for an unchanged catalogue.
+    assert candidate_snapshots == [{}]
+    row = payload["rows"][0]
+    assert row["daily_return"] == pytest.approx(0.107)
+    assert row["daily_return_source"] == fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE
+    assert payload["source_metadata"]["daily_return_carried_forward_count"] == 1
+
+
 def test_refresh_funds_snapshot_keeps_official_daily_return_over_local_fallback(monkeypatch, tmp_path) -> None:
     """If TEFAS does publish a daily return, the local fallback must not run."""
 

@@ -3588,6 +3588,54 @@ def _daily_return_overrides_from_price_history(
     return overrides
 
 
+def _carry_forward_resolved_daily_returns(
+    existing_rows: Iterable[Dict[str, Any]],
+    fresh_rows: Iterable[Dict[str, Any]],
+) -> int:
+    """Reuse a resolved previous-close return while the price is unchanged.
+
+    TEFAS publishes fund prices once per trading day, but the catalogue is
+    refreshed every 30 minutes. Recomputing the same previous-close difference
+    from ``fund_prices`` for all ~2,000 funds on every refresh reads about
+    1.3 MB. When the date and price are unchanged the stored return is still
+    valid, so only genuinely changed rows remain reconciliation candidates.
+    """
+
+    previous_by_code = {
+        normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or "")): row
+        for row in existing_rows
+        if isinstance(row, dict)
+    }
+    carried = 0
+    for row in fresh_rows:
+        if not isinstance(row, dict):
+            continue
+        code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        previous = previous_by_code.get(code)
+        if not previous:
+            continue
+        if str(previous.get("daily_return_source") or "") != DAILY_RETURN_LOCAL_PRICE_SOURCE:
+            continue
+        if _fund_date(previous.get("as_of")) != _fund_date(row.get("as_of")):
+            continue
+        previous_price = _coerce_float(previous.get("price"))
+        current_price = _coerce_float(row.get("price"))
+        if previous_price is None or current_price is None:
+            continue
+        if abs(previous_price - current_price) > max(1e-9, abs(previous_price) * 1e-9):
+            continue
+        resolved = _coerce_float(previous.get("daily_return"))
+        if resolved is None:
+            continue
+        row["daily_return"] = resolved
+        row["daily_return_source"] = DAILY_RETURN_LOCAL_PRICE_SOURCE
+        basis_date = previous.get("daily_return_basis_date")
+        if basis_date:
+            row["daily_return_basis_date"] = basis_date
+        carried += 1
+    return carried
+
+
 def _missing_daily_return_keys(rows: Iterable[Dict[str, Any]]) -> set[Tuple[str, str]]:
     """Return (fund, date) pairs whose catalogue row has no daily return."""
 
@@ -7404,6 +7452,7 @@ def refresh_funds_snapshot(
 
     rows = _merge_refresh_rows_with_existing(existing_rows, result.rows)
     rows, skipped_closed, skipped_unknown = _filter_tefas_open_rows(rows)
+    carried_daily_returns = _carry_forward_resolved_daily_returns(existing_rows, rows)
     if skipped_closed:
         warnings.append(
             f"tefas_open_only skipped {skipped_closed} closed fund rows"
@@ -7546,6 +7595,10 @@ def refresh_funds_snapshot(
     if local_fallback_count:
         meta = snapshot.setdefault("source_metadata", {})
         meta["daily_return_local_fallback_count"] = local_fallback_count
+    if carried_daily_returns:
+        snapshot.setdefault("source_metadata", {})[
+            "daily_return_carried_forward_count"
+        ] = carried_daily_returns
     if persist_reference_data:
         snapshot["source_metadata"]["reference_data"] = _upsert_fund_reference_data(processed_dir, snapshot["rows"])
     else:
