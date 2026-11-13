@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List
@@ -227,7 +228,7 @@ def test_bist_market_hours_and_sse_delta_stream(monkeypatch: pytest.MonkeyPatch)
     # Wednesday 14:30 TRT -> Open
     wed_open = datetime(2026, 10, 14, 14, 30, tzinfo=trt)
     assert api_mod._is_bist_market_open(wed_open) is True
-    assert api_mod._effective_market_quotes_fresh_ttl(wed_open) == 3
+    assert api_mod._effective_market_quotes_fresh_ttl(wed_open) == api_mod._MARKET_QUOTES_FRESH_TTL
 
     # Wednesday 20:00 TRT -> Closed (Off-hours)
     wed_night = datetime(2026, 10, 14, 20, 0, tzinfo=trt)
@@ -351,5 +352,145 @@ def test_market_stream_skips_delta_for_reused_rows_and_updates_new_snapshot(
     assert event_data[1]["count"] == 1
     assert event_data[1]["rows"][0]["company"] == "BIMAS"
     assert event_data[1]["rows"][0]["price"] == 512.5
+
+
+def _write_model_portfolio_state(tmp_path: Path, positions: List[Dict[str, Any]], version: int) -> Path:
+    state_path = tmp_path / "model_portfolio" / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": version,
+                "updated_at": "2026-02-01T00:00:00+00:00",
+                "positions": positions,
+                "changelog": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return state_path
+
+
+def _performance_test_series(series: Dict[str, Dict[str, float]]):
+    calls: List[tuple[str, str, date, date]] = []
+
+    def fake_series(kind: str, symbol: str, start_date: date, end_date: date) -> List[Dict[str, Any]]:
+        calls.append((kind, symbol, start_date, end_date))
+        return [{"date": d, "value": v} for d, v in sorted(series.get(symbol, {}).items())]
+
+    return fake_series, calls
+
+
+def test_performance_series_keeps_a_closed_position_until_its_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import model_portfolio_service as mps
+
+    reset_model_portfolio_cache_for_tests()
+    monkeypatch.setattr(mps, "read_json_cache", lambda path: None)
+    positions = [
+        {
+            "id": "pos-thyao",
+            "symbol": "THYAO",
+            "status": "active",
+            "weight_pct": 50.0,
+            "entry_date": "2026-01-05",
+            "entry_price": 100.0,
+        },
+        {
+            "id": "pos-bimas",
+            "symbol": "BIMAS",
+            "status": "closed",
+            "weight_pct": 50.0,
+            "entry_date": "2026-01-05",
+            "entry_price": 100.0,
+            "closed_date": "2026-01-07",
+            "exit_price": 130.0,
+        },
+    ]
+    _write_model_portfolio_state(tmp_path, positions, version=41)
+
+    fake_series, calls = _performance_test_series(
+        {
+            "XU100": {d: 100.0 for d in ("2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09")},
+            "XU030": {d: 100.0 for d in ("2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09")},
+            "THYAO": {d: 100.0 for d in ("2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09")},
+            "BIMAS": {"2026-01-05": 100.0, "2026-01-06": 100.0, "2026-01-07": 120.0},
+        }
+    )
+
+    payload = mps.build_model_portfolio_performance_payload(
+        tmp_path,
+        fetch_series_fn=fake_series,
+        quote_map={},
+        current_xu100=None,
+    )
+
+    points = payload["points"]
+    assert [p["date"] for p in points] == [
+        "2026-01-05",
+        "2026-01-06",
+        "2026-01-07",
+        "2026-01-08",
+        "2026-01-09",
+    ]
+    by_date = {p["date"]: p for p in points}
+    # The closed position is still flat on the entry day and the day after.
+    assert by_date["2026-01-06"]["portfolio_return_pct"] == 0.0
+    # On the exit day the realized move is booked at exit_price (130), not the
+    # last market print (120): half the sleeve gains 30% => +15%.
+    assert by_date["2026-01-07"]["portfolio_return_pct"] == 15.0
+    # After the close the position no longer contributes, but the realized gain stays.
+    assert by_date["2026-01-09"]["portfolio_return_pct"] == 15.0
+
+    # The closed symbol is only fetched through its exit date.
+    closed_calls = [c for c in calls if c[1] == "BIMAS"]
+    assert len(closed_calls) == 1
+    assert closed_calls[0][3] == date(2026, 1, 7)
+    assert all(c[3] > date(2026, 1, 7) for c in calls if c[1] == "THYAO")
+
+
+def test_performance_series_supports_a_portfolio_with_only_closed_positions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import model_portfolio_service as mps
+
+    reset_model_portfolio_cache_for_tests()
+    monkeypatch.setattr(mps, "read_json_cache", lambda path: None)
+    positions = [
+        {
+            "id": "pos-only-closed",
+            "symbol": "ONLY",
+            "status": "closed",
+            "weight_pct": 40.0,
+            "entry_date": "2026-01-05",
+            "entry_price": 100.0,
+            # Saturday close: no price bar exists for this date, so the exit
+            # must still be booked on the chart by the series builder.
+            "closed_date": "2026-01-10",
+            "exit_price": 110.0,
+        }
+    ]
+    _write_model_portfolio_state(tmp_path, positions, version=42)
+
+    fake_series, _ = _performance_test_series(
+        {
+            "XU100": {d: 100.0 for d in ("2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09")},
+            "XU030": {d: 100.0 for d in ("2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09")},
+            "ONLY": {d: 100.0 for d in ("2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09")},
+        }
+    )
+
+    payload = mps.build_model_portfolio_performance_payload(
+        tmp_path,
+        fetch_series_fn=fake_series,
+        quote_map={},
+        current_xu100=None,
+    )
+
+    assert payload["cache_status"] == "miss"
+    assert payload["points"], "a fully closed portfolio must still expose its realized track record"
+    assert payload["points"][-1]["date"] == "2026-01-10"
+    assert payload["points"][-1]["portfolio_return_pct"] == 10.0
 
 

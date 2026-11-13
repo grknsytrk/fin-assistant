@@ -1061,12 +1061,30 @@ def build_model_portfolio_performance_payload(
     canonical response so switching ranges never triggers an extra network request.
     """
     state = load_model_portfolio_state(processed_dir)
-    active_positions = [p for p in state["positions"] if str(p.get("status") or "active") == "active"]
+    positions = list(state["positions"])
+    # A closed position remains part of the realized track record until its
+    # exit date. Dropping it immediately would rewrite the whole history as if
+    # the position had never existed and erase its contribution from the chart.
+    series_positions: List[Dict[str, Any]] = []
+    for pos in positions:
+        if not str(pos.get("symbol") or "").strip():
+            continue
+        if str(pos.get("status") or "active") == "closed":
+            entry_raw = str(pos.get("entry_date") or "")[:10]
+            closed_raw = str(pos.get("closed_date") or "")[:10]
+            try:
+                if not entry_raw or not closed_raw:
+                    continue
+                if date.fromisoformat(entry_raw) > date.fromisoformat(closed_raw):
+                    continue
+            except ValueError:
+                continue
+        series_positions.append(pos)
     today = date.today()
     today_iso = today.isoformat()
     version = state["version"]
 
-    if not active_positions:
+    if not series_positions:
         return {
             "version": version,
             "start_date": today_iso,
@@ -1077,7 +1095,7 @@ def build_model_portfolio_performance_payload(
         }
 
     entry_dates: List[date] = []
-    for pos in state["positions"]:
+    for pos in series_positions:
         try:
             raw_entry_date = pos.get("entry_date") or pos.get("created_at")
             entry_dates.append(date.fromisoformat(str(raw_entry_date)[:10]))
@@ -1085,7 +1103,8 @@ def build_model_portfolio_performance_payload(
             continue
     canonical_start = min(entry_dates) if entry_dates else today
 
-    cache_key = f"api:model-portfolio:performance:v3:ver={version}:day={today_iso}"
+    # The series cache predates closed-position support, so bump its version.
+    cache_key = f"api:model-portfolio:performance:v4:ver={version}:day={today_iso}"
     now_ts = time.time()
 
     mem_entry = _MODEL_PORTFOLIO_PERF_MEMORY_CACHE.get(cache_key)
@@ -1103,12 +1122,27 @@ def build_model_portfolio_performance_payload(
             cache_status = "shared_hit"
 
     if base_series_data is None:
-        symbols = sorted({str(p.get("symbol") or "").strip().upper() for p in active_positions if p.get("symbol")})
+        symbols = sorted({str(p.get("symbol") or "").strip().upper() for p in series_positions if p.get("symbol")})
+        series_end_by_symbol: Dict[str, date] = {}
+        for pos in series_positions:
+            symbol = str(pos.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            if str(pos.get("status") or "active") != "closed":
+                series_end_by_symbol[symbol] = today
+                continue
+            try:
+                closed_on = date.fromisoformat(str(pos.get("closed_date") or "")[:10])
+            except ValueError:
+                closed_on = today
+            previous_end = series_end_by_symbol.get(symbol)
+            series_end_by_symbol[symbol] = max(closed_on, previous_end) if previous_end else closed_on
         from concurrent.futures import ThreadPoolExecutor
 
         def fetch_one(item: Tuple[str, str]) -> Tuple[str, List[Dict[str, Any]]]:
             kind, sym = item
-            return sym, fetch_series_fn(kind, sym, canonical_start, today)
+            end_date = today if kind == "index" else series_end_by_symbol.get(sym, today)
+            return sym, fetch_series_fn(kind, sym, canonical_start, max(canonical_start, end_date))
 
         tasks: List[Tuple[str, str]] = [("index", "XU100"), ("index", "XU030")] + [("stock", sym) for sym in symbols]
         series_by_symbol: Dict[str, Dict[str, float]] = {}
@@ -1138,6 +1172,19 @@ def build_model_portfolio_performance_payload(
                 shared_cache_set(cache_key, base_series_data, _PERF_MEMORY_TTL_SECONDS)
 
     sorted_dates = list(base_series_data.get("sorted_dates") or [])
+    # Book an exit on its exact date even when the price source has no bar for
+    # that day (weekend/holiday close), otherwise the realized move is lost.
+    for pos in series_positions:
+        if str(pos.get("status") or "active") != "closed":
+            continue
+        closed_d = str(pos.get("closed_date") or "")[:10]
+        if not closed_d or closed_d > today_iso or closed_d < canonical_start.isoformat():
+            continue
+        if _positive_float(pos.get("exit_price")) is None:
+            continue
+        if closed_d not in sorted_dates:
+            sorted_dates.append(closed_d)
+            sorted_dates.sort()
     raw_series_map: Dict[str, Dict[str, float]] = {
         k: dict(v) for k, v in (base_series_data.get("series_by_symbol") or {}).items()
     }
@@ -1151,8 +1198,20 @@ def build_model_portfolio_performance_payload(
     if current_xu030 is not None and current_xu030 > 0:
         raw_series_map.setdefault("XU030", {})[today_iso] = float(current_xu030)
         has_live_today = True
-    for pos in active_positions:
+    for pos in series_positions:
         sym = str(pos.get("symbol") or "").strip().upper()
+        is_closed = str(pos.get("status") or "active") == "closed"
+        if is_closed:
+            # A position closed today is valued at its exit price so the
+            # realized move lands on the chart on the day it was booked.
+            if str(pos.get("closed_date") or "")[:10] != today_iso:
+                continue
+            exit_price = _positive_float(pos.get("exit_price"))
+            if exit_price is None:
+                continue
+            raw_series_map.setdefault(sym, {})[today_iso] = exit_price
+            has_live_today = True
+            continue
         live_p = _positive_float((quote_map.get(sym) or {}).get("price"))
         if live_p is not None:
             raw_series_map.setdefault(sym, {})[today_iso] = live_p
@@ -1171,9 +1230,14 @@ def build_model_portfolio_performance_payload(
             "cache_status": cache_status,
         }
 
-    # Forward-fill missing trading days per symbol & compute daily weighted index (base 100)
-    symbols = [str(p.get("symbol") or "").strip().upper() for p in active_positions if p.get("symbol")]
-    last_price: Dict[str, Optional[float]] = {sym: None for sym in symbols}
+    # Forward-fill missing trading days per position & compute daily weighted index (base 100).
+    # Prices are tracked per position id rather than per symbol so that a symbol
+    # which was closed and later re-opened does not inherit the old tranche's fill.
+    position_keys: List[str] = []
+    for pos_idx, pos in enumerate(series_positions):
+        symbol = str(pos.get("symbol") or "").strip().upper()
+        position_keys.append(str(pos.get("id") or "").strip() or f"{symbol}:{pos_idx}")
+    last_price: Dict[str, Optional[float]] = {key: None for key in position_keys}
     last_index_prices: Dict[str, Optional[float]] = {"XU100": None, "XU030": None}
 
     portfolio_index = 100.0
@@ -1192,27 +1256,39 @@ def build_model_portfolio_performance_payload(
                 index_values[index_symbol] *= 1.0 + index_daily_return
 
         weighted_daily_ret = 0.0
-        active_weight_sum = 0.0
-        for pos in active_positions:
+        included_weight_sum = 0.0
+        for pos_idx, pos in enumerate(series_positions):
             sym = str(pos.get("symbol") or "").strip().upper()
             weight = float(pos.get("weight_pct") or 0.0)
             entry_d = str(pos.get("entry_date") or "")[:10]
+            closed_d = str(pos.get("closed_date") or "")[:10] if str(pos.get("status") or "active") == "closed" else ""
+            pos_key = position_keys[pos_idx]
+            # A closed position stops contributing right after its exit date,
+            # but everything it earned up to that day stays in the index.
+            if closed_d and d_str > closed_d:
+                continue
+
             sym_val = raw_series_map.get(sym, {}).get(d_str)
-            prev_sym = last_price.get(sym)
-            if sym_val is not None and sym_val > 0:
-                last_price[sym] = sym_val
-            cur_sym = last_price.get(sym)
+            prev_sym = last_price.get(pos_key)
+            cur_sym = sym_val if sym_val is not None and sym_val > 0 else prev_sym
+            if closed_d and d_str == closed_d:
+                exit_price = _positive_float(pos.get("exit_price"))
+                if exit_price is not None:
+                    cur_sym = exit_price
+            if cur_sym is not None:
+                last_price[pos_key] = cur_sym
 
             # Start counting returns on the day after entry so the entry day's
             # move from the previous close is not attributed to the portfolio.
             if d_str > entry_d and idx > 0 and prev_sym is not None and cur_sym is not None and prev_sym > 0:
                 stock_daily_ret = (cur_sym - prev_sym) / prev_sym
                 weighted_daily_ret += weight * stock_daily_ret
-                active_weight_sum += weight
+                included_weight_sum += weight
 
-        if idx > 0 and active_weight_sum > 0:
-            # Normalize daily return by active stock sleeve weight so 100 TL invested tracks stock performance cleanly
-            portfolio_daily_ret = weighted_daily_ret / active_weight_sum
+        if idx > 0 and included_weight_sum > 0:
+            # Normalize the daily return by the included stock sleeve weight so
+            # the 100 TL index tracks the positions actually held that day.
+            portfolio_daily_ret = weighted_daily_ret / included_weight_sum
             portfolio_index = portfolio_index * (1.0 + portfolio_daily_ret)
 
         port_ret_pct = round(portfolio_index - 100.0, 2)
