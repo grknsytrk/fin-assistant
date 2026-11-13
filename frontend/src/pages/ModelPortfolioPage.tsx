@@ -828,7 +828,7 @@ export default function ModelPortfolioPage() {
                             <span className="model-portfolio-kicker">ARAŞTIRMA & YATIRIM STRATEJİLERİ</span>
                             <h1 tabIndex={-1} data-dialog-return-focus>Model Portföy</h1>
                             <p>
-                                Temel analizle seçilen hisseleri canlı fiyatlarla ve yatırım tezleriyle takip edin. Geçmiş grafik, bugünkü aktif sepetin XU100 karşısındaki simülasyonunu gösterir.
+                                Temel analizle seçilen hisseleri canlı fiyatlarla ve yatırım tezleriyle takip edin. Geçmiş grafik, kapanan pozisyonları çıkış tarihine kadar dahil ederek model portföyün BIST 100 karşısındaki kümülatif performansını gösterir.
                             </p>
                             {hasPortfolioSetup && portfolioData?.updated_at && (
                                 <span className="mp-update-meta">
@@ -918,16 +918,16 @@ export default function ModelPortfolioPage() {
                     </section>
 
                     {/* Analytics Grid: Left = Cumulative Performance Chart, Right = Allocation Donut & Attribution */}
-                    {liveActivePositions.length > 0 && (
+                    {hasPortfolioSetup && (
                         <section className="mp-analytics-grid">
                             {/* Left: Cumulative Return vs XU100 SVG Chart */}
                             <div className="mp-panel mp-chart-panel">
                                 <div className="mp-panel-header">
                                     <div>
-                                        <span className="mp-panel-kicker">AKTİF MODEL PORTFÖYÜN GEÇMİŞ PERFORMANSI</span>
-                                        <h2 className="mp-panel-title">Aktif Sepet vs. BIST 100 / BIST 30 (100 ₺ Bazlı)</h2>
+                                        <span className="mp-panel-kicker">MODEL PORTFÖYÜN KÜMÜLATİF PERFORMANSI</span>
+                                        <h2 className="mp-panel-title">Model Portföy vs. BIST 100 / BIST 30 (100 ₺ Bazlı)</h2>
                                         <p className="mp-chart-note">
-                                            Bugünkü aktif hisse ve ağırlıklarla hesaplanır; kapanmış pozisyonlar ve geçmiş ağırlık değişiklikleri dahil değildir.
+                                            Kapanan pozisyonlar çıkış tarihine kadar katkı verir ve gerçekleşen getiri grafikte kalır. Ağırlıklar güncel ağırlıklardır; geçmiş ağırlık değişiklikleri ayrıca modellenmez.
                                         </p>
                                     </div>
                                     <div className="mp-range-tabs" role="tablist" aria-label="Grafik periyodu">
@@ -970,47 +970,55 @@ export default function ModelPortfolioPage() {
                                     </div>
                                 </div>
 
-                                <div className="mp-allocation-body">
-                                    <ModelPortfolioDonut
-                                        items={donutItems}
-                                        activeIndex={activeDonutIndex}
-                                        onActiveIndexChange={setActiveDonutIndex}
-                                    />
+                                {liveActivePositions.length > 0 ? (
+                                    <div className="mp-allocation-body">
+                                        <ModelPortfolioDonut
+                                            items={donutItems}
+                                            activeIndex={activeDonutIndex}
+                                            onActiveIndexChange={setActiveDonutIndex}
+                                        />
 
-                                    <div className="mp-attribution-list">
-                                        <div className="mp-attribution-head">
-                                            <span>Hisse / Ağırlık</span>
-                                            <span>Portföye Katkı (Puan)</span>
-                                        </div>
-                                        {donutItems.map((item, idx) => (
-                                            <div
-                                                key={item.symbol}
-                                                className={`mp-attribution-row${activeDonutIndex === idx ? ' is-highlighted' : ''}`}
-                                                onMouseEnter={() => setActiveDonutIndex(idx)}
-                                                onMouseLeave={() => setActiveDonutIndex(null)}
-                                            >
-                                                <div className="mp-attribution-left">
-                                                    <span
-                                                        className="mp-color-dot"
-                                                        style={{ backgroundColor: item.color }}
-                                                    />
-                                                    <span className="mp-attr-symbol">{item.symbol}</span>
-                                                    <span className="mp-attr-weight">%{item.weight.toFixed(1)}</span>
-                                                </div>
-                                                <div className="mp-attribution-right">
-                                                    {item.isCash ? (
-                                                        <span className="mp-tone-flat">0,00 puan</span>
-                                                    ) : (
-                                                        <span className={toneClass(item.attributionPct)}>
-                                                            {item.attributionPct > 0 ? '+' : ''}
-                                                            {item.attributionPct.toFixed(2)} puan
-                                                        </span>
-                                                    )}
-                                                </div>
+                                        <div className="mp-attribution-list">
+                                            <div className="mp-attribution-head">
+                                                <span>Hisse / Ağırlık</span>
+                                                <span>Portföye Katkı (Puan)</span>
                                             </div>
-                                        ))}
+                                            {donutItems.map((item, idx) => (
+                                                <div
+                                                    key={item.symbol}
+                                                    className={`mp-attribution-row${activeDonutIndex === idx ? ' is-highlighted' : ''}`}
+                                                    onMouseEnter={() => setActiveDonutIndex(idx)}
+                                                    onMouseLeave={() => setActiveDonutIndex(null)}
+                                                >
+                                                    <div className="mp-attribution-left">
+                                                        <span
+                                                            className="mp-color-dot"
+                                                            style={{ backgroundColor: item.color }}
+                                                        />
+                                                        <span className="mp-attr-symbol">{item.symbol}</span>
+                                                        <span className="mp-attr-weight">%{item.weight.toFixed(1)}</span>
+                                                    </div>
+                                                    <div className="mp-attribution-right">
+                                                        {item.isCash ? (
+                                                            <span className="mp-tone-flat">0,00 puan</span>
+                                                        ) : (
+                                                            <span className={toneClass(item.attributionPct)}>
+                                                                {item.attributionPct > 0 ? '+' : ''}
+                                                                {item.attributionPct.toFixed(2)} puan
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
-                                </div>
+                                ) : (
+                                    <div className="mp-allocation-body mp-allocation-empty">
+                                        <p className="mp-chart-note">
+                                            Aktif pozisyon kalmadı. Kapatılan işlemlerin gerçekleşen getirisi yukarıdaki grafikte çıkış tarihine kadar korunur.
+                                        </p>
+                                    </div>
+                                )}
                             </div>
                         </section>
                     )}

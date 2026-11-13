@@ -847,6 +847,14 @@
     padding: 0.85rem 1rem;
 }
 
+.mp-allocation-body.mp-allocation-empty {
+    display: block;
+}
+
+.mp-allocation-empty .mp-chart-note {
+    margin: 0;
+}
+
 .mp-donut-wrap {
     position: relative;
     width: 148px;
