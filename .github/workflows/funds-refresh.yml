@@ -23,19 +23,41 @@ jobs:
       FIN_API_ADMIN_TOKEN: ${{ secrets.FIN_API_ADMIN_TOKEN }}
       FIN_MAX_SNAPSHOT_AGE_DAYS: "5"
     steps:
+      - name: wake api
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A free CPU Space can be asleep when the schedule fires, and a cold
+          # boot takes far longer than a short request timeout. Wake it first so
+          # a failed refresh always means a real API or auth problem.
+          curl --fail --silent --show-error \
+            --retry 10 --retry-all-errors --retry-delay 6 \
+            --connect-timeout 10 --max-time 60 \
+            "$FIN_API_BASE_URL/health" > /dev/null
+
       - name: request refresh job
         id: request
         shell: bash
         run: |
           set -euo pipefail
-          response="$(curl --fail-with-body --silent --show-error --retry 2 \
-            --connect-timeout 5 --max-time 20 \
+          body="$(mktemp)"
+          # The endpoint returns the active job for concurrent requests, so a
+          # retry after a dropped connection cannot start a second refresh.
+          status="$(curl --silent --show-error --output "$body" --write-out '%{http_code}' \
+            --retry 3 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 10 --max-time 90 \
             -X POST \
             -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
-            "$FIN_API_BASE_URL/admin/funds/refresh-snapshot?lookback_days=5")"
-          job_id="$(echo "$response" | jq -r '.refresh_job.job_id // empty')"
+            "$FIN_API_BASE_URL/admin/funds/refresh-snapshot?lookback_days=5")" || status="000"
+          if [[ "$status" != "200" ]]; then
+            echo "refresh request failed: HTTP $status" >&2
+            cat "$body" >&2 || true
+            exit 1
+          fi
+          job_id="$(jq -r '.refresh_job.job_id // empty' "$body")"
           if [[ -z "$job_id" ]]; then
             echo "refresh endpoint did not return a job id" >&2
+            cat "$body" >&2 || true
             exit 1
           fi
           echo "refresh requested: job_id=$job_id"
@@ -48,8 +70,8 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in $(seq 1 90); do
-            response="$(curl --fail-with-body --silent --show-error --retry 2 --retry-all-errors \
-              --connect-timeout 5 --max-time 20 \
+            response="$(curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors --retry-delay 3 \
+              --connect-timeout 10 --max-time 60 \
               -H "Authorization: Bearer $FIN_API_ADMIN_TOKEN" \
               "$FIN_API_BASE_URL/admin/funds/refresh-snapshot/status?job_id=$JOB_ID")"
             status="$(echo "$response" | jq -r '.refresh_job.status // empty')"
