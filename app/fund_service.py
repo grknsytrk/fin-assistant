@@ -135,6 +135,7 @@ TEFAS_DIRECT_RETURNS_SOURCE = "tefas_direct_returns"
 TEFAS_DIRECT_PORTFOLIO_SOURCE = "tefas_direct_portfolio"
 FINTABLES_UDF_HISTORY_SOURCE = "fintables_udf_history"
 FINTABLES_YIELD_SUMMARY_SOURCE = "fintables_yield_summary"
+DAILY_RETURN_LOCAL_PRICE_SOURCE = "local_price_diff"
 FUND_HISTORY_SOURCE_POLICY = "fintables_daily_tefas_fallback"
 _TEFAS_ALLOWED_FUND_TYPES = {"SEC", "PEN", "ETF", "RE", "VC"}
 TEFAS_FUND_TYPES = tuple(
@@ -3587,6 +3588,50 @@ def _daily_return_overrides_from_price_history(
     return overrides
 
 
+def _missing_daily_return_keys(rows: Iterable[Dict[str, Any]]) -> set[Tuple[str, str]]:
+    """Return (fund, date) pairs whose catalogue row has no daily return."""
+
+    missing: set[Tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if _coerce_float(_first_present(row, "daily_return", "gunlukGetiri")) is not None:
+            continue
+        code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        point_date = _fund_date(row.get("as_of") or row.get("date") or row.get("tarih"))
+        if code and point_date:
+            missing.add((code, point_date))
+    return missing
+
+
+def _daily_return_override_values(
+    rows: Iterable[Dict[str, Any]],
+    overrides: Dict[Tuple[str, str], float],
+    *,
+    mark_price_history_source: bool = False,
+) -> List[Dict[str, Any]]:
+    """Apply precomputed previous-close returns to catalogue rows.
+
+    When ``mark_price_history_source`` is true the row records that its return
+    no longer comes from the range-return merge. Readers can then skip the
+    price-history reconciliation query for that row on every catalogue rebuild.
+    """
+
+    materialized = [dict(row) for row in rows if isinstance(row, dict)]
+    if not overrides:
+        return materialized
+    for row in materialized:
+        code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        point_date = _fund_date(row.get("as_of") or row.get("date") or row.get("tarih"))
+        override = overrides.get((code, point_date or ""))
+        if override is None:
+            continue
+        row["daily_return"] = override
+        if mark_price_history_source:
+            row["daily_return_source"] = DAILY_RETURN_LOCAL_PRICE_SOURCE
+    return materialized
+
+
 def _apply_daily_return_overrides(
     processed_dir: Path,
     rows: Iterable[Dict[str, Any]],
@@ -3606,14 +3651,7 @@ def _apply_daily_return_overrides(
     else:
         overrides = override_result
         source_revision = None
-    if not overrides:
-        return (materialized, source_revision) if include_revision else materialized
-    for row in materialized:
-        code = normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
-        point_date = _fund_date(row.get("as_of") or row.get("date") or row.get("tarih"))
-        override = overrides.get((code, point_date or ""))
-        if override is not None:
-            row["daily_return"] = override
+    materialized = _daily_return_override_values(materialized, overrides)
     return (materialized, source_revision) if include_revision else materialized
 
 
@@ -3845,7 +3883,7 @@ def _backfill_daily_returns_from_local_prices(
         rounded = round(computed, 4)
         row["daily_return"] = rounded
         row["gunlukGetiri"] = rounded
-        row["daily_return_source"] = "local_price_diff"
+        row["daily_return_source"] = DAILY_RETURN_LOCAL_PRICE_SOURCE
         row["daily_return_basis_date"] = previous_date.isoformat()
         filled += 1
     return filled
@@ -7480,18 +7518,34 @@ def refresh_funds_snapshot(
         source=result.source,
         fetched_at=str(snapshot.get("fetched_at") or _utc_now_iso()),
     )
-    daily_return_overrides = _daily_return_overrides_from_price_history(processed_dir, snapshot["rows"])
+    # Resolve every catalogue return once at write time. Previous-close returns
+    # from price history replace range-return values and record their source, so
+    # a later `/funds` rebuild no longer scans the 5-day window for every fund.
+    missing_return_keys = _missing_daily_return_keys(snapshot["rows"])
+    daily_return_overrides = _daily_return_overrides_from_price_history(
+        processed_dir,
+        snapshot["rows"],
+        include_missing=True,
+    )
+    local_fallback_count = sum(
+        1 for key in daily_return_overrides if key in missing_return_keys
+    )
     if daily_return_overrides:
-        snapshot["rows"] = _apply_daily_return_overrides(processed_dir, snapshot["rows"])
+        snapshot["rows"] = _daily_return_override_values(
+            snapshot["rows"],
+            daily_return_overrides,
+            mark_price_history_source=True,
+        )
         _persist_daily_return_overrides(processed_dir, daily_return_overrides)
     backfilled = (
         _backfill_daily_returns_from_local_prices(processed_dir, snapshot["rows"])
         if backfill_daily_returns
         else 0
     )
-    if backfilled:
+    local_fallback_count += backfilled
+    if local_fallback_count:
         meta = snapshot.setdefault("source_metadata", {})
-        meta["daily_return_local_fallback_count"] = backfilled
+        meta["daily_return_local_fallback_count"] = local_fallback_count
     if persist_reference_data:
         snapshot["source_metadata"]["reference_data"] = _upsert_fund_reference_data(processed_dir, snapshot["rows"])
     else:

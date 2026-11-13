@@ -4414,3 +4414,34 @@ def test_memory_cache_evicts_oldest_entries(monkeypatch) -> None:
 
     fund_service.reset_fund_caches_for_tests()
 
+
+def test_write_time_return_overrides_leave_no_read_time_candidates() -> None:
+    rows = [
+        {
+            "fund_code": "AAA",
+            "as_of": "2026-11-12",
+            "daily_return": 1.5,
+            "daily_return_source": "tefasfon_returns",
+        },
+        {"fund_code": "BBB", "as_of": "2026-11-12", "daily_return": None},
+        {"fund_code": "CCC", "as_of": "2026-11-12", "daily_return": 2.0},
+    ]
+    overrides = {("AAA", "2026-11-12"): 0.75, ("BBB", "2026-11-12"): -0.5}
+
+    applied = fund_service._daily_return_override_values(
+        rows,
+        overrides,
+        mark_price_history_source=True,
+    )
+
+    assert applied[0]["daily_return"] == 0.75
+    assert applied[0]["daily_return_source"] == fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE
+    assert applied[1]["daily_return"] == -0.5
+    assert applied[1]["daily_return_source"] == fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE
+    assert applied[2]["daily_return"] == 2.0
+    assert "daily_return_source" not in applied[2]
+
+    # Marked rows are no longer candidates, so a later catalogue rebuild does
+    # not scan the 5-day price window for them again.
+    assert fund_service._daily_return_reconciliation_candidates(applied, include_missing=True) == {}
+
