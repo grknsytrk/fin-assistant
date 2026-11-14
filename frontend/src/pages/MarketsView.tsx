@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
-import { AlertCircle, BarChart3, Building2, Check, Clock3, Coins, GripHorizontal, Maximize2, Percent, Plus, RefreshCw, RotateCcw, Search, SlidersHorizontal, Trash2, TrendingUp, X } from 'lucide-react';
+import { Activity, AlertCircle, BarChart3, Building2, Check, Clock3, Coins, GripHorizontal, History, Maximize2, Percent, Plus, RefreshCw, RotateCcw, Search, SlidersHorizontal, Trash2, TrendingUp, X } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type {
     MarketIndexCode,
@@ -71,7 +71,18 @@ type StockSortKey =
     | 'ttm_satis_gelirleri'
     | 'ttm_favok'
     | 'net_borc'
-    | 'ozkaynaklar';
+    | 'ozkaynaklar'
+    | 'hist_fk_avg'
+    | 'hist_pd_dd_avg'
+    | 'hist_fd_favok_avg'
+    | 'fk_hist_diff_pct'
+    | 'pd_dd_hist_diff_pct'
+    | 'fd_favok_hist_diff_pct'
+    | 'sma_50_diff_pct'
+    | 'sma_200_diff_pct'
+    | 'high_52w_dist_pct'
+    | 'low_52w_dist_pct'
+    | 'fk_sector_diff_pct';
 type IndexSortKey = keyof MarketIndexListRow;
 
 type StockReturnKey = Extract<
@@ -79,7 +90,7 @@ type StockReturnKey = Extract<
     'return_1w_pct' | 'return_1m_pct' | 'return_3m_pct' | 'return_6m_pct' | 'return_ytd_pct' | 'return_1y_pct'
 >;
 type StockTableMode = 'performance' | 'fundamentals';
-type StockScreenerCategory = 'all' | 'profile' | 'valuation' | 'financials' | 'market';
+type StockScreenerCategory = 'all' | 'profile' | 'valuation' | 'financials' | 'market' | 'historical';
 type StockScreenerPresetId =
     | 'discount'
     | 'low_debt'
@@ -89,7 +100,10 @@ type StockScreenerPresetId =
     | 'positive_cash_flow'
     | 'high_margins'
     | 'momentum_leaders'
-    | 'large_liquid';
+    | 'large_liquid'
+    | 'hist_discount'
+    | 'trend_above_200'
+    | 'sector_discount';
 type StockScreenerRangeKey =
     | 'min_fk' | 'max_fk'
     | 'min_pd_dd' | 'max_pd_dd'
@@ -114,26 +128,54 @@ type StockScreenerRangeKey =
     | 'min_return_1m_pct' | 'max_return_1m_pct'
     | 'min_return_3m_pct' | 'max_return_3m_pct'
     | 'min_return_ytd_pct' | 'max_return_ytd_pct'
-    | 'min_return_1y_pct' | 'max_return_1y_pct';
+    | 'min_return_1y_pct' | 'max_return_1y_pct'
+    | 'min_hist_fk_avg' | 'max_hist_fk_avg'
+    | 'min_hist_pd_dd_avg' | 'max_hist_pd_dd_avg'
+    | 'min_hist_fd_favok_avg' | 'max_hist_fd_favok_avg'
+    | 'min_fk_hist_diff_pct' | 'max_fk_hist_diff_pct'
+    | 'min_pd_dd_hist_diff_pct' | 'max_pd_dd_hist_diff_pct'
+    | 'min_fd_favok_hist_diff_pct' | 'max_fd_favok_hist_diff_pct'
+    | 'min_sma_50_diff_pct' | 'max_sma_50_diff_pct'
+    | 'min_sma_200_diff_pct' | 'max_sma_200_diff_pct'
+    | 'min_high_52w_dist_pct' | 'max_high_52w_dist_pct'
+    | 'min_low_52w_dist_pct' | 'max_low_52w_dist_pct'
+    | 'min_fk_sector_diff_pct' | 'max_fk_sector_diff_pct'
+    | 'min_pd_dd_sector_diff_pct' | 'max_pd_dd_sector_diff_pct'
+    | 'min_fd_favok_sector_diff_pct' | 'max_fd_favok_sector_diff_pct';
 type StockScreenerToggleKey =
     | 'positive_net_profit'
     | 'positive_ebitda'
     | 'positive_free_cash_flow'
     | 'net_cash_only'
     | 'positive_roe'
-    | 'only_with_financials';
+    | 'only_with_financials'
+    | 'below_hist_fk'
+    | 'below_hist_pd_dd'
+    | 'above_sma_50'
+    | 'above_sma_200'
+    | 'below_sector_fk'
+    | 'below_sector_pd_dd';
 type StockScreenerFilterState = { sector: string } & Record<StockScreenerRangeKey, string> & Record<StockScreenerToggleKey, boolean>;
+type StockSectorDiffFields = {
+    fk_sector_diff_pct: number | null;
+    pd_dd_sector_diff_pct: number | null;
+    fd_favok_sector_diff_pct: number | null;
+};
 type StockTableColumn = { key: StockSortKey; label: string; sublabel?: string; align?: 'left' | 'right'; width?: number };
 
 type ScreenerRangeSpec = {
-    card: 'valuation' | 'profitability' | 'scale' | 'market_scale' | 'returns';
+    card: 'valuation' | 'profitability' | 'scale' | 'market_scale' | 'returns' | 'hist_multiples' | 'technicals' | 'sector_relative';
     category: Exclude<StockScreenerCategory, 'all' | 'profile'>;
     field:
         | 'fk' | 'pd_dd' | 'fd_favok' | 'fd_satis'
         | 'roe_pct' | 'favok_margin_pct' | 'net_margin_pct' | 'net_borc_favok'
         | 'ttm_satis_gelirleri' | 'ttm_favok' | 'ttm_net_kar' | 'ttm_fcf' | 'ozkaynaklar' | 'net_borc'
         | 'market_cap' | 'volume' | 'free_float_pct' | 'price'
-        | 'change_pct' | 'return_1w_pct' | 'return_1m_pct' | 'return_3m_pct' | 'return_ytd_pct' | 'return_1y_pct';
+        | 'change_pct' | 'return_1w_pct' | 'return_1m_pct' | 'return_3m_pct' | 'return_ytd_pct' | 'return_1y_pct'
+        | 'hist_fk_avg' | 'hist_pd_dd_avg' | 'hist_fd_favok_avg'
+        | 'fk_hist_diff_pct' | 'pd_dd_hist_diff_pct' | 'fd_favok_hist_diff_pct'
+        | 'sma_50_diff_pct' | 'sma_200_diff_pct' | 'high_52w_dist_pct' | 'low_52w_dist_pct'
+        | 'fk_sector_diff_pct' | 'pd_dd_sector_diff_pct' | 'fd_favok_sector_diff_pct';
     minKey: StockScreenerRangeKey;
     maxKey: StockScreenerRangeKey;
     label: string;
@@ -172,15 +214,37 @@ const SCREENER_RANGE_SPECS: ScreenerRangeSpec[] = [
     { card: 'returns', category: 'market', field: 'return_3m_pct', minKey: 'min_return_3m_pct', maxKey: 'max_return_3m_pct', label: '3 Ay Getiri', hint: 'Çeyreklik Performans', unit: '%' },
     { card: 'returns', category: 'market', field: 'return_ytd_pct', minKey: 'min_return_ytd_pct', maxKey: 'max_return_ytd_pct', label: 'Yılbaşı (YTD)', hint: 'Yıl Başından Bugüne', unit: '%' },
     { card: 'returns', category: 'market', field: 'return_1y_pct', minKey: 'min_return_1y_pct', maxKey: 'max_return_1y_pct', label: '1 Yıl Getiri', hint: 'Yıllık Performans', unit: '%' },
+    // Tarihsel Çarpan Ortalamaları (5Y KAP)
+    { card: 'hist_multiples', category: 'historical', field: 'fk_hist_diff_pct', minKey: 'min_fk_hist_diff_pct', maxKey: 'max_fk_hist_diff_pct', label: 'F/K Tarihsel Fark', hint: 'Negatif = 5Y ort. iskontolu', unit: '%' },
+    { card: 'hist_multiples', category: 'historical', field: 'pd_dd_hist_diff_pct', minKey: 'min_pd_dd_hist_diff_pct', maxKey: 'max_pd_dd_hist_diff_pct', label: 'PD/DD Tarihsel Fark', hint: 'Negatif = 5Y ort. iskontolu', unit: '%' },
+    { card: 'hist_multiples', category: 'historical', field: 'fd_favok_hist_diff_pct', minKey: 'min_fd_favok_hist_diff_pct', maxKey: 'max_fd_favok_hist_diff_pct', label: 'FD/FAVÖK Tarihsel Fark', hint: 'Negatif = 5Y ort. iskontolu', unit: '%' },
+    { card: 'hist_multiples', category: 'historical', field: 'hist_fk_avg', minKey: 'min_hist_fk_avg', maxKey: 'max_hist_fk_avg', label: '5Y Ort. F/K', hint: 'Tarihsel Ortalama', unit: 'x' },
+    { card: 'hist_multiples', category: 'historical', field: 'hist_pd_dd_avg', minKey: 'min_hist_pd_dd_avg', maxKey: 'max_hist_pd_dd_avg', label: '5Y Ort. PD/DD', hint: 'Tarihsel Ortalama', unit: 'x' },
+    { card: 'hist_multiples', category: 'historical', field: 'hist_fd_favok_avg', minKey: 'min_hist_fd_favok_avg', maxKey: 'max_hist_fd_favok_avg', label: '5Y Ort. FD/FAVÖK', hint: 'Tarihsel Ortalama', unit: 'x' },
+    // Fiyat Hareketli Ortalamaları & 52H Zirve/Dip
+    { card: 'technicals', category: 'historical', field: 'sma_50_diff_pct', minKey: 'min_sma_50_diff_pct', maxKey: 'max_sma_50_diff_pct', label: '50G Ort. Fark', hint: 'Fiyat / 50G Ort. Uzaklık', unit: '%' },
+    { card: 'technicals', category: 'historical', field: 'sma_200_diff_pct', minKey: 'min_sma_200_diff_pct', maxKey: 'max_sma_200_diff_pct', label: '200G Ort. Fark', hint: 'Fiyat / 200G Ort. Uzaklık', unit: '%' },
+    { card: 'technicals', category: 'historical', field: 'high_52w_dist_pct', minKey: 'min_high_52w_dist_pct', maxKey: 'max_high_52w_dist_pct', label: '52H Zirveye Uzaklık', hint: '0% = 52H zirve seviyesi', unit: '%' },
+    { card: 'technicals', category: 'historical', field: 'low_52w_dist_pct', minKey: 'min_low_52w_dist_pct', maxKey: 'max_low_52w_dist_pct', label: '52H Dibe Uzaklık', hint: 'Düşük pozitif = dibe yakın', unit: '%' },
+    // Sektör Ortalaması Kıyaslaması
+    { card: 'sector_relative', category: 'historical', field: 'fk_sector_diff_pct', minKey: 'min_fk_sector_diff_pct', maxKey: 'max_fk_sector_diff_pct', label: 'Sektör F/K Fark', hint: 'Negatif = sektörden ucuz', unit: '%' },
+    { card: 'sector_relative', category: 'historical', field: 'pd_dd_sector_diff_pct', minKey: 'min_pd_dd_sector_diff_pct', maxKey: 'max_pd_dd_sector_diff_pct', label: 'Sektör PD/DD Fark', hint: 'Negatif = sektörden ucuz', unit: '%' },
+    { card: 'sector_relative', category: 'historical', field: 'fd_favok_sector_diff_pct', minKey: 'min_fd_favok_sector_diff_pct', maxKey: 'max_fd_favok_sector_diff_pct', label: 'Sektör FD/FAVÖK Fark', hint: 'Negatif = sektörden ucuz', unit: '%' },
 ];
 
-const SCREENER_TOGGLE_SPECS: Array<{ key: StockScreenerToggleKey; label: string }> = [
-    { key: 'positive_net_profit', label: 'Pozitif TTM Net Kâr' },
-    { key: 'positive_ebitda', label: 'Pozitif TTM FAVÖK' },
-    { key: 'positive_free_cash_flow', label: 'Pozitif Serbest Nakit Akışı' },
-    { key: 'net_cash_only', label: 'Net Nakit (Borçsuz)' },
-    { key: 'positive_roe', label: 'Pozitif ROE' },
-    { key: 'only_with_financials', label: 'Bilanço Verisi Mevcut' },
+const SCREENER_TOGGLE_SPECS: Array<{ key: StockScreenerToggleKey; label: string; category: 'profile' | 'historical' }> = [
+    { key: 'positive_net_profit', label: 'Pozitif TTM Net Kâr', category: 'profile' },
+    { key: 'positive_ebitda', label: 'Pozitif TTM FAVÖK', category: 'profile' },
+    { key: 'positive_free_cash_flow', label: 'Pozitif Serbest Nakit Akışı', category: 'profile' },
+    { key: 'net_cash_only', label: 'Net Nakit (Borçsuz)', category: 'profile' },
+    { key: 'positive_roe', label: 'Pozitif ROE', category: 'profile' },
+    { key: 'only_with_financials', label: 'Bilanço Verisi Mevcut', category: 'profile' },
+    { key: 'below_hist_fk', label: 'Tarihsel F/K Ort. Altında', category: 'historical' },
+    { key: 'below_hist_pd_dd', label: 'Tarihsel PD/DD Ort. Altında', category: 'historical' },
+    { key: 'above_sma_50', label: '50G Ort. Üstünde', category: 'historical' },
+    { key: 'above_sma_200', label: '200G Ort. Üstünde', category: 'historical' },
+    { key: 'below_sector_fk', label: 'Sektör F/K Ort. Altında', category: 'historical' },
+    { key: 'below_sector_pd_dd', label: 'Sektör PD/DD Ort. Altında', category: 'historical' },
 ];
 
 const EMPTY_STOCK_SCREENER_FILTERS: StockScreenerFilterState = {
@@ -209,12 +273,31 @@ const EMPTY_STOCK_SCREENER_FILTERS: StockScreenerFilterState = {
     min_return_3m_pct: '', max_return_3m_pct: '',
     min_return_ytd_pct: '', max_return_ytd_pct: '',
     min_return_1y_pct: '', max_return_1y_pct: '',
+    min_hist_fk_avg: '', max_hist_fk_avg: '',
+    min_hist_pd_dd_avg: '', max_hist_pd_dd_avg: '',
+    min_hist_fd_favok_avg: '', max_hist_fd_favok_avg: '',
+    min_fk_hist_diff_pct: '', max_fk_hist_diff_pct: '',
+    min_pd_dd_hist_diff_pct: '', max_pd_dd_hist_diff_pct: '',
+    min_fd_favok_hist_diff_pct: '', max_fd_favok_hist_diff_pct: '',
+    min_sma_50_diff_pct: '', max_sma_50_diff_pct: '',
+    min_sma_200_diff_pct: '', max_sma_200_diff_pct: '',
+    min_high_52w_dist_pct: '', max_high_52w_dist_pct: '',
+    min_low_52w_dist_pct: '', max_low_52w_dist_pct: '',
+    min_fk_sector_diff_pct: '', max_fk_sector_diff_pct: '',
+    min_pd_dd_sector_diff_pct: '', max_pd_dd_sector_diff_pct: '',
+    min_fd_favok_sector_diff_pct: '', max_fd_favok_sector_diff_pct: '',
     positive_net_profit: false,
     positive_ebitda: false,
     positive_free_cash_flow: false,
     net_cash_only: false,
     positive_roe: false,
     only_with_financials: false,
+    below_hist_fk: false,
+    below_hist_pd_dd: false,
+    above_sma_50: false,
+    above_sma_200: false,
+    below_sector_fk: false,
+    below_sector_pd_dd: false,
 };
 
 const STOCK_COLUMNS: StockTableColumn[] = [
@@ -240,6 +323,15 @@ const STOCK_FUNDAMENTAL_COLUMNS: StockTableColumn[] = [
     { key: 'pd_dd', label: 'PD/DD', align: 'right', width: 85 },
     { key: 'fd_favok', label: 'FD/FAVÖK', align: 'right', width: 95 },
     { key: 'fd_satis', label: 'FD/Satış', align: 'right', width: 95 },
+    { key: 'hist_fk_avg', label: 'Ort. F/K', sublabel: '5Y KAP', align: 'right', width: 95 },
+    { key: 'fk_hist_diff_pct', label: 'F/K Fark %', sublabel: 'vs 5Y Ort.', align: 'right', width: 105 },
+    { key: 'hist_pd_dd_avg', label: 'Ort. PD/DD', sublabel: '5Y KAP', align: 'right', width: 100 },
+    { key: 'pd_dd_hist_diff_pct', label: 'PD/DD Fark %', sublabel: 'vs 5Y Ort.', align: 'right', width: 110 },
+    { key: 'hist_fd_favok_avg', label: 'Ort. FD/FAVÖK', sublabel: '5Y KAP', align: 'right', width: 115 },
+    { key: 'fk_sector_diff_pct', label: 'Sektör F/K %', align: 'right', width: 105 },
+    { key: 'sma_50_diff_pct', label: '50G Ort. %', align: 'right', width: 95 },
+    { key: 'sma_200_diff_pct', label: '200G Ort. %', align: 'right', width: 100 },
+    { key: 'high_52w_dist_pct', label: '52H Zirve %', align: 'right', width: 105 },
     { key: 'net_borc_favok', label: 'Net Borç/FAVÖK', align: 'right', width: 120 },
     { key: 'ttm_net_kar', label: 'TTM Net Kâr', align: 'right', width: 125 },
     { key: 'ttm_fcf', label: 'TTM Serbest Nakit Akışı', align: 'right', width: 150 },
@@ -264,6 +356,9 @@ const STOCK_SCREENER_PRESETS: Array<{
     { id: 'positive_cash_flow', label: 'Pozitif Serbest Nakit', filters: { positive_free_cash_flow: true } },
     { id: 'momentum_leaders', label: 'Güçlü Momentum (1A & 1Y)', filters: { min_return_1m_pct: '5', min_return_1y_pct: '30' } },
     { id: 'large_liquid', label: 'Büyük Ölçek & Halka Açık', filters: { min_market_cap: '10000', min_free_float_pct: '25' } },
+    { id: 'hist_discount', label: 'Tarihsel İskontolu', filters: { below_hist_fk: true, below_hist_pd_dd: true, positive_net_profit: true } },
+    { id: 'trend_above_200', label: '200G Ort. Üstü Trend', filters: { above_sma_50: true, above_sma_200: true } },
+    { id: 'sector_discount', label: 'Sektörüne Göre Ucuz', filters: { below_sector_fk: true, below_sector_pd_dd: true, positive_roe: true } },
 ];
 const STOCK_INDEX_OPTIONS: MarketStockIndex[] = ['XUTUM', 'XU100', 'XU030'];
 const PRIMARY_MARKET_INDEX_RANK = new Map<string, number>(
@@ -1328,8 +1423,10 @@ function stockSortValue(
     key: StockSortKey,
     benchmarks: Record<MarketStockIndex, MarketReturnBenchmark> | undefined,
     returnMode: StockReturnMode,
+    sectorDiff?: StockSectorDiffFields,
 ): string | number | null | undefined {
     if (key === 'company') return row.company;
+    if (key === 'fk_sector_diff_pct') return sectorDiff?.fk_sector_diff_pct ?? null;
     if (isReturnKey(key)) return getReturnValue(row, key, benchmarks, returnMode);
     return row[key];
 }
@@ -1356,6 +1453,7 @@ const StockTableRow = memo(function StockTableRow({
     mode,
     returnMode,
     benchmarks,
+    sectorDiff,
     onCompanyClick,
 }: {
     row: MarketStockRow;
@@ -1363,6 +1461,7 @@ const StockTableRow = memo(function StockTableRow({
     mode: 'performance' | 'fundamentals';
     returnMode: StockReturnMode;
     benchmarks?: MarketStocksResponse['benchmarks'];
+    sectorDiff?: StockSectorDiffFields;
     onCompanyClick: (symbol: string) => void;
 }) {
     const prevPriceRef = useRef(row.price);
@@ -1430,6 +1529,27 @@ const StockTableRow = memo(function StockTableRow({
                     <td className="stocks-cell-right">{formatFundamentalRatio(row.pd_dd)}</td>
                     <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_favok)}</td>
                     <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_satis)}</td>
+                    <td className="stocks-cell-right">{formatFundamentalRatio(row.hist_fk_avg)}</td>
+                    <td className={`stocks-cell-right ${row.fk_hist_diff_pct == null ? 'stocks-cell-muted' : row.fk_hist_diff_pct < 0 ? 'stocks-up' : row.fk_hist_diff_pct > 0 ? 'stocks-down' : 'stocks-flat'}`}>
+                        {formatTablePct(row.fk_hist_diff_pct ?? null)}
+                    </td>
+                    <td className="stocks-cell-right">{formatFundamentalRatio(row.hist_pd_dd_avg)}</td>
+                    <td className={`stocks-cell-right ${row.pd_dd_hist_diff_pct == null ? 'stocks-cell-muted' : row.pd_dd_hist_diff_pct < 0 ? 'stocks-up' : row.pd_dd_hist_diff_pct > 0 ? 'stocks-down' : 'stocks-flat'}`}>
+                        {formatTablePct(row.pd_dd_hist_diff_pct ?? null)}
+                    </td>
+                    <td className="stocks-cell-right">{formatFundamentalRatio(row.hist_fd_favok_avg)}</td>
+                    <td className={`stocks-cell-right ${sectorDiff?.fk_sector_diff_pct == null ? 'stocks-cell-muted' : sectorDiff.fk_sector_diff_pct < 0 ? 'stocks-up' : sectorDiff.fk_sector_diff_pct > 0 ? 'stocks-down' : 'stocks-flat'}`}>
+                        {formatTablePct(sectorDiff?.fk_sector_diff_pct ?? null)}
+                    </td>
+                    <td className={`stocks-cell-right ${row.sma_50_diff_pct == null ? 'stocks-cell-muted' : getTableChangeClass(row.sma_50_diff_pct)}`}>
+                        {formatTablePct(row.sma_50_diff_pct ?? null)}
+                    </td>
+                    <td className={`stocks-cell-right ${row.sma_200_diff_pct == null ? 'stocks-cell-muted' : getTableChangeClass(row.sma_200_diff_pct)}`}>
+                        {formatTablePct(row.sma_200_diff_pct ?? null)}
+                    </td>
+                    <td className={`stocks-cell-right ${row.high_52w_dist_pct == null ? 'stocks-cell-muted' : getTableChangeClass(row.high_52w_dist_pct)}`}>
+                        {formatTablePct(row.high_52w_dist_pct ?? null)}
+                    </td>
                     <td className="stocks-cell-right">{formatFundamentalRatio(row.net_borc_favok)}</td>
                     <td className="stocks-cell-right">{formatMarketCap(row.ttm_net_kar ?? null)}</td>
                     <td className="stocks-cell-right">{formatMarketCap(row.ttm_fcf ?? null)}</td>
@@ -3112,6 +3232,7 @@ export default function MarketsView({
             valuation: 0,
             financials: 0,
             market: 0,
+            historical: 0,
         };
         const chips: Array<{ id: string; label: string; onClear: () => void }> = [];
 
@@ -3129,7 +3250,7 @@ export default function MarketsView({
 
         for (const toggle of SCREENER_TOGGLE_SPECS) {
             if (screenerFilters[toggle.key]) {
-                counts.profile += 1;
+                counts[toggle.category] += 1;
                 chips.push({
                     id: toggle.key,
                     label: toggle.label,
@@ -3165,7 +3286,7 @@ export default function MarketsView({
             }
         }
 
-        counts.all = counts.profile + counts.valuation + counts.financials + counts.market;
+        counts.all = counts.profile + counts.valuation + counts.financials + counts.market + counts.historical;
         return {
             activeFilterCount: counts.all,
             screenerCategoryCounts: counts,
@@ -3754,27 +3875,73 @@ export default function MarketsView({
     const screenerData = useMemo(() => {
         const allRows = stocks?.rows || [];
         const sectorCounts = new Map<string, number>();
+        const sectorBuckets = new Map<string, { fk: number[]; pd_dd: number[]; fd_favok: number[]; count: number }>();
         let financialCount = 0;
         for (const row of allRows) {
             const sectorName = String(row.sector || '').trim();
             if (sectorName) {
                 sectorCounts.set(sectorName, (sectorCounts.get(sectorName) || 0) + 1);
+                let bucket = sectorBuckets.get(sectorName);
+                if (!bucket) {
+                    bucket = { fk: [], pd_dd: [], fd_favok: [], count: 0 };
+                    sectorBuckets.set(sectorName, bucket);
+                }
+                bucket.count += 1;
+                if (row.fk != null && Number.isFinite(row.fk) && row.fk > 0) bucket.fk.push(row.fk);
+                if (row.pd_dd != null && Number.isFinite(row.pd_dd) && row.pd_dd > 0) bucket.pd_dd.push(row.pd_dd);
+                if (row.fd_favok != null && Number.isFinite(row.fd_favok) && row.fd_favok > 0) bucket.fd_favok.push(row.fd_favok);
             }
             if (hasStockFinancialData(row)) {
                 financialCount += 1;
             }
+        }
+        const avgOf = (arr: number[]): number | null => (
+            arr.length >= 2 ? Math.round((arr.reduce((sum, v) => sum + v, 0) / arr.length) * 100) / 100 : null
+        );
+        const pctDiff = (val: number | null | undefined, benchmark: number | null): number | null => {
+            if (val == null || !Number.isFinite(val) || val <= 0 || benchmark == null || benchmark <= 0) return null;
+            return Math.round(((val - benchmark) / benchmark) * 10000) / 100;
+        };
+        const sectorAverages = new Map<string, { fk: number | null; pd_dd: number | null; fd_favok: number | null; count: number }>();
+        for (const [sectorName, bucket] of sectorBuckets.entries()) {
+            sectorAverages.set(sectorName, {
+                fk: avgOf(bucket.fk),
+                pd_dd: avgOf(bucket.pd_dd),
+                fd_favok: avgOf(bucket.fd_favok),
+                count: bucket.count,
+            });
+        }
+        const sectorDiffByCompany = new Map<string, StockSectorDiffFields>();
+        for (const row of allRows) {
+            const sectorName = String(row.sector || '').trim();
+            const sectorAvg = sectorName ? sectorAverages.get(sectorName) : undefined;
+            sectorDiffByCompany.set(row.company, {
+                fk_sector_diff_pct: pctDiff(row.fk, sectorAvg?.fk ?? null),
+                pd_dd_sector_diff_pct: pctDiff(row.pd_dd, sectorAvg?.pd_dd ?? null),
+                fd_favok_sector_diff_pct: pctDiff(row.fd_favok, sectorAvg?.fd_favok ?? null),
+            });
         }
         const sectors = [...sectorCounts.keys()].sort((a, b) => a.localeCompare(b, 'tr'));
 
         const sectorFilter = screenerFilters.sector.trim().toLocaleLowerCase('tr-TR');
         const rows = allRows.filter((row) => {
             if (sectorFilter && String(row.sector || '').trim().toLocaleLowerCase('tr-TR') !== sectorFilter) return false;
+            const sectorDiff = sectorDiffByCompany.get(row.company);
             for (const spec of SCREENER_RANGE_SPECS) {
                 const scale = spec.scale || 1;
                 const minimumInput = parseScreenerNumber(screenerFilters[spec.minKey]);
                 const maximumInput = parseScreenerNumber(screenerFilters[spec.maxKey]);
                 if (minimumInput === undefined && maximumInput === undefined) continue;
-                const value = row[spec.field];
+                let value: number | null | undefined;
+                if (
+                    spec.field === 'fk_sector_diff_pct'
+                    || spec.field === 'pd_dd_sector_diff_pct'
+                    || spec.field === 'fd_favok_sector_diff_pct'
+                ) {
+                    value = sectorDiff?.[spec.field];
+                } else {
+                    value = row[spec.field];
+                }
                 if (value == null || !Number.isFinite(value)) return false;
                 if (minimumInput !== undefined && value < minimumInput * scale) return false;
                 if (maximumInput !== undefined && value > maximumInput * scale) return false;
@@ -3785,12 +3952,20 @@ export default function MarketsView({
             if (screenerFilters.net_cash_only && !(row.net_borc != null && row.net_borc < 0)) return false;
             if (screenerFilters.positive_roe && !(row.roe_pct != null && row.roe_pct > 0)) return false;
             if (screenerFilters.only_with_financials && !hasStockFinancialData(row)) return false;
+            if (screenerFilters.below_hist_fk && !(row.fk_hist_diff_pct != null && row.fk_hist_diff_pct < 0)) return false;
+            if (screenerFilters.below_hist_pd_dd && !(row.pd_dd_hist_diff_pct != null && row.pd_dd_hist_diff_pct < 0)) return false;
+            if (screenerFilters.above_sma_50 && !(row.sma_50_diff_pct != null && row.sma_50_diff_pct > 0)) return false;
+            if (screenerFilters.above_sma_200 && !(row.sma_200_diff_pct != null && row.sma_200_diff_pct > 0)) return false;
+            if (screenerFilters.below_sector_fk && !(sectorDiff?.fk_sector_diff_pct != null && sectorDiff.fk_sector_diff_pct < 0)) return false;
+            if (screenerFilters.below_sector_pd_dd && !(sectorDiff?.pd_dd_sector_diff_pct != null && sectorDiff.pd_dd_sector_diff_pct < 0)) return false;
             return true;
         });
         return {
             rows,
             sectors,
             sectorCounts,
+            sectorAverages,
+            sectorDiffByCompany,
             totalCount: allRows.length,
             financialCount,
         };
@@ -3857,8 +4032,20 @@ export default function MarketsView({
     const sortedStocks = useMemo(() => {
         const arr = [...filteredStocks];
         arr.sort((a, b) => {
-            const av = stockSortValue(a, stockSort.key, stocks?.benchmarks, returnMode);
-            const bv = stockSortValue(b, stockSort.key, stocks?.benchmarks, returnMode);
+            const av = stockSortValue(
+                a,
+                stockSort.key,
+                stocks?.benchmarks,
+                returnMode,
+                screenerData.sectorDiffByCompany.get(a.company),
+            );
+            const bv = stockSortValue(
+                b,
+                stockSort.key,
+                stocks?.benchmarks,
+                returnMode,
+                screenerData.sectorDiffByCompany.get(b.company),
+            );
             const aMissing = av == null || av === '';
             const bMissing = bv == null || bv === '';
             if (aMissing && bMissing) return a.company.localeCompare(b.company, 'tr');
@@ -3875,7 +4062,7 @@ export default function MarketsView({
             return stockSort.direction === 'asc' ? result : -result;
         });
         return arr;
-    }, [filteredStocks, stockSort, stocks?.benchmarks, returnMode]);
+    }, [filteredStocks, stockSort, stocks?.benchmarks, returnMode, screenerData.sectorDiffByCompany]);
 
     const stockTableWrapRef = useRef<HTMLDivElement>(null);
     const {
@@ -4812,6 +4999,7 @@ export default function MarketsView({
                                                 { id: 'all', label: 'Tümü' },
                                                 { id: 'profile', label: 'Sektör & Nitelik' },
                                                 { id: 'valuation', label: 'Değerleme' },
+                                                { id: 'historical', label: 'Tarihsel Ortalamalar' },
                                                 { id: 'financials', label: 'Kârlılık & Bilanço' },
                                                 { id: 'market', label: 'Piyasa & Getiri' },
                                             ] as const).map(({ id, label }) => {
@@ -4899,7 +5087,7 @@ export default function MarketsView({
                                                             </select>
                                                         </div>
                                                         <div className="screener-toggles-grid">
-                                                            {SCREENER_TOGGLE_SPECS.map(({ key, label }) => {
+                                                            {SCREENER_TOGGLE_SPECS.filter((spec) => spec.category === 'profile').map(({ key, label }) => {
                                                                 const checked = screenerFilters[key];
                                                                 return (
                                                                     <label
@@ -4979,6 +5167,83 @@ export default function MarketsView({
                                                     </div>
                                                     <div className="screener-card-content">
                                                         {renderScreenerRangeRows('returns')}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {(screenerCategory === 'all' || screenerCategory === 'historical') && (
+                                                <div className="screener-modal-card">
+                                                    <div className="screener-card-header">
+                                                        <History size={14} aria-hidden="true" />
+                                                        <span>Tarihsel Çarpan Ortalamaları (5Y KAP)</span>
+                                                    </div>
+                                                    <div className="screener-card-content">
+                                                        {renderScreenerRangeRows('hist_multiples')}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {(screenerCategory === 'all' || screenerCategory === 'historical') && (
+                                                <div className="screener-modal-card">
+                                                    <div className="screener-card-header">
+                                                        <Activity size={14} aria-hidden="true" />
+                                                        <span>Fiyat Ortalamaları & 52H Zirve/Dip</span>
+                                                    </div>
+                                                    <div className="screener-card-content">
+                                                        {renderScreenerRangeRows('technicals')}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {(screenerCategory === 'all' || screenerCategory === 'historical') && (
+                                                <div className="screener-modal-card is-span-2">
+                                                    <div className="screener-card-header">
+                                                        <BarChart3 size={14} aria-hidden="true" />
+                                                        <span>Sektör Ortalaması & Hızlı Seçimler</span>
+                                                    </div>
+                                                    <div className="screener-card-content">
+                                                        {(() => {
+                                                            const selectedSectorAvg = screenerFilters.sector
+                                                                ? screenerData.sectorAverages.get(screenerFilters.sector)
+                                                                : undefined;
+                                                            if (selectedSectorAvg) {
+                                                                return (
+                                                                    <div className="screener-sector-benchmark-strip">
+                                                                        <span><strong>{screenerFilters.sector}</strong> ortalaması ({selectedSectorAvg.count} hisse):</span>
+                                                                        <span>F/K: <strong>{formatFundamentalRatio(selectedSectorAvg.fk)}</strong></span>
+                                                                        <span>PD/DD: <strong>{formatFundamentalRatio(selectedSectorAvg.pd_dd)}</strong></span>
+                                                                        <span>FD/FAVÖK: <strong>{formatFundamentalRatio(selectedSectorAvg.fd_favok)}</strong></span>
+                                                                    </div>
+                                                                );
+                                                            }
+                                                            return (
+                                                                <div className="screener-sector-benchmark-strip">
+                                                                    <span>Her hisse, kendi sektörünün pozitif güncel çarpan ortalamasına göre kıyaslanır ({screenerData.sectorAverages.size} sektör).</span>
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                        {renderScreenerRangeRows('sector_relative')}
+                                                        <div className="screener-toggles-grid is-three-col">
+                                                            {SCREENER_TOGGLE_SPECS.filter((spec) => spec.category === 'historical').map(({ key, label }) => {
+                                                                const checked = screenerFilters[key];
+                                                                return (
+                                                                    <label
+                                                                        key={key}
+                                                                        className={`screener-toggle-item${checked ? ' is-checked' : ''}`}
+                                                                    >
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={checked}
+                                                                            onChange={(e) => handleScreenerFilterChange(key, e.currentTarget.checked)}
+                                                                        />
+                                                                        <span className="screener-checkbox-box" aria-hidden="true">
+                                                                            {checked && <Check size={11} strokeWidth={2.8} />}
+                                                                        </span>
+                                                                        <span>{label}</span>
+                                                                    </label>
+                                                                );
+                                                            })}
+                                                        </div>
                                                     </div>
                                                 </div>
                                             )}
@@ -5100,6 +5365,7 @@ export default function MarketsView({
                                                             mode={stockTableMode}
                                                             returnMode={returnMode}
                                                             benchmarks={stocks?.benchmarks}
+                                                            sectorDiff={screenerData.sectorDiffByCompany.get(row.company)}
                                                             onCompanyClick={onCompanyClick}
                                                         />
                                                     );

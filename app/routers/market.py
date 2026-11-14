@@ -87,6 +87,20 @@ def market_screener(
     max_net_borc_favok: Optional[float] = Query(None),
     min_roe_pct: Optional[float] = Query(None),
     min_favok_margin_pct: Optional[float] = Query(None),
+    min_fk_hist_diff_pct: Optional[float] = Query(None),
+    max_fk_hist_diff_pct: Optional[float] = Query(None),
+    min_pd_dd_hist_diff_pct: Optional[float] = Query(None),
+    max_pd_dd_hist_diff_pct: Optional[float] = Query(None),
+    min_fd_favok_hist_diff_pct: Optional[float] = Query(None),
+    max_fd_favok_hist_diff_pct: Optional[float] = Query(None),
+    min_sma_50_diff_pct: Optional[float] = Query(None),
+    max_sma_50_diff_pct: Optional[float] = Query(None),
+    min_sma_200_diff_pct: Optional[float] = Query(None),
+    max_sma_200_diff_pct: Optional[float] = Query(None),
+    min_high_52w_dist_pct: Optional[float] = Query(None),
+    max_high_52w_dist_pct: Optional[float] = Query(None),
+    min_low_52w_dist_pct: Optional[float] = Query(None),
+    max_low_52w_dist_pct: Optional[float] = Query(None),
     positive_net_profit: bool = Query(False),
     net_cash_only: bool = Query(False),
     sort_by: str = Query("company"),
@@ -100,6 +114,10 @@ def market_screener(
     allowed_sort = {
         "company", "sector", "fundamental_period", "fk", "pd_dd", "fd_favok",
         "fd_satis", "net_borc_favok", "roe_pct", "free_float_pct", "price",
+        "hist_fk_avg", "hist_pd_dd_avg", "hist_fd_favok_avg",
+        "fk_hist_diff_pct", "pd_dd_hist_diff_pct", "fd_favok_hist_diff_pct",
+        "sma_50", "sma_200", "sma_50_diff_pct", "sma_200_diff_pct",
+        "high_52w_dist_pct", "low_52w_dist_pct",
     }
     if normalized_sort not in allowed_sort:
         raise HTTPException(status_code=400, detail="Desteklenmeyen tarayıcı sıralama alanı.")
@@ -124,6 +142,13 @@ def market_screener(
         ("net_borc_favok", None, max_net_borc_favok),
         ("roe_pct", min_roe_pct, None),
         ("favok_margin_pct", min_favok_margin_pct, None),
+        ("fk_hist_diff_pct", min_fk_hist_diff_pct, max_fk_hist_diff_pct),
+        ("pd_dd_hist_diff_pct", min_pd_dd_hist_diff_pct, max_pd_dd_hist_diff_pct),
+        ("fd_favok_hist_diff_pct", min_fd_favok_hist_diff_pct, max_fd_favok_hist_diff_pct),
+        ("sma_50_diff_pct", min_sma_50_diff_pct, max_sma_50_diff_pct),
+        ("sma_200_diff_pct", min_sma_200_diff_pct, max_sma_200_diff_pct),
+        ("high_52w_dist_pct", min_high_52w_dist_pct, max_high_52w_dist_pct),
+        ("low_52w_dist_pct", min_low_52w_dist_pct, max_low_52w_dist_pct),
     )
     filtered: List[Dict[str, Any]] = []
     for row in rows:

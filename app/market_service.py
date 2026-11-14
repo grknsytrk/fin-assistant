@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import threading
@@ -517,6 +518,22 @@ _STOCK_RETURN_BASE_WARMUP_LOCK = threading.Lock()
 _STOCK_RETURN_BASE_WARMUP_RUNNING = False
 
 _STOCK_RETURN_BASE_WARMUP_LAST_FINISHED = 0.0
+
+_STOCK_HIST_MULTIPLES_TTL = int(os.getenv("RAGFIN_STOCK_HIST_MULTIPLES_TTL_SECONDS", "86400"))
+
+_STOCK_HIST_MULTIPLES_STALE_TTL = int(os.getenv("RAGFIN_STOCK_HIST_MULTIPLES_STALE_TTL_SECONDS", str(7 * 86400)))
+
+_STOCK_HIST_MULTIPLES_CACHE_VERSION = "v1"
+
+_STOCK_HIST_MULTIPLES_WARMUP_COOLDOWN_SECONDS = 300.0
+
+_STOCK_HIST_MULTIPLES_LOCK = threading.Lock()
+
+_STOCK_HIST_MULTIPLES_STATE: Dict[str, Any] = {"_ts": 0.0, "items": {}}
+
+_STOCK_HIST_MULTIPLES_WARMUP_RUNNING = False
+
+_STOCK_HIST_MULTIPLES_WARMUP_LAST_FINISHED = 0.0
 
 _ISYATIRIM_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=900)
 
@@ -1346,6 +1363,14 @@ def _stock_return_bases_from_series(series: List[Dict[str, Any]]) -> Dict[str, A
     bytd, hytd, lytd = _get_range_stats(year_start)
     b1y, h1y, l1y = _get_range_stats(latest_dt - timedelta(days=365))
 
+    closes = [
+        float(s["close"])
+        for s in ordered
+        if _as_finite_float(s.get("close")) is not None and float(s["close"]) > 0
+    ]
+    sma_50 = round(sum(closes[-50:]) / 50, 4) if len(closes) >= 50 else None
+    sma_200 = round(sum(closes[-200:]) / 200, 4) if len(closes) >= 200 else None
+
     return {
         "base_1w": b1w, "high_1w": h1w, "low_1w": l1w,
         "base_1m": b1m, "high_1m": h1m, "low_1m": l1m,
@@ -1353,6 +1378,8 @@ def _stock_return_bases_from_series(series: List[Dict[str, Any]]) -> Dict[str, A
         "base_6m": b6m, "high_6m": h6m, "low_6m": l6m,
         "base_ytd": bytd, "high_ytd": hytd, "low_ytd": lytd,
         "base_1y": b1y, "high_1y": h1y, "low_1y": l1y,
+        "sma_50": sma_50,
+        "sma_200": sma_200,
         "latest_close": latest_close,
         "as_of": latest_dt.isoformat(),
     }
@@ -1591,7 +1618,9 @@ def _fetch_stock_return_bases_spark_batch(symbols: List[str]) -> Dict[str, Dict[
         timestamps = r0.get("timestamp") or []
         quote = ((r0.get("indicators") or {}).get("quote") or [{}])[0]
         closes = quote.get("close") or []
-        series = _build_ohlc_series(timestamps, closes)
+        highs = quote.get("high") or None
+        lows = quote.get("low") or None
+        series = _build_ohlc_series(timestamps, closes, highs, lows)
         bases = _stock_return_bases_from_series(series)
         if bases:
             parsed[ticker] = bases
@@ -1716,6 +1745,17 @@ def _returns_from_bases(current_price: Any, return_bases: Dict[str, Any]) -> Dic
         res[f"base_{period}"] = base_val
         res[f"high_{period}"] = return_bases.get(f"high_{period}")
         res[f"low_{period}"] = return_bases.get(f"low_{period}")
+
+    sma_50 = _as_finite_float(return_bases.get("sma_50"))
+    sma_200 = _as_finite_float(return_bases.get("sma_200"))
+    high_1y = _as_finite_float(return_bases.get("high_1y"))
+    low_1y = _as_finite_float(return_bases.get("low_1y"))
+    res["sma_50"] = round(sma_50, 2) if sma_50 is not None else None
+    res["sma_200"] = round(sma_200, 2) if sma_200 is not None else None
+    res["sma_50_diff_pct"] = _return_pct(current_price, sma_50)
+    res["sma_200_diff_pct"] = _return_pct(current_price, sma_200)
+    res["high_52w_dist_pct"] = _return_pct(current_price, high_1y)
+    res["low_52w_dist_pct"] = _return_pct(current_price, low_1y)
     return res
 
 def _market_stock_benchmarks() -> Dict[str, Dict[str, Any]]:
@@ -1870,7 +1910,7 @@ def _stock_return_base_stale_symbols(symbols: List[str], *, now_ts: Optional[flo
         cached = _STOCK_RETURN_BASE_CACHE.get(symbol)
         if cached and not cached.get("data") and (now - float(cached.get("_neg_ts", 0.0))) < 1800:
             continue
-        if not cached or (now - float(cached.get("_ts", 0.0))) >= ttl or not cached.get("data"):
+        if not cached or (now - float(cached.get("_ts", 0.0))) >= ttl or not cached.get("data") or "sma_50" not in cached.get("data", {}):
             stale.append(symbol)
     return stale
 
@@ -1963,6 +2003,377 @@ def _schedule_xutum_return_bases_warmup_if_needed(symbols: Optional[List[str]] =
             _STOCK_RETURN_BASE_WARMUP_RUNNING = False
         return False
 
+def _stock_hist_multiples_disk_path() -> Path:
+    return CONFIG.paths.processed_dir / "_shared" / "stock_historical_averages.json"
+
+
+def _fetch_stock_weekly_5y_spark_batch(symbols: List[str]) -> Dict[str, List[tuple[str, float]]]:
+    """Fetch multi-symbol 5Y weekly split-adjusted closes in one Yahoo v7 spark call (~20 tickers/req)."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    cleaned = [str(s or "").strip().upper() for s in symbols if str(s or "").strip()]
+    if not cleaned:
+        return {}
+
+    yahoo_to_ticker = {f"{ticker}.IS": ticker for ticker in cleaned}
+    encoded_syms = urllib.parse.quote(",".join(yahoo_to_ticker.keys()), safe=",")
+    url = f"https://query1.finance.yahoo.com/v7/finance/spark?symbols={encoded_syms}&range=5y&interval=1wk"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, Exception):
+        return {}
+
+    items = ((data.get("spark") or {}).get("result") or []) if isinstance(data, dict) else []
+    parsed: Dict[str, List[tuple[str, float]]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_sym = str(item.get("symbol") or "").strip().upper()
+        ticker = yahoo_to_ticker.get(raw_sym) or raw_sym.removesuffix(".IS")
+        responses = item.get("response") or []
+        if not ticker or not responses or not isinstance(responses[0], dict):
+            continue
+        r0 = responses[0]
+        timestamps = r0.get("timestamp") or []
+        quote = ((r0.get("indicators") or {}).get("quote") or [{}])[0]
+        closes = quote.get("close") or []
+        by_date: Dict[str, float] = {}
+        for ts, close in zip(timestamps, closes):
+            close_val = _as_finite_float(close)
+            if close_val is None or close_val <= 0 or not isinstance(ts, (int, float)):
+                continue
+            try:
+                day_iso = datetime.fromtimestamp(float(ts), tz=timezone.utc).date().isoformat()
+                by_date[day_iso] = close_val
+            except Exception:
+                continue
+        if by_date:
+            parsed[ticker] = sorted(by_date.items(), key=lambda entry: entry[0])
+    return parsed
+
+
+def _compute_kap_historical_averages_for_snapshot(
+    snapshot: Dict[str, Any],
+    price_points: List[tuple[str, float]],
+    *,
+    current_shares: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Compute 5Y historical valuation multiple averages from a KAP snapshot + weekly prices."""
+    from app.kap_api_service import (
+        _build_kap_historical_ttm,
+        _kap_history_trading_date,
+    )
+
+    if not isinstance(snapshot, dict) or not price_points:
+        return {}
+    quarters_raw = snapshot.get("quarters")
+    if not isinstance(quarters_raw, list) or not quarters_raw:
+        return {}
+
+    quarters = sorted(
+        [quarter for quarter in quarters_raw if isinstance(quarter, dict)],
+        key=_quarter_sort_key,
+    )
+    if not quarters:
+        return {}
+
+    reporting_quarters = [
+        {
+            **quarter,
+            "metrics": quarter.get("metrics_original") or quarter.get("metrics") or {},
+            "metrics_ytd": quarter.get("metrics_ytd_original") or quarter.get("metrics_ytd") or {},
+            "metrics_quarterly": (
+                quarter.get("metrics_quarterly_original")
+                or quarter.get("metrics_quarterly")
+                or {}
+            ),
+            "metrics_comparative": quarter.get("metrics_comparative") or {},
+            "metrics_ytd_comparative": quarter.get("metrics_ytd_comparative") or {},
+        }
+        for quarter in quarters
+    ]
+
+    cur_shares = _as_finite_float(current_shares)
+    if cur_shares is None or cur_shares <= 0:
+        for quarter in reversed(reporting_quarters):
+            candidate = _extract_quarter_metric(
+                quarter,
+                "odenmis_sermaye",
+                priority=["metrics", "metrics_ytd"],
+            ) or _extract_quarter_metric(
+                quarter,
+                "cikarilmis_sermaye",
+                priority=["metrics", "metrics_ytd"],
+            )
+            if candidate is not None and candidate > 0:
+                cur_shares = float(candidate)
+                break
+    if cur_shares is None or cur_shares <= 0:
+        return {}
+
+    kind = str(snapshot.get("company_kind") or "generic").lower()
+    if kind == "generic":
+        from src.kap_fetcher import classify_kap_company_kind
+
+        kind = classify_kap_company_kind(
+            str(snapshot.get("stock_code") or snapshot.get("company") or ""),
+            snapshot.get("company_title"),
+        )
+    financial_company = kind in {"bank", "insurance"}
+
+    ordered_prices = sorted(price_points, key=lambda item: item[0])
+    price_dates = [item[0] for item in ordered_prices]
+    fk_vals: List[float] = []
+    pd_dd_vals: List[float] = []
+    fd_favok_vals: List[float] = []
+
+    for index, quarter in enumerate(reporting_quarters):
+        report_date = _kap_history_trading_date(quarter.get("publish_date"))
+        if report_date is None:
+            continue
+        pos = bisect.bisect_left(price_dates, report_date.isoformat())
+        if pos >= len(ordered_prices):
+            continue
+        try:
+            point_dt = date.fromisoformat(price_dates[pos])
+        except ValueError:
+            continue
+        if (point_dt - report_date).days > 10:
+            continue
+        price = _as_finite_float(ordered_prices[pos][1])
+        if price is None or price <= 0:
+            continue
+
+        market_cap = price * cur_shares
+        ttm_net_kar = _build_kap_historical_ttm(reporting_quarters, index, "net_kar")
+        equity = _extract_quarter_metric(quarter, "ozkaynaklar", priority=["metrics", "metrics_ytd"])
+        if ttm_net_kar is not None and ttm_net_kar > 0:
+            ratio = _round_market_ratio(market_cap, ttm_net_kar)
+            if ratio is not None and ratio > 0:
+                fk_vals.append(ratio)
+        if equity is not None and equity > 0:
+            ratio = _round_market_ratio(market_cap, equity)
+            if ratio is not None and ratio > 0:
+                pd_dd_vals.append(ratio)
+        if not financial_company:
+            ttm_favok = _build_kap_historical_ttm(reporting_quarters, index, "favok")
+            net_debt = _extract_quarter_metric(quarter, "net_borc", priority=["metrics", "metrics_ytd"])
+            if (
+                ttm_favok is not None
+                and ttm_favok > 0
+                and net_debt is not None
+                and math.isfinite(net_debt)
+            ):
+                ratio = _round_market_ratio(market_cap + net_debt, ttm_favok)
+                if ratio is not None and ratio > 0:
+                    fd_favok_vals.append(ratio)
+
+    def _avg_positive(vals: List[float]) -> Optional[float]:
+        if len(vals) < 2:
+            return None
+        return round(sum(vals) / len(vals), 2)
+
+    hist_fk_avg = _avg_positive(fk_vals)
+    hist_pd_dd_avg = _avg_positive(pd_dd_vals)
+    hist_fd_favok_avg = None if financial_company else _avg_positive(fd_favok_vals)
+    hist_quarters = max(len(fk_vals), len(pd_dd_vals), len(fd_favok_vals), 0)
+    if hist_fk_avg is None and hist_pd_dd_avg is None and hist_fd_favok_avg is None:
+        return {}
+    return {
+        "hist_fk_avg": hist_fk_avg,
+        "hist_pd_dd_avg": hist_pd_dd_avg,
+        "hist_fd_favok_avg": hist_fd_favok_avg,
+        "hist_quarters": hist_quarters,
+    }
+
+
+def _persist_stock_hist_multiples_disk(items: Dict[str, Dict[str, Any]], *, now_ts: Optional[float] = None) -> None:
+    """Persist computed historical multiple averages ONLY to local disk (zero egress)."""
+    try:
+        path = _stock_hist_multiples_disk_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": _STOCK_HIST_MULTIPLES_CACHE_VERSION,
+            "updated_at": time.time() if now_ts is None else now_ts,
+            "items": items,
+        }
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        tmp_path.replace(path)
+    except Exception as exc:
+        LOGGER.debug("stock historical multiples disk persist skipped: %s", exc)
+
+
+def _hydrate_stock_hist_multiples_from_disk() -> int:
+    path = _stock_hist_multiples_disk_path()
+    if not path.exists():
+        return 0
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if not isinstance(raw, dict):
+        return 0
+    if raw.get("version") != _STOCK_HIST_MULTIPLES_CACHE_VERSION:
+        return 0
+    items = raw.get("items")
+    if not isinstance(items, dict) or not items:
+        return 0
+    updated_at = float(raw.get("updated_at") or 0.0)
+    if updated_at > 0 and (time.time() - updated_at) > max(3600, int(_STOCK_HIST_MULTIPLES_STALE_TTL)):
+        return 0
+    clean: Dict[str, Dict[str, Any]] = {}
+    for sym, entry in items.items():
+        ticker = str(sym or "").strip().upper()
+        if ticker and isinstance(entry, dict):
+            clean[ticker] = dict(entry)
+    if not clean:
+        return 0
+    with _STOCK_HIST_MULTIPLES_LOCK:
+        _STOCK_HIST_MULTIPLES_STATE["_ts"] = updated_at
+        _STOCK_HIST_MULTIPLES_STATE["items"] = clean
+    return len(clean)
+
+
+def _cached_stock_hist_multiples_map() -> Dict[str, Dict[str, Any]]:
+    with _STOCK_HIST_MULTIPLES_LOCK:
+        existing = _STOCK_HIST_MULTIPLES_STATE.get("items")
+        if isinstance(existing, dict) and existing:
+            return dict(existing)
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        _hydrate_stock_hist_multiples_from_disk()
+    with _STOCK_HIST_MULTIPLES_LOCK:
+        items = _STOCK_HIST_MULTIPLES_STATE.get("items")
+        return dict(items) if isinstance(items, dict) else {}
+
+
+def _warm_stock_hist_multiples_sync(
+    symbols: Optional[List[str]] = None,
+    *,
+    financial_snapshot_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    basic_summary_map: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, int]:
+    """Compute historical valuation averages from local kap_cache JSONs + batched 5Y weekly spark."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    kap_cache_dir = CONFIG.paths.processed_dir / "kap_cache"
+    if not kap_cache_dir.exists():
+        return {"requested": 0, "populated": 0}
+
+    target_symbols = (
+        [str(s or "").strip().upper() for s in symbols if str(s or "").strip()]
+        if symbols is not None
+        else _market_stock_symbols_for_index("XUTUM")
+    )
+    kap_symbols = [sym for sym in target_symbols if (kap_cache_dir / f"{sym}.json").exists()]
+    if not kap_symbols:
+        return {"requested": 0, "populated": 0}
+
+    batches = [
+        kap_symbols[i : i + _STOCK_RETURN_BASE_SPARK_BATCH_SIZE]
+        for i in range(0, len(kap_symbols), _STOCK_RETURN_BASE_SPARK_BATCH_SIZE)
+    ]
+    price_map: Dict[str, List[tuple[str, float]]] = {}
+    try:
+        with ThreadPoolExecutor(max_workers=min(4, len(batches))) as pool:
+            for batch_res in pool.map(_fetch_stock_weekly_5y_spark_batch, batches):
+                price_map.update(batch_res)
+    except Exception:
+        for batch in batches:
+            price_map.update(_fetch_stock_weekly_5y_spark_batch(batch))
+
+    if not price_map:
+        return {"requested": len(kap_symbols), "populated": 0}
+
+    fin_map = financial_snapshot_map or {}
+    bs_map = basic_summary_map or {}
+    computed: Dict[str, Dict[str, Any]] = {}
+    for sym in kap_symbols:
+        pts = price_map.get(sym)
+        if not pts:
+            continue
+        cache_path = kap_cache_dir / f"{sym}.json"
+        try:
+            raw_kap = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        provider_shares = _as_finite_float((bs_map.get(sym) or {}).get("shares_outstanding"))
+        meta_shares = _as_finite_float((fin_map.get(sym) or {}).get("shares_outstanding"))
+        cur_shares = provider_shares if (provider_shares and provider_shares > 0) else meta_shares
+        summary = _compute_kap_historical_averages_for_snapshot(
+            raw_kap,
+            pts,
+            current_shares=cur_shares,
+        )
+        if summary:
+            computed[sym] = summary
+
+    now = time.time()
+    if computed:
+        with _STOCK_HIST_MULTIPLES_LOCK:
+            merged = dict(_STOCK_HIST_MULTIPLES_STATE.get("items") or {})
+            merged.update(computed)
+            _STOCK_HIST_MULTIPLES_STATE["_ts"] = now
+            _STOCK_HIST_MULTIPLES_STATE["items"] = merged
+        if not os.getenv("PYTEST_CURRENT_TEST"):
+            _persist_stock_hist_multiples_disk(merged, now_ts=now)
+        _refresh_cached_xutum_stocks_payload()
+    return {"requested": len(kap_symbols), "populated": len(computed)}
+
+
+def _schedule_stock_hist_multiples_warmup_if_needed(
+    symbols: Optional[List[str]] = None,
+    *,
+    financial_snapshot_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    basic_summary_map: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> bool:
+    """Kick off background warmup for historical valuation averages if cold/expired."""
+    global _STOCK_HIST_MULTIPLES_WARMUP_RUNNING, _STOCK_HIST_MULTIPLES_WARMUP_LAST_FINISHED
+
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+
+    now = time.time()
+    with _STOCK_HIST_MULTIPLES_LOCK:
+        ts = float(_STOCK_HIST_MULTIPLES_STATE.get("_ts") or 0.0)
+        items = _STOCK_HIST_MULTIPLES_STATE.get("items") or {}
+        if items and (now - ts) < max(3600, int(_STOCK_HIST_MULTIPLES_TTL)):
+            return False
+        if _STOCK_HIST_MULTIPLES_WARMUP_RUNNING:
+            return False
+        if (now - _STOCK_HIST_MULTIPLES_WARMUP_LAST_FINISHED) < _STOCK_HIST_MULTIPLES_WARMUP_COOLDOWN_SECONDS:
+            return False
+        _STOCK_HIST_MULTIPLES_WARMUP_RUNNING = True
+
+    def _run_warmup() -> None:
+        global _STOCK_HIST_MULTIPLES_WARMUP_RUNNING, _STOCK_HIST_MULTIPLES_WARMUP_LAST_FINISHED
+        try:
+            summary = _warm_stock_hist_multiples_sync(
+                symbols,
+                financial_snapshot_map=financial_snapshot_map,
+                basic_summary_map=basic_summary_map,
+            )
+            LOGGER.info("Stock historical valuation multiples warmup finished: %s", summary)
+        except Exception as exc:
+            LOGGER.warning("Stock historical valuation multiples warmup failed: %s", exc)
+        finally:
+            with _STOCK_HIST_MULTIPLES_LOCK:
+                _STOCK_HIST_MULTIPLES_WARMUP_LAST_FINISHED = time.time()
+                _STOCK_HIST_MULTIPLES_WARMUP_RUNNING = False
+
+    try:
+        _MARKET_SWR_REVALIDATION_EXECUTOR.submit(_run_warmup)
+        return True
+    except Exception:
+        with _STOCK_HIST_MULTIPLES_LOCK:
+            _STOCK_HIST_MULTIPLES_WARMUP_RUNNING = False
+        return False
+
+
 def _market_stock_row(
     symbol: str,
     *,
@@ -1970,6 +2381,7 @@ def _market_stock_row(
     quote: Dict[str, Any],
     return_bases: Dict[str, Any],
     basic_summary: Optional[Dict[str, Any]] = None,
+    historical_multiples: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     latest_quarter = cached_meta.get("latest_quarter")
     current_for_returns = quote.get("price") if quote.get("price") is not None else return_bases.get("latest_close")
@@ -2019,6 +2431,19 @@ def _market_stock_row(
         # Leverage is not meaningful for financial companies or when EBITDA is
         # zero or negative.
         net_borc_favok = None
+    hist = historical_multiples or {}
+    hist_fk_avg = _as_finite_float(hist.get("hist_fk_avg"))
+    hist_pd_dd_avg = _as_finite_float(hist.get("hist_pd_dd_avg"))
+    hist_fd_favok_avg = (
+        None
+        if company_kind in {"bank", "insurance"}
+        else _as_finite_float(hist.get("hist_fd_favok_avg"))
+    )
+    hist_quarters = (
+        int(hist["hist_quarters"])
+        if isinstance(hist.get("hist_quarters"), int) and not isinstance(hist.get("hist_quarters"), bool)
+        else None
+    )
     return {
         "company": symbol,
         "name": cached_meta.get("company_title") or symbol,
@@ -2038,6 +2463,13 @@ def _market_stock_row(
         "fd_favok": valuation.get("fd_favok"),
         "fd_satis": fd_satis,
         "net_borc_favok": net_borc_favok,
+        "hist_fk_avg": hist_fk_avg,
+        "hist_pd_dd_avg": hist_pd_dd_avg,
+        "hist_fd_favok_avg": hist_fd_favok_avg,
+        "fk_hist_diff_pct": _return_pct(valuation.get("fk"), hist_fk_avg),
+        "pd_dd_hist_diff_pct": _return_pct(valuation.get("pd_dd"), hist_pd_dd_avg),
+        "fd_favok_hist_diff_pct": _return_pct(valuation.get("fd_favok"), hist_fd_favok_avg),
+        "hist_quarters": hist_quarters,
         "roe_pct": _as_finite_float(cached_meta.get("roe_pct")),
         "favok_margin_pct": _as_finite_float(cached_meta.get("favok_margin_pct")),
         "net_margin_pct": _as_finite_float(cached_meta.get("net_margin_pct")),
@@ -2096,6 +2528,12 @@ def _build_market_stocks_payload(
     except Exception as exc:
         LOGGER.warning("market stock financial snapshot lookup failed: %s", exc)
         financial_snapshot_map = {}
+    hist_multiples_map = _cached_stock_hist_multiples_map()
+    _schedule_stock_hist_multiples_warmup_if_needed(
+        symbols,
+        financial_snapshot_map=financial_snapshot_map,
+        basic_summary_map=basic_summary_map,
+    )
     rows = [
         _market_stock_row(
             symbol,
@@ -2103,6 +2541,7 @@ def _build_market_stocks_payload(
             quote=price_map.get(symbol, {}),
             return_bases=return_base_map.get(symbol, {}),
             basic_summary=basic_summary_map.get(symbol),
+            historical_multiples=hist_multiples_map.get(str(symbol or "").strip().upper()),
         )
         for symbol in symbols
     ]
@@ -2241,8 +2680,13 @@ _MARKET_STOCK_DELTA_TRACKED_KEYS = (
     "price", "change", "change_pct", "volume", "market_cap",
     "return_1w_pct", "return_1m_pct", "return_3m_pct", "return_6m_pct",
     "return_ytd_pct", "return_1y_pct",
+    "sma_50", "sma_200", "high_1y", "low_1y",
+    "sma_50_diff_pct", "sma_200_diff_pct", "high_52w_dist_pct", "low_52w_dist_pct",
     "latest_quarter", "fundamental_period", "sector", "has_kap_cache",
-    "fk", "pd_dd", "fd_favok", "fd_satis", "net_borc_favok", "roe_pct",
+    "fk", "pd_dd", "fd_favok", "fd_satis", "net_borc_favok",
+    "hist_fk_avg", "hist_pd_dd_avg", "hist_fd_favok_avg",
+    "fk_hist_diff_pct", "pd_dd_hist_diff_pct", "fd_favok_hist_diff_pct", "hist_quarters",
+    "roe_pct",
     "favok_margin_pct", "net_margin_pct", "free_float_pct", "ttm_net_kar",
     "ttm_satis_gelirleri", "ttm_favok", "ttm_fcf", "ozkaynaklar", "net_borc",
 )
@@ -2263,6 +2707,14 @@ _MARKET_STOCK_DELTA_PAYLOAD_KEYS = (
     "return_6m_pct",
     "return_ytd_pct",
     "return_1y_pct",
+    "sma_50",
+    "sma_200",
+    "high_1y",
+    "low_1y",
+    "sma_50_diff_pct",
+    "sma_200_diff_pct",
+    "high_52w_dist_pct",
+    "low_52w_dist_pct",
     "latest_quarter",
     "fundamental_period",
     "has_kap_cache",
@@ -2272,6 +2724,13 @@ _MARKET_STOCK_DELTA_PAYLOAD_KEYS = (
     "fd_favok",
     "fd_satis",
     "net_borc_favok",
+    "hist_fk_avg",
+    "hist_pd_dd_avg",
+    "hist_fd_favok_avg",
+    "fk_hist_diff_pct",
+    "pd_dd_hist_diff_pct",
+    "fd_favok_hist_diff_pct",
+    "hist_quarters",
     "roe_pct",
     "favok_margin_pct",
     "net_margin_pct",

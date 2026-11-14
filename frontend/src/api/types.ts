@@ -60,6 +60,21 @@ export interface MarketStockRow extends MarketUniverseRow {
   ttm_fcf?: number | null;
   ozkaynaklar?: number | null;
   net_borc?: number | null;
+  hist_fk_avg?: number | null;
+  hist_pd_dd_avg?: number | null;
+  hist_fd_favok_avg?: number | null;
+  fk_hist_diff_pct?: number | null;
+  pd_dd_hist_diff_pct?: number | null;
+  fd_favok_hist_diff_pct?: number | null;
+  hist_quarters?: number | null;
+  sma_50?: number | null;
+  sma_200?: number | null;
+  high_1y?: number | null;
+  low_1y?: number | null;
+  sma_50_diff_pct?: number | null;
+  sma_200_diff_pct?: number | null;
+  high_52w_dist_pct?: number | null;
+  low_52w_dist_pct?: number | null;
 }
 
 export interface MarketScreenerParams {

@@ -2306,6 +2306,38 @@
     overflow: hidden;
 }
 
+.screener-modal-card.is-span-2 {
+    grid-column: 1 / -1;
+}
+
+.screener-sector-benchmark-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.55rem 0.9rem;
+    padding: 0.45rem 0.68rem;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 0.72rem;
+    color: #a1a1aa;
+}
+
+.screener-sector-benchmark-strip strong {
+    color: #e4e4e7;
+    font-weight: 600;
+}
+
+.screener-toggles-grid.is-three-col {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 780px) {
+    .screener-toggles-grid.is-three-col {
+        grid-template-columns: 1fr;
+    }
+}
+
 .screener-card-header {
     display: flex;
     align-items: center;
