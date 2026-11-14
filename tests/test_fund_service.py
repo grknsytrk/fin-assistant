@@ -1720,7 +1720,6 @@ def test_carry_forward_resolved_daily_returns_only_for_unchanged_price() -> None
             "price": 10.0,
             "daily_return": 2.0,
             "daily_return_source": fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE,
-            "daily_return_basis_date": "2026-05-25",
         },
         {
             "fund_code": "MOV",
@@ -1740,12 +1739,51 @@ def test_carry_forward_resolved_daily_returns_only_for_unchanged_price() -> None
     assert carried == 1
     assert fresh[0]["daily_return"] == 2.0
     assert fresh[0]["daily_return_source"] == fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE
-    assert fresh[0]["daily_return_basis_date"] == "2026-05-25"
     # A moved price must be recomputed, so the row stays a reconciliation candidate.
     assert "daily_return" not in fresh[1]
     assert set(
         fund_service._daily_return_reconciliation_candidates(fresh, include_missing=True)
     ) == {"MOV"}
+
+
+def test_merge_refresh_rows_keeps_daily_return_source_out_of_previous_quote() -> None:
+    """The stored marker must describe the current quote, not the previous one."""
+
+    existing = [
+        {
+            "fund_code": "STL",
+            "name": "STABLE PORTFOY FONU",
+            "price": 10.0,
+            "daily_return": 2.0,
+            "daily_return_source": fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE,
+        }
+    ]
+
+    merged = fund_service._merge_refresh_rows_with_existing(
+        existing,
+        [{"fund_code": "STL", "price": None, "daily_return": None}],
+    )
+
+    assert merged[0]["name"] == "STABLE PORTFOY FONU"
+    assert "daily_return_source" not in merged[0]
+
+    # A fresh range return must keep its own marker so reconciliation still
+    # rewrites it to the previous-close value.
+    merged = fund_service._merge_refresh_rows_with_existing(
+        existing,
+        [
+            {
+                "fund_code": "STL",
+                "as_of": "2026-05-26",
+                "price": 10.5,
+                "daily_return": 1.5,
+                "daily_return_source": fund_service.TEFASFON_RETURNS_SOURCE,
+            }
+        ],
+    )
+
+    assert merged[0]["daily_return_source"] == fund_service.TEFASFON_RETURNS_SOURCE
+    assert set(fund_service._daily_return_reconciliation_candidates(merged)) == {"STL"}
 
 
 def test_refresh_funds_snapshot_reuses_resolved_return_for_unchanged_price(

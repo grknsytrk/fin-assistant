@@ -3629,9 +3629,6 @@ def _carry_forward_resolved_daily_returns(
             continue
         row["daily_return"] = resolved
         row["daily_return_source"] = DAILY_RETURN_LOCAL_PRICE_SOURCE
-        basis_date = previous.get("daily_return_basis_date")
-        if basis_date:
-            row["daily_return_basis_date"] = basis_date
         carried += 1
     return carried
 
@@ -7233,9 +7230,14 @@ def _merge_refresh_rows_with_existing(
         if isinstance(row, dict)
         and normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
     }
+    # Fields that describe the current quote. A previous value must never
+    # survive into a new row: a stale ``daily_return_source`` would claim a
+    # return that no longer exists and would also hide a fresh TEFAS range
+    # return from the reconciliation step.
     volatile_fields = {
         "price",
         "daily_return",
+        "daily_return_source",
         "aum",
         "investor_count",
         "share_count",
