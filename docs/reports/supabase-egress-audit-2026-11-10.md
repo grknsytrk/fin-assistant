@@ -426,8 +426,10 @@ and the rebuild took 9.7 s.
   **`local_price_diff=1,998 / tefasfon_returns=7 / none=10`** and reported
   `daily_return_local_fallback_count=1,981`.
 - Read-time reconciliation candidates for the same catalogue dropped from
-  2,015 (`include_missing=True`) / 1,047 (strict) to **34 / 7**. The 34 rows
-  without any return are the only remaining price-window readers on rebuild.
+  2,015 (`include_missing=True`) / 1,047 (strict) to **34 / 7**. Of the 34 rows
+  without a return, 33 are zero-price placeholders with no price history at all,
+  so `4e03f98` removes them from the candidate set; a rebuild now queries the
+  window for a single fund.
 - `f1062cd` carries a resolved return forward while the date and price are
   unchanged, so an intraday refresh no longer repeats the ~1.3 MB window read
   for ~2,000 funds; only rows whose price moved are recomputed. The effect is
@@ -443,8 +445,11 @@ Cold `/funds` after the write-time materialisation (2026-11-14, space sha
 | Read | Rows | Bytes |
 |---|---:|---:|
 | `fund_snapshots` catalogue + overlay dates (3 reads) | 2,015 | 1,666 KB |
-| `fund_prices` latest points + 34-candidate window (1 read) | ~2,150 | 518 KB |
+| `fund_prices` latest points + one candidate window (1 read) | ~1,990 | 518 KB |
 | **Total** | | **2,184 KB** |
+
+The same total is visible in the per-boot counters: 1,706,043 B in
+`fund_snapshots` and 530,168 B in `fund_prices`.
 
 The response is still 1,285 KB and the cold rebuild still takes 9.7 s;
 the 1,285 KB return-window read is gone (**−1,501 KB, −41 %**). The next
