@@ -364,7 +364,7 @@ curl -s https://grknsytrk-fin-api.hf.space/health | jq '.cache_redis_circuit, .s
 
 ---
 
-## 10. Implementation log — 2026-11-12
+## 10. Implementation log — 2026-11-12 to 2026-11-14
 
 Measured on the live Space (`grknsytrk/fin-api`) and against the production
 Supabase project unless a row says otherwise.
@@ -415,12 +415,54 @@ measured **3,685 KB** of Supabase reads: `fund_snapshots` **1,664 KB** across
 3 reads and `fund_prices` **2,021 KB** in one read. The response was 1,285 KB
 and the rebuild took 9.7 s.
 
+### M2 — daily returns at catalogue write time
+
+- `660564b` resolves each catalogue row's previous-close return inside
+  `refresh_funds_snapshot()` and marks it `daily_return_source=local_price_diff`,
+  so a `/funds` rebuild no longer scans the 5-day `fund_prices` window for every
+  fund. The first production refresh on the new code
+  (`2026-11-13T20:35:12Z`, catalog generation 325) moved the stored distribution
+  from `local_price_diff=927 / tefasfon_returns=1,047 / none=41` to
+  **`local_price_diff=1,998 / tefasfon_returns=7 / none=10`** and reported
+  `daily_return_local_fallback_count=1,981`.
+- Read-time reconciliation candidates for the same catalogue dropped from
+  2,015 (`include_missing=True`) / 1,047 (strict) to **34 / 7**. The 34 rows
+  without any return are the only remaining price-window readers on rebuild.
+- `f1062cd` carries a resolved return forward while the date and price are
+  unchanged, so an intraday refresh no longer repeats the ~1.3 MB window read
+  for ~2,000 funds; only rows whose price moved are recomputed. The effect is
+  observable from the second refresh of a trading date and is reported as
+  `daily_return_carried_forward_count`.
+- `11726ee` stops the previous quote's `daily_return_source` from surviving a
+  merge. A row without a current value no longer claims a local-diff source, and
+  a fresh TEFAS range return can no longer hide behind a stale marker.
+
+Cold `/funds` after the write-time materialisation (2026-11-14, space sha
+`6ce9d287`):
+
+| Read | Rows | Bytes |
+|---|---:|---:|
+| `fund_snapshots` catalogue + overlay dates (3 reads) | 2,015 | 1,666 KB |
+| `fund_prices` latest points + 34-candidate window (1 read) | ~2,150 | 518 KB |
+| **Total** | | **2,184 KB** |
+
+The response is still 1,285 KB and the cold rebuild still takes 9.7 s;
+the 1,285 KB return-window read is gone (**−1,501 KB, −41 %**). The next
+`/funds` rebuild answers from memory in 3.3 s with **0 B** of reads, and a
+conditional request returns `304` in 2.0 s with **0 B**.
+
 ### Still open from the P1 list
 
-- `include_missing=True` still makes all ~2,014 funds candidates for the 5-day
-  price window: every catalogue row carries `source=tefasfon_funds`, and 1,047
-  of them also carry `daily_return_source=tefasfon_returns`. Narrowing this
-  safely needs the daily return to be computed and stored when prices are
-  written, not inferred on every rebuild.
-- `company_financial_snapshots` is still read in full (484 KB per real change)
-  instead of incrementally by snapshot date.
+- `company_financial_snapshots` is still read in full (484 KB per real change).
+  A production sample showed **0 reads** for the table while the catalogue and
+  market paths were being exercised, so an `updated_at` watermark would add
+  staleness risk for out-of-band SQL updates without measurable savings. The
+  incremental read is deferred until the table shows real read traffic.
+- `/funds/{code}` detail has no response cache; each hit rebuilds the row and
+  the history/performance windows. This is the largest remaining per-request
+  read path.
+- The GitHub schedule that drives the catalogue refresh has been unreliable:
+  runs arrived hours apart and `request refresh job` failed on 11 consecutive
+  attempts between 2026-11-10 and 2026-11-13 before succeeding again. The
+  workflow now wakes the Space and reports the terminal HTTP status, so the next
+  failure names its own cause instead of only `curl` exit code 22.
