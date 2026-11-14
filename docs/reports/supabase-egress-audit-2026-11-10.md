@@ -466,6 +466,13 @@ conditional request returns `304` in 2.0 s with **0 B**.
 - `/funds/{code}` detail has no response cache; each hit rebuilds the row and
   the history/performance windows. This is the largest remaining per-request
   read path.
+- The listing payload cache is keyed by `catalog_generation` +
+  `price_generation`, so writes already invalidate it, but it still expires
+  after 600 s (`_FUND_LISTING_CACHE_TTL_SECONDS`). With the 2,184 KB rebuild
+  cost that is up to ~13 MB/hour (~315 MB/day) of steady traffic for the default
+  view alone. Raising the TTL to an hour (or dropping it for revision-keyed
+  entries) is the cheapest remaining win; the only behaviour to re-check is the
+  frozen `stale` flag between refreshes.
 - The GitHub schedule that drives the catalogue refresh has been unreliable:
   runs arrived hours apart and `request refresh job` failed on 11 consecutive
   attempts between 2026-11-10 and 2026-11-13 before succeeding again. The
