@@ -456,13 +456,39 @@ the 1,285 KB return-window read is gone (**−1,501 KB, −41 %**). The next
 `/funds` rebuild answers from memory in 3.3 s with **0 B** of reads, and a
 conditional request returns `304` in 2.0 s with **0 B**.
 
+### Phase status (2026-11-14)
+
+| Phase | Item | Status | Evidence |
+|---|---|---|---|
+| P0-1 | Read-time snapshot freshness (60 s trading / 300 s off-hours), serve stale | done | `42e3e5a`, `0b9cdee` |
+| P0-2 | Delete the 30 s poll loop, process-local single-flight | done | `8463392` |
+| P0-3 | A completed rebuild is reused | done | freshness no longer baked into the blob |
+| P0-4 | Restore Redis capacity | accepted as open | circuit still `quota_limited`; memory-only is the intended fallback |
+| P1-5 | History/backfill from `fund_prices` | partial | `4bbfcb0`, `a84cb11`; snapshot documents remain the last resort |
+| P1-6 | Write-time daily returns, narrow reconciliation | done | `660564b`, `f1062cd`, `11726ee`, `4e03f98` |
+| P1-7 | One `fund_listing_state` read + 30 s memo | done | `ef8d9fd` |
+| P1-8 | Trim the `/funds` projection | done | `22a1048`, `26e52db`, `e24911e` |
+| P1-9 | Incremental `company_financial_snapshots` | deferred | see below |
+| P2-10 | Row-based market quotes / compact snapshot | open | blob still carries the full item map |
+| P2-11 | Fund detail response cache | open | `api:fund-detail:` prefix is still never populated |
+| P2-12 | Precomputed `/kap/companies` payload | open | 300 s in-process/shared cache only |
+| P2-13 | Per-table egress counters | done | `9b3c5ad`, `/health.supabase_db_metrics` |
+
+Market path after M1 (`/market/stocks?index=XU100`): a warm request costs
+**0 B**; the first build after a restart measured **581 KB** (484 KB financial
+snapshots + 96 KB stored snapshot) with a 128 KB response in 25.3 s. Before the
+fix the floor was 294 KB on *every* request and a waiter could add ~18 MB.
+
 ### Still open from the P1 list
 
-- `company_financial_snapshots` is still read in full (484 KB per real change).
-  A production sample showed **0 reads** for the table while the catalogue and
-  market paths were being exercised, so an `updated_at` watermark would add
-  staleness risk for out-of-band SQL updates without measurable savings. The
-  incremental read is deferred until the table shows real read traffic.
+- `company_financial_snapshots` is still read in full (484 KB). The earlier
+  production sample showed 0 reads because it was taken before any market
+  rebuild; a later cold build paid one full read. Re-read frequency depends on
+  KAP version bumps: if the API process performs those upserts, each bump
+  invalidates the map and the next build reads it again. An `updated_at`
+  watermark would add staleness risk for out-of-band SQL updates, so the
+  incremental read stays deferred, but the next step is to count these reads
+  over a trading day instead of assuming zero.
 - `/funds/{code}` detail has no response cache; each hit rebuilds the row and
   the history/performance windows. This is the largest remaining per-request
   read path.
