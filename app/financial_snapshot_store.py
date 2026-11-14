@@ -443,6 +443,94 @@ def _normalized_snapshot_record(record: Dict[str, Any]) -> Optional[Dict[str, An
     return normalized
 
 
+_KAP_UPSERT_PRESERVE_IF_NONE_COLUMNS = frozenset(
+    {"source_mtime_ns", "shares_outstanding", "share_source"}
+)
+_KAP_UPSERT_PROVIDER_ONLY_COLUMNS = frozenset(
+    {
+        "symbol",
+        "sector",
+        "free_float_pct",
+        "provider_fk",
+        "provider_pd_dd",
+        "provider_fd_favok",
+        "provider_fd_satis",
+        "provider_period",
+        "updated_at",
+    }
+)
+
+
+def _snapshot_values_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return bool(left) == bool(right)
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        if math.isnan(float(left)) and math.isnan(float(right)):
+            return True
+        return abs(float(left) - float(right)) <= 1e-9
+    return left == right
+
+
+def _kap_snapshot_differs(record: Dict[str, Any], existing: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(existing, dict):
+        return True
+    for column in _SNAPSHOT_COLUMNS:
+        if column in _KAP_UPSERT_PROVIDER_ONLY_COLUMNS:
+            continue
+        incoming = record.get(column)
+        if column in _KAP_UPSERT_PRESERVE_IF_NONE_COLUMNS and incoming is None:
+            continue
+        current = existing.get(column)
+        if column == "has_kap_cache":
+            if bool(incoming) != bool(current):
+                return True
+        elif not _snapshot_values_equal(incoming, current):
+            return True
+    return False
+
+
+def _merge_kap_record_into_cached_row(record: Dict[str, Any], existing: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    for column in _SNAPSHOT_COLUMNS:
+        if column in {"sector", "free_float_pct", "provider_fk", "provider_pd_dd", "provider_fd_favok", "provider_fd_satis", "provider_period"}:
+            if column not in merged:
+                merged[column] = None
+            continue
+        incoming = record.get(column)
+        if column in _KAP_UPSERT_PRESERVE_IF_NONE_COLUMNS and incoming is None:
+            continue
+        merged[column] = bool(incoming) if column == "has_kap_cache" else incoming
+    return merged
+
+
+def _provider_record_differs(record: Dict[str, Any], existing: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(existing, dict):
+        return True
+    for column in ("sector", "free_float_pct", "provider_fk", "provider_pd_dd", "provider_fd_favok", "provider_fd_satis", "provider_period"):
+        if not _snapshot_values_equal(record.get(column), existing.get(column)):
+            return True
+    existing_share_source = str(existing.get("share_source") or "").strip()
+    if existing_share_source not in {"odenmis_sermaye", "cikarilmis_sermaye"}:
+        if not _snapshot_values_equal(record.get("shares_outstanding"), existing.get("shares_outstanding")):
+            return True
+        if record.get("share_source") != existing.get("share_source"):
+            return True
+    return False
+
+
+def _get_valid_memory_cached_map(processed_dir: Path) -> Optional[Dict[str, Dict[str, Any]]]:
+    key = _cache_key(processed_dir)
+    current_version = get_snapshot_cache_version()
+    with _CACHE_LOCK:
+        cached = _SNAPSHOT_MEMORY_CACHE.get(key)
+        if not cached or len(cached) != 3:
+            return None
+        _expires_at, cached_version, cached_map = cached
+        if cached_version != current_version or not isinstance(cached_map, dict):
+            return None
+        return cached_map
+
+
 def upsert_financial_snapshots(processed_dir: Path, records: Iterable[Dict[str, Any]]) -> int:
     """Batch upsert KAP-derived fields while leaving provider fields intact."""
 
@@ -454,6 +542,13 @@ def upsert_financial_snapshots(processed_dir: Path, records: Iterable[Dict[str, 
     ]
     if not normalized_records:
         return 0
+    cached_map = _get_valid_memory_cached_map(processed_dir)
+    if cached_map is not None:
+        normalized_records = [
+            record for record in normalized_records if _kap_snapshot_differs(record, cached_map.get(record["symbol"]))
+        ]
+        if not normalized_records:
+            return 0
     columns = _SNAPSHOT_COLUMNS
     placeholders = ", ".join("?" for _ in columns)
     updates = [
@@ -482,7 +577,24 @@ def upsert_financial_snapshots(processed_dir: Path, records: Iterable[Dict[str, 
         with _connection(processed_dir) as conn:
             conn.executemany(query, chunk)
             conn.commit()
-    _invalidate_memory_cache(processed_dir)
+    new_version = _invalidate_memory_cache(processed_dir)
+    if cached_map is not None:
+        key = _cache_key(processed_dir)
+        merged_map = {sym: dict(row) for sym, row in cached_map.items()}
+        for record in normalized_records:
+            sym = record["symbol"]
+            merged_map[sym] = _merge_kap_record_into_cached_row(record, merged_map.get(sym))
+        max_updated_at = max(
+            (str(row.get("updated_at") or "") for row in merged_map.values()),
+            default="",
+        )
+        with _CACHE_LOCK:
+            _SNAPSHOT_MEMORY_CACHE[key] = (
+                time.monotonic() + _SNAPSHOT_MEMORY_CACHE_TTL_SECONDS,
+                new_version,
+                merged_map,
+            )
+            _SNAPSHOT_DB_STAMPS[key] = (max_updated_at, len(merged_map))
     return len(normalized_records)
 
 
@@ -702,6 +814,13 @@ def upsert_provider_fundamentals_bulk(
     ]
     if not records:
         return 0
+    cached_map = _get_valid_memory_cached_map(processed_dir)
+    if cached_map is not None:
+        records = [
+            record for record in records if _provider_record_differs(record, cached_map.get(record["symbol"]))
+        ]
+        if not records:
+            return 0
     with _connection(processed_dir) as conn:
         conn.executemany(
             """

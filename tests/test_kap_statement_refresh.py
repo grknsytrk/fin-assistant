@@ -748,3 +748,44 @@ def test_process_kap_statement_symbol_passes_criteria_fallback_true(
     assert captured_kwargs.get("allow_criteria_fallback") is True
     assert res["symbol"] == "DOCO"
 
+
+def test_statement_cache_state_uses_remote_kap_metadata_when_local_files_absent(
+    statement_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.kap_fetcher import KAP_CACHE_SCHEMA_VERSION
+
+    assert not (statement_env.cache_dir / "KRDMA.json").exists()
+    statement_module.clear_remote_statement_meta_cache()
+    monkeypatch.setattr(statement_module, "database_enabled", lambda: True)
+
+    meta_calls = 0
+
+    def fake_read_metadata(*args, **kwargs):
+        nonlocal meta_calls
+        meta_calls += 1
+        return {
+            "KRDMA": {
+                "cache_key": "kap_cache/KRDMA.json",
+                "symbol": "KRDMA",
+                "stock_code": "KRDMA",
+                "company_name": "KARDEMIR",
+                "schema_version": KAP_CACHE_SCHEMA_VERSION,
+                "period_count": 1,
+                "quarters": [
+                    {
+                        "year": 2026,
+                        "period": 1,
+                        "disclosure_index": 100,
+                        "stock_code": "KRDMA",
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr("app.database.read_json_cache_kap_metadata", fake_read_metadata)
+
+    assert statement_module._statement_cache_state("KRDMA", 1) == "ready"
+    assert statement_module._statement_cache_state("UNKNOWN_SYM", 1) == "missing"
+    assert meta_calls == 1
+    statement_module.clear_remote_statement_meta_cache()
+

@@ -24,6 +24,7 @@ LOGGER = logging.getLogger(__name__)
 
 TARGET_TABLES = (
     "ragfin_json_cache",
+    "ragfin_kap_flow_events",
     "fund_snapshots",
     "fund_prices",
     "company_financial_snapshots",
@@ -366,16 +367,27 @@ def close_postgres_pool() -> None:
         _POSTGRES_POOL_URL = ""
 
 
+_KNOWN_CACHE_ROOTS = ("_shared", "model_portfolio", "funds_cache", "kap_cache")
+
+
 def _cache_key(path: Path) -> str:
     """Create a portable key relative to the application's processed folder."""
 
     normalized = Path(path)
-    parts = list(normalized.parts)
+    parts = [part for part in normalized.parts if str(part)]
+    lowered = [str(part).lower() for part in parts]
     try:
-        processed_index = next(i for i, part in enumerate(parts) if part.lower() == "processed")
+        processed_index = next(i for i, part in enumerate(lowered) if part == "processed")
         relative = parts[processed_index + 1 :]
     except StopIteration:
-        relative = parts
+        try:
+            known_index = next(i for i, part in enumerate(lowered) if part in _KNOWN_CACHE_ROOTS)
+            relative = parts[known_index:]
+        except StopIteration:
+            is_abs_or_os = normalized.is_absolute() or (
+                len(parts) > 0 and (":" in str(parts[0]) or str(parts[0]).startswith(("/", "\\")))
+            )
+            relative = parts[-1:] if is_abs_or_os and len(parts) > 1 else parts
     return "/".join(str(part).replace("\\", "/") for part in relative if str(part))
 
 
@@ -528,7 +540,7 @@ def ensure_kap_flow_schema() -> None:
 
 
 def upsert_kap_flow_events(events: list[dict[str, Any]]) -> int:
-    """Atomically upsert normalized KAP flow events into Postgres."""
+    """Atomically upsert changed KAP flow events into Postgres in batches."""
 
     if not database_enabled() or not events:
         return 0
@@ -553,33 +565,74 @@ def upsert_kap_flow_events(events: list[dict[str, Any]]) -> int:
     ]
     if not rows:
         return 0
+    value_tuple = "(?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?::jsonb, NOW(), NOW())"
+    chunk_size = 150
     with connect_postgres() as conn:
-        conn.executemany(
-            """
-            INSERT INTO ragfin_kap_flow_events (
-                event_key, source, disclosure_id, published_at, symbol,
-                stock_codes, related_symbols, title, subject, category,
-                kap_url, payload, ingested_at, updated_at
+        for offset in range(0, len(rows), chunk_size):
+            chunk = rows[offset : offset + chunk_size]
+            placeholders = ", ".join(value_tuple for _ in chunk)
+            flat_params = [col for row in chunk for col in row]
+            conn.execute(
+                f"""
+                INSERT INTO ragfin_kap_flow_events (
+                    event_key, source, disclosure_id, published_at, symbol,
+                    stock_codes, related_symbols, title, subject, category,
+                    kap_url, payload, ingested_at, updated_at
+                )
+                VALUES {placeholders}
+                ON CONFLICT (event_key) DO UPDATE SET
+                    source = EXCLUDED.source,
+                    disclosure_id = EXCLUDED.disclosure_id,
+                    published_at = EXCLUDED.published_at,
+                    symbol = EXCLUDED.symbol,
+                    stock_codes = EXCLUDED.stock_codes,
+                    related_symbols = EXCLUDED.related_symbols,
+                    title = EXCLUDED.title,
+                    subject = EXCLUDED.subject,
+                    category = EXCLUDED.category,
+                    kap_url = EXCLUDED.kap_url,
+                    payload = EXCLUDED.payload,
+                    updated_at = NOW()
+                WHERE ragfin_kap_flow_events.payload IS DISTINCT FROM EXCLUDED.payload
+                   OR ragfin_kap_flow_events.title IS DISTINCT FROM EXCLUDED.title
+                   OR ragfin_kap_flow_events.subject IS DISTINCT FROM EXCLUDED.subject
+                   OR ragfin_kap_flow_events.category IS DISTINCT FROM EXCLUDED.category
+                   OR ragfin_kap_flow_events.published_at IS DISTINCT FROM EXCLUDED.published_at
+                   OR ragfin_kap_flow_events.symbol IS DISTINCT FROM EXCLUDED.symbol
+                   OR ragfin_kap_flow_events.kap_url IS DISTINCT FROM EXCLUDED.kap_url
+                """,
+                tuple(flat_params),
             )
-            VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?::jsonb, NOW(), NOW())
-            ON CONFLICT (event_key) DO UPDATE SET
-                source = EXCLUDED.source,
-                disclosure_id = EXCLUDED.disclosure_id,
-                published_at = EXCLUDED.published_at,
-                symbol = EXCLUDED.symbol,
-                stock_codes = EXCLUDED.stock_codes,
-                related_symbols = EXCLUDED.related_symbols,
-                title = EXCLUDED.title,
-                subject = EXCLUDED.subject,
-                category = EXCLUDED.category,
-                kap_url = EXCLUDED.kap_url,
-                payload = EXCLUDED.payload,
-                updated_at = NOW()
-            """,
-            rows,
-        )
         conn.commit()
     return len(rows)
+
+
+def read_kap_flow_head(*, category: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Read only the newest (event_key, published_at) cursor without fetching payload JSONB."""
+
+    if not database_enabled():
+        return None
+    ensure_kap_flow_schema()
+    where = "WHERE category = ?" if category else ""
+    params: tuple[Any, ...] = (category,) if category else ()
+    with connect_postgres() as conn:
+        row = conn.execute(
+            f"""
+            SELECT event_key, published_at
+            FROM ragfin_kap_flow_events
+            {where}
+            ORDER BY published_at DESC, event_key DESC
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+    if not isinstance(row, dict):
+        return None
+    event_key = str(row.get("event_key") or "").strip()
+    published_at = row.get("published_at")
+    if not event_key or not published_at:
+        return None
+    return {"event_key": event_key, "published_at": published_at}
 
 
 def read_kap_flow_events(
@@ -938,6 +991,94 @@ def read_json_cache_history_metadata(path: Path) -> Optional[dict[str, Any]]:
         return None
 
 
+def read_json_cache_kap_metadata() -> dict[str, dict[str, Any]]:
+    """Read compact headers for cached KAP company documents without transferring financial tables."""
+
+    if not database_enabled():
+        return {}
+    try:
+        ensure_json_cache_schema()
+        with connect_postgres() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    cache_key,
+                    payload->>'ok' AS ok,
+                    payload->>'company' AS company,
+                    payload->>'stock_code' AS stock_code,
+                    payload->>'company_title' AS company_title,
+                    payload->>'member_oid' AS member_oid,
+                    payload->>'source_url' AS source_url,
+                    payload->>'schema_version' AS schema_version,
+                    payload->>'live_period_count' AS live_period_count,
+                    (
+                        SELECT COALESCE(
+                            jsonb_agg(
+                                jsonb_build_object(
+                                    'year', q->'year',
+                                    'period', q->'period',
+                                    'disclosure_index', q->'disclosure_index',
+                                    'stock_code', q->'stock_code'
+                                )
+                            ),
+                            '[]'::jsonb
+                        )
+                        FROM jsonb_array_elements(
+                            CASE
+                                WHEN jsonb_typeof(payload->'quarters') = 'array' THEN payload->'quarters'
+                                ELSE '[]'::jsonb
+                            END
+                        ) AS q
+                    ) AS quarter_headers
+                FROM ragfin_json_cache
+                WHERE cache_key LIKE ?
+                """,
+                ("kap_cache/%.json",),
+            ).fetchall()
+        out: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            cache_key = str(row.get("cache_key") or "").strip()
+            if not cache_key:
+                continue
+            stem = Path(cache_key).stem.strip().upper()
+            if not stem:
+                continue
+            raw_ok = row.get("ok")
+            ok_val = False if str(raw_ok).strip().lower() == "false" else True
+            try:
+                schema_version = int(row.get("schema_version") or 0)
+            except (TypeError, ValueError):
+                schema_version = 0
+            try:
+                live_period_count = int(row.get("live_period_count") or 0)
+            except (TypeError, ValueError):
+                live_period_count = 0
+            raw_headers = row.get("quarter_headers")
+            if isinstance(raw_headers, str):
+                try:
+                    raw_headers = json.loads(raw_headers)
+                except ValueError:
+                    raw_headers = []
+            quarters = [q for q in (raw_headers or []) if isinstance(q, dict)]
+            out[stem] = {
+                "ok": ok_val,
+                "company": row.get("company") or stem,
+                "stock_code": row.get("stock_code") or stem,
+                "company_title": row.get("company_title"),
+                "member_oid": row.get("member_oid"),
+                "source_url": row.get("source_url"),
+                "schema_version": schema_version,
+                "live_period_count": live_period_count,
+                "quarters": quarters,
+            }
+        return out
+    except Exception:
+        LOGGER.warning("remote KAP metadata batch read failed", exc_info=True)
+        return {}
+
+
 def write_json_cache(path: Path, payload: dict[str, Any]) -> None:
     """Upsert one JSON cache document in Supabase."""
 
@@ -979,47 +1120,54 @@ def hydrate_json_cache(
     processed_dir: Path,
     *,
     exclude_key_prefixes: tuple[str, ...] = (),
+    include_key_prefixes: tuple[str, ...] = (),
 ) -> int:
     """Download selected remote JSON cache documents into the local folder.
 
-    Large daily fund snapshots are fetched on demand by the fund service. They
-    do not need to be copied into every fresh API container during bootstrap.
+    Large daily fund snapshots and KAP company caches are fetched on demand.
+    When ``include_key_prefixes`` is supplied, only those prefixes are hydrated,
+    preventing unrelated or stale cache rows from causing startup egress.
     """
 
     if not database_enabled():
         return 0
     try:
         ensure_json_cache_schema()
-        normalized_prefixes: list[str] = []
+        normalized_excludes: list[str] = []
         for raw_prefix in exclude_key_prefixes:
             prefix = str(raw_prefix or "").replace("\\", "/").strip("/")
             if prefix:
-                normalized_prefixes.append(f"{prefix}/")
-        prefixes = tuple(dict.fromkeys(normalized_prefixes))
-        where_clause = ""
-        query_params: tuple[Any, ...] = ()
-        if prefixes:
-            where_clause = "WHERE " + " AND ".join(
-                "SUBSTR(cache_key, 1, ?) <> ?" for _ in prefixes
-            )
-            query_params = tuple(value for prefix in prefixes for value in (len(prefix), prefix))
+                normalized_excludes.append(f"{prefix}/")
+        excludes = tuple(dict.fromkeys(normalized_excludes))
+
+        normalized_includes: list[str] = []
+        for raw_prefix in include_key_prefixes:
+            prefix = str(raw_prefix or "").replace("\\", "/").strip("/")
+            if prefix:
+                normalized_includes.append(f"{prefix}/")
+        includes = tuple(dict.fromkeys(normalized_includes))
+
+        conditions: list[str] = [
+            "POSITION('://' IN cache_key) = 0",
+            "SUBSTR(cache_key, 1, 1) <> '/'",
+        ]
+        query_params: list[Any] = []
+        if includes:
+            conditions.append("(" + " OR ".join("SUBSTR(cache_key, 1, ?) = ?" for _ in includes) + ")")
+            for prefix in includes:
+                query_params.extend((len(prefix), prefix))
+        if excludes:
+            for prefix in excludes:
+                conditions.append("SUBSTR(cache_key, 1, ?) <> ?")
+                query_params.extend((len(prefix), prefix))
+
+        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
         with connect_postgres() as conn:
             excluded_rows = 0
-            if prefixes:
-                excluded_rows = sum(
-                    int((count_row or {}).get("row_count") or 0)
-                    for count_row in (
-                        conn.execute(
-                            "SELECT COUNT(*) AS row_count FROM ragfin_json_cache WHERE SUBSTR(cache_key, 1, ?) = ?",
-                            (len(prefix), prefix),
-                        ).fetchone()
-                        for prefix in prefixes
-                    )
-                )
             rows = conn.execute(
                 f"SELECT cache_key, payload, updated_at::text AS updated_at, COALESCE(version, 0) AS version FROM ragfin_json_cache {where_clause} ORDER BY cache_key",
-                query_params,
+                tuple(query_params),
             ).fetchall()
         hydrated = 0
         measured_bytes = 0
@@ -1063,7 +1211,7 @@ def hydrate_json_cache(
             len(rows),
             hydrated,
             excluded_rows,
-            ",".join(prefixes),
+            ",".join(excludes),
             measured_bytes,
             measured_bytes > 1024 * 1024,
         )

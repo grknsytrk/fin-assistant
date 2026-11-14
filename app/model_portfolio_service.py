@@ -244,7 +244,7 @@ def load_model_portfolio_state(processed_dir: Path, *, force_reload: bool = Fals
             except Exception:
                 LOGGER.warning("Failed to read local model portfolio state from %s", path, exc_info=True)
 
-        remote_raw = read_json_cache(path)
+        remote_raw = read_json_cache(path) if (force_reload or local_state is None) else None
         remote_state = _normalize_state(remote_raw) if isinstance(remote_raw, dict) else None
 
         state: Optional[Dict[str, Any]] = local_state
@@ -1189,36 +1189,38 @@ def build_model_portfolio_performance_payload(
         k: dict(v) for k, v in (base_series_data.get("series_by_symbol") or {}).items()
     }
 
-    # Overlay today's live cached prices without mutating the historical cache entry
-    live_Overlay_dates = set(sorted_dates)
-    has_live_today = False
-    if current_xu100 is not None and current_xu100 > 0:
-        raw_series_map.setdefault("XU100", {})[today_iso] = float(current_xu100)
-        has_live_today = True
-    if current_xu030 is not None and current_xu030 > 0:
-        raw_series_map.setdefault("XU030", {})[today_iso] = float(current_xu030)
-        has_live_today = True
-    for pos in series_positions:
-        sym = str(pos.get("symbol") or "").strip().upper()
-        is_closed = str(pos.get("status") or "active") == "closed"
-        if is_closed:
-            # A position closed today is valued at its exit price so the
-            # realized move lands on the chart on the day it was booked.
-            if str(pos.get("closed_date") or "")[:10] != today_iso:
-                continue
-            exit_price = _positive_float(pos.get("exit_price"))
-            if exit_price is None:
-                continue
-            raw_series_map.setdefault(sym, {})[today_iso] = exit_price
+    # Overlay today's live cached prices without mutating the historical cache entry.
+    # Skip weekends (Sat/Sun) so BIST closed days do not appear as flat chart points.
+    if today.weekday() < 5:
+        live_overlay_dates = set(sorted_dates)
+        has_live_today = False
+        if current_xu100 is not None and current_xu100 > 0:
+            raw_series_map.setdefault("XU100", {})[today_iso] = float(current_xu100)
             has_live_today = True
-            continue
-        live_p = _positive_float((quote_map.get(sym) or {}).get("price"))
-        if live_p is not None:
-            raw_series_map.setdefault(sym, {})[today_iso] = live_p
+        if current_xu030 is not None and current_xu030 > 0:
+            raw_series_map.setdefault("XU030", {})[today_iso] = float(current_xu030)
             has_live_today = True
-    if has_live_today and today_iso not in live_Overlay_dates:
-        sorted_dates.append(today_iso)
-        sorted_dates.sort()
+        for pos in series_positions:
+            sym = str(pos.get("symbol") or "").strip().upper()
+            is_closed = str(pos.get("status") or "active") == "closed"
+            if is_closed:
+                # A position closed today is valued at its exit price so the
+                # realized move lands on the chart on the day it was booked.
+                if str(pos.get("closed_date") or "")[:10] != today_iso:
+                    continue
+                exit_price = _positive_float(pos.get("exit_price"))
+                if exit_price is None:
+                    continue
+                raw_series_map.setdefault(sym, {})[today_iso] = exit_price
+                has_live_today = True
+                continue
+            live_p = _positive_float((quote_map.get(sym) or {}).get("price"))
+            if live_p is not None:
+                raw_series_map.setdefault(sym, {})[today_iso] = live_p
+                has_live_today = True
+        if has_live_today and today_iso not in live_overlay_dates:
+            sorted_dates.append(today_iso)
+            sorted_dates.sort()
 
     if not sorted_dates:
         return {

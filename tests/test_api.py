@@ -86,6 +86,7 @@ def test_api_health() -> None:
     assert "tables" in db_metrics
     expected_tables = {
         "ragfin_json_cache",
+        "ragfin_kap_flow_events",
         "fund_snapshots",
         "fund_prices",
         "company_financial_snapshots",
@@ -110,6 +111,7 @@ def test_api_health_supabase_db_metrics_contract() -> None:
     tables = db_metrics["tables"]
     expected_tables = (
         "ragfin_json_cache",
+        "ragfin_kap_flow_events",
         "fund_snapshots",
         "fund_prices",
         "company_financial_snapshots",
@@ -140,7 +142,7 @@ def test_api_health_db_metrics_increments_on_target_queries(monkeypatch: pytest.
     assert metrics["ragfin_json_cache"]["reads"] == 1
     assert metrics["ragfin_json_cache"]["bytes"] == mock_bytes
 
-    for other in ("fund_snapshots", "fund_prices", "company_financial_snapshots", "instruments"):
+    for other in ("ragfin_kap_flow_events", "fund_snapshots", "fund_prices", "company_financial_snapshots", "instruments"):
         assert metrics[other]["reads"] == 0
         assert metrics[other]["bytes"] == 0
 
@@ -160,6 +162,7 @@ def test_api_health_db_metrics_ignores_non_targeted_tables() -> None:
 
     for target in (
         "ragfin_json_cache",
+        "ragfin_kap_flow_events",
         "fund_snapshots",
         "fund_prices",
         "company_financial_snapshots",
@@ -8217,6 +8220,71 @@ def test_market_stocks_stream_emits_benchmarks(
             break
     else:
         pytest.fail("stocks_delta event data not found in stream response")
+
+
+def test_fund_detail_categories_search_payload_caches_and_invalidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.fund_service as fund_service_module
+
+    monkeypatch.setattr(
+        fund_service_module,
+        "fund_listing_revision",
+        lambda _dir: {"catalog_generation": 7, "price_generation": 11},
+    )
+
+    detail_calls = 0
+    categories_calls = 0
+    search_calls = 0
+
+    def fake_detail(_dir, fund_code: str):
+        nonlocal detail_calls
+        detail_calls += 1
+        return {"status": "ok", "fund_code": fund_code, "name": "TERA FON"}
+
+    def fake_categories(_dir):
+        nonlocal categories_calls
+        categories_calls += 1
+        return {
+            "status": "ok",
+            "fund_types": [{"code": "SEC", "label": "Menkul"}],
+            "categories": ["Menkul"],
+        }
+
+    def fake_search(_dir, **_kwargs):
+        nonlocal search_calls
+        search_calls += 1
+        return {
+            "status": "ok",
+            "rows": [{"fund_code": "TLY", "name": "TERA FON"}],
+            "total": 1,
+            "stale": False,
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_fund_detail_payload", fake_detail)
+    monkeypatch.setattr(fund_service_module, "get_fund_categories_payload", fake_categories)
+    monkeypatch.setattr(fund_service_module, "get_funds_payload", fake_search)
+
+    assert api_module._fund_detail_payload(normalized="TLY")["fund_code"] == "TLY"
+    assert api_module._fund_detail_payload(normalized="TLY")["fund_code"] == "TLY"
+    assert detail_calls == 1
+
+    assert api_module._funds_categories_payload()["categories"] == ["Menkul"]
+    assert api_module._funds_categories_payload()["categories"] == ["Menkul"]
+    assert categories_calls == 1
+
+    assert api_module._funds_search_payload(q="TLY", limit=10)["total"] == 1
+    assert api_module._funds_search_payload(q="TLY", limit=10)["total"] == 1
+    assert search_calls == 1
+
+    api_module._invalidate_fund_response_cache()
+
+    assert api_module._fund_detail_payload(normalized="TLY")["fund_code"] == "TLY"
+    assert api_module._funds_categories_payload()["categories"] == ["Menkul"]
+    assert api_module._funds_search_payload(q="TLY", limit=10)["total"] == 1
+    assert detail_calls == 2
+    assert categories_calls == 2
+    assert search_calls == 2
 
 
 # endregion

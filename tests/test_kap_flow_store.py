@@ -69,3 +69,61 @@ def test_database_read_failure_uses_bounded_redis_copy(monkeypatch: pytest.Monke
 
     assert page is not None
     assert page["items"][0]["id"] == "kap-1"
+
+
+def test_persist_flow_items_skips_unchanged_db_upsert_and_read_flow_head_avoids_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.clear_persisted_flow_hashes()
+    monkeypatch.setattr(store, "database_enabled", lambda: True)
+
+    upsert_calls: list[list[dict]] = []
+    head_db_calls = 0
+
+    def fake_upsert(rows: list[dict]) -> dict[str, int]:
+        upsert_calls.append(list(rows))
+        return {"upserted_count": len(rows)}
+
+    def fake_read_head(*, category=None) -> dict[str, str]:
+        nonlocal head_db_calls
+        head_db_calls += 1
+        return {
+            "event_key": "kap-2",
+            "published_at": "2026-09-09T10:02:00+00:00",
+        }
+
+    monkeypatch.setattr(store, "upsert_kap_flow_events", fake_upsert)
+    monkeypatch.setattr(store, "read_kap_flow_head", fake_read_head)
+    monkeypatch.setattr(
+        store,
+        "read_kap_flow_events",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("head check must not read full payload rows")),
+    )
+
+    items = [_item(1, 1), _item(2, 2)]
+    first_status = store.persist_flow_items(
+        items,
+        source="kap_public_website",
+        as_of="2026-09-09T10:02:00+00:00",
+    )
+    assert first_status["stored_count"] == 2
+    assert len(upsert_calls) == 1
+    assert len(upsert_calls[0]) == 2
+
+    head1 = store.read_flow_head()
+    assert head1["latest_cursor"] is not None
+    assert head_db_calls == 1
+
+    second_status = store.persist_flow_items(
+        items,
+        source="kap_public_website",
+        as_of="2026-09-09T10:02:00+00:00",
+    )
+    assert second_status["stored_count"] == 2
+    # Identical items must not re-upsert or invalidate the cached flow head cursor.
+    assert len(upsert_calls) == 1
+
+    head2 = store.read_flow_head()
+    assert head2["latest_cursor"] == head1["latest_cursor"]
+    assert head_db_calls == 1
+    store.clear_persisted_flow_hashes()

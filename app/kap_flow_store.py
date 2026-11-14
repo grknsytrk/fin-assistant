@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import binascii
 import copy
+import hashlib
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -15,10 +17,15 @@ from app.cache import get_cache
 from app.database import (
     database_enabled,
     read_kap_flow_events,
+    read_kap_flow_head,
     upsert_kap_flow_events,
 )
 
 LOGGER = logging.getLogger(__name__)
+
+_PERSISTED_FLOW_HASH_LOCK = threading.Lock()
+_PERSISTED_FLOW_HASHES: dict[tuple[Any, ...], str] = {}
+_PERSISTED_FLOW_HASH_MAX = 5000
 
 FLOW_HEAD_CACHE_PREFIX = "api:kap:flow:head:v1:"
 FLOW_STATUS_CACHE_KEY = "api:kap:flow:status:v1"
@@ -216,8 +223,28 @@ def _build_page(
     }
 
 
+def clear_persisted_flow_hashes() -> None:
+    """Clear the process-local dedup table (primarily for tests)."""
+
+    with _PERSISTED_FLOW_HASH_LOCK:
+        _PERSISTED_FLOW_HASHES.clear()
+
+
+def _flow_hash_scope() -> tuple[Any, ...]:
+    return (
+        bool(database_enabled()),
+        os.getenv("RAGFIN_DATABASE_URL", "") or os.getenv("DATABASE_URL", ""),
+        id(get_cache()),
+    )
+
+
+def _flow_item_digest(row: dict[str, Any]) -> str:
+    body = json.dumps(row.get("payload") or {}, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha1(body.encode("utf-8")).hexdigest()
+
+
 def persist_flow_items(items: list[dict[str, Any]], *, source: str, as_of: Optional[str] = None) -> dict[str, Any]:
-    """Persist feed rows and invalidate only the affected head cache."""
+    """Persist new or changed feed rows and invalidate head cache only when changed."""
 
     normalized_by_key: dict[str, dict[str, Any]] = {}
     for item in items:
@@ -225,34 +252,61 @@ def persist_flow_items(items: list[dict[str, Any]], *, source: str, as_of: Optio
         if normalized:
             normalized_by_key[normalized["event_key"]] = normalized
     normalized = sorted(normalized_by_key.values(), key=_sort_key, reverse=True)
+
+    scope = _flow_hash_scope()
+    previous_status = get_flow_status()
+    cache_cold = not previous_status
+    changed_rows: list[dict[str, Any]] = []
+    row_digests: list[tuple[tuple[Any, ...], str]] = []
+    with _PERSISTED_FLOW_HASH_LOCK:
+        for row in normalized:
+            digest = _flow_item_digest(row)
+            key = (*scope, row["event_key"])
+            row_digests.append((key, digest))
+            if cache_cold or _PERSISTED_FLOW_HASHES.get(key) != digest:
+                changed_rows.append(row)
+
     database_written = False
-    if normalized and database_enabled():
+    if changed_rows and database_enabled():
         try:
-            upsert_kap_flow_events(normalized)
+            upsert_kap_flow_events(changed_rows)
             database_written = True
         except Exception:
             LOGGER.warning("durable KAP flow upsert failed", exc_info=True)
 
+    if changed_rows:
+        with _PERSISTED_FLOW_HASH_LOCK:
+            if len(_PERSISTED_FLOW_HASHES) > _PERSISTED_FLOW_HASH_MAX:
+                _PERSISTED_FLOW_HASHES.clear()
+            for key, digest in row_digests:
+                _PERSISTED_FLOW_HASHES[key] = digest
+
     # Redis remains a useful local fallback when database persistence is not
     # configured, and always provides the fast head cache.
     existing = {row["event_key"]: row for row in _redis_events()}
-    for row in normalized:
-        existing[row["event_key"]] = {
-            "event_key": row["event_key"],
+    redis_changed = False
+    for row in changed_rows if existing else normalized:
+        event_key = row["event_key"]
+        candidate = {
+            "event_key": event_key,
             "published_at": row["published_at"],
             "payload": row["payload"],
         }
+        if existing.get(event_key) != candidate:
+            existing[event_key] = candidate
+            redis_changed = True
     merged = sorted(existing.values(), key=_sort_key, reverse=True)[:FLOW_RETAINED_EVENTS]
-    _write_redis_events(merged)
+    if redis_changed or (normalized and not existing):
+        _write_redis_events(merged)
 
     backend = get_cache()
-    try:
-        backend.delete_prefix(FLOW_HEAD_CACHE_PREFIX)
-    except Exception:
-        LOGGER.debug("KAP flow head cache invalidation failed", exc_info=True)
+    if changed_rows or redis_changed:
+        try:
+            backend.delete_prefix(FLOW_HEAD_CACHE_PREFIX)
+        except Exception:
+            LOGGER.debug("KAP flow head cache invalidation failed", exc_info=True)
 
-    latest = merged[0] if merged else None
-    previous_status = get_flow_status()
+    latest = merged[0] if merged else (normalized[0] if normalized else None)
     status = {
         "source": source,
         "as_of": as_of or (latest or {}).get("published_at"),
@@ -262,6 +316,7 @@ def persist_flow_items(items: list[dict[str, Any]], *, source: str, as_of: Optio
         "refresh_status": "ok" if normalized else "empty",
         "refresh_pending": False,
         "stored_count": len(normalized),
+        "changed_count": len(changed_rows),
         "database_written": database_written,
     }
     backend.set(FLOW_STATUS_CACHE_KEY, status)
@@ -351,18 +406,56 @@ def store_is_configured() -> bool:
 
 
 def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[str, Any]:
-    page = read_flow_page(limit=limit, category=category)
-    if page is None:
+    del limit  # Head queries only inspect the newest cursor.
+    norm_category = str(category or "").strip() or None
+    cache_key = f"{FLOW_HEAD_CACHE_PREFIX}cursor:{norm_category or ''}"
+    cached = get_cache().get(cache_key)
+    if isinstance(cached, dict) and cached.get("latest_cursor"):
+        return dict(cached)
+
+    head_row: Optional[dict[str, Any]] = None
+    if database_enabled():
+        try:
+            db_head = read_kap_flow_head(category=norm_category)
+            if db_head:
+                normalized_dt = _normalize_datetime(db_head.get("published_at"))
+                if normalized_dt and db_head.get("event_key"):
+                    head_row = {
+                        "event_key": str(db_head["event_key"]),
+                        "published_at": normalized_dt,
+                    }
+        except Exception:
+            LOGGER.warning("durable KAP flow head read failed; using Redis fallback", exc_info=True)
+
+    if head_row is None:
+        redis_rows, _has_more = _page_from_events(
+            _redis_events(),
+            limit=1,
+            before=None,
+            after=None,
+            category=norm_category,
+        )
+        if redis_rows:
+            head_row = {
+                "event_key": redis_rows[0]["event_key"],
+                "published_at": redis_rows[0]["published_at"],
+            }
+
+    if head_row is None:
         return {
             "latest_cursor": None,
             "as_of": None,
             "last_successful_refresh": None,
             "refresh_status": "empty",
         }
-    return {
-        "latest_cursor": page.get("latest_cursor"),
-        "as_of": page.get("as_of"),
-        "last_successful_refresh": page.get("last_successful_refresh"),
-        "refresh_status": page.get("refresh_status"),
-        "source": page.get("source"),
+
+    status = get_flow_status()
+    result = {
+        "latest_cursor": encode_cursor(head_row["published_at"], head_row["event_key"]),
+        "as_of": status.get("as_of") or head_row["published_at"],
+        "last_successful_refresh": status.get("last_successful_refresh"),
+        "refresh_status": status.get("refresh_status") or "unknown",
+        "source": status.get("source") or "kap_flow_store",
     }
+    get_cache().set(cache_key, result, ttl_seconds=max(1, FLOW_HEAD_CACHE_TTL_SECONDS))
+    return result

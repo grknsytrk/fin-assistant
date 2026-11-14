@@ -44,6 +44,7 @@ except ImportError:  # pragma: no cover
 
 TARGET_DB_TABLES = (
     "ragfin_json_cache",
+    "ragfin_kap_flow_events",
     "fund_snapshots",
     "fund_prices",
     "company_financial_snapshots",

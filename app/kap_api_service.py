@@ -1837,8 +1837,9 @@ def _refresh_kap_flow_store(*, fast: bool = False) -> Dict[str, Any]:
             last_refresh_error=None,
         )
         try:
+            fast_limit = max(60, int(os.getenv("RAGFIN_KAP_VYK_FAST_REFRESH_LIMIT", "150")))
             payload = _build_market_flow_payload(
-                limit=_VYK_DEFAULT_DETAIL_BUDGET_MAX,
+                limit=fast_limit if fast else _VYK_DEFAULT_DETAIL_BUDGET_MAX,
                 category=None,
                 force_refresh=True,
                 include_category_backfill=not fast,

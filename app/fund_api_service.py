@@ -127,7 +127,9 @@ _FUND_HISTORY_KEY_VERSION = 7
 # same transaction as their source data. Keeping popular list payloads around
 # longer lets the 5-minute edge revalidation reuse memory instead of rereading
 # the full catalog from Supabase on every refresh.
-_FUND_LISTING_CACHE_TTL_SECONDS = 600.0
+_FUND_LISTING_CACHE_TTL_SECONDS = float(
+    os.getenv("RAGFIN_FUND_LISTING_CACHE_TTL_SECONDS", "3600")
+)
 _FUND_LISTING_CACHE_MAX_ENTRIES = 8
 _FUND_LISTING_CACHE_MAX_BYTES = 8 * 1024 * 1024
 _FUND_LISTING_CACHE_LOCK = threading.RLock()
@@ -881,9 +883,22 @@ def _funds_listing_payload(
 
 
 def _funds_search_payload(*, q: str, limit: int = 50) -> Dict[str, Any]:
-    from app.fund_service import get_funds_payload
+    from app.fund_service import fund_listing_revision, get_funds_payload
 
-    return get_funds_payload(
+    try:
+        revision = fund_listing_revision(CONFIG.paths.processed_dir)
+    except Exception:
+        revision = {}
+    cache_key = (
+        f"api:funds-search:v1:q={_normalized_cache_text(q, max_length=80)}"
+        f"|limit={int(limit)}|rev={int(revision.get('catalog_generation') or 0)}:{int(revision.get('price_generation') or 0)}"
+    )
+    backend = _get_cache()
+    cached = backend.get(cache_key)
+    if isinstance(cached, dict) and isinstance(cached.get("rows"), list):
+        return dict(cached)
+
+    payload = get_funds_payload(
         CONFIG.paths.processed_dir,
         q=q,
         sort="fund_code",
@@ -894,11 +909,30 @@ def _funds_search_payload(*, q: str, limit: int = 50) -> Dict[str, Any]:
         # background job started by the list page.
         auto_refresh=False,
     )
+    if _fund_listing_cacheable(payload):
+        backend.set(cache_key, payload, ttl_seconds=600)
+    return payload
 
 def _funds_categories_payload() -> Dict[str, Any]:
-    from app.fund_service import get_fund_categories_payload
+    from app.fund_service import fund_listing_revision, get_fund_categories_payload
 
-    return get_fund_categories_payload(CONFIG.paths.processed_dir)
+    try:
+        revision = fund_listing_revision(CONFIG.paths.processed_dir)
+    except Exception:
+        revision = {}
+    cat_rev = f"{int(revision.get('catalog_generation') or 0)}:{int(revision.get('price_generation') or 0)}"
+    cache_key = "api:funds-categories:v2"
+    backend = _get_cache()
+    cached = backend.get(cache_key)
+    if isinstance(cached, dict) and cached.get("fund_types") is not None and cached.get("_rev") == cat_rev:
+        out = dict(cached)
+        out.pop("_rev", None)
+        return out
+
+    payload = get_fund_categories_payload(CONFIG.paths.processed_dir)
+    if isinstance(payload, dict) and str(payload.get("status") or "").strip().lower() == "ok":
+        backend.set(cache_key, {**payload, "_rev": cat_rev}, ttl_seconds=1800)
+    return payload
 
 def _history_job_key(fund_code: str, job_id: str) -> str:
     return f"api:fund-history:job:v{_FUND_HISTORY_KEY_VERSION}:{fund_code}:{job_id}"
@@ -1588,11 +1622,11 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
     else:
         try:
             rev = fund_listing_revision(CONFIG.paths.processed_dir)
-            version_token = f"gen={int(rev.get('catalog_generation') or 0)}:price={int(rev.get('price_revision') or 0)}"
+            version_token = f"gen={int(rev.get('catalog_generation') or 0)}:price={int(rev.get('price_generation') or 0)}"
         except Exception:
             version_token = None
     if cached and stat is None and version_token and cached.get("version_token") == version_token:
-        cached["expires_at"] = now_mono + 60.0
+        cached["expires_at"] = now_mono + 300.0
         return dict(cached.get("rows") or {}), {
             "cache_hit": True,
             "row_count": cached.get("row_count", 0),
@@ -2409,18 +2443,34 @@ def _start_allocation_history_refresh_job(fund_code: str, lookback_days: int) ->
     }
 
 def _fund_detail_payload(*, normalized: str) -> Dict[str, Any]:
-    from app.fund_service import get_fund_detail_payload
+    from app.fund_service import fund_listing_revision, get_fund_detail_payload
 
-    return get_fund_detail_payload(CONFIG.paths.processed_dir, normalized)
+    try:
+        revision = fund_listing_revision(CONFIG.paths.processed_dir)
+    except Exception:
+        revision = {}
+    detail_rev = f"{int(revision.get('catalog_generation') or 0)}:{int(revision.get('price_generation') or 0)}"
+    cache_key = f"api:fund-detail:{normalized}"
+    backend = _get_cache()
+    cached = backend.get(cache_key)
+    if isinstance(cached, dict) and cached.get("fund_code") == normalized and cached.get("_rev") == detail_rev:
+        out = dict(cached)
+        out.pop("_rev", None)
+        return out
+
+    payload = get_fund_detail_payload(CONFIG.paths.processed_dir, normalized)
+    if isinstance(payload, dict) and str(payload.get("status") or "").strip().lower() not in {"unavailable", "pending"}:
+        backend.set(cache_key, {**payload, "_rev": detail_rev}, ttl_seconds=900)
+    return payload
 
 def _require_known_fund_code(fund_code: str) -> str:
     """Reject arbitrary cache/job keys before an upstream refresh is queued."""
 
-    from app.fund_service import get_fund_detail_payload, normalize_fund_code
+    from app.fund_service import normalize_fund_code
 
     normalized = normalize_fund_code(fund_code)
     try:
-        get_fund_detail_payload(CONFIG.paths.processed_dir, normalized)
+        _fund_detail_payload(normalized=normalized)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Fon bulunamadi: {normalized}") from exc
     return normalized

@@ -365,3 +365,61 @@ def test_expired_memory_ttl_with_unchanged_db_stamp_skips_full_table_scan(
     assert len(stamp_checks) == 1
     store.reset_financial_snapshot_store_for_tests()
 
+
+def test_upsert_financial_snapshots_updates_memory_cache_and_skips_unchanged_provider_bulk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import json
+    from contextlib import contextmanager
+
+    store.reset_financial_snapshot_store_for_tests()
+    processed_dir = tmp_path / "processed"
+    store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Enerji"}})
+    primed = store.get_financial_snapshots_map(processed_dir)
+    assert primed["AAA"]["sector"] == "Enerji"
+
+    original_connection = store._connection
+    queries: list[str] = []
+
+    class QueryTrackingConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql: str, *args, **kwargs):
+            queries.append(" ".join(sql.split()))
+            return self._inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str):
+            return getattr(self._inner, name)
+
+    @contextmanager
+    def tracked_connection(path: Path):
+        with original_connection(path) as conn:
+            yield QueryTrackingConn(conn)
+
+    monkeypatch.setattr(store, "_connection", tracked_connection)
+
+    # Identical provider bulk must skip DB writes and keep the memory cache warm.
+    written = store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Enerji"}})
+    assert written == 0
+    assert not any("INSERT INTO company_financial_snapshots" in q or "UPDATE company_financial_snapshots" in q for q in queries)
+
+    queries.clear()
+    still_cached = store.get_financial_snapshots_map(processed_dir)
+    assert still_cached["AAA"]["sector"] == "Enerji"
+    assert not any("SELECT * FROM company_financial_snapshots" in q for q in queries)
+
+    # Syncing KAP cache upserts snapshots and must update memory cache in-place.
+    kap_dir = processed_dir / "kap_cache"
+    kap_dir.mkdir(parents=True, exist_ok=True)
+    (kap_dir / "AAA.json").write_text(json.dumps(_kap_payload(250.0)), encoding="utf-8")
+    store.sync_financial_snapshots_from_kap_cache(processed_dir)
+
+    queries.clear()
+    updated_map = store.get_financial_snapshots_map(processed_dir)
+    assert updated_map["AAA"]["sector"] == "Enerji"
+    assert updated_map["AAA"]["has_kap_cache"] is True
+    assert updated_map["AAA"]["ttm_net_kar"] == 250.0
+    assert not any("SELECT * FROM company_financial_snapshots" in q for q in queries)
+    store.reset_financial_snapshot_store_for_tests()
+

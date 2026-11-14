@@ -83,9 +83,10 @@ def bootstrap_application_storage() -> None:
     ensure_fund_prices_schema(CONFIG.paths.processed_dir)
     hydrate_json_cache(
         CONFIG.paths.processed_dir,
-        # The catalogue has a row store, while fund history, allocations,
-        # holdings, daily snapshots, and KAP company payloads are fetched
-        # from JSON cache on demand.
+        # Only hydrate compact shared and model-portfolio state on startup;
+        # the catalogue has a row store, and fund/KAP payloads are loaded
+        # on demand.
+        include_key_prefixes=("_shared/", "model_portfolio/"),
         exclude_key_prefixes=("funds_cache/", "kap_cache/"),
     )
     ensure_fund_snapshot_store(CONFIG.paths.processed_dir)

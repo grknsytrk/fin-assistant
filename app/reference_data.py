@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -54,6 +55,73 @@ _SEEDED_PROCESSED_DIRS: set[str] = set()
 _BOOTSTRAPPED_PROCESSED_DIRS: set[str] = set()
 _REFERENCE_SCHEMA_LOCK = threading.Lock()
 _REFERENCE_SCHEMA_READY = False
+_INSTRUMENTS_CACHE_TTL_SECONDS = float(os.getenv("RAGFIN_INSTRUMENTS_CACHE_TTL_SECONDS", "1800"))
+_INSTRUMENTS_CACHE_LOCK = threading.RLock()
+_INSTRUMENTS_CACHE: Dict[
+    str,
+    tuple[float, Dict[tuple[str, str], Dict[str, Any]], Dict[tuple[str, str], str]],
+] = {}
+
+
+def _instruments_cache_key(processed_dir: Path) -> str:
+    if database_enabled():
+        db_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL") or ""
+        return f"postgres:{hash(db_url)}"
+    return str(Path(processed_dir).resolve())
+
+
+def clear_instruments_cache(processed_dir: Optional[Path] = None) -> None:
+    """Clear the process-local instruments cache (all scopes or a single scope)."""
+    with _INSTRUMENTS_CACHE_LOCK:
+        if processed_dir is None:
+            _INSTRUMENTS_CACHE.clear()
+        else:
+            _INSTRUMENTS_CACHE.pop(_instruments_cache_key(processed_dir), None)
+
+
+def _copy_instrument_dict(inst: Dict[str, Any]) -> Dict[str, Any]:
+    copied = dict(inst)
+    metadata = inst.get("metadata")
+    if isinstance(metadata, dict):
+        copied["metadata"] = dict(metadata)
+    return copied
+
+
+def _ensure_instruments_cache(
+    processed_dir: Path,
+) -> tuple[Dict[tuple[str, str], Dict[str, Any]], Dict[tuple[str, str], str]]:
+    cache_key = _instruments_cache_key(processed_dir)
+    with _INSTRUMENTS_CACHE_LOCK:
+        now = time.monotonic()
+        cached = _INSTRUMENTS_CACHE.get(cache_key)
+        if cached is not None and cached[0] > now:
+            return cached[1], cached[2]
+
+        by_kind_symbol: Dict[tuple[str, str], Dict[str, Any]] = {}
+        aliases_by_kind_alias: Dict[tuple[str, str], str] = {}
+        with _connect(processed_dir) as conn:
+            rows = conn.execute("SELECT * FROM instruments").fetchall()
+            alias_rows = conn.execute("SELECT alias, kind, symbol FROM instrument_aliases").fetchall()
+        for row in rows:
+            instrument = _row_to_dict(row)
+            norm_kind = normalize_instrument_kind(instrument.get("kind"))
+            norm_symbol = normalize_instrument_symbol(instrument.get("symbol"))
+            if norm_kind and norm_symbol:
+                by_kind_symbol[(norm_kind, norm_symbol)] = instrument
+        for row in alias_rows:
+            norm_kind = normalize_instrument_kind(row["kind"])
+            norm_alias = normalize_instrument_symbol(row["alias"])
+            norm_symbol = normalize_instrument_symbol(row["symbol"])
+            if norm_kind and norm_alias and norm_symbol:
+                aliases_by_kind_alias[(norm_kind, norm_alias)] = norm_symbol
+
+        if _INSTRUMENTS_CACHE_TTL_SECONDS > 0:
+            _INSTRUMENTS_CACHE[cache_key] = (
+                time.monotonic() + _INSTRUMENTS_CACHE_TTL_SECONDS,
+                by_kind_symbol,
+                aliases_by_kind_alias,
+            )
+        return by_kind_symbol, aliases_by_kind_alias
 
 
 def reference_data_db_path(processed_dir: Path) -> Path:
@@ -453,6 +521,7 @@ def upsert_instruments(
                 alias_count += 1
             upserted += 1
         conn.commit()
+    clear_instruments_cache(processed_dir)
     return {
         "db_path": str(reference_data_db_path(processed_dir)),
         "upserted_count": upserted,
@@ -485,22 +554,13 @@ def get_instrument(processed_dir: Path, kind: str, symbol: Any) -> Optional[Dict
     normalized_symbol = normalize_instrument_symbol(symbol)
     if not normalized_kind or not normalized_symbol:
         return None
-    with _connect(processed_dir) as conn:
-        row = conn.execute(
-            "SELECT * FROM instruments WHERE kind = ? AND symbol = ?",
-            (normalized_kind, normalized_symbol),
-        ).fetchone()
-        if not row:
-            alias = conn.execute(
-                "SELECT kind, symbol FROM instrument_aliases WHERE alias = ?",
-                (normalized_symbol,),
-            ).fetchone()
-            if alias and alias["kind"] == normalized_kind:
-                row = conn.execute(
-                    "SELECT * FROM instruments WHERE kind = ? AND symbol = ?",
-                    (alias["kind"], alias["symbol"]),
-                ).fetchone()
-        return _row_to_dict(row) if row else None
+    by_kind_symbol, aliases_by_kind_alias = _ensure_instruments_cache(processed_dir)
+    instrument = by_kind_symbol.get((normalized_kind, normalized_symbol))
+    if instrument is None:
+        target_symbol = aliases_by_kind_alias.get((normalized_kind, normalized_symbol))
+        if target_symbol:
+            instrument = by_kind_symbol.get((normalized_kind, target_symbol))
+    return _copy_instrument_dict(instrument) if instrument else None
 
 
 def get_instruments(processed_dir: Path, kind: str, symbols: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
@@ -517,49 +577,16 @@ def get_instruments(processed_dir: Path, kind: str, symbols: Iterable[Any]) -> D
     if not normalized_kind or not requested_symbols:
         return {}
 
-    placeholders = ",".join("?" for _ in requested_symbols)
+    by_kind_symbol, aliases_by_kind_alias = _ensure_instruments_cache(processed_dir)
     result: Dict[str, Dict[str, Any]] = {}
-    missing = set(requested_symbols)
-    with _connect(processed_dir) as conn:
-        rows = conn.execute(
-            f"SELECT * FROM instruments WHERE kind = ? AND symbol IN ({placeholders})",
-            (normalized_kind, *requested_symbols),
-        ).fetchall()
-        for row in rows:
-            instrument = _row_to_dict(row)
-            symbol = str(instrument.get("symbol") or "")
-            if symbol:
-                result[symbol] = instrument
-                missing.discard(symbol)
-
-        if missing:
-            alias_placeholders = ",".join("?" for _ in missing)
-            alias_rows = conn.execute(
-                f"SELECT alias, kind, symbol FROM instrument_aliases WHERE alias IN ({alias_placeholders})",
-                tuple(missing),
-            ).fetchall()
-            alias_targets = {
-                str(row["alias"]): str(row["symbol"])
-                for row in alias_rows
-                if row["kind"] == normalized_kind and row["symbol"]
-            }
-            target_symbols = sorted(set(alias_targets.values()))
-            if target_symbols:
-                target_placeholders = ",".join("?" for _ in target_symbols)
-                target_rows = conn.execute(
-                    f"SELECT * FROM instruments WHERE kind = ? AND symbol IN ({target_placeholders})",
-                    (normalized_kind, *target_symbols),
-                ).fetchall()
-                target_map: Dict[str, Dict[str, Any]] = {}
-                for row in target_rows:
-                    instrument = _row_to_dict(row)
-                    target_symbol = str(instrument.get("symbol") or "")
-                    if target_symbol:
-                        target_map[target_symbol] = instrument
-                for alias, target_symbol in alias_targets.items():
-                    instrument = target_map.get(target_symbol)
-                    if instrument:
-                        result[alias] = instrument
+    for requested_symbol in requested_symbols:
+        instrument = by_kind_symbol.get((normalized_kind, requested_symbol))
+        if instrument is None:
+            target_symbol = aliases_by_kind_alias.get((normalized_kind, requested_symbol))
+            if target_symbol:
+                instrument = by_kind_symbol.get((normalized_kind, target_symbol))
+        if instrument is not None:
+            result[requested_symbol] = _copy_instrument_dict(instrument)
     return result
 
 
@@ -573,16 +600,16 @@ def get_instrument_name(processed_dir: Path, kind: str, symbol: Any) -> Optional
 def get_instrument_names(processed_dir: Path, kind: str) -> Dict[str, str]:
     seed_manual_instruments(processed_dir)
     normalized_kind = normalize_instrument_kind(kind)
-    with _connect(processed_dir) as conn:
-        rows = conn.execute(
-            "SELECT symbol, name, short_name FROM instruments WHERE kind = ? AND active = 1",
-            (normalized_kind,),
-        ).fetchall()
+    if not normalized_kind:
+        return {}
+    by_kind_symbol, _ = _ensure_instruments_cache(processed_dir)
     result: Dict[str, str] = {}
-    for row in rows:
-        name = str(row["name"] or row["short_name"] or "").strip()
-        if row["symbol"] and name:
-            result[str(row["symbol"])] = name
+    for (row_kind, symbol), instrument in by_kind_symbol.items():
+        if row_kind != normalized_kind or not instrument.get("active"):
+            continue
+        name = str(instrument.get("name") or instrument.get("short_name") or "").strip()
+        if symbol and name:
+            result[symbol] = name
     return result
 
 
@@ -591,6 +618,7 @@ def reset_reference_data_state_for_tests() -> None:
     _SEEDED_PROCESSED_DIRS.clear()
     _BOOTSTRAPPED_PROCESSED_DIRS.clear()
     _REFERENCE_SCHEMA_READY = False
+    clear_instruments_cache()
 
 
 def _read_json_dict(path: Path) -> Optional[Dict[str, Any]]:

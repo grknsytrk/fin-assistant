@@ -504,3 +504,45 @@ fix the floor was 294 KB on *every* request and a waiter could add ~18 MB.
   attempts between 2026-11-10 and 2026-11-13 before succeeding again. The
   workflow now wakes the Space and reports the terminal HTTP status, so the next
   failure names its own cause instead of only `curl` exit code 22.
+
+---
+
+## Milestone 3 — Write-storm, cold-container hydration & uncached read-path elimination (2026-11-14)
+
+### 1. Telemetry & Live DB Audit Findings
+
+Live production `/health` (`2523.9s` / ~42 min uptime) and live Supabase project `fngzctgzwhdcdzlifemg` (`fin-assistant`) measurements showed that Redis (Upstash) remains over quota (`cache_redis_fallback: true`, `quota_limited: true`) and revealed six high-frequency Postgres/Supabase egress and churn paths:
+
+1. **1-minute KAP Flow upsert storm & payload-heavy head poll (`ragfin_kap_flow_events`)**:
+   - Production `pg_stat_user_tables` recorded **3,930,116** row upsert operations (~**1,988/min**) across **22,094** rows (~8.99 MB payload), inflating dead-tuple table bloat to **85 MB** (`autovacuum` continuously rewriting).
+   - `_refresh_kap_flow_store(fast=True)` used `_VYK_DEFAULT_DETAIL_BUDGET_MAX` (**2,000** items) per 1-minute cycle, issuing unconditional per-row `ON CONFLICT (event_key) DO UPDATE` writes and resetting `FLOW_HEAD_CACHE_PREFIX`.
+   - `read_flow_head` called `read_flow_page`, reading full `payload` JSONB rows just to compute `(published_at, event_key)` cursor state.
+2. **Test key pollution & broad startup hydration (`ragfin_json_cache`)**:
+   - Live `ragfin_json_cache` contained **330** Windows/POSIX pytest temp keys (`C://%`, `/tmp/%`, `%pytest-%`, **352,947 B** payload).
+   - Startup `bootstrap_application_storage()` hydrated `ragfin_json_cache` without an explicit key-prefix allowlist and counted excluded rows via sequential `SELECT COUNT(*)` queries.
+3. **Cold-container KAP statement check fallback & snapshot churn**:
+   - Without local `kap_cache/*.json` on ephemeral containers, `_read_local_statement_cache()` lacked a compact remote metadata fallback and triggered heavy `kap_cache/` scans (~19 MB uncompressed) during coverage/state checks.
+   - `upsert_financial_snapshots()` bumped the shared version and cleared `_SNAPSHOT_MEMORY_CACHE` even when in-process snapshots could be merged in-place, while `upsert_provider_fundamentals_bulk()` wrote and invalidated unchanged provider rows.
+4. **Redundant `fund_snapshots` / `fund_prices` reads & uncached fund API endpoints**:
+   - Production `/health` showed **6** `fund_snapshots` reads (**3,412,086 B**) and **2** `fund_prices` reads (**1,060,336 B**) within 42 minutes: unfiltered `_read_fund_snapshot_rows()` was not cached in memory across listing/detail/overlay rebuilds, `read_latest_fund_price_points` omitted `price_generation` from `db_key_prefix`, `_catalog_price_overlay_metadata` re-scanned `catalog_dates`, and `_FUND_SNAPSHOT_ROW_MAP_CACHE` had a typo (`rev.get('price_revision')` instead of `price_generation`).
+   - `_fund_detail_payload`, `_funds_categories_payload`, and `_funds_search_payload` had no response cache (closing open **P2-11**), and `_FUND_LISTING_CACHE_TTL_SECONDS` defaulted to `600 s`.
+5. **Uncached `instruments` lookups (`reference_data.py`)**:
+   - `/health` showed `instruments` reads on cold/request paths without process-local caching.
+6. **Unconditional remote `model_portfolio/state.json` read**:
+   - `load_model_portfolio_state` called `read_json_cache(path)` on a cold worker even when startup hydration had already materialized `model_portfolio/state.json` locally and `force_reload=False`.
+
+### 2. Live DB Cleanup & Code Fixes Applied
+
+- **Live Supabase cleanup (`ragfin_json_cache`)**: Deleted **330** polluted pytest temp rows (**352,947 B**). Verified only 4 valid prefixes remain: `funds_cache` (`550` rows, `19,339,225 B`), `kap_cache` (`572` rows, `2,555,075 B`), `_shared` (`1` row, `18,246 B`), `model_portfolio` (`1` row, `9,333 B`).
+- **KAP Flow storm & head cursor (`app/database.py`, `app/kap_flow_store.py`, `app/kap_api_service.py`)**: Added `"ragfin_kap_flow_events"` to `TARGET_TABLES` (plus `tests/test_api.py` & `scripts/benchmark_supabase_egress.py`); batched `upsert_kap_flow_events` in `150`-row chunks with `IS DISTINCT FROM` guards; added `_PERSISTED_FLOW_HASHES` (max `5,000`) to skip unchanged batches and preserve `FLOW_HEAD_CACHE_PREFIX`; added payload-less `read_kap_flow_head(*, category=None)` and cached cursors under `{FLOW_HEAD_CACHE_PREFIX}cursor:{norm_category or ''}`; lowered fast refresh limit to `RAGFIN_KAP_VYK_FAST_REFRESH_LIMIT` (default `150`).
+- **JSON cache hardening (`app/database.py`, `app/api.py`)**: Hardened `_cache_key()` with `_KNOWN_CACHE_ROOTS = ("_shared", "model_portfolio", "funds_cache", "kap_cache")`; restricted `bootstrap_application_storage()` hydration via `include_key_prefixes=("_shared/", "model_portfolio/")`; removed `excluded_prefixes` `SELECT COUNT(*)` loop and filtered invalid OS/URI keys in SQL.
+- **KAP metadata projection & financial snapshot cache (`app/database.py`, `app/kap_statement_refresh.py`, `app/financial_snapshot_store.py`)**: Added `read_json_cache_kap_metadata()` returning projected quarter headers (`572` rows, **291,050 B** vs ~19 MB full payloads) with `120 s` `_REMOTE_STATEMENT_META_CACHE`; updated `upsert_financial_snapshots` to skip unchanged rows and update `_SNAPSHOT_MEMORY_CACHE` in-place; updated `upsert_provider_fundamentals_bulk` to skip unchanged rows and avoid spurious invalidations.
+- **Fund service & API caches (`app/fund_service.py`, `app/fund_api_service.py`)**: Cached unfiltered `_read_fund_snapshot_rows` under `fund-snapshot-all-rows:{db_path}:{catalog_gen}` (`3600 s` TTL, reusing `catalog_dates` in `_catalog_price_overlay_metadata`); keyed `read_latest_fund_price_points` on `gen={price_gen}` with `max(3600, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)` on Postgres; raised `_FUND_LISTING_CACHE_TTL_SECONDS` to `3600`, fixed `price_generation` lookup, extended `_FUND_SNAPSHOT_ROW_MAP_CACHE` TTL to `300 s`, and added generation-keyed caches for `_funds_search_payload` (`600 s`), `_funds_categories_payload` (`1800 s`), and `_fund_detail_payload` (`900 s`).
+- **Reference data & model portfolio (`app/reference_data.py`, `app/model_portfolio_service.py`)**: Added process-local `1800 s` `instruments` + alias cache in `reference_data.py` invalidated on `upsert_instruments`; updated `load_model_portfolio_state` to query `read_json_cache(path)` only when `force_reload` or `local_state is None`.
+
+### 3. Targeted Verification (`pytest`)
+
+- `pytest tests/test_kap_flow_store.py tests/test_kap_statement_refresh.py tests/test_financial_snapshot_store.py tests/test_reference_data.py tests/test_fund_price_points_cache.py tests/test_e2e_egress.py -q`: **100 passed** (`20.06s`)
+- `pytest tests/test_api.py -k "health or kap_flow or commit_json_cache or fund_yield_summary or admin_funds_refresh or fund_detail_categories_search_payload" -q`: **13 passed**, 194 deselected (`1.23s`)
+- `pytest tests/test_fund_service.py -k "snapshot or detail or categories or overlay" -q`: **47 passed**, 83 deselected (`2.23s`)
+

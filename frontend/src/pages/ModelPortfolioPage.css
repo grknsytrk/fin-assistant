@@ -465,23 +465,76 @@
 
 /* Performance SVG Chart */
 .mp-chart-container {
-    padding: 0.9rem 1rem 0.8rem;
+    padding: 0.9rem 1rem 0.85rem;
 }
 
 .mp-chart-legend {
     display: flex;
     align-items: flex-start;
+    justify-content: space-between;
     flex-wrap: wrap;
-    gap: 0.6rem 1.75rem;
+    gap: 0.65rem 1.25rem;
     margin-bottom: 0.75rem;
     font-size: 0.76rem;
 }
 
+.mp-legend-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+}
+
+.mp-chart-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: nowrap;
+    gap: 0.75rem;
+    min-height: 30px;
+    margin-top: 0.6rem;
+}
+
 .mp-chart-footnote {
-    margin: 0.55rem 0 0;
+    min-width: 0;
+    margin: 0;
     color: var(--text-muted);
     font-size: 0.7rem;
     line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mp-chart-measure-btn {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-width: 142px;
+    height: 28px;
+    padding: 0 0.65rem;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--border-radius);
+    background: var(--bg-color);
+    color: var(--text-secondary);
+    font-family: var(--font-sans);
+    font-size: 0.72rem;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: border-color 0.14s ease, color 0.14s ease, background 0.14s ease;
+}
+
+.mp-chart-measure-btn:hover {
+    border-color: color-mix(in srgb, var(--accent-color) 55%, var(--surface-border));
+    color: var(--text-primary);
+}
+
+.mp-chart-measure-btn.is-active {
+    border-color: var(--accent-color);
+    background: color-mix(in srgb, var(--accent-color) 16%, transparent);
+    color: var(--text-primary);
 }
 
 .mp-chart-panel {
@@ -494,41 +547,42 @@
     z-index: 10;
 }
 
-/* Range tooltip: compact, only the series that are drawn on the chart */
-.mp-chart-measure-tooltip {
+/* Unified chart tooltip (Point hover/scrub & Range measurement) */
+.mp-chart-tooltip {
     position: absolute;
     z-index: 50;
     box-sizing: border-box;
-    width: 180px;
-    max-height: calc(100% - 16px);
-    overflow-y: auto;
-    padding: 0.5rem 0.6rem;
-    border: 1px solid var(--surface-border);
+    width: 224px;
+    padding: 0.55rem 0.68rem;
+    border: 1px solid color-mix(in srgb, var(--surface-border) 85%, var(--text-muted));
     border-radius: var(--border-radius);
     background: color-mix(in srgb, var(--surface-color) 94%, black);
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
     pointer-events: none;
+    transition: left 0.08s ease-out, top 0.08s ease-out;
 }
 
-.mp-chart-measure-tooltip-header {
+.mp-chart-tooltip-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.4rem;
-    margin-bottom: 0.4rem;
-    padding-bottom: 0.4rem;
+    margin-bottom: 0.42rem;
+    padding-bottom: 0.38rem;
     border-bottom: 1px solid var(--surface-border);
     color: var(--text-secondary);
     font-family: var(--font-mono);
-    font-size: 0.66rem;
+    font-size: 0.68rem;
+    font-weight: 600;
     white-space: nowrap;
 }
 
-.mp-chart-measure-tooltip-header button {
+.mp-chart-tooltip-header button {
     display: grid;
     flex: 0 0 auto;
-    width: 1.2rem;
-    height: 1.2rem;
+    width: 1.3rem;
+    height: 1.3rem;
     place-items: center;
     border: 0;
     border-radius: 3px;
@@ -538,90 +592,131 @@
     pointer-events: auto;
 }
 
-.mp-chart-measure-tooltip-header button:hover,
-.mp-chart-measure-tooltip-header button:focus-visible {
+.mp-chart-tooltip-header button:hover,
+.mp-chart-tooltip-header button:focus-visible {
     background: var(--surface-hover);
     color: var(--text-primary);
 }
 
-.mp-chart-measure-tooltip-header button:focus-visible {
+.mp-chart-tooltip-header button:focus-visible {
     outline: 2px solid var(--accent-color);
     outline-offset: 1px;
 }
 
-.mp-chart-measure-tooltip-list {
+.mp-chart-tooltip-list {
     display: flex;
     flex-direction: column;
-    gap: 0.28rem;
+    gap: 0.32rem;
     margin: 0;
     padding: 0;
     list-style: none;
 }
 
-.mp-chart-measure-tooltip-list li {
+.mp-chart-tooltip-list li {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 0.6rem;
-    font-size: 0.72rem;
+    gap: 0.5rem;
+    font-size: 0.73rem;
 }
 
-.mp-chart-measure-tooltip-name {
+.mp-chart-tooltip-name {
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: 0.38rem;
     color: var(--text-secondary);
+    white-space: nowrap;
 }
 
-.mp-chart-measure-tooltip-dot {
+.mp-chart-tooltip-dot {
+    flex: 0 0 auto;
     width: 7px;
     height: 7px;
     border-radius: 50%;
 }
 
-.mp-chart-measure-tooltip-list strong {
+.mp-chart-tooltip-val {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.38rem;
+    white-space: nowrap;
+}
+
+.mp-chart-tooltip-price {
+    color: var(--text-primary);
+    font-size: 0.72rem;
+    font-weight: 500;
+}
+
+.mp-chart-tooltip-list strong {
     font-size: 0.74rem;
     font-weight: 600;
 }
 
-/* Legend: flat, fixed-height row so nothing jumps while hovering or toggling */
-.mp-chart-legend {
-    min-height: 2.9rem;
+.mp-chart-tooltip-alphas {
+    display: flex;
+    flex-direction: column;
+    gap: 0.24rem;
+    margin-top: 0.42rem;
+    padding-top: 0.38rem;
+    border-top: 1px dashed var(--surface-border);
 }
 
+.mp-chart-tooltip-alpha-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.mp-chart-tooltip-alpha-row strong {
+    font-size: 0.72rem;
+    font-weight: 600;
+}
+
+/* Legend: interactive pill toggles so state is obvious and nothing jumps */
 .mp-legend-toggle {
     display: flex;
     flex-direction: column;
-    gap: 0.22rem;
-    min-width: 8.6rem;
-    padding: 0;
-    border: 0;
-    background: transparent;
+    gap: 0.18rem;
+    min-width: 8.2rem;
+    padding: 0.38rem 0.62rem;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--border-radius);
+    background: color-mix(in srgb, var(--bg-color) 65%, var(--surface-color));
     color: var(--text-secondary);
     font: inherit;
     text-align: left;
     white-space: nowrap;
     cursor: pointer;
+    transition: border-color 0.14s ease, background 0.14s ease;
+}
+
+.mp-legend-toggle:hover {
+    border-color: color-mix(in srgb, var(--text-muted) 45%, var(--surface-border));
+    background: var(--surface-hover);
 }
 
 .mp-legend-name {
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
-    font-size: 0.74rem;
+    gap: 0.38rem;
+    font-size: 0.72rem;
     color: var(--text-secondary);
 }
 
 .mp-legend-figures {
     display: inline-flex;
     align-items: baseline;
-    gap: 0.5rem;
-    font-size: 0.78rem;
+    gap: 0.45rem;
+    font-size: 0.76rem;
 }
 
 .mp-legend-figures strong {
     color: var(--text-primary);
-    font-size: 0.95rem;
+    font-size: 0.88rem;
     font-weight: 600;
 }
 
@@ -647,15 +742,14 @@
 }
 
 .mp-legend-toggle.is-hidden .mp-legend-swatch {
-    background: transparent;
-    box-shadow: inset 0 0 0 1.5px var(--text-muted);
+    opacity: 0.35;
 }
 
 .mp-legend-swatch {
     flex: 0 0 auto;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
+    width: 14px;
+    height: 2.5px;
+    border-radius: 2px;
     display: inline-block;
 }
 
@@ -664,11 +758,17 @@
 }
 
 .mp-legend-swatch.is-xu100 {
-    background: #94a3b8;
+    height: 0;
+    border-top: 2px dashed #10b981;
+    border-radius: 0;
+    background: transparent;
 }
 
 .mp-legend-swatch.is-xu030 {
-    background: #f59e0b;
+    height: 0;
+    border-top: 2px dotted #f59e0b;
+    border-radius: 0;
+    background: transparent;
 }
 
 .mp-legend-meta {
@@ -677,7 +777,8 @@
     align-items: flex-end;
     gap: 0.22rem;
     margin-left: auto;
-    min-width: 10rem;
+    min-width: 10.5rem;
+    font-variant-numeric: tabular-nums;
     text-align: right;
 }
 
@@ -717,14 +818,16 @@
 }
 
 .mp-chart-grid {
-    stroke: rgba(255, 255, 255, 0.045);
+    stroke: rgba(255, 255, 255, 0.05);
     stroke-width: 1;
+    vector-effect: non-scaling-stroke;
 }
 
 .mp-chart-baseline {
     stroke: rgba(148, 163, 184, 0.35);
     stroke-width: 1;
     stroke-dasharray: 3 5;
+    vector-effect: non-scaling-stroke;
 }
 
 .mp-chart-baseline-text {
@@ -747,28 +850,32 @@
 .mp-line-xu030 {
     stroke-linecap: round;
     stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
 }
 
 .mp-line-portfolio {
     stroke: #3b82f6;
-    stroke-width: 2.8;
+    stroke-width: 2.5;
 }
 
 .mp-line-portfolio-glow {
     stroke: #3b82f6;
-    stroke-width: 8;
-    stroke-opacity: 0.14;
+    stroke-width: 6;
+    stroke-opacity: 0.12;
 }
 
 .mp-line-xu100 {
-    stroke: #94a3b8;
-    stroke-width: 1.7;
+    stroke: #10b981;
+    stroke-width: 1.8;
+    stroke-dasharray: 6 4;
+    stroke-opacity: 0.9;
 }
 
 .mp-line-xu030 {
     stroke: #f59e0b;
-    stroke-width: 1.7;
-    stroke-dasharray: 6 5;
+    stroke-width: 1.8;
+    stroke-dasharray: 2 4;
+    stroke-opacity: 0.9;
 }
 .mp-chart-no-series {
     fill: var(--text-muted, #8B949E);
@@ -776,9 +883,10 @@
 }
 
 .mp-chart-crosshair {
-    stroke: rgba(255, 255, 255, 0.18);
+    stroke: rgba(255, 255, 255, 0.22);
     stroke-width: 1;
     stroke-dasharray: 2 2;
+    vector-effect: non-scaling-stroke;
 }
 
 .mp-chart-selection-band {
@@ -798,6 +906,14 @@
     vector-effect: non-scaling-stroke;
 }
 
+.mp-chart-measure-anchor {
+    stroke: var(--accent-color);
+    stroke-width: 1.4;
+    stroke-dasharray: 4 4;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+}
+
 .mp-dot-portfolio {
     fill: #3b82f6;
     stroke: #0A0C0F;
@@ -810,7 +926,7 @@
 }
 
 .mp-dot-xu100 {
-    fill: #94a3b8;
+    fill: #10b981;
     stroke: #0A0C0F;
     stroke-width: 1.5;
 }
@@ -2960,8 +3076,45 @@
     }
 }
 
-/* Mobile: measurement summary sits below the chart instead of covering it. */
+/* Mobile: chart legend, docked tooltip, and measure controls */
 @media (max-width: 760px) {
+    .mp-chart-container {
+        padding: 0.75rem 0.7rem 0.75rem;
+    }
+
+    .mp-chart-legend {
+        flex-direction: column;
+        gap: 0.55rem;
+    }
+
+    .mp-legend-toggles {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        width: 100%;
+        gap: 0.38rem;
+    }
+
+    .mp-legend-toggle {
+        min-width: 0;
+        min-height: var(--touch-target, 44px);
+        padding: 0.35rem 0.45rem;
+    }
+
+    .mp-legend-name {
+        font-size: 0.68rem;
+    }
+
+    .mp-legend-figures {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.05rem;
+        font-size: 0.7rem;
+    }
+
+    .mp-legend-figures strong {
+        font-size: 0.78rem;
+    }
+
     .mp-chart-stage {
         display: flex;
         flex-direction: column;
@@ -2971,7 +3124,7 @@
         touch-action: pan-y;
     }
 
-    .mp-chart-measure-tooltip {
+    .mp-chart-tooltip {
         position: static !important;
         top: auto !important;
         right: auto !important;
@@ -2981,29 +3134,42 @@
         max-height: none;
         margin-top: 0.55rem;
         overflow: visible;
-        padding: 0.55rem 0.65rem;
+        padding: 0.6rem 0.7rem;
+        pointer-events: auto;
     }
 
-    .mp-chart-measure-tooltip-header {
+    .mp-chart-tooltip-header {
         margin-bottom: 0.45rem;
-        font-size: 0.7rem;
+        font-size: 0.72rem;
         white-space: normal;
     }
 
-    .mp-chart-measure-tooltip-list {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 0.32rem 0.85rem;
+    .mp-chart-tooltip-list {
+        gap: 0.36rem;
     }
 
-    .mp-chart-measure-tooltip-list li {
-        gap: 0.35rem;
-        font-size: 0.7rem;
+    .mp-chart-tooltip-list li {
+        font-size: 0.73rem;
     }
 
-    .mp-chart-measure-tooltip-list strong {
-        font-size: 0.72rem;
-        white-space: nowrap;
+    .mp-chart-tooltip-alphas {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 0.35rem 0.85rem;
+    }
+
+    .mp-chart-footer {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.45rem;
+    }
+
+    .mp-chart-measure-btn {
+        justify-content: center;
+        min-height: var(--touch-target, 44px);
+        font-size: 0.76rem;
     }
 }
 

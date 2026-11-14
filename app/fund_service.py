@@ -1123,11 +1123,41 @@ def _read_fund_snapshot_rows(
     params: Iterable[Any] = (),
     order_by: str = "row_order ASC",
 ) -> List[Dict[str, Any]]:
+    use_all_rows_cache = (
+        not where
+        and not tuple(params)
+        and order_by == "row_order ASC"
+        and database_enabled()
+    )
+    all_rows_cache_key = ""
+    if use_all_rows_cache:
+        catalog_gen = fund_listing_revision(processed_dir).get("catalog_generation", 0)
+        all_rows_cache_key = f"fund-snapshot-all-rows:{_fund_prices_db_path(processed_dir)}:{catalog_gen}"
+        cached = _MEMORY_CACHE.get(all_rows_cache_key)
+        if (
+            isinstance(cached, dict)
+            and isinstance(cached.get("cached_at"), (int, float))
+            and time.time() - float(cached["cached_at"]) <= 3600.0
+            and isinstance(cached.get("rows"), list)
+        ):
+            return [dict(row) for row in cached["rows"]]
+
     columns = ", ".join(_FUND_SNAPSHOT_READ_COLUMNS)
     query = f"SELECT {columns} FROM fund_snapshots{(' WHERE ' + where) if where else ''} ORDER BY {order_by}"
     with _connect_fund_prices_db(processed_dir) as conn:
         records = conn.execute(query, tuple(params)).fetchall()
-    return [_snapshot_row_from_record(record) for record in records]
+    rows = [_snapshot_row_from_record(record) for record in records]
+    if use_all_rows_cache and all_rows_cache_key:
+        catalog_dates = {
+            str(row.get("fund_code") or ""): _fund_date(row.get("as_of"))
+            for row in rows
+            if row.get("fund_code")
+        }
+        _memory_cache_put(
+            all_rows_cache_key,
+            {"cached_at": time.time(), "rows": [dict(row) for row in rows], "catalog_dates": catalog_dates},
+        )
+    return rows
 
 
 def _read_fund_snapshot_category_returns(
@@ -3277,12 +3307,18 @@ def read_latest_fund_price_points(
     if not normalized_codes:
         return {}
 
-    ttl = max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
+    is_postgres = database_enabled()
+    price_gen = fund_listing_revision(processed_dir).get("price_generation", 0) if is_postgres else 0
+    ttl = (
+        max(3600, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
+        if (is_postgres and FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS >= 900)
+        else max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
+    )
     now = time.time()
     projection_mode = "full" if include_metadata else "quote"
     db_key_prefix = (
         f"latest-fund-price-points:{projection_mode}:{_fund_prices_db_path(processed_dir)}:"
-        f"{end_date.isoformat() if end_date else 'latest'}"
+        f"gen={price_gen}:{end_date.isoformat() if end_date else 'latest'}"
     )
     cache_key = f"{db_key_prefix}:{','.join(normalized_codes)}"
     cached = _MEMORY_CACHE.get(cache_key)
@@ -6869,13 +6905,23 @@ def _overlay_latest_price_history(
 
 
 def _catalog_price_overlay_metadata(processed_dir: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
-    ttl = max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
+    is_postgres = database_enabled()
     generation = payload.get("snapshot_generation")
+    ttl = (
+        max(3600, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
+        if (generation and is_postgres and FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS >= 900)
+        else max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
+    )
     original_as_of = _fund_date(payload.get("as_of") or (payload.get("source_metadata") or {}).get("as_of"))
     dates_cache_key = (
         f"catalog-dates:{_fund_prices_db_path(processed_dir)}:{generation}:{original_as_of}"
     )
     cached_dates_entry = _MEMORY_CACHE.get(dates_cache_key)
+    all_rows_cached = (
+        _MEMORY_CACHE.get(f"fund-snapshot-all-rows:{_fund_prices_db_path(processed_dir)}:{generation}")
+        if (generation is not None and is_postgres)
+        else None
+    )
     if (
         isinstance(cached_dates_entry, dict)
         and isinstance(cached_dates_entry.get("cached_at"), (int, float))
@@ -6883,6 +6929,17 @@ def _catalog_price_overlay_metadata(processed_dir: Path, payload: Dict[str, Any]
         and isinstance(cached_dates_entry.get("catalog_dates"), dict)
     ):
         catalog_dates: Dict[str, Optional[str]] = dict(cached_dates_entry["catalog_dates"])
+    elif (
+        isinstance(all_rows_cached, dict)
+        and isinstance(all_rows_cached.get("cached_at"), (int, float))
+        and time.time() - float(all_rows_cached["cached_at"]) <= ttl
+        and isinstance(all_rows_cached.get("catalog_dates"), dict)
+    ):
+        catalog_dates = dict(all_rows_cached["catalog_dates"])
+        _memory_cache_put(
+            dates_cache_key,
+            {"cached_at": time.time(), "catalog_dates": catalog_dates},
+        )
     else:
         with _connect_fund_prices_db(processed_dir) as conn:
             records = conn.execute("SELECT fund_code, as_of FROM fund_snapshots ORDER BY fund_code").fetchall()

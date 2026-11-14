@@ -336,12 +336,48 @@ def _statement_cache_path(symbol: str) -> Path:
     return _cache_file_for_company(CONFIG.paths.processed_dir, symbol)
 
 
+_REMOTE_STATEMENT_META_LOCK = threading.Lock()
+_REMOTE_STATEMENT_META_CACHE: Dict[str, Any] = {"scope": "", "loaded_at": 0.0, "by_symbol": {}}
+_REMOTE_STATEMENT_META_TTL_SECONDS = 120.0
+
+
+def clear_remote_statement_meta_cache() -> None:
+    """Reset the process-local remote KAP metadata map (primarily for tests)."""
+
+    with _REMOTE_STATEMENT_META_LOCK:
+        _REMOTE_STATEMENT_META_CACHE.update({"scope": "", "loaded_at": 0.0, "by_symbol": {}})
+
+
+def _load_remote_statement_cache_metadata() -> Dict[str, Dict[str, Any]]:
+    if not database_enabled():
+        return {}
+    scope = os.getenv("RAGFIN_DATABASE_URL", "") or os.getenv("DATABASE_URL", "")
+    now = time.monotonic()
+    with _REMOTE_STATEMENT_META_LOCK:
+        if (
+            _REMOTE_STATEMENT_META_CACHE.get("scope") == scope
+            and now - float(_REMOTE_STATEMENT_META_CACHE.get("loaded_at") or 0.0) <= _REMOTE_STATEMENT_META_TTL_SECONDS
+            and isinstance(_REMOTE_STATEMENT_META_CACHE.get("by_symbol"), dict)
+        ):
+            return _REMOTE_STATEMENT_META_CACHE["by_symbol"]
+
+    from app.database import read_json_cache_kap_metadata
+
+    by_symbol = read_json_cache_kap_metadata()
+    with _REMOTE_STATEMENT_META_LOCK:
+        _REMOTE_STATEMENT_META_CACHE.update(
+            {"scope": scope, "loaded_at": time.monotonic(), "by_symbol": by_symbol}
+        )
+    return by_symbol
+
+
 def _read_local_statement_cache(symbol: str) -> Optional[Dict[str, Any]]:
-    """Read only the local mirror; remote hydration happens at bootstrap."""
+    """Read local mirror first, falling back to compact remote KAP headers when missing."""
 
     from src.kap_fetcher import _cache_matches_requested_company, _company_cache_keys
 
-    for key in _company_cache_keys(symbol):
+    keys = _company_cache_keys(symbol)
+    for key in keys:
         path = _statement_cache_path(key)
         try:
             with path.open("r", encoding="utf-8") as handle:
@@ -350,6 +386,13 @@ def _read_local_statement_cache(symbol: str) -> Optional[Dict[str, Any]]:
             continue
         if isinstance(payload, dict) and _cache_matches_requested_company(payload, symbol):
             return payload
+
+    if database_enabled():
+        remote_map = _load_remote_statement_cache_metadata()
+        for key in keys:
+            candidate = remote_map.get(str(key).strip().upper())
+            if isinstance(candidate, dict) and _cache_matches_requested_company(candidate, symbol):
+                return candidate
     return None
 
 

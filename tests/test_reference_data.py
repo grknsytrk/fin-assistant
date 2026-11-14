@@ -110,3 +110,54 @@ def test_reference_data_deduplicates_batch_keys(tmp_path) -> None:
     assert result["record_count"] == 1
     assert result["upserted_count"] == 1
     assert get_instrument(tmp_path, "fund", "TLY")["name"] == "TLY updated"
+
+
+def test_instruments_lookup_uses_memory_cache_and_invalidates_on_upsert(tmp_path, monkeypatch) -> None:
+    import app.reference_data as ref_data
+
+    ref_data.reset_reference_data_state_for_tests()
+    upsert_instrument(
+        tmp_path,
+        kind="stock",
+        symbol="THYAO",
+        name="TÜRK HAVA YOLLARI",
+        aliases=["THYAO_ALT"],
+        source="kap",
+        active=1,
+    )
+
+    original_connect = ref_data._connect
+    connect_calls = 0
+
+    def tracked_connect(processed_dir):
+        nonlocal connect_calls
+        connect_calls += 1
+        return original_connect(processed_dir)
+
+    monkeypatch.setattr(ref_data, "_connect", tracked_connect)
+
+    by_symbol = get_instrument(tmp_path, "stock", "THYAO")
+    by_alias = get_instrument(tmp_path, "stock", "THYAO_ALT")
+    batch = ref_data.get_instruments(tmp_path, "stock", ["THYAO", "THYAO_ALT"])
+    names = ref_data.get_instrument_names(tmp_path, "stock")
+
+    assert by_symbol is not None and by_symbol["name"] == "TÜRK HAVA YOLLARI"
+    assert by_alias is not None and by_alias["name"] == "TÜRK HAVA YOLLARI"
+    assert batch["THYAO"]["name"] == "TÜRK HAVA YOLLARI"
+    assert batch["THYAO_ALT"]["name"] == "TÜRK HAVA YOLLARI"
+    assert names["THYAO"] == "TÜRK HAVA YOLLARI"
+    assert connect_calls == 1
+
+    # Updating an instrument must invalidate the in-memory cache cleanly.
+    upsert_instrument(
+        tmp_path,
+        kind="stock",
+        symbol="THYAO",
+        name="THYAO UPDATED",
+        source="manual",
+        active=1,
+    )
+    refreshed = get_instrument(tmp_path, "stock", "THYAO")
+    assert refreshed is not None and refreshed["name"] == "THYAO UPDATED"
+    assert connect_calls == 3
+    ref_data.reset_reference_data_state_for_tests()
