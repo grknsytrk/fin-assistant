@@ -1786,6 +1786,23 @@ def test_merge_refresh_rows_keeps_daily_return_source_out_of_previous_quote() ->
     assert set(fund_service._daily_return_reconciliation_candidates(merged)) == {"STL"}
 
 
+def test_reconciliation_candidates_skip_zero_price_rows() -> None:
+    """Zero-price placeholder rows can never be reconciled from price history."""
+
+    rows = [
+        {"fund_code": "ZRO", "as_of": "2026-05-26", "price": 0.0},
+        {"fund_code": "NUL", "as_of": "2026-05-26", "price": None},
+        {"fund_code": "OKP", "as_of": "2026-05-26", "price": 1.5},
+    ]
+
+    candidates = fund_service._daily_return_reconciliation_candidates(
+        rows,
+        include_missing=True,
+    )
+
+    assert set(candidates) == {"NUL", "OKP"}
+
+
 def test_refresh_funds_snapshot_reuses_resolved_return_for_unchanged_price(
     monkeypatch, tmp_path
 ) -> None:

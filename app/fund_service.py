@@ -3479,6 +3479,12 @@ def _daily_return_reconciliation_candidates(
         source = _normalize_price_source(str(row.get("source") or ""))
         return_source = _normalize_price_source(str(row.get("daily_return_source") or ""))
         has_daily_return = _coerce_float(_first_present(row, "daily_return", "gunlukGetiri")) is not None
+        # A catalogue row that carries a zero price has no price history either,
+        # so it can never produce a previous-close return. Keeping it in the
+        # candidate set only adds funds to the rebuild's window query.
+        row_price = _coerce_float(row.get("price"))
+        if row_price is not None and row_price <= 0:
+            continue
         if not (
             source == TEFAS_LIST_SNAPSHOT_SOURCE
             or return_source == TEFASFON_RETURNS_SOURCE
