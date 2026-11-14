@@ -16,23 +16,30 @@ import {
     type RefObject,
     type SetStateAction,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
+    AlertCircle,
     ArrowUpDown,
     BarChart3,
     BriefcaseBusiness,
+    Building2,
     ChevronDown,
     ChevronRight,
+    Clock3,
     Database,
     Info,
     LineChart,
     LogIn,
     LogOut,
+    Percent,
     Plus,
     RefreshCw,
+    RotateCcw,
     Search,
     ShieldAlert,
     SlidersHorizontal,
     Star,
+    TrendingUp,
     Trophy,
     X,
 } from 'lucide-react';
@@ -89,9 +96,98 @@ type FundSortKey =
     | 'founder_company'
     | 'price'
     | 'daily_return'
+    | 'return_1w'
+    | 'return_1m'
+    | 'return_3m'
+    | 'return_6m'
+    | 'return_ytd'
+    | 'return_1y'
     | 'risk_value'
     | 'aum'
+    | 'investor_count'
     | 'as_of';
+
+type FundTableMode = 'summary' | 'performance';
+type FundScreenerPresetId =
+    | 'high_1y'
+    | 'steady_momentum'
+    | 'short_term_move'
+    | 'low_risk'
+    | 'large_aum'
+    | 'popular_investors';
+type FundScreenerRangeKey =
+    | 'min_daily' | 'max_daily'
+    | 'min_1w' | 'max_1w'
+    | 'min_1m' | 'max_1m'
+    | 'min_3m' | 'max_3m'
+    | 'min_6m' | 'max_6m'
+    | 'min_ytd' | 'max_ytd'
+    | 'min_1y' | 'max_1y'
+    | 'min_risk' | 'max_risk'
+    | 'min_aum_m' | 'max_aum_m'
+    | 'min_investors' | 'max_investors';
+type FundScreenerFilterState = {
+    founder: string;
+} & Record<FundScreenerRangeKey, string>;
+
+const EMPTY_FUND_SCREENER_FILTERS: FundScreenerFilterState = {
+    founder: '',
+    min_daily: '', max_daily: '',
+    min_1w: '', max_1w: '',
+    min_1m: '', max_1m: '',
+    min_3m: '', max_3m: '',
+    min_6m: '', max_6m: '',
+    min_ytd: '', max_ytd: '',
+    min_1y: '', max_1y: '',
+    min_risk: '', max_risk: '',
+    min_aum_m: '', max_aum_m: '',
+    min_investors: '', max_investors: '',
+};
+
+const FUND_SCREENER_PRESETS: Array<{
+    id: FundScreenerPresetId;
+    label: string;
+    filters: Partial<FundScreenerFilterState>;
+    fundType?: string;
+    risk?: string;
+}> = [
+    { id: 'high_1y', label: 'Yüksek Getiri (1Y %50+)', filters: { min_1y: '50' } },
+    { id: 'steady_momentum', label: 'Güçlü Momentum (1A & 3A)', filters: { min_1m: '3', min_3m: '10' } },
+    { id: 'short_term_move', label: 'Kısa Vadeli İvme (1H %2+)', filters: { min_1w: '2' } },
+    { id: 'low_risk', label: 'Düşük Risk (1–3)', filters: { min_risk: '1', max_risk: '3' } },
+    { id: 'large_aum', label: 'Büyük Ölçek (1 Mr ₺+)', filters: { min_aum_m: '1000' } },
+    { id: 'popular_investors', label: 'Popüler Fonlar (10B+ Yatırımcı)', filters: { min_investors: '10000' } },
+];
+
+type FundScreenerRangeSpec = {
+    label: string;
+    minKey: FundScreenerRangeKey;
+    maxKey: FundScreenerRangeKey;
+    minPh: string;
+    maxPh: string;
+    unit?: string;
+    group: 'returns' | 'scale';
+};
+
+const FUND_SCREENER_RANGE_SPECS: FundScreenerRangeSpec[] = [
+    { label: 'Günlük Getiri', minKey: 'min_daily', maxKey: 'max_daily', minPh: '-5', maxPh: '5', unit: '%', group: 'returns' },
+    { label: '1 Hafta Getiri', minKey: 'min_1w', maxKey: 'max_1w', minPh: '-10', maxPh: '15', unit: '%', group: 'returns' },
+    { label: '1 Ay Getiri', minKey: 'min_1m', maxKey: 'max_1m', minPh: '0', maxPh: '25', unit: '%', group: 'returns' },
+    { label: '3 Ay Getiri', minKey: 'min_3m', maxKey: 'max_3m', minPh: '0', maxPh: '40', unit: '%', group: 'returns' },
+    { label: '6 Ay Getiri', minKey: 'min_6m', maxKey: 'max_6m', minPh: '0', maxPh: '80', unit: '%', group: 'returns' },
+    { label: 'Yılbaşı Getiri', minKey: 'min_ytd', maxKey: 'max_ytd', minPh: '0', maxPh: '100', unit: '%', group: 'returns' },
+    { label: '1 Yıl Getiri', minKey: 'min_1y', maxKey: 'max_1y', minPh: '20', maxPh: '150', unit: '%', group: 'returns' },
+    { label: 'Risk Değeri', minKey: 'min_risk', maxKey: 'max_risk', minPh: '1', maxPh: '7', group: 'scale' },
+    { label: 'Portföy Büyüklüğü', minKey: 'min_aum_m', maxKey: 'max_aum_m', minPh: '100', maxPh: '50000', unit: 'Mn ₺', group: 'scale' },
+    { label: 'Yatırımcı Sayısı', minKey: 'min_investors', maxKey: 'max_investors', minPh: '1000', maxPh: '100000', unit: 'kişi', group: 'scale' },
+];
+
+function parseFundScreenerNumber(raw: string): number | undefined {
+    const text = String(raw || '').trim().replace(',', '.');
+    if (!text) return undefined;
+    const value = Number(text);
+    return Number.isFinite(value) ? value : undefined;
+}
 
 type FundsPageProps = {
     view?: 'list' | 'compare';
@@ -104,18 +200,6 @@ type FundsPageProps = {
     onNavigateFundSection?: (section: MarketsNavigationFundSection) => void;
     onOpenTicker?: (ticker: string) => void;
 };
-
-const FUND_SORT_OPTIONS: Array<{ key: FundSortKey; label: string }> = [
-    { key: 'fund_code', label: 'Kod' },
-    { key: 'name', label: 'Ad' },
-    { key: 'fund_type', label: 'Tür' },
-    { key: 'founder_company', label: 'Kurucu' },
-    { key: 'daily_return', label: 'Günlük getiri' },
-    { key: 'risk_value', label: 'Risk' },
-    { key: 'aum', label: 'Portföy' },
-    { key: 'price', label: 'Fiyat' },
-    { key: 'as_of', label: 'Tarih' },
-];
 
 const FUND_TABS: Array<{ key: FundTab; label: string; icon: typeof BarChart3 }> = [
     { key: 'overview', label: 'Genel Bakış', icon: BarChart3 },
@@ -290,18 +374,37 @@ const FundsSearchInput = memo(function FundsSearchInput({
     const debouncedDraft = useDebouncedValue(draft, 160);
 
     useEffect(() => {
+        setDraft(value);
+    }, [value]);
+
+    useEffect(() => {
         if (debouncedDraft !== value) onChange(debouncedDraft);
     }, [debouncedDraft, onChange, value]);
 
     return (
-        <label className="funds-search">
-            <Search size={16} aria-hidden="true" />
+        <div className="funds-search-wrap">
+            <Search size={14} className="funds-search-icon" aria-hidden="true" />
             <input
+                type="text"
+                className="funds-search-input"
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
-                placeholder="Fon kodu, ad veya kurucu ara"
+                placeholder="Fon kodu, ad veya kurucu ara..."
             />
-        </label>
+            {draft && (
+                <button
+                    type="button"
+                    className="funds-search-clear"
+                    onClick={() => {
+                        setDraft('');
+                        onChange('');
+                    }}
+                    aria-label="Aramayı temizle"
+                >
+                    <X size={12} aria-hidden="true" />
+                </button>
+            )}
+        </div>
     );
 });
 
@@ -620,9 +723,32 @@ async function fetchFundsCatalog(options: { bypassMemoryCache?: boolean } = {}):
     return task;
 }
 
+function fundSortValue(row: FundSummary, key: FundSortKey): string | number | null {
+    switch (key) {
+        case 'return_1w':
+            return row.period_returns?.['1w'] ?? null;
+        case 'return_1m':
+            return row.period_returns?.['1m'] ?? null;
+        case 'return_3m':
+            return row.period_returns?.['3m'] ?? null;
+        case 'return_6m':
+            return row.period_returns?.['6m'] ?? null;
+        case 'return_ytd':
+            return row.period_returns?.ytd ?? null;
+        case 'return_1y':
+            return row.period_returns?.['1y'] ?? null;
+        case 'investor_count':
+            return row.investor_count ?? null;
+        case 'founder_company':
+            return row.founder_company || row.manager_company || null;
+        default:
+            return row[key] ?? null;
+    }
+}
+
 function compareFundRows(a: FundSummary, b: FundSummary, key: FundSortKey, order: 'asc' | 'desc'): number {
-    const av = a[key];
-    const bv = b[key];
+    const av = fundSortValue(a, key);
+    const bv = fundSortValue(b, key);
     if (av == null && bv == null) return 0;
     if (av == null) return 1;
     if (bv == null) return -1;
@@ -936,10 +1062,11 @@ function periodReturnsFromPerformancePoints(
     }, {});
 }
 
-const FUND_TABLE_ROW_HEIGHT = 48;
+const FUND_TABLE_ROW_HEIGHT = 44;
 
 type FundsTableProps = {
     rows: FundSummary[];
+    mode: FundTableMode;
     sortKey: FundSortKey;
     sortOrder: 'asc' | 'desc';
     onSort: (key: FundSortKey) => void;
@@ -949,16 +1076,26 @@ type FundsTableProps = {
 
 const FundTableRow = memo(function FundTableRow({
     row,
+    rank,
     rowIndex,
+    mode,
     onOpenFund,
 }: {
     row: FundSummary;
+    rank: number;
     rowIndex: number;
+    mode: FundTableMode;
     onOpenFund: (fundCode: string, tab?: FundTab) => void;
 }) {
     const handleOpen = useCallback(() => {
         onOpenFund(row.fund_code, 'overview');
     }, [onOpenFund, row.fund_code]);
+
+    const renderPctCell = (val: number | null | undefined) => (
+        <td className={`funds-cell-right ${val == null || !Number.isFinite(val) ? 'funds-cell-muted' : pctClass(val)}`}>
+            {formatPct(val)}
+        </td>
+    );
 
     return (
         <tr
@@ -974,7 +1111,8 @@ const FundTableRow = memo(function FundTableRow({
                 window.open(toFundDetail(row.fund_code, 'overview'), '_blank', 'noopener,noreferrer');
             }}
         >
-            <td>
+            <td className="funds-rank">{rank}</td>
+            <td className="funds-symbol-cell">
                 <a
                     className="funds-symbol-link"
                     href={toFundDetail(row.fund_code, 'overview')}
@@ -990,28 +1128,63 @@ const FundTableRow = memo(function FundTableRow({
                             symbol={row.fund_code}
                             name={row.founder_company || row.manager_company || row.name}
                             kind="fund"
-                            size="sm"
+                            size="xs"
+                            className="funds-symbol-logo"
                         />
                         <span>
                             <strong>{row.fund_code}</strong>
-                            <small>{row.name}</small>
+                            <small title={row.name}>{row.name}</small>
                         </span>
                     </div>
                 </a>
             </td>
-            <td>{row.fund_type || '-'}</td>
-            <td>{row.founder_company || row.manager_company || '-'}</td>
-            <td className="funds-cell-right">{formatCurrency(row.price, row.currency)}</td>
-            <td className={`funds-cell-right ${pctClass(row.daily_return)}`}>{formatPct(row.daily_return)}</td>
-            <td className="funds-cell-right">{row.risk_value ?? '-'}</td>
-            <td className="funds-cell-right">{formatCompactCurrency(row.aum)}</td>
-            <td className="funds-cell-right">{formatDate(row.as_of)}</td>
+            {mode === 'performance' ? (
+                <>
+                    <td className={`funds-cell-right ${row.price == null ? 'funds-cell-muted' : 'funds-price-cell'}`}>
+                        {formatCurrency(row.price, row.currency)}
+                    </td>
+                    {renderPctCell(row.daily_return)}
+                    {renderPctCell(row.period_returns?.['1w'])}
+                    {renderPctCell(row.period_returns?.['1m'])}
+                    {renderPctCell(row.period_returns?.['3m'])}
+                    {renderPctCell(row.period_returns?.['6m'])}
+                    {renderPctCell(row.period_returns?.ytd)}
+                    {renderPctCell(row.period_returns?.['1y'])}
+                    <td className={`funds-cell-right ${row.aum == null ? 'funds-cell-muted' : 'funds-aum-cell'}`}>
+                        {formatCompactCurrency(row.aum)}
+                    </td>
+                </>
+            ) : (
+                <>
+                    <td className={row.fund_type ? 'funds-text-muted' : 'funds-cell-muted'}>{row.fund_type || '—'}</td>
+                    <td className={row.founder_company || row.manager_company ? 'funds-text-muted' : 'funds-cell-muted'} title={row.founder_company || row.manager_company || undefined}>
+                        {row.founder_company || row.manager_company || '—'}
+                    </td>
+                    <td className={`funds-cell-right ${row.price == null ? 'funds-cell-muted' : 'funds-price-cell'}`}>
+                        {formatCurrency(row.price, row.currency)}
+                    </td>
+                    {renderPctCell(row.daily_return)}
+                    <td className={`funds-cell-right ${row.risk_value == null ? 'funds-cell-muted' : ''}`}>
+                        {row.risk_value ?? '—'}
+                    </td>
+                    <td className={`funds-cell-right ${row.aum == null ? 'funds-cell-muted' : 'funds-aum-cell'}`}>
+                        {formatCompactCurrency(row.aum)}
+                    </td>
+                    <td className={`funds-cell-right ${row.investor_count == null ? 'funds-cell-muted' : 'funds-aum-cell'}`}>
+                        {row.investor_count != null ? row.investor_count.toLocaleString('tr-TR') : '—'}
+                    </td>
+                    <td className={`funds-cell-right ${row.as_of ? 'funds-aum-cell' : 'funds-cell-muted'}`}>
+                        {formatDate(row.as_of)}
+                    </td>
+                </>
+            )}
         </tr>
     );
 });
 
 const FundsTable = memo(function FundsTable({
     rows,
+    mode,
     sortKey,
     sortOrder,
     onSort,
@@ -1030,7 +1203,7 @@ const FundsTable = memo(function FundsTable({
         rowHeight: FUND_TABLE_ROW_HEIGHT,
         overscan: 12,
         containerRef: tableWrapRef,
-        resetDeps: resetDeps ?? [sortKey, sortOrder],
+        resetDeps: resetDeps ?? [mode, sortKey, sortOrder],
     });
 
     const visibleRows = useMemo(() => {
@@ -1038,53 +1211,82 @@ const FundsTable = memo(function FundsTable({
     }, [rows, startIndex, endIndex]);
 
     const sortLabel = sortOrder === 'asc' ? 'artan' : 'azalan';
-    const renderSortHeader = (key: FundSortKey, label: string, align: 'left' | 'right' = 'left') => (
-        <th className={align === 'right' ? 'funds-cell-right' : undefined} aria-sort={sortKey === key ? (sortOrder === 'asc' ? 'ascending' : 'descending') : 'none'}>
-            <button
-                type="button"
-                className={`funds-th-sort${align === 'right' ? ' funds-th-sort-right' : ''}${sortKey === key ? ' active' : ''}`}
-                onClick={() => onSort(key)}
-                title={`${label} sütununa göre sırala`}
-            >
-                <span>{label}</span>
-                <ArrowUpDown size={13} aria-hidden="true" />
-                <span className="sr-only">{sortKey === key ? `Şu an ${sortLabel}` : ''}</span>
-            </button>
-        </th>
-    );
+    const renderSortHeader = (key: FundSortKey, label: string, align: 'left' | 'right' = 'left') => {
+        const isActive = sortKey === key;
+        return (
+            <th className={align === 'right' ? 'funds-cell-right' : undefined} aria-sort={isActive ? (sortOrder === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                <button
+                    type="button"
+                    className={`funds-th-sort${align === 'right' ? ' funds-th-sort-right' : ''}${isActive ? ' active' : ''}`}
+                    onClick={() => onSort(key)}
+                    title={`${label} sütununa göre sırala`}
+                >
+                    <span>{label}</span>
+                    {isActive && (
+                        <span className="funds-sort-indicator" aria-hidden="true">
+                            {sortOrder === 'asc' ? '↑' : '↓'}
+                        </span>
+                    )}
+                    <span className="sr-only">{isActive ? `Şu an ${sortLabel}` : ''}</span>
+                </button>
+            </th>
+        );
+    };
+
+    const columnCount = mode === 'performance' ? 11 : 10;
 
     return (
         <div className="funds-table-wrap" ref={tableWrapCallbackRef}>
-            <table className="funds-table" aria-rowcount={rows.length + 1}>
+            <table className={`funds-table${mode === 'performance' ? ' funds-performance-table' : ''}`} aria-rowcount={rows.length + 1}>
                 <thead>
                     <tr>
+                        <th className="funds-rank">#</th>
                         {renderSortHeader('fund_code', 'Fon')}
-                        {renderSortHeader('fund_type', 'Tür')}
-                        {renderSortHeader('founder_company', 'Kurucu')}
-                        {renderSortHeader('price', 'Fiyat', 'right')}
-                        {renderSortHeader('daily_return', 'Gün %', 'right')}
-                        {renderSortHeader('risk_value', 'Risk', 'right')}
-                        {renderSortHeader('aum', 'Portföy', 'right')}
-                        {renderSortHeader('as_of', 'Tarih', 'right')}
+                        {mode === 'performance' ? (
+                            <>
+                                {renderSortHeader('price', 'Fiyat', 'right')}
+                                {renderSortHeader('daily_return', 'Gün %', 'right')}
+                                {renderSortHeader('return_1w', '1 Hafta', 'right')}
+                                {renderSortHeader('return_1m', '1 Ay', 'right')}
+                                {renderSortHeader('return_3m', '3 Ay', 'right')}
+                                {renderSortHeader('return_6m', '6 Ay', 'right')}
+                                {renderSortHeader('return_ytd', 'Yılbaşı', 'right')}
+                                {renderSortHeader('return_1y', '1 Yıl', 'right')}
+                                {renderSortHeader('aum', 'Portföy', 'right')}
+                            </>
+                        ) : (
+                            <>
+                                {renderSortHeader('fund_type', 'Tür')}
+                                {renderSortHeader('founder_company', 'Kurucu')}
+                                {renderSortHeader('price', 'Fiyat', 'right')}
+                                {renderSortHeader('daily_return', 'Gün %', 'right')}
+                                {renderSortHeader('risk_value', 'Risk', 'right')}
+                                {renderSortHeader('aum', 'Portföy', 'right')}
+                                {renderSortHeader('investor_count', 'Yatırımcı', 'right')}
+                                {renderSortHeader('as_of', 'Tarih', 'right')}
+                            </>
+                        )}
                     </tr>
                 </thead>
                 <tbody>
                     {topSpacerHeight > 0 && (
                         <tr key="funds-top-spacer" className="funds-spacer-row" style={{ height: `${topSpacerHeight}px` }} aria-hidden="true">
-                            <td colSpan={8} style={{ height: `${topSpacerHeight}px` }} />
+                            <td colSpan={columnCount} style={{ height: `${topSpacerHeight}px` }} />
                         </tr>
                     )}
                     {visibleRows.map((row, index) => (
                         <FundTableRow
                             key={row.fund_code}
                             row={row}
+                            rank={startIndex + index + 1}
                             rowIndex={startIndex + index + 2}
+                            mode={mode}
                             onOpenFund={onOpenFund}
                         />
                     ))}
                     {bottomSpacerHeight > 0 && (
                         <tr key="funds-bottom-spacer" className="funds-spacer-row" style={{ height: `${bottomSpacerHeight}px` }} aria-hidden="true">
-                            <td colSpan={8} style={{ height: `${bottomSpacerHeight}px` }} />
+                            <td colSpan={columnCount} style={{ height: `${bottomSpacerHeight}px` }} />
                         </tr>
                     )}
                 </tbody>
@@ -5522,6 +5724,10 @@ export default function FundsPage({
     const [searchTerm, setSearchTerm] = useState('');
     const [fundTypeFilter, setFundTypeFilter] = useState('');
     const [riskFilter, setRiskFilter] = useState('');
+    const [fundTableMode, setFundTableMode] = useState<FundTableMode>('summary');
+    const [fundScreenerOpen, setFundScreenerOpen] = useState(false);
+    const [fundScreenerFilters, setFundScreenerFilters] = useState<FundScreenerFilterState>(EMPTY_FUND_SCREENER_FILTERS);
+    const [activeFundScreenerPreset, setActiveFundScreenerPreset] = useState<FundScreenerPresetId | null>(null);
     const [sortKey, setSortKey] = useState<FundSortKey>('fund_code');
     const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
     const deferredSearchTerm = useDeferredValue(searchTerm);
@@ -6095,25 +6301,76 @@ export default function FundsPage({
         ),
     })), [funds]);
 
+    const parsedFundScreenerBounds = useMemo(() => ({
+        minDaily: parseFundScreenerNumber(fundScreenerFilters.min_daily),
+        maxDaily: parseFundScreenerNumber(fundScreenerFilters.max_daily),
+        min1w: parseFundScreenerNumber(fundScreenerFilters.min_1w),
+        max1w: parseFundScreenerNumber(fundScreenerFilters.max_1w),
+        min1m: parseFundScreenerNumber(fundScreenerFilters.min_1m),
+        max1m: parseFundScreenerNumber(fundScreenerFilters.max_1m),
+        min3m: parseFundScreenerNumber(fundScreenerFilters.min_3m),
+        max3m: parseFundScreenerNumber(fundScreenerFilters.max_3m),
+        min6m: parseFundScreenerNumber(fundScreenerFilters.min_6m),
+        max6m: parseFundScreenerNumber(fundScreenerFilters.max_6m),
+        minYtd: parseFundScreenerNumber(fundScreenerFilters.min_ytd),
+        maxYtd: parseFundScreenerNumber(fundScreenerFilters.max_ytd),
+        min1y: parseFundScreenerNumber(fundScreenerFilters.min_1y),
+        max1y: parseFundScreenerNumber(fundScreenerFilters.max_1y),
+        minRisk: parseFundScreenerNumber(fundScreenerFilters.min_risk),
+        maxRisk: parseFundScreenerNumber(fundScreenerFilters.max_risk),
+        minAumM: parseFundScreenerNumber(fundScreenerFilters.min_aum_m),
+        maxAumM: parseFundScreenerNumber(fundScreenerFilters.max_aum_m),
+        minInvestors: parseFundScreenerNumber(fundScreenerFilters.min_investors),
+        maxInvestors: parseFundScreenerNumber(fundScreenerFilters.max_investors),
+    }), [fundScreenerFilters]);
+
     const filteredFunds = useMemo(() => {
         const needle = normalizeCompareSearch(deferredSearchTerm);
+        const matchesRange = (val: number | null | undefined, min?: number, max?: number) => {
+            if (min !== undefined && (val == null || !Number.isFinite(val) || val < min)) return false;
+            if (max !== undefined && (val == null || !Number.isFinite(val) || val > max)) return false;
+            return true;
+        };
+        const b = parsedFundScreenerBounds;
         const filtered = fundSearchIndex
             .filter(({ row, haystack }) => {
-            if (needle) {
-                if (!haystack.includes(needle)) return false;
-            }
-            if (fundTypeFilter && row.fund_type !== fundTypeFilter) return false;
-            if (riskFilter && String(row.risk_value ?? '') !== riskFilter) return false;
-            return true;
+                if (needle && !haystack.includes(needle)) return false;
+                if (fundTypeFilter && row.fund_type !== fundTypeFilter) return false;
+                if (riskFilter && String(row.risk_value ?? '') !== riskFilter) return false;
+                if (fundScreenerFilters.founder) {
+                    const founder = row.founder_company || row.manager_company || '';
+                    if (founder !== fundScreenerFilters.founder) return false;
+                }
+                if (!matchesRange(row.daily_return, b.minDaily, b.maxDaily)) return false;
+                if (!matchesRange(row.period_returns?.['1w'], b.min1w, b.max1w)) return false;
+                if (!matchesRange(row.period_returns?.['1m'], b.min1m, b.max1m)) return false;
+                if (!matchesRange(row.period_returns?.['3m'], b.min3m, b.max3m)) return false;
+                if (!matchesRange(row.period_returns?.['6m'], b.min6m, b.max6m)) return false;
+                if (!matchesRange(row.period_returns?.ytd, b.minYtd, b.maxYtd)) return false;
+                if (!matchesRange(row.period_returns?.['1y'], b.min1y, b.max1y)) return false;
+                if (!matchesRange(row.risk_value, b.minRisk, b.maxRisk)) return false;
+                const aumMillions = row.aum != null && Number.isFinite(row.aum) ? row.aum / 1_000_000 : null;
+                if (!matchesRange(aumMillions, b.minAumM, b.maxAumM)) return false;
+                if (!matchesRange(row.investor_count, b.minInvestors, b.maxInvestors)) return false;
+                return true;
             })
             .map(({ row }) => row);
-        filtered.sort((a, b) => compareFundRows(a, b, sortKey, sortOrder));
+        filtered.sort((a, bRow) => compareFundRows(a, bRow, sortKey, sortOrder));
         return filtered;
-    }, [deferredSearchTerm, fundSearchIndex, fundTypeFilter, riskFilter, sortKey, sortOrder]);
+    }, [
+        deferredSearchTerm,
+        fundScreenerFilters.founder,
+        fundSearchIndex,
+        fundTypeFilter,
+        parsedFundScreenerBounds,
+        riskFilter,
+        sortKey,
+        sortOrder,
+    ]);
 
     const tableResetDeps = useMemo(
-        () => [searchTerm, deferredSearchTerm, fundTypeFilter, riskFilter, sortKey, sortOrder],
-        [searchTerm, deferredSearchTerm, fundTypeFilter, riskFilter, sortKey, sortOrder],
+        () => [searchTerm, deferredSearchTerm, fundTypeFilter, riskFilter, fundScreenerFilters, fundTableMode, sortKey, sortOrder],
+        [searchTerm, deferredSearchTerm, fundTypeFilter, riskFilter, fundScreenerFilters, fundTableMode, sortKey, sortOrder],
     );
 
     const normalizedRouteFundCode = fundCode?.trim().toUpperCase() || '';
@@ -6305,13 +6562,186 @@ export default function FundsPage({
     );
     const visibleFundTypes = categories?.fund_types.length ? categories.fund_types : Array.from(new Set((funds?.rows || []).map((row) => row.fund_type).filter(Boolean))) as string[];
     const visibleRiskValues = categories?.risk_values.length ? categories.risk_values : Array.from(new Set((funds?.rows || []).map((row) => row.risk_value).filter((value): value is number => typeof value === 'number'))).sort((a, b) => a - b);
+    const visibleFounders = useMemo(
+        () => Array.from(new Set((funds?.rows || []).map((row) => row.founder_company || row.manager_company).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b, 'tr')),
+        [funds],
+    );
+    const activeFundFilterCount = useMemo(() => {
+        let count = 0;
+        if (fundTypeFilter) count += 1;
+        if (riskFilter) count += 1;
+        if (fundScreenerFilters.founder) count += 1;
+        for (const spec of FUND_SCREENER_RANGE_SPECS) {
+            if (fundScreenerFilters[spec.minKey].trim() || fundScreenerFilters[spec.maxKey].trim()) {
+                count += 1;
+            }
+        }
+        return count;
+    }, [fundScreenerFilters, fundTypeFilter, riskFilter]);
+    const isFundScreenerActive = activeFundFilterCount > 0;
+    const isFundsFiltered = isFundScreenerActive || Boolean(deferredSearchTerm.trim());
+    const activeFundChips = useMemo(() => {
+        const chips: Array<{ id: string; label: string; onClear: () => void }> = [];
+        if (fundTypeFilter) {
+            chips.push({ id: 'fund_type', label: `Tür: ${fundTypeFilter}`, onClear: () => setFundTypeFilter('') });
+        }
+        if (riskFilter) {
+            chips.push({ id: 'risk', label: `Risk: ${riskFilter}`, onClear: () => setRiskFilter('') });
+        }
+        if (fundScreenerFilters.founder) {
+            chips.push({
+                id: 'founder',
+                label: `Kurucu: ${fundScreenerFilters.founder}`,
+                onClear: () => {
+                    setActiveFundScreenerPreset(null);
+                    setFundScreenerFilters((prev) => ({ ...prev, founder: '' }));
+                },
+            });
+        }
+        for (const spec of FUND_SCREENER_RANGE_SPECS) {
+            const minVal = fundScreenerFilters[spec.minKey].trim();
+            const maxVal = fundScreenerFilters[spec.maxKey].trim();
+            if (!minVal && !maxVal) continue;
+            const unit = spec.unit ? ` ${spec.unit}` : '';
+            const rangeText = minVal && maxVal
+                ? `${minVal}–${maxVal}${unit}`
+                : minVal
+                    ? `≥ ${minVal}${unit}`
+                    : `≤ ${maxVal}${unit}`;
+            chips.push({
+                id: spec.minKey,
+                label: `${spec.label}: ${rangeText}`,
+                onClear: () => {
+                    setActiveFundScreenerPreset(null);
+                    setFundScreenerFilters((prev) => ({ ...prev, [spec.minKey]: '', [spec.maxKey]: '' }));
+                },
+            });
+        }
+        return chips;
+    }, [fundScreenerFilters, fundTypeFilter, riskFilter]);
+
+    useEffect(() => {
+        if (!fundScreenerOpen) return;
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setFundScreenerOpen(false);
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [fundScreenerOpen]);
+
+    const handleFundScreenerFilterChange = useCallback(<K extends keyof FundScreenerFilterState>(
+        key: K,
+        value: FundScreenerFilterState[K],
+    ) => {
+        setActiveFundScreenerPreset(null);
+        setFundScreenerFilters((prev) => ({ ...prev, [key]: value }));
+    }, []);
+
+    const applyFundScreenerPreset = useCallback((presetId: FundScreenerPresetId) => {
+        if (activeFundScreenerPreset === presetId) {
+            setActiveFundScreenerPreset(null);
+            setFundScreenerFilters(EMPTY_FUND_SCREENER_FILTERS);
+            return;
+        }
+        const preset = FUND_SCREENER_PRESETS.find((item) => item.id === presetId);
+        if (!preset) return;
+        setActiveFundScreenerPreset(presetId);
+        setFundScreenerFilters({ ...EMPTY_FUND_SCREENER_FILTERS, ...preset.filters });
+        if (preset.fundType !== undefined) setFundTypeFilter(preset.fundType);
+        if (preset.risk !== undefined) setRiskFilter(preset.risk);
+    }, [activeFundScreenerPreset]);
+
+    const clearFundScreenerFilters = useCallback(() => {
+        setActiveFundScreenerPreset(null);
+        setFundScreenerFilters(EMPTY_FUND_SCREENER_FILTERS);
+        setFundTypeFilter('');
+        setRiskFilter('');
+    }, []);
+
+    const hasNumericFilterError = useCallback((key: FundScreenerRangeKey): boolean => {
+        const raw = fundScreenerFilters[key].trim();
+        return raw !== '' && parseFundScreenerNumber(raw) === undefined;
+    }, [fundScreenerFilters]);
+
+    const renderFundScreenerRangeRows = (group: FundScreenerRangeSpec['group']) =>
+        FUND_SCREENER_RANGE_SPECS.filter((spec) => spec.group === group).map((spec) => {
+            const minRaw = fundScreenerFilters[spec.minKey];
+            const maxRaw = fundScreenerFilters[spec.maxKey];
+            const minVal = parseFundScreenerNumber(minRaw);
+            const maxVal = parseFundScreenerNumber(maxRaw);
+            const isReversed = minVal !== undefined && maxVal !== undefined && minVal > maxVal;
+            const minInvalid = hasNumericFilterError(spec.minKey);
+            const maxInvalid = hasNumericFilterError(spec.maxKey);
+
+            return (
+                <div key={spec.minKey} className={`funds-screener-range-row${isReversed ? ' is-reversed' : ''}`}>
+                    <div className="funds-screener-range-header">
+                        <span className="funds-screener-field-label">{spec.label}</span>
+                        {isReversed && <span className="funds-screener-range-warn">Min &gt; Max</span>}
+                    </div>
+                    <div className="funds-screener-range-inputs">
+                        <label className={`funds-screener-num-field${minRaw ? ' is-filled' : ''}${minInvalid ? ' is-invalid' : ''}`}>
+                            <span className="funds-screener-num-tag">Min</span>
+                            <input
+                                type="text"
+                                inputMode="decimal"
+                                placeholder={spec.minPh}
+                                aria-label={`${spec.label} en az`}
+                                value={minRaw}
+                                onChange={(e) => handleFundScreenerFilterChange(spec.minKey, e.currentTarget.value)}
+                            />
+                            {spec.unit && <span className="funds-screener-num-unit">{spec.unit}</span>}
+                        </label>
+                        <span className="funds-screener-range-sep" aria-hidden="true">–</span>
+                        <label className={`funds-screener-num-field${maxRaw ? ' is-filled' : ''}${maxInvalid ? ' is-invalid' : ''}`}>
+                            <span className="funds-screener-num-tag">Max</span>
+                            <input
+                                type="text"
+                                inputMode="decimal"
+                                placeholder={spec.maxPh}
+                                aria-label={`${spec.label} en çok`}
+                                value={maxRaw}
+                                onChange={(e) => handleFundScreenerFilterChange(spec.maxKey, e.currentTarget.value)}
+                            />
+                            {spec.unit && <span className="funds-screener-num-unit">{spec.unit}</span>}
+                        </label>
+                    </div>
+                </div>
+            );
+        });
+
+    const handleFundTableModeChange = useCallback((mode: FundTableMode) => {
+        setFundTableMode(mode);
+        if (mode === 'summary' && sortKey.startsWith('return_')) {
+            setSortKey('daily_return');
+            setSortOrder('desc');
+        } else if (mode === 'performance' && ['fund_type', 'founder_company', 'risk_value', 'investor_count', 'as_of'].includes(sortKey)) {
+            setSortKey('return_1y');
+            setSortOrder('desc');
+        }
+    }, [sortKey]);
+
     const setTableSort = useCallback((key: FundSortKey) => {
         if (sortKey === key) {
             setSortOrder((currentOrder) => (currentOrder === 'asc' ? 'desc' : 'asc'));
             return;
         }
+        const defaultDescKeys = new Set<FundSortKey>([
+            'price',
+            'daily_return',
+            'return_1w',
+            'return_1m',
+            'return_3m',
+            'return_6m',
+            'return_ytd',
+            'return_1y',
+            'risk_value',
+            'aum',
+            'investor_count',
+            'as_of',
+        ]);
         setSortKey(key);
-        setSortOrder('asc');
+        setSortOrder(defaultDescKeys.has(key) ? 'desc' : 'asc');
     }, [sortKey]);
     const selectedFundCode = selectedFund?.fund_code || fundCode?.trim().toUpperCase() || '';
     const isStarred = selectedFundCode ? watchlist.hasItem('fund', selectedFundCode) : false;
@@ -6491,32 +6921,134 @@ export default function FundsPage({
                             error={error}
                         />
                     ) : !fundCode ? (
-                        <>
-                            <header className="funds-header">
-                                <div>
-                                    <span className="funds-kicker">TEFAS verileri</span>
-                                    <h1>Fonlar</h1>
-                                    <p>Yatırım fonları, fiyat/getiri verisi ve kaynak durumuyla tek listede.</p>
+                        <section className="funds-panel funds-table-panel">
+                            <div className="funds-panel-header">
+                                <div className="funds-panel-header-top">
+                                    <div className="funds-panel-title-group">
+                                        <h2>Fonlar</h2>
+                                        <span className="funds-count-badge">
+                                            {loading && !funds
+                                                ? 'Yükleniyor…'
+                                                : isFundsFiltered
+                                                    ? `${filteredFunds.length} / ${funds?.total_count ?? funds?.count ?? 0} fon`
+                                                    : `${filteredFunds.length} fon`}
+                                        </span>
+                                    </div>
+                                    <div className="funds-header-actions">
+                                        <FundsSearchInput value={searchTerm} onChange={setSearchTerm} />
+                                        <button
+                                            type="button"
+                                            className={`funds-screener-trigger-btn${isFundScreenerActive ? ' is-active' : ''}`}
+                                            onClick={() => setFundScreenerOpen(true)}
+                                            aria-label="Fon Tarayıcısı ve Filtreler"
+                                        >
+                                            <SlidersHorizontal size={13} aria-hidden="true" />
+                                            <span>Fon Tarayıcısı</span>
+                                            {activeFundFilterCount > 0 && (
+                                                <span className="funds-screener-count-badge">{activeFundFilterCount}</span>
+                                            )}
+                                        </button>
+                                    </div>
                                 </div>
-                                <div className="funds-header-stats">
-                                    <div>
-                                        <span>Fon</span>
-                                        <strong>{funds?.total_count ?? funds?.count ?? 0}</strong>
+                                <div className="funds-panel-toolbar">
+                                    <div className="funds-toolbar-left">
+                                        <div className="funds-control-group">
+                                            <span className="funds-control-label">Görünüm</span>
+                                            <div
+                                                className="funds-segment"
+                                                aria-label="Fon tablo görünümü"
+                                                style={{
+                                                    '--item-count': 2,
+                                                    '--active-index': fundTableMode === 'summary' ? 0 : 1,
+                                                } as CSSProperties}
+                                            >
+                                                {([['summary', 'Özet'], ['performance', 'Getiri']] as const).map(([mode, label]) => (
+                                                    <button
+                                                        key={mode}
+                                                        type="button"
+                                                        className={fundTableMode === mode ? 'active' : ''}
+                                                        aria-pressed={fundTableMode === mode}
+                                                        onClick={() => handleFundTableModeChange(mode)}
+                                                    >
+                                                        {label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        <div className="funds-control-group">
+                                            <span className="funds-control-label">Tür</span>
+                                            <select
+                                                className={`funds-toolbar-select${fundTypeFilter ? ' is-active' : ''}`}
+                                                value={fundTypeFilter}
+                                                onChange={(event) => setFundTypeFilter(event.target.value)}
+                                                aria-label="Fon türü filtresi"
+                                            >
+                                                <option value="">Tümü</option>
+                                                {visibleFundTypes.map((item) => (
+                                                    <option key={item} value={item}>{item}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <div className="funds-control-group">
+                                            <span className="funds-control-label">Risk</span>
+                                            <select
+                                                className={`funds-toolbar-select${riskFilter ? ' is-active' : ''}`}
+                                                value={riskFilter}
+                                                onChange={(event) => setRiskFilter(event.target.value)}
+                                                aria-label="Risk filtresi"
+                                            >
+                                                <option value="">Tümü</option>
+                                                {visibleRiskValues.map((item) => (
+                                                    <option key={item} value={String(item)}>Risk {item}</option>
+                                                ))}
+                                            </select>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <span>Kaynak</span>
-                                        <strong>{funds?.source?.toUpperCase() || 'TEFAS'}</strong>
-                                    </div>
-                                    <div>
-                                        <span>Tarih</span>
-                                        <strong>{formatDate(funds?.as_of)}</strong>
+                                    <div className="funds-toolbar-meta">
+                                        <span className="funds-meta-chip">
+                                            Kaynak: <strong>{funds?.source?.toUpperCase() || 'TEFAS'}</strong>
+                                        </span>
+                                        {funds?.refresh_pending && (
+                                            <span className="funds-status-pill is-info" title="Fon kataloğu arka planda yenileniyor.">
+                                                <span>Yenileniyor</span>
+                                            </span>
+                                        )}
+                                        {(funds?.stale || funds?.degraded) && (
+                                            <span
+                                                className="funds-status-pill is-warning"
+                                                title={funds?.degraded ? 'Fon snapshot cache boş veya kullanılamıyor.' : 'Son güvenilir veri gösteriliyor.'}
+                                            >
+                                                <AlertCircle size={12} aria-hidden="true" />
+                                                <span>{funds?.degraded ? 'Cache uyarısı' : 'Son sağlıklı veri'}</span>
+                                            </span>
+                                        )}
+                                        {refreshError && (
+                                            <span className="funds-status-pill is-danger" title={refreshError}>
+                                                <AlertCircle size={12} aria-hidden="true" />
+                                                <span>Yenileme başarısız</span>
+                                            </span>
+                                        )}
+                                        <span className="funds-meta-time" title="Son fon veri tarihi">
+                                            <Clock3 size={12} aria-hidden="true" />
+                                            <span>{formatDate(funds?.as_of)}</span>
+                                        </span>
+                                        <button
+                                            type="button"
+                                            className={`funds-refresh-btn${refreshing ? ' is-spinning' : ''}`}
+                                            onClick={() => { void refreshSnapshot(); }}
+                                            disabled={refreshing}
+                                            title="Fon listesini yenile"
+                                            aria-label="Fon listesini yenile"
+                                        >
+                                            <RefreshCw size={12} aria-hidden="true" />
+                                        </button>
                                     </div>
                                 </div>
-                            </header>
+                            </div>
 
                             {(Boolean(refreshError) || funds?.stale || funds?.degraded || funds?.warnings?.length) && (
                                 <div className="funds-source-warning">
-                                    <ShieldAlert size={17} aria-hidden="true" />
+                                    <ShieldAlert size={14} aria-hidden="true" />
                                     <span>
                                         {refreshError
                                             ? `Fon listesi yenilenemedi: ${refreshError}`
@@ -6524,91 +7056,264 @@ export default function FundsPage({
                                               ? 'Fon listesi yeniden yükleniyor.'
                                               : funds?.refresh_pending
                                                 ? 'Fon kataloğu arka planda otomatik yenileniyor.'
-                                              : funds?.degraded
-                                            ? 'Fon snapshot cache boş veya kullanılamıyor.'
-                                            : funds?.stale && funds?.source_metadata?.snapshot_as_of && funds?.source_metadata?.price_history_as_of
-                                            ? `Fon kataloğu ${formatDate(funds.source_metadata.snapshot_as_of)} tarihli; fiyat verileri ${formatDate(funds.source_metadata.price_history_as_of)} tarihine kadar güncel.`
-                                            : funds?.stale
-                                            ? 'Fon kataloğu güncel snapshot alınamadığı için son güvenilir veriyle gösteriliyor.'
-                                            : funds?.warnings?.length
-                                            ? `Fon verisi TEFAS birincil kaynağından alınamadı; fallback sonucu gösteriliyor. ${funds.warnings[0]}`
-                                            : 'Fon kaynak durumu uyarı verdi.'}
+                                                : funds?.degraded
+                                                  ? 'Fon snapshot cache boş veya kullanılamıyor.'
+                                                  : funds?.stale && funds?.source_metadata?.snapshot_as_of && funds?.source_metadata?.price_history_as_of
+                                                    ? `Fon kataloğu ${formatDate(funds.source_metadata.snapshot_as_of)} tarihli; fiyat verileri ${formatDate(funds.source_metadata.price_history_as_of)} tarihine kadar güncel.`
+                                                    : funds?.stale
+                                                      ? 'Fon kataloğu güncel snapshot alınamadığı için son güvenilir veriyle gösteriliyor.'
+                                                      : funds?.warnings?.length
+                                                        ? `Fon verisi TEFAS birincil kaynağından alınamadı; fallback sonucu gösteriliyor. ${funds.warnings[0]}`
+                                                        : 'Fon kaynak durumu uyarı verdi.'}
                                     </span>
                                     <button
                                         type="button"
-                                        className="funds-refresh-button"
+                                        className="funds-banner-btn"
                                         onClick={() => { void refreshSnapshot(); }}
                                         disabled={refreshing}
-                                        title="Fon listesini yeniden yükle"
                                     >
-                                        <RefreshCw size={15} aria-hidden="true" className={refreshing ? 'funds-spin' : undefined} />
-                                        {refreshing ? 'Yükleniyor' : 'Veriyi yeniden yükle'}
+                                        <RefreshCw size={12} aria-hidden="true" className={refreshing ? 'funds-spin' : undefined} />
+                                        {refreshing ? 'Yükleniyor' : 'Yenile'}
                                     </button>
                                 </div>
                             )}
 
-                            <section className="funds-panel">
-                                <div className="funds-toolbar">
-                                    <FundsSearchInput value={searchTerm} onChange={setSearchTerm} />
-                                    <div className="funds-filter">
-                                        <SlidersHorizontal size={16} aria-hidden="true" />
-                                        <select value={fundTypeFilter} onChange={(event) => setFundTypeFilter(event.target.value)}>
-                                            <option value="">Tüm türler</option>
-                                            {visibleFundTypes.map((item) => (
-                                                <option key={item} value={item}>{item}</option>
-                                            ))}
-                                        </select>
-                                        <select value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>
-                                            <option value="">Tüm riskler</option>
-                                            {visibleRiskValues.map((item) => (
-                                                <option key={item} value={String(item)}>Risk {item}</option>
-                                            ))}
-                                        </select>
-                                        <select value={sortKey} onChange={(event) => setSortKey(event.target.value as FundSortKey)}>
-                                            {FUND_SORT_OPTIONS.map((option) => (
-                                                <option key={option.key} value={option.key}>{option.label}</option>
-                                            ))}
-                                        </select>
+                            {isFundScreenerActive && (
+                                <div className="funds-screener-active-banner">
+                                    <div className="funds-screener-active-banner-left">
+                                        <SlidersHorizontal size={13} aria-hidden="true" />
+                                        <span>
+                                            <strong>{activeFundFilterCount} filtre devrede:</strong> {filteredFunds.length} / {funds?.total_count ?? funds?.count ?? 0} fon gösteriliyor
+                                        </span>
+                                    </div>
+                                    <div className="funds-screener-active-banner-actions">
                                         <button
                                             type="button"
-                                            onClick={() => setSortOrder((order) => (order === 'asc' ? 'desc' : 'asc'))}
-                                            className="funds-sort-order"
+                                            className="funds-screener-banner-btn"
+                                            onClick={() => setFundScreenerOpen(true)}
                                         >
-                                            {sortOrder === 'asc' ? 'Artan' : 'Azalan'}
+                                            Filtreleri Düzenle
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="funds-screener-banner-btn funds-screener-banner-clear"
+                                            onClick={clearFundScreenerFilters}
+                                        >
+                                            <X size={12} aria-hidden="true" /> Temizle
                                         </button>
                                     </div>
                                 </div>
+                            )}
 
-                                {loading ? (
-                                    <FundsListLoader />
-                                ) : error ? (
-                                    <div className="funds-state funds-state-error">
-                                        <span>{error}</span>
-                                        <button
-                                            type="button"
-                                            className="funds-retry-btn"
-                                            onClick={() => void refreshSnapshot()}
-                                            disabled={refreshing}
-                                        >
-                                            {refreshing ? 'Yenileniyor…' : 'Tekrar Dene'}
-                                        </button>
+                            {fundScreenerOpen && createPortal(
+                                <div
+                                    className="funds-screener-backdrop"
+                                    role="dialog"
+                                    aria-modal="true"
+                                    aria-labelledby="fund-screener-modal-title"
+                                    onClick={() => setFundScreenerOpen(false)}
+                                >
+                                    <div className="funds-screener-modal" onClick={(event) => event.stopPropagation()}>
+                                        <div className="funds-screener-header">
+                                            <div className="funds-screener-title-group">
+                                                <div>
+                                                    <h3 id="fund-screener-modal-title">Fon Tarayıcısı</h3>
+                                                    <p>
+                                                        {funds?.total_count ?? funds?.count ?? 0} fon · TEFAS kataloğu
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                className="funds-screener-close-btn"
+                                                onClick={() => setFundScreenerOpen(false)}
+                                                aria-label="Kapat"
+                                            >
+                                                <X size={17} aria-hidden="true" />
+                                            </button>
+                                        </div>
+
+                                        <div className="funds-screener-body">
+                                            <div className="funds-screener-presets-section">
+                                                <div className="funds-screener-section-label">
+                                                    <span>Hazır Stratejiler</span>
+                                                </div>
+                                                <div className="funds-screener-presets-row">
+                                                    {FUND_SCREENER_PRESETS.map((preset) => (
+                                                        <button
+                                                            key={preset.id}
+                                                            type="button"
+                                                            aria-pressed={activeFundScreenerPreset === preset.id}
+                                                            className={`funds-screener-preset-chip${activeFundScreenerPreset === preset.id ? ' is-active' : ''}`}
+                                                            onClick={() => applyFundScreenerPreset(preset.id)}
+                                                        >
+                                                            {preset.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+
+                                            {activeFundChips.length > 0 && (
+                                                <div className="funds-screener-active-chips" aria-label="Aktif filtreler">
+                                                    {activeFundChips.map((chip) => (
+                                                        <span key={chip.id} className="funds-screener-active-chip">
+                                                            <span>{chip.label}</span>
+                                                            <button
+                                                                type="button"
+                                                                onClick={chip.onClear}
+                                                                aria-label={`${chip.label} filtresini kaldır`}
+                                                            >
+                                                                <X size={11} aria-hidden="true" />
+                                                            </button>
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            <div className="funds-screener-grid">
+                                                <div className="funds-screener-card">
+                                                    <div className="funds-screener-card-header">
+                                                        <Building2 size={14} aria-hidden="true" />
+                                                        <span>Tür, Risk & Kurucu</span>
+                                                    </div>
+                                                    <div className="funds-screener-card-content">
+                                                        <div className="funds-screener-field">
+                                                            <label className="funds-screener-field-label" htmlFor="fund-screener-type">
+                                                                Fon Türü
+                                                            </label>
+                                                            <select
+                                                                id="fund-screener-type"
+                                                                className="funds-screener-select"
+                                                                value={fundTypeFilter}
+                                                                onChange={(e) => {
+                                                                    setActiveFundScreenerPreset(null);
+                                                                    setFundTypeFilter(e.currentTarget.value);
+                                                                }}
+                                                            >
+                                                                <option value="">Tüm Türler</option>
+                                                                {visibleFundTypes.map((item) => (
+                                                                    <option key={item} value={item}>{item}</option>
+                                                                ))}
+                                                            </select>
+                                                        </div>
+                                                        <div className="funds-screener-field">
+                                                            <label className="funds-screener-field-label" htmlFor="fund-screener-risk">
+                                                                Risk Seviyesi
+                                                            </label>
+                                                            <select
+                                                                id="fund-screener-risk"
+                                                                className="funds-screener-select"
+                                                                value={riskFilter}
+                                                                onChange={(e) => {
+                                                                    setActiveFundScreenerPreset(null);
+                                                                    setRiskFilter(e.currentTarget.value);
+                                                                }}
+                                                            >
+                                                                <option value="">Tüm Riskler</option>
+                                                                {visibleRiskValues.map((item) => (
+                                                                    <option key={item} value={String(item)}>Risk {item}</option>
+                                                                ))}
+                                                            </select>
+                                                        </div>
+                                                        <div className="funds-screener-field">
+                                                            <label className="funds-screener-field-label" htmlFor="fund-screener-founder">
+                                                                Kurucu / Portföy Yönetimi
+                                                            </label>
+                                                            <select
+                                                                id="fund-screener-founder"
+                                                                className="funds-screener-select"
+                                                                value={fundScreenerFilters.founder}
+                                                                onChange={(e) => handleFundScreenerFilterChange('founder', e.currentTarget.value)}
+                                                            >
+                                                                <option value="">Tüm Kurucular</option>
+                                                                {visibleFounders.map((item) => (
+                                                                    <option key={item} value={item}>{item}</option>
+                                                                ))}
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div className="funds-screener-card">
+                                                    <div className="funds-screener-card-header">
+                                                        <Percent size={14} aria-hidden="true" />
+                                                        <span>Ölçek & Yatırımcı</span>
+                                                    </div>
+                                                    <div className="funds-screener-card-content">
+                                                        {renderFundScreenerRangeRows('scale')}
+                                                    </div>
+                                                </div>
+
+                                                <div className="funds-screener-card funds-screener-card-wide">
+                                                    <div className="funds-screener-card-header">
+                                                        <TrendingUp size={14} aria-hidden="true" />
+                                                        <span>Getiri Filtreleri (%)</span>
+                                                    </div>
+                                                    <div className="funds-screener-card-content funds-screener-returns-cols">
+                                                        {renderFundScreenerRangeRows('returns')}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="funds-screener-footer">
+                                            <button
+                                                type="button"
+                                                className="funds-screener-clear-btn"
+                                                onClick={clearFundScreenerFilters}
+                                                disabled={!isFundScreenerActive}
+                                            >
+                                                <RotateCcw size={13} aria-hidden="true" />
+                                                <span>Filtreleri Sıfırla</span>
+                                            </button>
+                                            <div className="funds-screener-footer-right">
+                                                <span className="funds-screener-footer-info">
+                                                    <strong>{filteredFunds.length}</strong> / {funds?.total_count ?? funds?.count ?? 0} fon
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    className="funds-screener-apply-btn"
+                                                    onClick={() => setFundScreenerOpen(false)}
+                                                >
+                                                    Sonuçları Göster
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
-                                ) : filteredFunds.length === 0 ? (
-                                    <div className="funds-state">
-                                        Fon bulunamadı.
-                                    </div>
-                                ) : (
-                                    <FundsTable
-                                        rows={filteredFunds}
-                                        sortKey={sortKey}
-                                        sortOrder={sortOrder}
-                                        onSort={setTableSort}
-                                        onOpenFund={onOpenFund}
-                                        resetDeps={tableResetDeps}
-                                    />
-                                )}
-                            </section>
-                        </>
+                                </div>,
+                                document.body,
+                            )}
+
+                            {loading ? (
+                                <FundsListLoader />
+                            ) : error ? (
+                                <div className="funds-state funds-state-error">
+                                    <span>{error}</span>
+                                    <button
+                                        type="button"
+                                        className="funds-retry-btn"
+                                        onClick={() => void refreshSnapshot()}
+                                        disabled={refreshing}
+                                    >
+                                        {refreshing ? 'Yenileniyor…' : 'Tekrar Dene'}
+                                    </button>
+                                </div>
+                            ) : filteredFunds.length === 0 ? (
+                                <div className="funds-state">
+                                    Aranan kritere uyan fon bulunamadı.
+                                </div>
+                            ) : (
+                                <FundsTable
+                                    rows={filteredFunds}
+                                    mode={fundTableMode}
+                                    sortKey={sortKey}
+                                    sortOrder={sortOrder}
+                                    onSort={setTableSort}
+                                    onOpenFund={onOpenFund}
+                                    resetDeps={tableResetDeps}
+                                />
+                            )}
+                        </section>
                     ) : (
                         <section className="fund-detail">
                             {detailLoading && !selectedFund ? (

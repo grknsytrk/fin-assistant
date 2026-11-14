@@ -598,6 +598,21 @@ def upsert_financial_snapshots(processed_dir: Path, records: Iterable[Dict[str, 
     return len(normalized_records)
 
 
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def sync_financial_snapshots_from_kap_cache(processed_dir: Path) -> Dict[str, int]:
     """Parse only new or changed KAP JSON files and persist their compact data."""
 
@@ -611,14 +626,14 @@ def sync_financial_snapshots_from_kap_cache(processed_dir: Path) -> Dict[str, in
 
     with _connection(processed_dir) as conn:
         existing_rows = conn.execute(
-            "SELECT symbol, source_mtime_ns FROM company_financial_snapshots WHERE has_kap_cache = 1"
+            "SELECT symbol, source_mtime_ns, as_of FROM company_financial_snapshots WHERE has_kap_cache = 1"
         ).fetchall()
-    existing_mtimes = {
-        str(row.get("symbol") if isinstance(row, dict) else row["symbol"]).upper(): (
-            row.get("source_mtime_ns") if isinstance(row, dict) else row["source_mtime_ns"]
-        )
-        for row in existing_rows
-    }
+    existing_by_symbol: Dict[str, tuple[Any, Optional[datetime]]] = {}
+    for row in existing_rows:
+        sym = str(row.get("symbol") if isinstance(row, dict) else row["symbol"]).upper()
+        mtime_ns = row.get("source_mtime_ns") if isinstance(row, dict) else row["source_mtime_ns"]
+        as_of_raw = row.get("as_of") if isinstance(row, dict) else row["as_of"]
+        existing_by_symbol[sym] = (mtime_ns, _parse_iso_datetime(as_of_raw))
 
     records: List[Dict[str, Any]] = []
     scanned_count = 0
@@ -629,7 +644,8 @@ def sync_financial_snapshots_from_kap_cache(processed_dir: Path) -> Dict[str, in
         symbol = cache_path.stem.strip().upper()
         try:
             source_mtime_ns = cache_path.stat().st_mtime_ns
-            if existing_mtimes.get(symbol) == source_mtime_ns:
+            existing_entry = existing_by_symbol.get(symbol)
+            if existing_entry and existing_entry[0] == source_mtime_ns:
                 skipped_count += 1
                 continue
             with cache_path.open("r", encoding="utf-8") as handle:
@@ -643,6 +659,11 @@ def sync_financial_snapshots_from_kap_cache(processed_dir: Path) -> Dict[str, in
                 source_mtime_ns=source_mtime_ns,
             )
             if record:
+                existing_as_of = existing_entry[1] if existing_entry else None
+                record_as_of = _parse_iso_datetime(record.get("as_of"))
+                if existing_as_of is not None and record_as_of is not None and record_as_of < existing_as_of:
+                    skipped_count += 1
+                    continue
                 records.append(record)
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             error_count += 1

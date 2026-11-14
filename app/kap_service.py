@@ -373,18 +373,22 @@ def get_kap_snapshot(
     max_quarters: int = 10,
     use_cache_when_complete: bool = False,
     allow_criteria_fallback: bool = True,
+    strict_provider_errors: bool = False,
 ) -> Dict[str, Any]:
     """Fetch a raw snapshot via kap_fetcher with correct keyword args."""
     normalized_company = normalize_kap_symbol(company)
-    return fetch_kap_company_snapshot(
-        company=normalized_company,
-        cfg=cfg,
-        processed_dir=processed_dir,
-        force_refresh=force_refresh,
-        max_quarters=max_quarters,
-        use_cache_when_complete=use_cache_when_complete,
-        allow_criteria_fallback=allow_criteria_fallback,
-    )
+    kwargs: Dict[str, Any] = {
+        "company": normalized_company,
+        "cfg": cfg,
+        "processed_dir": processed_dir,
+        "force_refresh": force_refresh,
+        "max_quarters": max_quarters,
+        "use_cache_when_complete": use_cache_when_complete,
+        "allow_criteria_fallback": allow_criteria_fallback,
+    }
+    if strict_provider_errors:
+        kwargs["strict_provider_errors"] = True
+    return fetch_kap_company_snapshot(**kwargs)
 
 
 # Display labels for frontend normalization

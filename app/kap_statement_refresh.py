@@ -559,6 +559,7 @@ def _process_kap_statement_symbol(
         max_quarters=fetch_depth,
         use_cache_when_complete=(mode == "incremental"),
         allow_criteria_fallback=(mode == "full"),
+        strict_provider_errors=True,
     )
     if not isinstance(raw, dict) or not raw.get("ok"):
         error = str((raw or {}).get("error") or "KAP snapshot unavailable")
@@ -584,19 +585,6 @@ def _process_kap_statement_symbol(
                 f"beklenen={expected_depth} alinan={actual_depth}"
             )
 
-    snapshot_mtime_ns: Optional[int] = None
-    try:
-        snapshot_mtime_ns = _statement_cache_path(normalized).stat().st_mtime_ns
-    except OSError:
-        snapshot_mtime_ns = None
-    financial_snapshot = extract_financial_snapshot_from_kap_payload(
-        normalized,
-        raw,
-        source_mtime_ns=snapshot_mtime_ns,
-    )
-    if financial_snapshot:
-        upsert_financial_snapshots(CONFIG.paths.processed_dir, [financial_snapshot])
-
     try:
         prev_schema = int((previous or {}).get("schema_version") or 0)
     except (TypeError, ValueError):
@@ -610,6 +598,41 @@ def _process_kap_statement_symbol(
         or _statement_cached_depth(previous) != _statement_cached_depth(raw)
         or prev_schema != new_schema
     )
+
+    snapshot_warning: Optional[str] = None
+    should_upsert = changed or mode == "full" or not bool(raw.get("cache_hit"))
+    if should_upsert:
+        snapshot_mtime_ns: Optional[int] = None
+        try:
+            snapshot_mtime_ns = _statement_cache_path(normalized).stat().st_mtime_ns
+        except OSError:
+            snapshot_mtime_ns = None
+        financial_snapshot = extract_financial_snapshot_from_kap_payload(
+            normalized,
+            raw,
+            source_mtime_ns=snapshot_mtime_ns,
+        )
+        if financial_snapshot:
+            last_upsert_exc: Optional[BaseException] = None
+            for attempt in range(2):
+                try:
+                    upsert_financial_snapshots(CONFIG.paths.processed_dir, [financial_snapshot])
+                    last_upsert_exc = None
+                    break
+                except Exception as exc:  # noqa: BLE001 - DB blip after KAP write must not abort batch as provider failure
+                    last_upsert_exc = exc
+                    if attempt == 0:
+                        time.sleep(1.0)
+            if last_upsert_exc is not None:
+                LOGGER.warning(
+                    "Financial snapshot DB upsert failed after KAP cache write for %s: %s",
+                    normalized,
+                    last_upsert_exc,
+                )
+                snapshot_warning = (
+                    "snapshot_upsert_failed: "
+                    f"{(str(last_upsert_exc or '')[:200] or last_upsert_exc.__class__.__name__)}"
+                )
     if changed:
         try:
             from app.kap_api_service import (
@@ -624,12 +647,15 @@ def _process_kap_statement_symbol(
         except Exception:  # noqa: BLE001 - price warm-up must not fail statement refresh
             LOGGER.debug("Valuation history price warm-up skipped for %s", normalized, exc_info=True)
 
-    return {
+    result: Dict[str, Any] = {
         "symbol": normalized,
         "outcome": "updated" if changed else "unchanged",
         "quarter_count": _statement_cached_depth(raw),
         "schema_version": raw.get("schema_version") or KAP_CACHE_SCHEMA_VERSION,
     }
+    if snapshot_warning:
+        result["error"] = snapshot_warning
+    return result
 
 
 def _guarded_process_kap_statement_symbol(

@@ -746,7 +746,47 @@ def test_process_kap_statement_symbol_passes_criteria_fallback_true(
     monkeypatch.setattr("app.kap_service.get_kap_snapshot", mock_snapshot)
     res = statement_module._process_kap_statement_symbol("DOCO", mode="full", max_quarters=1)
     assert captured_kwargs.get("allow_criteria_fallback") is True
+    assert captured_kwargs.get("strict_provider_errors") is True
     assert res["symbol"] == "DOCO"
+
+
+def test_process_kap_statement_symbol_handles_snapshot_upsert_error_without_provider_abort(
+    statement_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def mock_snapshot(**_kwargs: Any) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "schema_version": 15,
+            "live_period_count": 1,
+            "quarters": [
+                {"year": 2026, "period": 1, "disclosure_index": 100}
+            ],
+        }
+
+    upsert_calls = 0
+
+    def failing_upsert(_processed_dir: Any, _records: Any) -> int:
+        nonlocal upsert_calls
+        upsert_calls += 1
+        raise RuntimeError("transient db outage")
+
+    monkeypatch.setattr("app.kap_service.get_kap_snapshot", mock_snapshot)
+    monkeypatch.setattr(
+        "app.financial_snapshot_store.extract_financial_snapshot_from_kap_payload",
+        lambda symbol, _raw, source_mtime_ns=None: {"symbol": symbol, "has_kap_cache": True},
+    )
+    monkeypatch.setattr(
+        "app.financial_snapshot_store.upsert_financial_snapshots",
+        failing_upsert,
+    )
+    monkeypatch.setattr(statement_module.time, "sleep", lambda _seconds: None)
+
+    res = statement_module._guarded_process_kap_statement_symbol("DOCO", mode="full", max_quarters=1)
+
+    assert upsert_calls == 2
+    assert res["outcome"] == "updated"
+    assert res["blocked"] is False
+    assert "snapshot_upsert_failed" in str(res.get("error") or "")
 
 
 def test_statement_cache_state_uses_remote_kap_metadata_when_local_files_absent(

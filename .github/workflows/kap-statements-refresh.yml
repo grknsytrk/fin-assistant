@@ -154,23 +154,24 @@ jobs:
             coverage_ready="$(echo "$response" | jq -r '.refresh_job.coverage.ready // "?"')"
             stop_reason="$(echo "$response" | jq -r '.refresh_job.stop_reason // empty')"
             job_mode="$(echo "$response" | jq -r '.refresh_job.mode // empty')"
+            errors_summary="$(echo "$response" | jq -rc '(.refresh_job.errors // [])[:5] | map("\(.symbol // "-")(\(.outcome // "-")): \(.error // "")") | join(" | ")' 2>/dev/null || true)"
             echo "statement refresh: job_id=$JOB_ID status=${status:-unknown} processed=$processed/$total current=$current_symbol last=$last_symbol fetched=$fetched updated=$updated unchanged=$unchanged skipped_ready=$skipped_ready skipped_missing=$skipped_missing skipped_shallow=$skipped_shallow skipped_schema=$skipped_schema failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
             max_allowed_failures="${MAX_ALLOWED_FAILURES:-10}"
             max_allowed_blocked="${MAX_ALLOWED_BLOCKED:-5}"
             case "$status" in
               succeeded)
                 if (( blocked > 0 )); then
-                  echo "::error::statement refresh reported blocked requests ($blocked); provider circuit breaker engaged" >&2
+                  echo "::error::statement refresh reported blocked requests ($blocked); provider circuit breaker engaged${errors_summary:+; errors=$errors_summary}" >&2
                   echo "$response" >&2
                   exit 1
                 fi
                 if (( failed > max_allowed_failures )); then
-                  echo "::error::statement refresh reported failures exceeding threshold ($failed > $max_allowed_failures); refusing to treat partial coverage as healthy" >&2
+                  echo "::error::statement refresh reported failures exceeding threshold ($failed > $max_allowed_failures); refusing to treat partial coverage as healthy${errors_summary:+; errors=$errors_summary}" >&2
                   echo "$response" >&2
                   exit 1
                 fi
                 if (( failed > 0 )); then
-                  echo "::warning::statement refresh finished with $failed non-fatal failure(s) (within tolerance of $max_allowed_failures)"
+                  echo "::warning::statement refresh finished with $failed non-fatal failure(s) (within tolerance of $max_allowed_failures)${errors_summary:+; errors=$errors_summary}"
                 fi
                 if [[ "${job_mode:-$MODE}" == "full" && "$coverage_ready" != "$total" ]]; then
                   echo "::warning::full refresh finished but coverage_ready=$coverage_ready/$total; some companies may expose fewer quarters than requested"
@@ -183,17 +184,17 @@ jobs:
                 ;;
               partial)
                 if (( blocked > max_allowed_blocked )); then
-                  echo "::error::statement refresh hit provider blocking for $blocked symbol(s) (limit $max_allowed_blocked) stop_reason=${stop_reason:-unknown}" >&2
+                  echo "::error::statement refresh hit provider blocking for $blocked symbol(s) (limit $max_allowed_blocked) stop_reason=${stop_reason:-unknown}${errors_summary:+; errors=$errors_summary}" >&2
                   echo "$response" >&2
                   exit 1
                 fi
                 if (( failed > max_allowed_failures )); then
-                  echo "::error::statement refresh failed with errors exceeding threshold: failed=$failed max_allowed=$max_allowed_failures stop_reason=${stop_reason:-unknown}" >&2
+                  echo "::error::statement refresh failed with errors exceeding threshold: failed=$failed max_allowed=$max_allowed_failures stop_reason=${stop_reason:-unknown}${errors_summary:+; errors=$errors_summary}" >&2
                   echo "$response" >&2
                   exit 1
                 fi
                 if (( blocked > 0 )); then
-                  echo "::warning::statement refresh finished with $blocked blocked symbol(s) (within tolerance of $max_allowed_blocked); the next run will retry them"
+                  echo "::warning::statement refresh finished with $blocked blocked symbol(s) (within tolerance of $max_allowed_blocked); the next run will retry them${errors_summary:+; errors=$errors_summary}"
                 fi
                 if [[ "$stop_reason" == "worker_interrupted" ]]; then
                   echo "::warning::statement refresh was interrupted (stop_reason=worker_interrupted); processed=$processed/$total remaining=$remaining. Initiating automatic resume pass..."
@@ -204,19 +205,19 @@ jobs:
                   if [[ "${job_mode:-$MODE}" == "incremental" ]] && (( skipped_missing + skipped_shallow + skipped_schema > 0 )); then
                     echo "needs_backfill=true" >> "$GITHUB_OUTPUT"
                   fi
-                  echo "::warning::statement refresh completed with failed=$failed blocked=$blocked (within tolerance); processed=$processed/$total"
+                  echo "::warning::statement refresh completed with failed=$failed blocked=$blocked (within tolerance); processed=$processed/$total${errors_summary:+; errors=$errors_summary}"
                   exit 0
                 fi
                 echo "::warning::statement refresh stopped early (stop_reason=${stop_reason:-budget_exhausted}); processed=$processed/$total remaining=$remaining. Next run will continue automatically."
                 exit 0
                 ;;
               aborted)
-                echo "statement refresh aborted to protect KAP from a request burst: stop_reason=${stop_reason:-unknown} blocked=$blocked failed=$failed" >&2
+                echo "statement refresh aborted to protect KAP from a request burst: stop_reason=${stop_reason:-unknown} blocked=$blocked failed=$failed${errors_summary:+; errors=$errors_summary}" >&2
                 echo "$response" >&2
                 exit 1
                 ;;
               failed)
-                echo "statement refresh failed: stop_reason=${stop_reason:-unknown}" >&2
+                echo "statement refresh failed: stop_reason=${stop_reason:-unknown}${errors_summary:+; errors=$errors_summary}" >&2
                 echo "$response" >&2
                 exit 1
                 ;;
@@ -280,11 +281,12 @@ jobs:
             last_symbol="$(echo "$response" | jq -r '.refresh_job.last_symbol // "-"')"
             coverage_ready="$(echo "$response" | jq -r '.refresh_job.coverage.ready // "?"')"
             stop_reason="$(echo "$response" | jq -r '.refresh_job.stop_reason // empty')"
+            errors_summary="$(echo "$response" | jq -rc '(.refresh_job.errors // [])[:5] | map("\(.symbol // "-")(\(.outcome // "-")): \(.error // "")") | join(" | ")' 2>/dev/null || true)"
             echo "resume refresh: job_id=$job_id status=${status:-unknown} processed=$processed/$total current=$current_symbol last=$last_symbol updated=$updated skipped_ready=$skipped_ready failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
             case "$status" in
               succeeded)
                 if (( blocked > max_allowed_blocked || failed > max_allowed_failures )); then
-                  echo "::error::resume refresh reported errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)" >&2
+                  echo "::error::resume refresh reported errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)${errors_summary:+; errors=$errors_summary}" >&2
                   exit 1
                 fi
                 skipped_missing="$(echo "$response" | jq -r '.refresh_job.skipped_missing_cache // 0')"
@@ -298,17 +300,17 @@ jobs:
                 ;;
               partial)
                 if (( blocked > max_allowed_blocked || failed > max_allowed_failures )); then
-                  echo "::error::resume refresh completed with errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)" >&2
+                  echo "::error::resume refresh completed with errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)${errors_summary:+; errors=$errors_summary}" >&2
                   exit 1
                 fi
                 if (( blocked > 0 )); then
-                  echo "::warning::resume refresh finished with $blocked blocked symbol(s) (within tolerance); the next run will retry them"
+                  echo "::warning::resume refresh finished with $blocked blocked symbol(s) (within tolerance); the next run will retry them${errors_summary:+; errors=$errors_summary}"
                 fi
                 echo "::warning::resume refresh stopped early (stop_reason=${stop_reason:-budget_exhausted}); remaining=$remaining. Next scheduled run will continue."
                 exit 0
                 ;;
               aborted|failed)
-                echo "::error::resume refresh failed: status=$status stop_reason=${stop_reason:-unknown}" >&2
+                echo "::error::resume refresh failed: status=$status stop_reason=${stop_reason:-unknown}${errors_summary:+; errors=$errors_summary}" >&2
                 exit 1
                 ;;
               superseded)
@@ -367,11 +369,12 @@ jobs:
             last_symbol="$(echo "$response" | jq -r '.refresh_job.last_symbol // "-"')"
             coverage_ready="$(echo "$response" | jq -r '.refresh_job.coverage.ready // "?"')"
             stop_reason="$(echo "$response" | jq -r '.refresh_job.stop_reason // empty')"
+            errors_summary="$(echo "$response" | jq -rc '(.refresh_job.errors // [])[:5] | map("\(.symbol // "-")(\(.outcome // "-")): \(.error // "")") | join(" | ")' 2>/dev/null || true)"
             echo "backfill refresh: job_id=$job_id status=${status:-unknown} processed=$processed/$total current=$current_symbol last=$last_symbol updated=$updated skipped_ready=$skipped_ready failed=$failed blocked=$blocked remaining=$remaining coverage_ready=$coverage_ready stop=${stop_reason:-running}"
             case "$status" in
               succeeded)
                 if (( blocked > max_allowed_blocked || failed > max_allowed_failures )); then
-                  echo "::error::backfill refresh reported errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)" >&2
+                  echo "::error::backfill refresh reported errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)${errors_summary:+; errors=$errors_summary}" >&2
                   exit 1
                 fi
                 echo "backfill refresh succeeded: updated=$updated coverage_ready=$coverage_ready"
@@ -379,17 +382,17 @@ jobs:
                 ;;
               partial)
                 if (( blocked > max_allowed_blocked || failed > max_allowed_failures )); then
-                  echo "::error::backfill refresh completed with errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)" >&2
+                  echo "::error::backfill refresh completed with errors: failed=$failed blocked=$blocked (limit $max_allowed_blocked)${errors_summary:+; errors=$errors_summary}" >&2
                   exit 1
                 fi
                 if (( blocked > 0 )); then
-                  echo "::warning::backfill refresh finished with $blocked blocked symbol(s) (within tolerance); the next run will retry them"
+                  echo "::warning::backfill refresh finished with $blocked blocked symbol(s) (within tolerance); the next run will retry them${errors_summary:+; errors=$errors_summary}"
                 fi
                 echo "::warning::backfill refresh stopped early (stop_reason=${stop_reason:-budget_exhausted}); remaining=$remaining"
                 exit 0
                 ;;
               aborted|failed)
-                echo "::error::backfill refresh failed: status=$status stop_reason=${stop_reason:-unknown}" >&2
+                echo "::error::backfill refresh failed: status=$status stop_reason=${stop_reason:-unknown}${errors_summary:+; errors=$errors_summary}" >&2
                 exit 1
                 ;;
               superseded)

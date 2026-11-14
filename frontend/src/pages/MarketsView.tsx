@@ -400,16 +400,31 @@ const STOCK_CARD_CHART_RANGES: Array<{ id: MarketStockCardChartRange; label: str
 ];
 const INDEX_COLUMNS: Array<{ key: keyof MarketIndexListRow; label: string; align?: 'left' | 'right' }> = [
     { key: 'symbol', label: 'Endeks', align: 'left' },
-    { key: 'price', label: 'Son Fiyat', align: 'right' },
+    { key: 'price', label: 'Fiyat', align: 'right' },
     { key: 'change_pct', label: 'Gün %', align: 'right' },
     { key: 'volume', label: 'Hacim', align: 'right' },
-    { key: 'return_1w_pct', label: '1 Hafta %', align: 'right' },
-    { key: 'return_1m_pct', label: '1 Ay %', align: 'right' },
-    { key: 'return_3m_pct', label: '3 Ay %', align: 'right' },
-    { key: 'return_6m_pct', label: '6 Ay %', align: 'right' },
-    { key: 'return_ytd_pct', label: 'YTA %', align: 'right' },
-    { key: 'return_1y_pct', label: '1 Yıl %', align: 'right' },
+    { key: 'return_1w_pct', label: '1 Hafta', align: 'right' },
+    { key: 'return_1m_pct', label: '1 Ay', align: 'right' },
+    { key: 'return_3m_pct', label: '3 Ay', align: 'right' },
+    { key: 'return_6m_pct', label: '6 Ay', align: 'right' },
+    { key: 'return_ytd_pct', label: 'Yılbaşı', align: 'right' },
+    { key: 'return_1y_pct', label: '1 Yıl', align: 'right' },
 ];
+type IndexGroupFilter = 'all' | 'main' | 'sector';
+const INDEX_GROUP_OPTIONS: Array<{ id: IndexGroupFilter; label: string }> = [
+    { id: 'all', label: 'Tümü' },
+    { id: 'main', label: 'Ana Endeksler' },
+    { id: 'sector', label: 'Sektör' },
+];
+const MAIN_MARKET_INDICES = new Set<string>([
+    'XUTUM',
+    'XU100',
+    'XU030',
+    'XUSIN',
+    'XUHIZ',
+    'XUMAL',
+    'XUTEK',
+]);
 const INDEX_CONSTITUENT_COLUMNS: Array<{ key: Exclude<IndexConstituentSortKey, 'impact_abs'>; label: string; align?: 'left' | 'right' }> = [
     { key: 'symbol', label: 'Şirket', align: 'left' },
     { key: 'price', label: 'Son Fiyat', align: 'right' },
@@ -3204,6 +3219,7 @@ export default function MarketsView({
     const [indexDetailLoading, setIndexDetailLoading] = useState(false);
     const [indexDetailError, setIndexDetailError] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [indexGroup, setIndexGroup] = useState<IndexGroupFilter>('all');
     const [stockCardSearchTerm, setStockCardSearchTerm] = useState('');
     const [navCollapsed, setNavCollapsed] = useState(false);
     const [railCollapsed, setRailCollapsed] = useState(false);
@@ -3987,6 +4003,8 @@ export default function MarketsView({
     const filteredIndices = useMemo(
         () =>
             (indices?.rows || []).filter((row) => {
+                if (indexGroup === 'main' && !MAIN_MARKET_INDICES.has(row.symbol)) return false;
+                if (indexGroup === 'sector' && MAIN_MARKET_INDICES.has(row.symbol)) return false;
                 const query = normalizedSearch;
                 if (!query) return true;
                 return (
@@ -3994,8 +4012,9 @@ export default function MarketsView({
                     row.label.toLowerCase().includes(query)
                 );
             }),
-        [indices?.rows, normalizedSearch],
+        [indices?.rows, indexGroup, normalizedSearch],
     );
+    const isIndicesFiltered = indexGroup !== 'all' || Boolean(normalizedSearch);
 
     const sortedIndices = useMemo(() => {
         const arr = [...filteredIndices];
@@ -5392,24 +5411,90 @@ export default function MarketsView({
                 <div className="indices-view">
                     <div className="panel stocks-table-panel">
                         <div className="panel-header stocks-panel-header">
-                            <div>
-                                <h2>Endeksler</h2>
-                                <span className="panel-kicker">
-                                    {indicesLoading && !indices
-                                        ? 'Yükleniyor…'
-                                        : `${filteredIndices.length || indices?.rows.length || 0} endeks`}
-                                </span>
-                            </div>
-                            <div className="stocks-panel-actions">
-                                <div className="search-box">
-                                    <input
-                                        type="text"
-                                        placeholder="Endeks kodu ile ara..."
-                                        value={searchTerm}
-                                        onChange={(e) => setSearchTerm(e.target.value)}
-                                        className="input-field"
-                                    />
+                            <div className="stocks-panel-header-top">
+                                <div className="stocks-panel-title-group">
+                                    <h2>Endeksler</h2>
+                                    <span className="stocks-count-badge">
+                                        {indicesLoading && !indices
+                                            ? 'Yükleniyor…'
+                                            : isIndicesFiltered
+                                                ? `${sortedIndices.length} / ${indices?.rows.length || 0} endeks`
+                                                : `${sortedIndices.length} endeks`}
+                                    </span>
                                 </div>
+                                <div className="stocks-header-actions">
+                                    <div className="stocks-search-wrap">
+                                        <Search size={14} className="stocks-search-icon" aria-hidden="true" />
+                                        <input
+                                            type="text"
+                                            placeholder="Endeks kodu veya adı ile ara..."
+                                            value={searchTerm}
+                                            onChange={(e) => setSearchTerm(e.target.value)}
+                                            className="stocks-search-input"
+                                        />
+                                        {searchTerm && (
+                                            <button
+                                                type="button"
+                                                className="stocks-search-clear"
+                                                onClick={() => setSearchTerm('')}
+                                                aria-label="Aramayı temizle"
+                                            >
+                                                <X size={12} aria-hidden="true" />
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="stocks-panel-toolbar">
+                                <div className="stocks-toolbar-left">
+                                    <div className="stocks-control-group">
+                                        <span className="stocks-control-label">Kapsam</span>
+                                        <div
+                                            className="stocks-segment"
+                                            aria-label="Endeks kapsamı"
+                                            style={{
+                                                '--item-count': INDEX_GROUP_OPTIONS.length,
+                                                '--active-index': INDEX_GROUP_OPTIONS.findIndex((opt) => opt.id === indexGroup),
+                                            } as React.CSSProperties}
+                                        >
+                                            {INDEX_GROUP_OPTIONS.map((option) => (
+                                                <button
+                                                    key={option.id}
+                                                    type="button"
+                                                    className={indexGroup === option.id ? 'active' : ''}
+                                                    aria-pressed={indexGroup === option.id}
+                                                    onClick={() => setIndexGroup(option.id)}
+                                                >
+                                                    {option.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                                {indices && (
+                                    <div className="stocks-toolbar-meta">
+                                        {indicesError && (
+                                            <span className="stocks-status-pill is-danger" title={indicesError}>
+                                                <AlertCircle size={12} aria-hidden="true" />
+                                                <span>Yenileme başarısız</span>
+                                            </span>
+                                        )}
+                                        <span className="stocks-meta-time" title="Son endeks güncellemesi">
+                                            <Clock3 size={12} aria-hidden="true" />
+                                            <span>{formatUpdateTime(indices.as_of)}</span>
+                                        </span>
+                                        <button
+                                            type="button"
+                                            className={`stocks-refresh-btn${indicesLoading ? ' is-spinning' : ''}`}
+                                            onClick={() => loadIndices(false, true)}
+                                            disabled={indicesLoading}
+                                            title="Verileri yenile"
+                                            aria-label="Endeks verilerini yenile"
+                                        >
+                                            <RefreshCw size={12} aria-hidden="true" />
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         </div>
 
@@ -5432,15 +5517,11 @@ export default function MarketsView({
 
                         {indices && (
                             <>
-                                <div className="stocks-table-meta">
-                                    <span>Son güncelleme: {formatUpdateTime(indices.as_of)}</span>
-                                    {indicesError && <span className="stocks-soft-error">Son yenileme başarısız oldu.</span>}
-                                </div>
                                 {filteredIndices.length === 0 ? (
                                     <div className="no-results">Aranan kritere uyan endeks bulunamadı.</div>
                                 ) : (
                                     <div className="stocks-table-wrap indices-table-wrap">
-                                        <table className="stocks-table indices-table">
+                                        <table className="stocks-table indices-table" aria-rowcount={sortedIndices.length + 1}>
                                             <thead>
                                                 <tr>
                                                     <th className="stocks-rank">#</th>
@@ -5476,23 +5557,30 @@ export default function MarketsView({
                                                 {sortedIndices.map((row, index) => (
                                                     <tr
                                                         key={row.symbol}
+                                                        aria-rowindex={index + 2}
                                                         onClick={() => handleSelectIndex(row.symbol)}
                                                     >
                                                         <td className="stocks-rank">{index + 1}</td>
                                                         {INDEX_COLUMNS.map((column) => {
-                                                            const value = numericOrNull(row[column.key]);
+                                                            const rawVal = row[column.key];
+                                                            const value = numericOrNull(rawVal);
                                                             const isPct =
                                                                 column.key === 'change_pct' ||
                                                                 String(column.key).startsWith('return_');
+                                                            const isMuted = column.key !== 'symbol' && (
+                                                                isPct ? value == null : rawVal == null
+                                                            );
                                                             return (
                                                                 <td
                                                                     key={column.key}
                                                                     className={[
                                                                         column.align === 'right' ? 'stocks-cell-right' : '',
                                                                         isPct ? getTableChangeClass(value) : '',
+                                                                        isMuted ? 'stocks-cell-muted' : '',
                                                                         column.key === 'symbol' ? 'stocks-symbol-cell' : '',
                                                                         column.key === 'price' ? 'stocks-price-cell' : '',
-                                                                    ].join(' ')}
+                                                                        column.key === 'volume' ? 'stocks-volume-cell' : '',
+                                                                    ].filter(Boolean).join(' ')}
                                                                 >
                                                                     {column.key === 'symbol' ? (
                                                                         <span className="indices-symbol-main">
@@ -5506,7 +5594,7 @@ export default function MarketsView({
                                                                                 />
                                                                                 <span>{row.symbol}</span>
                                                                             </span>
-                                                                            <small>{row.label}</small>
+                                                                            <small title={row.label}>{row.label}</small>
                                                                         </span>
                                                                     ) : (
                                                                         indexCellValue(row, column.key)
@@ -5606,13 +5694,18 @@ export default function MarketsView({
 
                             <section className="indices-impact-panel">
                                 <div className="indices-impact-head">
-                                    <div>
+                                    <div className="stocks-panel-title-group">
                                         <h3>{indexDetail.symbol} Endeksindeki Şirketler ve Etkileri</h3>
-                                        <span className="panel-kicker">
-                                            {indexDetail.constituents.length} şirket · {indexDetail.weight_status === 'available' ? 'ağırlık hesaplandı' : 'ağırlık bekleniyor'}
+                                        <span className="stocks-count-badge">
+                                            {indexDetail.constituents.length} hisse · {indexDetail.weight_status === 'available' ? 'ağırlık hesaplandı' : 'ağırlık bekleniyor'}
                                         </span>
                                     </div>
-                                    {indexDetailError && <span className="stocks-soft-error">Son yenileme başarısız oldu.</span>}
+                                    {indexDetailError && (
+                                        <span className="stocks-status-pill is-danger">
+                                            <AlertCircle size={12} aria-hidden="true" />
+                                            <span>Son yenileme başarısız</span>
+                                        </span>
+                                    )}
                                 </div>
 
                                 {indexDetail.weight_note && (

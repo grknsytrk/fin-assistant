@@ -1308,7 +1308,9 @@ def _list_company_disclosures(
     max_periods: Optional[int] = None,
     *,
     allow_criteria_fallback: bool = True,
+    strict_provider_errors: bool = False,
 ) -> List[Dict[str, Any]]:
+    strict_errors = bool(strict_provider_errors) or not allow_criteria_fallback
     current_year = _utc_now().year
     rows: List[Dict[str, Any]] = []
     last_error: Optional[BaseException] = None
@@ -1339,7 +1341,7 @@ def _list_company_disclosures(
                     raise RuntimeError(
                         "KAP istek limiti (429) nedeniyle finansal bildirimler şu anda alınamadı."
                     ) from exc
-                if not allow_criteria_fallback:
+                if strict_errors:
                     raise RuntimeError(
                         f"KAP finansal bildirim listesi 429 ile sinirlandi: member_oid={member_oid}"
                     ) from exc
@@ -1350,7 +1352,7 @@ def _list_company_disclosures(
             continue
         except Exception as exc:
             last_error = exc
-            if not allow_criteria_fallback:
+            if strict_errors:
                 # Connection resets and timeouts often arrive without an HTTP
                 # status. Do not turn a partial year list into an "unchanged"
                 # result in batch mode when one of those requests failed.
@@ -1407,12 +1409,12 @@ def _list_company_disclosures(
             if period_count >= requested_periods:
                 break
 
-    if not allow_criteria_fallback and provider_error is not None:
+    if strict_errors and provider_error is not None:
         raise RuntimeError(
             f"KAP finansal bildirim listesi saglayici hatasi: member_oid={member_oid} error={provider_error}"
         ) from provider_error
 
-    if not rows and not allow_criteria_fallback and last_error is not None:
+    if not rows and strict_errors and last_error is not None:
         raise RuntimeError(
             f"KAP finansal bildirim listesi alinamadi: member_oid={member_oid} error={last_error}"
         ) from last_error
@@ -3559,7 +3561,9 @@ def fetch_kap_company_snapshot(
     max_quarters: int = 4,
     use_cache_when_complete: bool = False,
     allow_criteria_fallback: bool = True,
+    strict_provider_errors: bool = False,
 ) -> Dict[str, Any]:
+    strict_errors = bool(strict_provider_errors) or not allow_criteria_fallback
     company_norm = str(company or "").strip().upper()
     if not company_norm:
         return {
@@ -3650,7 +3654,7 @@ def fetch_kap_company_snapshot(
                             cfg=cfg,
                             member=None,
                             force_refresh=False,
-                            strict=not allow_criteria_fallback,
+                            strict=strict_errors,
                         )
                     if not live_latest_key:
                         raise RuntimeError("KAP finansal bildirim listesi bos dondu.")
@@ -3658,7 +3662,7 @@ def fetch_kap_company_snapshot(
                     # The UI can fall back to the cached snapshot, but a batch
                     # job must surface provider blocks instead of reporting a
                     # throttled check as "unchanged".
-                    if not allow_criteria_fallback:
+                    if strict_errors:
                         raise
                     _mark_live_disclosure_check_failed(cache_path, cached, exc)
                     cached["cache_hit"] = True
@@ -3678,9 +3682,9 @@ def fetch_kap_company_snapshot(
         # Keep the legacy two-argument call for interactive paths so existing
         # monkeypatches keep working; batch jobs opt into strict mode.
         member = (
-            _resolve_member(company_norm, cfg)
-            if allow_criteria_fallback
-            else _resolve_member(company_norm, cfg, strict=True)
+            _resolve_member(company_norm, cfg, strict=True)
+            if strict_errors
+            else _resolve_member(company_norm, cfg)
         )
         if not member:
             raise RuntimeError(f"KAP uyelik kaydi bulunamadi: {company_norm}")
@@ -3693,12 +3697,15 @@ def fetch_kap_company_snapshot(
         is_bank = company_kind == "bank"
         is_insurance = company_kind == "insurance"
 
-        disclosures = _list_company_disclosures(
-            member_oid=member["mkk_member_oid"],
-            cfg=cfg,
-            max_periods=requested_max_quarters,
-            allow_criteria_fallback=allow_criteria_fallback,
-        )
+        disclosures_kwargs: Dict[str, Any] = {
+            "member_oid": member["mkk_member_oid"],
+            "cfg": cfg,
+            "max_periods": requested_max_quarters,
+            "allow_criteria_fallback": allow_criteria_fallback,
+        }
+        if strict_provider_errors:
+            disclosures_kwargs["strict_provider_errors"] = True
+        disclosures = _list_company_disclosures(**disclosures_kwargs)
         if not disclosures:
             raise RuntimeError("KAP finansal bildirimleri şu anda alınamadı.")
 
@@ -3742,7 +3749,7 @@ def fetch_kap_company_snapshot(
                 continue
             detail = _fetch_attachment_detail(disclosure_index, cfg)
             if not detail:
-                if not allow_criteria_fallback:
+                if strict_errors:
                     raise RuntimeError(
                         f"KAP bildirim detayi bos dondu: disclosure_index={disclosure_index}"
                     )
@@ -3815,7 +3822,7 @@ def fetch_kap_company_snapshot(
 
         quarter_rows = _merge_live_and_cached_quarters(quarter_rows, cached, cache_write_depth)
 
-        if not allow_criteria_fallback:
+        if strict_errors:
             expected_live_periods = min(requested_max_quarters, len(disclosures))
             actual_periods = _cached_period_count({"quarters": quarter_rows})
             if actual_periods < expected_live_periods:
@@ -3854,14 +3861,14 @@ def fetch_kap_company_snapshot(
             cfg=cfg,
             member=member,
             force_refresh=force_refresh,
-            strict=not allow_criteria_fallback,
+            strict=strict_errors,
         )
         _write_cache(cache_path, payload)
         return payload
     except Exception as exc:
         # A batch job must see the provider failure; serving the previous cache
         # here would report a throttled or partial refresh as success.
-        if not allow_criteria_fallback:
+        if strict_errors:
             raise
         if cached:
             cached["ok"] = bool(cached.get("ok", False))

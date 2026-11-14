@@ -1919,3 +1919,45 @@ def test_list_company_disclosures_stops_after_consecutive_empty_years(
     assert len(rows) == 2
     assert len(calls) == 3
     assert all(any(f"/{year}/" in call for year in (2026, 2025, 2024)) for call in calls)
+
+
+def test_fetch_snapshot_raises_provider_error_when_strict_with_criteria_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    cache_dir = tmp_path / "kap_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    stale_payload = {
+        "ok": True,
+        "schema_version": 1,
+        "company": "GARAN",
+        "quarters": [{"year": 2025, "period": 4, "disclosure_index": 123}],
+        "fetched_at": "2025-01-01T00:00:00+00:00",
+    }
+    (cache_dir / "GARAN.json").write_text(json.dumps(stale_payload), encoding="utf-8")
+
+    monkeypatch.setattr(
+        kap_fetcher,
+        "_resolve_member",
+        lambda _company, _cfg_obj, strict=False: {"mkk_member_oid": "oid", "title": "GARANTI"},
+    )
+    list_kwargs: dict[str, object] = {}
+
+    def failing_list(**kwargs: object) -> list[dict[str, object]]:
+        list_kwargs.update(kwargs)
+        raise RuntimeError("KAP istek limiti (429)")
+
+    monkeypatch.setattr(kap_fetcher, "_list_company_disclosures", failing_list)
+
+    with pytest.raises(RuntimeError, match="429"):
+        fetch_kap_company_snapshot(
+            company="GARAN",
+            cfg=_cfg(),
+            processed_dir=tmp_path,
+            max_quarters=5,
+            allow_criteria_fallback=True,
+            strict_provider_errors=True,
+        )
+
+    assert list_kwargs.get("allow_criteria_fallback") is True
+    assert list_kwargs.get("strict_provider_errors") is True

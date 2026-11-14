@@ -423,3 +423,32 @@ def test_upsert_financial_snapshots_updates_memory_cache_and_skips_unchanged_pro
     assert not any("SELECT * FROM company_financial_snapshots" in q for q in queries)
     store.reset_financial_snapshot_store_for_tests()
 
+
+def test_sync_kap_cache_does_not_overwrite_newer_db_snapshot(tmp_path) -> None:
+    store.reset_financial_snapshot_store_for_tests()
+    processed_dir = tmp_path / "processed"
+    store.ensure_financial_snapshot_schema(processed_dir)
+
+    newer_payload = _kap_payload(999.0)
+    newer_payload["fetched_at"] = "2026-11-14T10:00:00+00:00"
+    newer_record = store.extract_financial_snapshot_from_kap_payload(
+        "AAA", newer_payload, source_mtime_ns=100
+    )
+    assert newer_record is not None
+    assert store.upsert_financial_snapshots(processed_dir, [newer_record]) == 1
+
+    older_payload = _kap_payload(111.0)
+    older_payload["fetched_at"] = "2026-11-01T10:00:00+00:00"
+    kap_dir = processed_dir / "kap_cache"
+    kap_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = kap_dir / "AAA.json"
+    cache_path.write_text(json.dumps(older_payload), encoding="utf-8")
+
+    result = store.sync_financial_snapshots_from_kap_cache(processed_dir)
+    stored = store.get_financial_snapshots_map(processed_dir, ["AAA"])["AAA"]
+
+    assert result["upserted_count"] == 0
+    assert result["skipped_unchanged_count"] == 1
+    assert stored["ttm_net_kar"] == 999.0
+    assert stored["as_of"] == "2026-11-14T10:00:00+00:00"
+
