@@ -62,17 +62,79 @@ const REQUEST_TIMEOUT_MS = 15000;
 const OVERVIEW_COMMENTARY_TIMEOUT_MS = Number(import.meta.env.VITE_KAP_OVERVIEW_COMMENTARY_TIMEOUT_MS || 300000);
 const TIMEOUT_MESSAGE = 'Istek suresi asildi. Lutfen tekrar deneyin.';
 
-const FUND_HOLDINGS_MEMORY_CACHE_TTL_MS = 15_000;
+const FUND_HOLDINGS_MEMORY_CACHE_TTL_MS = 60_000;
+const FUND_STATIC_MEMORY_CACHE_TTL_MS = 5 * 60_000;
+const FUND_DETAIL_MEMORY_CACHE_TTL_MS = 60_000;
+const MARKET_REFERENCE_LIVE_TTL_MS = 30_000;
+const MARKET_REFERENCE_OFFHOURS_TTL_MS = 120_000;
 const fundHoldingsMemoryCache = new BoundedMemoryCache<string, { payload: FundHoldingsResponse; fetchedAt: number }>(64);
 const fundHoldingsInFlight = new Map<string, Promise<FundHoldingsResponse>>();
 const fundHoldingsLiveInFlight = new Map<string, Promise<FundHoldingsLiveResponse>>();
+const fundCategoriesMemoryCache = new BoundedMemoryCache<string, { payload: FundCategoriesResponse; fetchedAt: number }>(4);
+const fundCategoriesInFlight = new Map<string, Promise<FundCategoriesResponse>>();
+const fundDetailMemoryCache = new BoundedMemoryCache<string, { payload: FundDetail; fetchedAt: number }>(64);
+const fundDetailInFlight = new Map<string, Promise<FundDetail>>();
+const fundYieldSummaryMemoryCache = new BoundedMemoryCache<string, { payload: FundYieldSummaryResponse; fetchedAt: number }>(64);
+const fundPerformanceMemoryCache = new BoundedMemoryCache<string, { payload: FundPerformanceResponse; fetchedAt: number }>(64);
+const fundAllocationsMemoryCache = new BoundedMemoryCache<string, { payload: FundAllocationsResponse; fetchedAt: number }>(64);
+const fundAllocationsInFlight = new Map<string, Promise<FundAllocationsResponse>>();
+const fundAllocationsHistoryMemoryCache = new BoundedMemoryCache<string, { payload: FundAllocationsHistoryResponse; fetchedAt: number }>(64);
+const fundAllocationsHistoryInFlight = new Map<string, Promise<FundAllocationsHistoryResponse>>();
+const marketIndicesMemoryCache = new BoundedMemoryCache<string, { payload: MarketIndicesResponse; fetchedAt: number }>(4);
+const marketIndicesInFlight = new Map<string, Promise<MarketIndicesResponse>>();
+const marketFxMemoryCache = new BoundedMemoryCache<string, { payload: MarketFxResponse; fetchedAt: number }>(4);
+const marketFxInFlight = new Map<string, Promise<MarketFxResponse>>();
+const MARKET_WATCH_LIVE_TTL_MS = 25_000;
+const MARKET_WATCH_OFFHOURS_TTL_MS = MARKET_REFERENCE_OFFHOURS_TTL_MS;
+const marketWatchMemoryCache = new BoundedMemoryCache<string, { payload: MarketWatchResponse; fetchedAt: number }>(4);
+const marketWatchInFlight = new Map<string, Promise<MarketWatchResponse>>();
+const marketWatchUnifiedMemoryCache = new BoundedMemoryCache<string, { payload: UnifiedMarketWatchResponse; fetchedAt: number }>(4);
+const marketWatchUnifiedInFlight = new Map<string, Promise<UnifiedMarketWatchResponse>>();
+const marketWatchGlobalMemoryCache = new BoundedMemoryCache<string, { payload: MarketWatchGlobalResponse; fetchedAt: number }>(4);
+const marketWatchGlobalInFlight = new Map<string, Promise<MarketWatchGlobalResponse>>();
+const marketCommoditiesMemoryCache = new BoundedMemoryCache<string, { payload: MarketCommoditiesResponse; fetchedAt: number }>(4);
+const marketCommoditiesInFlight = new Map<string, Promise<MarketCommoditiesResponse>>();
+
+function cachedFetch<T>(
+    cache: BoundedMemoryCache<string, { payload: T; fetchedAt: number }>,
+    inFlight: Map<string, Promise<T>>,
+    key: string,
+    ttlMs: number,
+    fetcher: () => Promise<T>,
+    options?: { bypassCache?: boolean; shouldCache?: (payload: T) => boolean },
+): Promise<T> {
+    const now = Date.now();
+    const bypass = Boolean(options?.bypassCache);
+    if (!bypass) {
+        const cached = cache.get(key);
+        if (cached && now - cached.fetchedAt < ttlMs) {
+            return Promise.resolve(cached.payload);
+        }
+        const existing = inFlight.get(key);
+        if (existing) return existing;
+    }
+    const request = fetcher()
+        .then((payload) => {
+            if (!options?.shouldCache || options.shouldCache(payload)) {
+                cache.set(key, { payload, fetchedAt: Date.now() });
+            }
+            return payload;
+        })
+        .finally(() => {
+            if (inFlight.get(key) === request) {
+                inFlight.delete(key);
+            }
+        });
+    if (!bypass) inFlight.set(key, request);
+    return request;
+}
 const MARKET_FLOW_MEMORY_CACHE_TTL_MS = 15_000;
 const marketFlowMemoryCache = new BoundedMemoryCache<string, { payload: MarketFlowResponse; fetchedAt: number }>(32);
 const marketFlowInFlight = new Map<string, Promise<MarketFlowResponse>>();
 const MARKET_UNIVERSE_MEMORY_CACHE_TTL_MS = 60_000;
 const marketUniverseMemoryCache = new Map<string, { payload: MarketUniverseResponse; fetchedAt: number }>();
 const marketUniverseInFlight = new Map<string, Promise<MarketUniverseResponse>>();
-import { isBistTradingHours } from '../utils/marketHours';
+import { isBistTradingHours, isGlobalFxTradingHours } from '../utils/marketHours';
 
 const MARKET_STOCKS_MEMORY_CACHE_TTL_MS = 3_000;
 const MARKET_STOCKS_OFFHOURS_MEMORY_CACHE_TTL_MS = 60_000;
@@ -715,7 +777,15 @@ export const apiClient = {
         const params = new URLSearchParams();
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
-        return fetchApi<MarketIndicesResponse>(query ? `/market/indices?${query}` : '/market/indices');
+        const ttlMs = isBistTradingHours() ? MARKET_REFERENCE_LIVE_TTL_MS : MARKET_REFERENCE_OFFHOURS_TTL_MS;
+        return cachedFetch(
+            marketIndicesMemoryCache,
+            marketIndicesInFlight,
+            'indices',
+            ttlMs,
+            () => fetchApi<MarketIndicesResponse>(query ? `/market/indices?${query}` : '/market/indices'),
+            { bypassCache: Boolean(options?.refresh) },
+        );
     },
     marketIndexDetail: (index: MarketIndexCode, options?: { refresh?: boolean }) => {
         const params = new URLSearchParams();
@@ -768,35 +838,93 @@ export const apiClient = {
         const params = new URLSearchParams();
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
-        return fetchApi<MarketWatchResponse>(query ? `/market/watch?${query}` : '/market/watch');
+        const ttlMs = isGlobalFxTradingHours() ? MARKET_WATCH_LIVE_TTL_MS : MARKET_WATCH_OFFHOURS_TTL_MS;
+        return cachedFetch(
+            marketWatchMemoryCache,
+            marketWatchInFlight,
+            'watch',
+            ttlMs,
+            () => fetchApi<MarketWatchResponse>(query ? `/market/watch?${query}` : '/market/watch'),
+            {
+                bypassCache: Boolean(options?.refresh),
+                shouldCache: (payload) => Boolean(payload?.sections),
+            },
+        );
     },
     marketWatchUnified: (options?: { refresh?: boolean; signal?: AbortSignal }) => {
         const params = new URLSearchParams();
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
-        return fetchApi<UnifiedMarketWatchResponse>(
-            query ? `/market/watch/unified?${query}` : '/market/watch/unified',
-            { signal: options?.signal },
+        const ttlMs = isGlobalFxTradingHours() ? MARKET_WATCH_LIVE_TTL_MS : MARKET_WATCH_OFFHOURS_TTL_MS;
+        return cachedFetch(
+            marketWatchUnifiedMemoryCache,
+            marketWatchUnifiedInFlight,
+            'unified',
+            ttlMs,
+            () => fetchApi<UnifiedMarketWatchResponse>(
+                query ? `/market/watch/unified?${query}` : '/market/watch/unified',
+                { signal: options?.signal },
+            ),
+            {
+                bypassCache: Boolean(options?.refresh || options?.signal),
+                shouldCache: (payload) =>
+                    (payload?.indices?.length ?? 0) > 0
+                    || (payload?.fx?.length ?? 0) > 0
+                    || (payload?.commodities?.length ?? 0) > 0,
+            },
         );
     },
     marketWatchGlobal: (options?: { refresh?: boolean }) => {
         const params = new URLSearchParams();
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
-        return fetchApi<MarketWatchGlobalResponse>(query ? `/market/watch/global?${query}` : '/market/watch/global');
+        const ttlMs = isGlobalFxTradingHours() ? MARKET_WATCH_LIVE_TTL_MS : MARKET_WATCH_OFFHOURS_TTL_MS;
+        return cachedFetch(
+            marketWatchGlobalMemoryCache,
+            marketWatchGlobalInFlight,
+            'global',
+            ttlMs,
+            () => fetchApi<MarketWatchGlobalResponse>(query ? `/market/watch/global?${query}` : '/market/watch/global'),
+            {
+                bypassCache: Boolean(options?.refresh),
+                shouldCache: (payload) => (payload?.items?.length ?? 0) > 0,
+            },
+        );
     },
     marketXu030: () => fetchApi<MarketIndexResponse>('/market/xu030'),
     marketCommodities: (options?: { refresh?: boolean }) => {
         const params = new URLSearchParams();
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
-        return fetchApi<MarketCommoditiesResponse>(query ? `/market/commodities?${query}` : '/market/commodities');
+        const ttlMs = isGlobalFxTradingHours() ? MARKET_WATCH_LIVE_TTL_MS : MARKET_WATCH_OFFHOURS_TTL_MS;
+        return cachedFetch(
+            marketCommoditiesMemoryCache,
+            marketCommoditiesInFlight,
+            'commodities',
+            ttlMs,
+            () => fetchApi<MarketCommoditiesResponse>(query ? `/market/commodities?${query}` : '/market/commodities'),
+            {
+                bypassCache: Boolean(options?.refresh),
+                shouldCache: (payload) => (payload?.items?.length ?? 0) > 0,
+            },
+        );
     },
     marketFx: (options?: { refresh?: boolean }) => {
         const params = new URLSearchParams();
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
-        return fetchApi<MarketFxResponse>(query ? `/market/fx?${query}` : '/market/fx');
+        const ttlMs = isGlobalFxTradingHours() ? MARKET_WATCH_LIVE_TTL_MS : MARKET_WATCH_OFFHOURS_TTL_MS;
+        return cachedFetch(
+            marketFxMemoryCache,
+            marketFxInFlight,
+            'fx',
+            ttlMs,
+            () => fetchApi<MarketFxResponse>(query ? `/market/fx?${query}` : '/market/fx'),
+            {
+                bypassCache: Boolean(options?.refresh),
+                shouldCache: (payload) => (payload?.items?.length ?? 0) > 0,
+            },
+        );
     },
 
     funds: (options?: {
@@ -1047,24 +1175,66 @@ export const apiClient = {
             signal: options?.signal,
         });
     },
-    fundCategories: () => fetchApi<FundCategoriesResponse>('/funds/categories'),
-    fundDetail: (fundCode: string) => fetchApi<FundDetail>(`/funds/${encodeURIComponent(fundCode)}`),
-    fundYieldSummary: (fundCode: string, options?: { signal?: AbortSignal }) =>
-        fetchFundResponse<FundYieldSummaryResponse>(`/funds/${encodeURIComponent(fundCode)}/yield-summary`, {
+    fundCategories: () =>
+        cachedFetch(
+            fundCategoriesMemoryCache,
+            fundCategoriesInFlight,
+            'categories',
+            FUND_STATIC_MEMORY_CACHE_TTL_MS,
+            () => fetchApi<FundCategoriesResponse>('/funds/categories'),
+            { shouldCache: (p) => p.status !== 'pending' && p.status !== 'unavailable' },
+        ),
+    fundDetail: (fundCode: string) => {
+        const normalizedCode = fundCode.trim().toUpperCase();
+        return cachedFetch(
+            fundDetailMemoryCache,
+            fundDetailInFlight,
+            normalizedCode,
+            FUND_DETAIL_MEMORY_CACHE_TTL_MS,
+            () => fetchApi<FundDetail>(`/funds/${encodeURIComponent(normalizedCode)}`),
+            { shouldCache: (p) => Boolean(p?.fund_code) },
+        );
+    },
+    fundYieldSummary: (fundCode: string, options?: { signal?: AbortSignal }) => {
+        const normalizedCode = fundCode.trim().toUpperCase();
+        const cached = fundYieldSummaryMemoryCache.get(normalizedCode);
+        if (cached && Date.now() - cached.fetchedAt < FUND_DETAIL_MEMORY_CACHE_TTL_MS && !options?.signal?.aborted) {
+            return Promise.resolve(cached.payload);
+        }
+        return fetchFundResponse<FundYieldSummaryResponse>(`/funds/${encodeURIComponent(normalizedCode)}/yield-summary`, {
             signal: options?.signal,
             timeoutMs: 30000,
             exposeErrorDetail: true,
-        }),
+        }).then((payload) => {
+            if (payload.status !== 'pending' && payload.status !== 'unavailable') {
+                fundYieldSummaryMemoryCache.set(normalizedCode, { payload, fetchedAt: Date.now() });
+            }
+            return payload;
+        });
+    },
     fundPerformance: (fundCode: string, options?: { startDate?: string; endDate?: string; refresh?: boolean; signal?: AbortSignal }) => {
+        const normalizedCode = fundCode.trim().toUpperCase();
         const params = new URLSearchParams();
         if (options?.startDate) params.append('start_date', options.startDate);
         if (options?.endDate) params.append('end_date', options.endDate);
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
+        const cacheKey = `${normalizedCode}:${options?.startDate || ''}:${options?.endDate || ''}`;
+        if (!options?.refresh && !options?.signal?.aborted) {
+            const cached = fundPerformanceMemoryCache.get(cacheKey);
+            if (cached && Date.now() - cached.fetchedAt < FUND_DETAIL_MEMORY_CACHE_TTL_MS) {
+                return Promise.resolve(cached.payload);
+            }
+        }
         return fetchApi<FundPerformanceResponse>(
-            `/funds/${encodeURIComponent(fundCode)}/performance${query ? `?${query}` : ''}`,
+            `/funds/${encodeURIComponent(normalizedCode)}/performance${query ? `?${query}` : ''}`,
             { signal: options?.signal },
-        );
+        ).then((payload) => {
+            if (!payload.stale && payload.status !== 'pending' && payload.status !== 'unavailable') {
+                fundPerformanceMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
+            }
+            return payload;
+        });
     },
     fundPerformanceStatus: (fundCode: string, options?: { startDate?: string; endDate?: string }) => {
         const params = new URLSearchParams();
@@ -1075,37 +1245,49 @@ export const apiClient = {
             `/funds/${encodeURIComponent(fundCode)}/performance/status${query ? `?${query}` : ''}`,
         );
     },
-    fundAllocations: (fundCode: string) =>
-        fetchApi<FundAllocationsResponse>(`/funds/${encodeURIComponent(fundCode)}/allocations`),
-    fundAllocationsHistory: (fundCode: string, lookbackDays = 30) =>
-        fetchApi<FundAllocationsHistoryResponse>(
-            `/funds/${encodeURIComponent(fundCode)}/allocations/history?lookback_days=${lookbackDays}`,
-            {
-                timeoutMs: 60000,
-                exposeErrorDetail: true,
-            },
-        ),
+    fundAllocations: (fundCode: string) => {
+        const normalizedCode = fundCode.trim().toUpperCase();
+        return cachedFetch(
+            fundAllocationsMemoryCache,
+            fundAllocationsInFlight,
+            normalizedCode,
+            FUND_DETAIL_MEMORY_CACHE_TTL_MS,
+            () => fetchApi<FundAllocationsResponse>(`/funds/${encodeURIComponent(normalizedCode)}/allocations`),
+            { shouldCache: (p) => !p.refresh_pending && !p.stale && p.status !== 'pending' && p.status !== 'unavailable' },
+        );
+    },
+    fundAllocationsHistory: (fundCode: string, lookbackDays = 30) => {
+        const normalizedCode = fundCode.trim().toUpperCase();
+        const cacheKey = `${normalizedCode}:${lookbackDays}`;
+        return cachedFetch(
+            fundAllocationsHistoryMemoryCache,
+            fundAllocationsHistoryInFlight,
+            cacheKey,
+            FUND_DETAIL_MEMORY_CACHE_TTL_MS,
+            () =>
+                fetchApi<FundAllocationsHistoryResponse>(
+                    `/funds/${encodeURIComponent(normalizedCode)}/allocations/history?lookback_days=${lookbackDays}`,
+                    {
+                        timeoutMs: 60000,
+                        exposeErrorDetail: true,
+                    },
+                ),
+            { shouldCache: (p) => !p.refresh_pending && !p.stale && p.status !== 'pending' && p.status !== 'unavailable' },
+        );
+    },
     fundHoldings: async (fundCode: string, options?: { force?: boolean }) => {
         const normalizedCode = fundCode.trim().toUpperCase();
-        const now = Date.now();
-        const cached = fundHoldingsMemoryCache.get(normalizedCode);
-        if (!options?.force && cached && now - cached.fetchedAt < FUND_HOLDINGS_MEMORY_CACHE_TTL_MS) {
-            return cached.payload;
-        }
-        const existingRequest = fundHoldingsInFlight.get(normalizedCode);
-        if (existingRequest) return existingRequest;
-        const request = fetchFundResponse<FundHoldingsResponse>(`/funds/${encodeURIComponent(normalizedCode)}/holdings`)
-            .then((payload) => {
-                fundHoldingsMemoryCache.set(normalizedCode, { payload, fetchedAt: Date.now() });
-                return payload;
-            })
-            .finally(() => {
-                if (fundHoldingsInFlight.get(normalizedCode) === request) {
-                    fundHoldingsInFlight.delete(normalizedCode);
-                }
-            });
-        fundHoldingsInFlight.set(normalizedCode, request);
-        return request;
+        return cachedFetch(
+            fundHoldingsMemoryCache,
+            fundHoldingsInFlight,
+            normalizedCode,
+            FUND_HOLDINGS_MEMORY_CACHE_TTL_MS,
+            () => fetchFundResponse<FundHoldingsResponse>(`/funds/${encodeURIComponent(normalizedCode)}/holdings`),
+            {
+                bypassCache: Boolean(options?.force),
+                shouldCache: (p) => p.status !== 'pending' && p.status !== 'unavailable',
+            },
+        );
     },
     fundHoldingsLive: async (fundCode: string) => {
         const normalizedCode = fundCode.trim().toUpperCase();

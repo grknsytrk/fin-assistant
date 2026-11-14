@@ -179,3 +179,50 @@ def test_price_points_cache_respects_entry_limit(tmp_path, monkeypatch) -> None:
     assert len(fund_service._FUND_PRICE_POINTS_CACHE) == 1
     assert next(iter(fund_service._FUND_PRICE_POINTS_CACHE))[1] == "BBB"
     assert fund_service._FUND_PRICE_POINTS_CACHE_METRICS["evictions"] == 1
+
+
+def test_noop_price_point_upsert_does_not_bump_listing_revision(tmp_path, monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    next_rowcount = 0
+    bump_calls = 0
+    invalidate_calls = 0
+
+    class _FakeCursor:
+        def __init__(self, rowcount: int) -> None:
+            self.rowcount = rowcount
+
+    class _FakeConn:
+        def execute(self, _sql, _params=()):
+            return _FakeCursor(next_rowcount)
+
+        def commit(self) -> None:
+            pass
+
+    @contextmanager
+    def fake_connect(_processed_dir):
+        yield _FakeConn()
+
+    monkeypatch.setattr(fund_service, "database_enabled", lambda: True)
+    monkeypatch.setattr(fund_service, "_connect_fund_prices_db", fake_connect)
+    monkeypatch.setattr(fund_service, "_bump_fund_listing_price_revision", lambda _conn: _inc("bump"))
+    monkeypatch.setattr(fund_service, "_invalidate_fund_price_memory_caches", lambda: _inc("inv"))
+
+    def _inc(kind: str) -> None:
+        nonlocal bump_calls, invalidate_calls
+        if kind == "bump":
+            bump_calls += 1
+        else:
+            invalidate_calls += 1
+
+    sample = [{"fund_code": "TLY", "date": "2026-10-20", "price": 10.0}]
+    noop_result = fund_service.upsert_fund_price_points(tmp_path, sample, source="tefasfon_funds")
+    assert noop_result["upserted_count"] == 1
+    assert bump_calls == 0
+    assert invalidate_calls == 0
+
+    next_rowcount = 1
+    changed_result = fund_service.upsert_fund_price_points(tmp_path, sample, source="tefasfon_funds")
+    assert changed_result["upserted_count"] == 1
+    assert bump_calls == 1
+    assert invalidate_calls == 1

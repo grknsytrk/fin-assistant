@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.api_runtime import *
+from app.cache import BoundedMemoryCache, cache_reset_epoch
 from app.market_service import *
 from app.kap_financials import *
 from app.kap_service import *
@@ -36,6 +37,16 @@ _KAP_FLOW_REFRESH_LIVE_COOLDOWN_SECONDS = max(
 )
 
 _KAP_FLOW_REFRESH_LIVE_WATCHDOG_KEY = "api:kap:flow:refresh-live-watchdog:v1"
+
+_KAP_FLOW_WATCHDOG_L1_TTL_SECONDS = max(
+    1,
+    int(os.getenv("RAGFIN_KAP_FLOW_WATCHDOG_L1_TTL_SECONDS", "15")),
+)
+
+_KAP_FLOW_WATCHDOG_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(
+    max_entries=16,
+    default_ttl=_KAP_FLOW_WATCHDOG_L1_TTL_SECONDS,
+)
 
 _KAP_FLOW_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
@@ -129,6 +140,10 @@ def _maybe_schedule_kap_flow_refresh(
         return False
 
     backend = _get_cache()
+    watchdog_l1_key = (cache_reset_epoch(), id(backend), lease_key)
+    l1_cooldown_until = _KAP_FLOW_WATCHDOG_L1_CACHE.get(watchdog_l1_key)
+    if isinstance(l1_cooldown_until, (int, float)) and time.time() < l1_cooldown_until:
+        return False
     owner = uuid.uuid4().hex
     requested_at = datetime.now(timezone.utc).isoformat()
     lease_value = {"owner": owner, "requested_at": requested_at}
@@ -141,6 +156,10 @@ def _maybe_schedule_kap_flow_refresh(
     except Exception:
         LOGGER.warning("KAP flow watchdog lease could not be acquired", exc_info=True)
         return False
+    _KAP_FLOW_WATCHDOG_L1_CACHE[watchdog_l1_key] = time.time() + min(
+        _KAP_FLOW_WATCHDOG_L1_TTL_SECONDS,
+        cooldown,
+    )
     if not claimed:
         return False
 
@@ -161,6 +180,7 @@ def _maybe_schedule_kap_flow_refresh(
     try:
         _KAP_FLOW_REFRESH_EXECUTOR.submit(refresh)
     except Exception:
+        _KAP_FLOW_WATCHDOG_L1_CACHE.pop(watchdog_l1_key, None)
         try:
             backend.release_if_owner(lease_key, lease_value)
         except Exception:

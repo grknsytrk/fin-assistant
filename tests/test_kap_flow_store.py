@@ -184,3 +184,86 @@ def test_persist_flow_items_skips_unchanged_redis_event_list_gets_and_sets(monke
     assert flow_gets == 1
     assert flow_sets == 1
     store.clear_persisted_flow_hashes()
+
+
+def test_read_flow_head_and_status_l1_cache_avoids_repeated_redis_and_db_polls(monkeypatch) -> None:
+    from app.cache import InMemoryCache
+    from app import kap_api_service
+
+    store.clear_persisted_flow_hashes()
+    inner = InMemoryCache()
+    head_gets = 0
+    status_gets = 0
+    watchdog_sets = 0
+    db_head_calls = 0
+
+    class _CountingCache:
+        name = "redis"
+
+        def get(self, key: str):
+            nonlocal head_gets, status_gets
+            if key.startswith(store.FLOW_HEAD_CACHE_PREFIX):
+                head_gets += 1
+            elif key == store.FLOW_STATUS_CACHE_KEY:
+                status_gets += 1
+            return inner.get(key)
+
+        def set(self, key: str, value, ttl_seconds=None):
+            inner.set(key, value, ttl_seconds=ttl_seconds)
+
+        def set_if_absent(self, key: str, value, ttl_seconds=None) -> bool:
+            nonlocal watchdog_sets
+            watchdog_sets += 1
+            if inner.get(key) is not None:
+                return False
+            inner.set(key, value, ttl_seconds=ttl_seconds)
+            return True
+
+        def delete(self, key: str) -> None:
+            inner.delete(key)
+
+        def delete_prefix(self, prefix: str) -> None:
+            inner.delete_prefix(prefix)
+
+    counting = _CountingCache()
+    monkeypatch.setattr(store, "get_cache", lambda: counting)
+    monkeypatch.setattr(kap_api_service, "_get_cache", lambda: counting)
+    monkeypatch.setattr(kap_api_service, "_refresh_kap_flow_store", lambda **_kwargs: {"status": "ok"})
+    monkeypatch.setattr(
+        kap_api_service,
+        "_KAP_FLOW_REFRESH_EXECUTOR",
+        type("_NoopExec", (), {"submit": staticmethod(lambda fn: None)})(),
+    )
+    monkeypatch.setattr(store, "database_enabled", lambda: True)
+    monkeypatch.setattr(store, "upsert_kap_flow_events", lambda rows: {"upserted_count": len(rows)})
+
+    def fake_db_head(*, category=None):
+        nonlocal db_head_calls
+        db_head_calls += 1
+        return {"event_key": f"kap:{100 + db_head_calls}", "published_at": "2026-09-09T10:15:00+00:00"}
+
+    monkeypatch.setattr(store, "read_kap_flow_head", fake_db_head)
+
+    store.update_flow_status(
+        refresh_status="ok",
+        refresh_pending=False,
+        last_successful_refresh="2026-09-09T10:00:00+00:00",
+    )
+    # First head read populates both Redis and L1; subsequent 5s polls must stay in L1.
+    for _ in range(5):
+        head = store.read_flow_head()
+        assert head["latest_cursor"] is not None
+        kap_api_service._kap_flow_refresh_metadata()
+        kap_api_service._maybe_schedule_kap_flow_live_refresh()
+
+    assert db_head_calls == 1
+    assert head_gets == 1
+    assert status_gets == 1
+    assert watchdog_sets == 1
+
+    # Persisting a changed item invalidates head L1 cleanly so new head is picked up.
+    store.persist_flow_items([_item(99, 25)], source="kap_public_website", as_of="2026-09-09T10:25:00+00:00")
+    refreshed_head = store.read_flow_head()
+    assert db_head_calls == 2
+    assert refreshed_head["latest_cursor"] != head["latest_cursor"]
+    store.clear_persisted_flow_hashes()

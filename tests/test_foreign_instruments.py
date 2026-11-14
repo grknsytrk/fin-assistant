@@ -115,3 +115,50 @@ def test_mapping_uses_report_isin_when_the_original_code_is_another_identifier()
     )
     assert keys == ["api:funds:foreign-identity:US02079K3059:v1"]
     assert resolved[0]["provider_symbol"] == "GOOGL"
+
+
+def test_fund_api_service_uses_bulk_redis_keys_for_foreign_quotes_and_identities(monkeypatch) -> None:
+    from app import cache as cache_module
+    from app import fund_api_service
+
+    cache_module.reset_cache_for_tests()
+    fund_api_service._FOREIGN_HOLDING_QUOTE_CACHE.clear()
+    fund_api_service._FOREIGN_IDENTITIES_L1_CACHE.clear()
+    monkeypatch.setattr(
+        fund_api_service,
+        "_fetch_yahoo_quote",
+        lambda sym: {"ok": True, "price": 100.0, "currency": "USD", "change_pct": 1.25},
+    )
+
+    positions = [
+        _row("US5949181045", asset_code="MSFT", provider_symbol="MSFT"),
+        _row("US0079031078", asset_code="AMD", provider_symbol="AMD"),
+    ]
+    quotes = fund_api_service._quote_map_for_foreign_holdings(positions)
+    assert sorted(quotes) == ["AMD", "MSFT"]
+
+    backend = cache_module.get_cache()
+    bulk_quotes = backend.get(fund_api_service._FOREIGN_QUOTES_BULK_KEY)
+    assert isinstance(bulk_quotes, dict)
+    assert set(bulk_quotes) == {"AMD", "MSFT"}
+    # No per-symbol quote keys should be written when bulk cache is active.
+    assert backend.get("api:funds:foreign-holding-quote:MSFT:v4") is None
+    assert backend.get("api:funds:foreign-holding-quote:AMD:v4") is None
+
+    _mock_client(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200,
+            json=[{"data": [_mapping("MSFT", "MICROSOFT CORP")]}],
+        ),
+    )
+    enriched = fund_api_service._enrich_fund_holdings_with_daily_market_data(
+        {"fund_code": "TLY", "positions": [_row("US5949181045")]},
+        "TLY",
+    )
+    assert enriched["positions"][0]["provider_symbol"] == "MSFT"
+    bulk_identities = backend.get(fund_api_service._FOREIGN_IDENTITIES_BULK_KEY)
+    assert isinstance(bulk_identities, dict)
+    assert "api:funds:foreign-identity:US5949181045:v1" in bulk_identities
+    assert backend.get("api:funds:foreign-identity:US5949181045:v1") is None
+    cache_module.reset_cache_for_tests()

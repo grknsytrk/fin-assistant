@@ -5,7 +5,7 @@ import hashlib
 import json
 import threading
 
-from app.cache import BoundedMemoryCache
+from app.cache import BoundedMemoryCache, cache_reset_epoch
 from app import database as _market_database
 from app.api_runtime import *
 from app.kap_financials import *
@@ -2762,9 +2762,9 @@ def _effective_market_quotes_fresh_ttl(now: Optional[datetime] = None) -> int:
         return max(1, int(_MARKET_QUOTES_FRESH_TTL))
     return max(1, int(_MARKET_QUOTES_FRESH_TTL), int(_MARKET_QUOTES_OFFHOURS_FRESH_TTL))
 
-_MACRO_ACTIVE_TTL_SECONDS = int(os.getenv("RAGFIN_MACRO_FRESH_TTL_SECONDS", "30"))
+_MACRO_ACTIVE_TTL_SECONDS = int(os.getenv("RAGFIN_MACRO_FRESH_TTL_SECONDS", "60"))
 _MACRO_OFFHOURS_TTL_SECONDS = int(os.getenv("RAGFIN_MACRO_OFFHOURS_FRESH_TTL_SECONDS", "300"))
-_BIST_INDEX_ACTIVE_TTL_SECONDS = int(os.getenv("RAGFIN_BIST_INDEX_FRESH_TTL_SECONDS", "30"))
+_BIST_INDEX_ACTIVE_TTL_SECONDS = int(os.getenv("RAGFIN_BIST_INDEX_FRESH_TTL_SECONDS", "60"))
 _BIST_INDEX_OFFHOURS_TTL_SECONDS = int(os.getenv("RAGFIN_BIST_INDEX_OFFHOURS_FRESH_TTL_SECONDS", "300"))
 
 
@@ -4853,17 +4853,130 @@ def _fetch_index_quote(index_code: str) -> Dict[str, Any]:
     _MARKET_INDEX_QUOTE_CACHE[normalized] = {"_ts": now, "data": fallback}
     return dict(fallback)
 
+_BULK_RETURN_BASES_LOCK = threading.Lock()
+_INDEX_RETURN_BASES_BULK_KEY = "api:market:index-return-bases:bulk:v3"
+_FX_RETURN_BASES_BULK_KEY = "api:market:fx-return-bases:bulk:v2"
+_BULK_RETURN_BATCH_DEPTH: Dict[str, int] = {}
+_BULK_RETURN_DIRTY: Dict[str, bool] = {}
+
+
+def _bulk_return_loaded_key() -> str:
+    return f"__bulk_loaded__:{cache_reset_epoch()}:{id(_get_cache())}"
+
+
+def _warm_bulk_return_bases(
+    local_cache: BoundedMemoryCache,
+    shared_key: str,
+    ttl_seconds: int,
+) -> None:
+    loaded_key = _bulk_return_loaded_key()
+    if local_cache.get(loaded_key):
+        return
+    with _BULK_RETURN_BASES_LOCK:
+        if local_cache.get(loaded_key):
+            return
+        now = time.time()
+        shared_map = _shared_cache_get_dict(shared_key)
+        if isinstance(shared_map, dict):
+            for item_key, entry in shared_map.items():
+                if not isinstance(entry, dict):
+                    continue
+                ts = entry.get("_ts")
+                data = entry.get("data")
+                if isinstance(ts, (int, float)) and isinstance(data, dict) and now - float(ts) < ttl_seconds:
+                    local_cache[str(item_key)] = {"_ts": float(ts), "data": dict(data)}
+        local_cache[loaded_key] = now
+
+
+def _flush_bulk_return_bases(
+    local_cache: BoundedMemoryCache,
+    shared_key: str,
+    ttl_seconds: int,
+) -> None:
+    with _BULK_RETURN_BASES_LOCK:
+        now = time.time()
+        payload: Dict[str, Any] = {}
+        existing = _shared_cache_get_dict(shared_key)
+        if isinstance(existing, dict):
+            for item_key, entry in existing.items():
+                if (
+                    isinstance(entry, dict)
+                    and isinstance(entry.get("_ts"), (int, float))
+                    and isinstance(entry.get("data"), dict)
+                    and now - float(entry["_ts"]) < ttl_seconds
+                ):
+                    payload[str(item_key)] = entry
+        changed = False
+        for item_key in list(local_cache.keys()):
+            if str(item_key).startswith("__bulk_loaded__:"):
+                continue
+            entry = local_cache.get(item_key)
+            if not isinstance(entry, dict):
+                continue
+            ts = entry.get("_ts")
+            data = entry.get("data")
+            if isinstance(ts, (int, float)) and isinstance(data, dict) and now - float(ts) < ttl_seconds:
+                prev = payload.get(str(item_key))
+                if not isinstance(prev, dict) or float(prev.get("_ts", 0)) < float(ts):
+                    payload[str(item_key)] = {"_ts": float(ts), "data": dict(data)}
+                    changed = True
+        if changed and payload:
+            _shared_cache_set(shared_key, payload, ttl_seconds=ttl_seconds)
+
+
+def _begin_bulk_return_batch(local_cache: BoundedMemoryCache, shared_key: str, ttl_seconds: int) -> None:
+    _warm_bulk_return_bases(local_cache, shared_key, ttl_seconds)
+    with _BULK_RETURN_BASES_LOCK:
+        _BULK_RETURN_BATCH_DEPTH[shared_key] = _BULK_RETURN_BATCH_DEPTH.get(shared_key, 0) + 1
+
+
+def _end_bulk_return_batch(local_cache: BoundedMemoryCache, shared_key: str, ttl_seconds: int) -> None:
+    should_flush = False
+    with _BULK_RETURN_BASES_LOCK:
+        next_depth = max(0, _BULK_RETURN_BATCH_DEPTH.get(shared_key, 0) - 1)
+        if next_depth == 0:
+            _BULK_RETURN_BATCH_DEPTH.pop(shared_key, None)
+            should_flush = bool(_BULK_RETURN_DIRTY.pop(shared_key, False))
+        else:
+            _BULK_RETURN_BATCH_DEPTH[shared_key] = next_depth
+    if should_flush:
+        _flush_bulk_return_bases(local_cache, shared_key, ttl_seconds)
+
+
+def _store_bulk_return_base_entry(
+    local_cache: BoundedMemoryCache,
+    shared_key: str,
+    item_key: str,
+    data: Dict[str, Any],
+    ttl_seconds: int,
+    now: float,
+) -> Dict[str, Any]:
+    local_cache[item_key] = {"_ts": now, "data": dict(data)}
+    flush_now = False
+    with _BULK_RETURN_BASES_LOCK:
+        if _BULK_RETURN_BATCH_DEPTH.get(shared_key, 0) > 0:
+            _BULK_RETURN_DIRTY[shared_key] = True
+        else:
+            flush_now = True
+    if flush_now:
+        _flush_bulk_return_bases(local_cache, shared_key, ttl_seconds)
+    return dict(data)
+
+
 def _fetch_index_return_bases(index_code: str) -> Dict[str, Any]:
     normalized = _normalize_market_index(index_code)
     now = time.time()
     cached = _MARKET_INDEX_RETURN_CACHE.get(normalized)
     if cached and now - cached.get("_ts", 0) < _MARKET_INDEX_RETURN_CACHE_TTL:
         return dict(cached.get("data") or {})
-    shared_key = f"api:market:index-return-bases:{normalized}:v2"
-    shared_cached = _shared_cache_get_dict(shared_key)
-    if shared_cached is not None:
-        _MARKET_INDEX_RETURN_CACHE[normalized] = {"_ts": now, "data": shared_cached}
-        return dict(shared_cached)
+    _warm_bulk_return_bases(
+        _MARKET_INDEX_RETURN_CACHE,
+        _INDEX_RETURN_BASES_BULK_KEY,
+        _MARKET_INDEX_RETURN_CACHE_TTL,
+    )
+    cached_after_warm = _MARKET_INDEX_RETURN_CACHE.get(normalized)
+    if cached_after_warm and now - cached_after_warm.get("_ts", 0) < _MARKET_INDEX_RETURN_CACHE_TTL:
+        return dict(cached_after_warm.get("data") or {})
 
     meta = _MARKET_INDEX_META[normalized]
     yahoo_partial: Optional[Dict[str, Any]] = None
@@ -4880,9 +4993,14 @@ def _fetch_index_return_bases(index_code: str) -> Dict[str, Any]:
             continue
         bases = _index_return_bases_from_points(points, history_source="yahoo", provider_symbol=yahoo_symbol)
         if _index_return_bases_have_period_history(bases):
-            _MARKET_INDEX_RETURN_CACHE[normalized] = {"_ts": now, "data": bases}
-            _shared_cache_set(shared_key, bases, ttl_seconds=_MARKET_INDEX_RETURN_CACHE_TTL)
-            return dict(bases)
+            return _store_bulk_return_base_entry(
+                _MARKET_INDEX_RETURN_CACHE,
+                _INDEX_RETURN_BASES_BULK_KEY,
+                normalized,
+                bases,
+                _MARKET_INDEX_RETURN_CACHE_TTL,
+                now,
+            )
         if yahoo_partial is None:
             yahoo_partial = bases
 
@@ -4891,18 +5009,33 @@ def _fetch_index_return_bases(index_code: str) -> Dict[str, Any]:
     history_points = _fetch_isyatirim_index_history(normalized, start_date=history_start, end_date=today + timedelta(days=1))
     bases = _index_return_bases_from_points(history_points, history_source="isyatirim")
     if _index_return_bases_have_period_history(bases):
-        _MARKET_INDEX_RETURN_CACHE[normalized] = {"_ts": now, "data": bases}
-        _shared_cache_set(shared_key, bases, ttl_seconds=_MARKET_INDEX_RETURN_CACHE_TTL)
-        return dict(bases)
+        return _store_bulk_return_base_entry(
+            _MARKET_INDEX_RETURN_CACHE,
+            _INDEX_RETURN_BASES_BULK_KEY,
+            normalized,
+            bases,
+            _MARKET_INDEX_RETURN_CACHE_TTL,
+            now,
+        )
 
     if yahoo_partial and _index_return_bases_have_period_history(yahoo_partial):
-        _MARKET_INDEX_RETURN_CACHE[normalized] = {"_ts": now, "data": yahoo_partial}
-        _shared_cache_set(shared_key, yahoo_partial, ttl_seconds=_MARKET_INDEX_RETURN_CACHE_TTL)
-        return dict(yahoo_partial)
+        return _store_bulk_return_base_entry(
+            _MARKET_INDEX_RETURN_CACHE,
+            _INDEX_RETURN_BASES_BULK_KEY,
+            normalized,
+            yahoo_partial,
+            _MARKET_INDEX_RETURN_CACHE_TTL,
+            now,
+        )
 
-    _MARKET_INDEX_RETURN_CACHE[normalized] = {"_ts": now, "data": {}}
-    _shared_cache_set(shared_key, {}, ttl_seconds=_MARKET_INDEX_RETURN_CACHE_TTL)
-    return {}
+    return _store_bulk_return_base_entry(
+        _MARKET_INDEX_RETURN_CACHE,
+        _INDEX_RETURN_BASES_BULK_KEY,
+        normalized,
+        {},
+        _MARKET_INDEX_RETURN_CACHE_TTL,
+        now,
+    )
 
 def _index_returns_from_bases(current_price: Any, return_bases: Dict[str, Any]) -> Dict[str, Optional[float]]:
     return {
@@ -5247,11 +5380,23 @@ def _market_indices_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
     def build() -> Dict[str, Any]:
         from concurrent.futures import ThreadPoolExecutor
 
+        _begin_bulk_return_batch(
+            _MARKET_INDEX_RETURN_CACHE,
+            _INDEX_RETURN_BASES_BULK_KEY,
+            _MARKET_INDEX_RETURN_CACHE_TTL,
+        )
         try:
-            with ThreadPoolExecutor(max_workers=min(8, len(_MARKET_INDEX_ORDER))) as pool:
-                rows = list(pool.map(_market_index_row, _MARKET_INDEX_ORDER))
-        except Exception:
-            rows = [_market_index_row(index_code) for index_code in _MARKET_INDEX_ORDER]
+            try:
+                with ThreadPoolExecutor(max_workers=min(8, len(_MARKET_INDEX_ORDER))) as pool:
+                    rows = list(pool.map(_market_index_row, _MARKET_INDEX_ORDER))
+            except Exception:
+                rows = [_market_index_row(index_code) for index_code in _MARKET_INDEX_ORDER]
+        finally:
+            _end_bulk_return_batch(
+                _MARKET_INDEX_RETURN_CACHE,
+                _INDEX_RETURN_BASES_BULK_KEY,
+                _MARKET_INDEX_RETURN_CACHE_TTL,
+            )
         return {
             "rows": rows,
             "source": "yahoo_finance_chart",
@@ -5699,17 +5844,25 @@ def _fetch_fx_return_bases(yahoo_symbol: str) -> Dict[str, Any]:
     cached = _FX_RETURN_CACHE.get(normalized)
     if cached and now - cached.get("_ts", 0) < _FX_RETURN_CACHE_TTL:
         return dict(cached.get("data") or {})
-    shared_key = f"api:market:fx-return-bases:{normalized}:v1"
-    shared_cached = _shared_cache_get_dict(shared_key)
-    if shared_cached is not None:
-        _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": shared_cached}
-        return dict(shared_cached)
+    _warm_bulk_return_bases(
+        _FX_RETURN_CACHE,
+        _FX_RETURN_BASES_BULK_KEY,
+        _FX_RETURN_CACHE_TTL,
+    )
+    cached_after_warm = _FX_RETURN_CACHE.get(normalized)
+    if cached_after_warm and now - cached_after_warm.get("_ts", 0) < _FX_RETURN_CACHE_TTL:
+        return dict(cached_after_warm.get("data") or {})
 
     chart = _fetch_yahoo_chart_raw(normalized, interval="1d", range_="1y")
     if not chart.get("ok"):
-        _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": {}}
-        _shared_cache_set(shared_key, {}, ttl_seconds=_FX_RETURN_CACHE_TTL)
-        return {}
+        return _store_bulk_return_base_entry(
+            _FX_RETURN_CACHE,
+            _FX_RETURN_BASES_BULK_KEY,
+            normalized,
+            {},
+            _FX_RETURN_CACHE_TTL,
+            now,
+        )
 
     points = [
         (datetime.fromisoformat(str(point["time"])), float(point["close"]))
@@ -5717,9 +5870,14 @@ def _fetch_fx_return_bases(yahoo_symbol: str) -> Dict[str, Any]:
         if point.get("time") and isinstance(point.get("close"), (int, float))
     ]
     if not points:
-        _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": {}}
-        _shared_cache_set(shared_key, {}, ttl_seconds=_FX_RETURN_CACHE_TTL)
-        return {}
+        return _store_bulk_return_base_entry(
+            _FX_RETURN_CACHE,
+            _FX_RETURN_BASES_BULK_KEY,
+            normalized,
+            {},
+            _FX_RETURN_CACHE_TTL,
+            now,
+        )
 
     points.sort(key=lambda item: item[0])
     latest_dt, latest_close = points[-1]
@@ -5734,9 +5892,14 @@ def _fetch_fx_return_bases(yahoo_symbol: str) -> Dict[str, Any]:
         "latest_close": latest_close,
         "as_of": latest_dt.isoformat(),
     }
-    _FX_RETURN_CACHE[normalized] = {"_ts": now, "data": data}
-    _shared_cache_set(shared_key, data, ttl_seconds=_FX_RETURN_CACHE_TTL)
-    return dict(data)
+    return _store_bulk_return_base_entry(
+        _FX_RETURN_CACHE,
+        _FX_RETURN_BASES_BULK_KEY,
+        normalized,
+        data,
+        _FX_RETURN_CACHE_TTL,
+        now,
+    )
 
 def _fx_returns_from_bases(current_price: Any, return_bases: Dict[str, Any]) -> Dict[str, Optional[float]]:
     current_for_returns = current_price if current_price is not None else return_bases.get("latest_close")
@@ -5847,14 +6010,26 @@ def _market_fx_payload(*, force_refresh: bool = False) -> Dict[str, Any]:
         from concurrent.futures import ThreadPoolExecutor
 
         items_by_symbol: Dict[str, Dict[str, Any]] = {}
+        _begin_bulk_return_batch(
+            _FX_RETURN_CACHE,
+            _FX_RETURN_BASES_BULK_KEY,
+            _FX_RETURN_CACHE_TTL,
+        )
         try:
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                for row in pool.map(_fx_direct_item, _FX_DIRECT_MAP):
+            try:
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    for row in pool.map(_fx_direct_item, _FX_DIRECT_MAP):
+                        items_by_symbol[str(row.get("symbol") or "")] = row
+            except Exception:
+                for entry in _FX_DIRECT_MAP:
+                    row = _fx_direct_item(entry)
                     items_by_symbol[str(row.get("symbol") or "")] = row
-        except Exception:
-            for entry in _FX_DIRECT_MAP:
-                row = _fx_direct_item(entry)
-                items_by_symbol[str(row.get("symbol") or "")] = row
+        finally:
+            _end_bulk_return_batch(
+                _FX_RETURN_CACHE,
+                _FX_RETURN_BASES_BULK_KEY,
+                _FX_RETURN_CACHE_TTL,
+            )
 
         for symbol, label, numerator_symbol, denominator_symbol in _FX_DERIVED_MAP:
             items_by_symbol[symbol] = _fx_derived_item(
@@ -6117,11 +6292,12 @@ def _market_watch_global_payload(*, force_refresh: bool = False) -> Dict[str, An
             "as_of": datetime.now(timezone.utc).isoformat(),
         }
 
+    fresh_ttl = _effective_macro_fresh_ttl()
     payload, cache_status, stale, refresh_pending = _shared_swr_payload(
         cache_key="api:market:watch-global:v2",
         factory=build,
-        fresh_ttl_seconds=_WATCH_GLOBAL_CACHE_TTL,
-        stale_ttl_seconds=max(_MARKET_SWR_STALE_TTL_SECONDS, _WATCH_GLOBAL_CACHE_TTL * 2),
+        fresh_ttl_seconds=fresh_ttl,
+        stale_ttl_seconds=max(_MARKET_SWR_STALE_TTL_SECONDS, fresh_ttl * 2),
         local_cache=_WATCH_GLOBAL_CACHE,
         local_key="payload",
         force_revalidate=force_refresh,

@@ -169,10 +169,10 @@ FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS = int(
     os.getenv("RAGFIN_FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS", "2")
 )
 FUNDS_HOLDINGS_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_TTL_SECONDS", str(7 * 24 * 60 * 60)))
-# KAP's portfolio PDF is cached for days, but its lightweight disclosure list
-# must be revalidated frequently because a fund can publish a new snapshot
-# without changing the PDF filename or report month.
-FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS", "60"))
+# KAP's portfolio PDF is cached for days; revalidating its disclosure list
+# every 2 hours catches newly published monthly reports without hammering KAP
+# or rewriting Supabase JSON cache on every poll.
+FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS", "7200"))
 FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS", str(30 * 60)))
 FUNDS_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_FUNDS_HISTORY_CHUNK_DAYS", "60"))
 FUNDS_WEB_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_FUNDS_WEB_HISTORY_CHUNK_DAYS", "30"))
@@ -241,7 +241,12 @@ def _invalidate_fund_price_memory_caches() -> None:
         key
         for key in list(_MEMORY_CACHE.keys())
         if str(key).startswith(
-            ("fund-listing-state:", "latest-fund-price-points:", "snapshot:")
+            (
+                "fund-listing-state:",
+                "latest-fund-price-points:",
+                "snapshot:",
+                "daily-return-overrides:",
+            )
         )
     ]:
         _MEMORY_CACHE.pop(cache_key, None)
@@ -1520,15 +1525,26 @@ def _read_local_json(path: Path) -> Optional[Dict[str, Any]]:
     return json_cache_store.read_local_json(path)
 
 
+def _should_clear_listing_memory_caches_for_path(path: Path) -> bool:
+    if not database_enabled():
+        return True
+    parent_names = {path.parent.name.lower(), path.parent.parent.name.lower()}
+    if parent_names & {"daily_snapshots", "history", "allocations", "holdings", "attachment_text"}:
+        return False
+    return True
+
+
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     _write_local_json(path, payload)
     write_json_cache(path, payload)
-    _clear_all_fund_memory_caches()
+    if _should_clear_listing_memory_caches_for_path(path):
+        _clear_all_fund_memory_caches()
 
 
 def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
     json_cache_store.write_local_json(path, payload)
-    _clear_all_fund_memory_caches()
+    if _should_clear_listing_memory_caches_for_path(path):
+        _clear_all_fund_memory_caches()
 
 
 def _commit_local_fund_snapshot_rows(
@@ -1702,7 +1718,9 @@ def _cached_daily_funds_snapshot(
     force_refresh: bool = False,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     path = _fund_daily_snapshot_path(processed_dir, as_of)
-    cached = _read_json(path) or {}
+    # In Postgres mode the snapshot rows live in `fund_prices` and `fund_snapshots`;
+    # keep multi-MB daily snapshot blobs on local disk only to avoid egress churn.
+    cached = (_read_local_json(path) if database_enabled() else _read_json(path)) or {}
     if not force_refresh and cached and _daily_snapshot_cache_is_fresh(cached, as_of):
         rows = [row for row in list(cached.get("rows") or []) if isinstance(row, dict)]
         return rows, True
@@ -1725,7 +1743,10 @@ def _cached_daily_funds_snapshot(
             "row_count": len(rows),
         },
     }
-    _write_json(path, payload)
+    if database_enabled():
+        _write_local_json(path, payload)
+    else:
+        _write_json(path, payload)
     if rows:
         upsert_fund_price_points(processed_dir, rows, source=TEFASFON_FUNDS_SOURCE, fetched_at=fetched_at)
         _upsert_fund_reference_data(processed_dir, rows)
@@ -2905,13 +2926,19 @@ def upsert_fund_price_points(
                    OR fund_prices.metadata_json IS DISTINCT FROM excluded.metadata_json
                    OR fund_prices.raw_json IS DISTINCT FROM excluded.raw_json
             """
+            changed_count = 0
             for offset in range(0, len(prepared_rows), 250):
                 chunk = prepared_rows[offset : offset + 250]
                 value_group = "(" + ", ".join("?" for _ in range(13)) + ")"
-                conn.execute(
+                exec_result = conn.execute(
                     insert_sql.format(values=", ".join(value_group for _ in chunk)),
                     [value for row in chunk for value in row],
                 )
+                rowcount = getattr(exec_result, "rowcount", None)
+                if isinstance(rowcount, int) and rowcount >= 0:
+                    changed_count += rowcount
+                else:
+                    changed_count += len(chunk)
             if warning_rows:
                 warning_sql = """
                     INSERT INTO fund_price_warnings (
@@ -2926,10 +2953,10 @@ def upsert_fund_price_points(
                         warning_sql.format(values=", ".join(value_group for _ in chunk)),
                         [value for row in chunk for value in row],
                     )
-            if upserted_count:
+            if changed_count:
                 _bump_fund_listing_price_revision(conn)
             conn.commit()
-        if upserted_count:
+        if changed_count:
             _invalidate_fund_price_memory_caches()
             invalidate_fund_price_points_cache()
         return {
@@ -3785,17 +3812,53 @@ def _apply_daily_return_overrides(
     include_revision: bool = False,
 ) -> List[Dict[str, Any]] | Tuple[List[Dict[str, Any]], Optional[Tuple[str, int]]]:
     materialized = [dict(row) for row in rows if isinstance(row, dict)]
-    override_result = _daily_return_overrides_from_price_history(
-        processed_dir,
-        materialized,
-        include_missing=include_missing,
-        include_revision=include_revision,
-    )
-    if include_revision:
-        overrides, source_revision = override_result
-    else:
-        overrides = override_result
-        source_revision = None
+    cache_key: Optional[str] = None
+    overrides: Optional[Dict[Tuple[str, str], float]] = None
+    source_revision: Optional[Tuple[str, int]] = None
+    if database_enabled() and not include_revision and len(materialized) >= 10:
+        candidates = _daily_return_reconciliation_candidates(
+            materialized,
+            include_missing=include_missing,
+        )
+        if not candidates:
+            return materialized
+        price_gen = fund_listing_revision(processed_dir).get("price_generation", 0)
+        digest_input = "|".join(f"{code}:{point_date}" for code, point_date in sorted(candidates.items()))
+        candidates_hash = hashlib.sha1(digest_input.encode("utf-8")).hexdigest()[:16]
+        cache_key = (
+            f"daily-return-overrides:{_fund_prices_db_path(processed_dir)}:"
+            f"{price_gen}:{int(include_missing)}:{candidates_hash}"
+        )
+        cached = _MEMORY_CACHE.get(cache_key)
+        memo_ttl = max(15.0, min(60.0, float(_FUND_LISTING_STATE_MEMO_TTL_SECONDS or 30.0)))
+        if (
+            isinstance(cached, dict)
+            and isinstance(cached.get("cached_at"), (int, float))
+            and time.time() - float(cached["cached_at"]) <= memo_ttl
+            and isinstance(cached.get("overrides"), dict)
+        ):
+            overrides = cached["overrides"]
+
+    if overrides is None:
+        override_result = _daily_return_overrides_from_price_history(
+            processed_dir,
+            materialized,
+            include_missing=include_missing,
+            include_revision=include_revision,
+        )
+        if include_revision:
+            overrides, source_revision = override_result
+        else:
+            overrides = override_result
+            source_revision = None
+        if cache_key is not None and isinstance(overrides, dict):
+            _memory_cache_put(
+                cache_key,
+                {
+                    "cached_at": time.time(),
+                    "overrides": overrides,
+                },
+            )
     materialized = _daily_return_override_values(materialized, overrides)
     return (materialized, source_revision) if include_revision else materialized
 
@@ -9930,7 +9993,28 @@ def refresh_fund_performance(
         fallback_reason=fallback_reason,
     )
     if write_history_cache:
-        _write_json(_history_path(processed_dir, normalized), payload)
+        history_path = _history_path(processed_dir, normalized)
+        if database_enabled():
+            # Full price series already reside in `fund_prices`; store full payload locally
+            # and keep only span/parse metadata in `ragfin_json_cache` to minimize Postgres egress.
+            _write_local_json(history_path, payload)
+            compact_history_meta = {
+                key: payload[key]
+                for key in (
+                    "fund_code",
+                    "status",
+                    "source",
+                    "source_url",
+                    "as_of",
+                    "fetched_at",
+                    "stale",
+                    "source_metadata",
+                )
+                if key in payload
+            }
+            write_json_cache(history_path, compact_history_meta)
+        else:
+            _write_json(history_path, payload)
     return payload
 
 
@@ -11044,7 +11128,8 @@ def _cached_holdings_with_disclosure_check(
 ) -> Dict[str, Any]:
     payload = dict(cached)
     positions = list(payload.get("positions") or [])
-    meta = dict(payload.get("source_metadata") or {})
+    previous_meta = dict(payload.get("source_metadata") or {})
+    meta = dict(previous_meta)
     meta["parser_version"] = KAP_HOLDINGS_PARSE_VERSION
     meta["positions_hash"] = _holdings_positions_hash(positions)
     meta["disclosure_check"] = _holdings_disclosure_check_meta(disclosures)
@@ -11055,7 +11140,20 @@ def _cached_holdings_with_disclosure_check(
         stale=False,
         static_cache_hit=True,
     )
-    _write_json(_holdings_path(processed_dir, fund_code), payload)
+    holdings_path = _holdings_path(processed_dir, fund_code)
+    prev_disclosure = dict(previous_meta.get("disclosure_check") or {})
+    same_report_metadata = (
+        previous_meta.get("parser_version") == KAP_HOLDINGS_PARSE_VERSION
+        and previous_meta.get("positions_hash") == meta["positions_hash"]
+        and prev_disclosure.get("latest_disclosure_index")
+        == meta["disclosure_check"].get("latest_disclosure_index")
+        and holdings_path.exists()
+    )
+    if database_enabled() and same_report_metadata:
+        # Only refreshed validation timestamps; avoid re-uploading unchanged holdings JSON to Supabase.
+        _write_local_json(holdings_path, payload)
+    else:
+        _write_json(holdings_path, payload)
     return payload
 
 

@@ -186,6 +186,8 @@ export default function MarketFlowPanel({
             .catch(() => {});
     }, [filter]);
 
+    const lastHeadPollAtRef = useRef<number>(0);
+
     const load = useCallback((requestedLimit?: number, requestedCategory?: string) => {
         const expectedFilter = filterRef.current;
         const serverCategory = requestedCategory ?? getServerFlowCategory(expectedFilter);
@@ -208,6 +210,7 @@ export default function MarketFlowPanel({
                 observedFlowIdsRef.current = new Set(nextItems.map((item) => item.id));
                 nextCursorRef.current = payload.next_cursor || null;
                 latestCursorRef.current = payload.latest_cursor || null;
+                lastHeadPollAtRef.current = Date.now();
                 setItems(nextItems);
                 setWarning(payload.warning || null);
                 setHasMore(typeof payload.has_more === 'boolean'
@@ -310,6 +313,7 @@ export default function MarketFlowPanel({
             inFlight = true;
             try {
                 if (document.visibilityState === 'visible') {
+                    lastHeadPollAtRef.current = Date.now();
                     const serverCategory = requestCategoryRef.current;
                     try {
                         const head = await apiClient.marketFlowHead(serverCategory);
@@ -357,6 +361,14 @@ export default function MarketFlowPanel({
 
         const onVisibilityChange = () => {
             if (document.visibilityState === 'visible' && !cancelled) {
+                const elapsed = Date.now() - lastHeadPollAtRef.current;
+                const minInterval = getFlowHeadPollInterval();
+                if (elapsed < minInterval) {
+                    if (timerId === null) {
+                        timerId = window.setTimeout(poll, minInterval - elapsed);
+                    }
+                    return;
+                }
                 if (timerId !== null) {
                     window.clearTimeout(timerId);
                     timerId = null;

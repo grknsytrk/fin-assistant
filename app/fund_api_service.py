@@ -10,7 +10,7 @@ from collections import OrderedDict
 from typing import Callable, Dict, Optional
 
 from app.api_runtime import *
-from app.cache import get_cache as _get_cache
+from app.cache import BoundedMemoryCache, get_cache as _get_cache
 from app.market_service import *
 from app.etag import orjson_dumps
 
@@ -20,12 +20,14 @@ _FUND_YIELD_SUMMARY_CACHE_TTL = int(os.getenv("RAGFIN_FUND_YIELD_SUMMARY_CACHE_T
 
 _FUND_HOLDINGS_RESPONSE_CACHE_TTL = int(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_CACHE_TTL_SECONDS", "60"))
 
+_FUND_HOLDINGS_STATIC_CACHE_TTL = int(os.getenv("RAGFIN_FUND_HOLDINGS_STATIC_CACHE_TTL_SECONDS", "3600"))
+
 _FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT = float(os.getenv("RAGFIN_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT_SECONDS", "120"))
 
 _FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION = 13
 
 _FUND_HOLDINGS_LIVE_RESPONSE_CACHE_TTL = int(
-    os.getenv("RAGFIN_FUND_HOLDINGS_LIVE_RESPONSE_CACHE_TTL_SECONDS", "10")
+    os.getenv("RAGFIN_FUND_HOLDINGS_LIVE_RESPONSE_CACHE_TTL_SECONDS", "30")
 )
 
 _FUND_HOLDINGS_LIVE_RESPONSE_LOCK_TTL = float(
@@ -303,6 +305,7 @@ def _get_fund_refresh_job(job_id: str) -> Optional[Dict[str, Any]]:
     return dict(job) if isinstance(job, dict) else None
 
 def _set_fund_refresh_job(job: Dict[str, Any]) -> None:
+    _FUND_AUTO_REFRESH_PREFLIGHT_L1.clear()
     _get_cache().set(
         _fund_refresh_job_key(str(job["job_id"])),
         job,
@@ -682,8 +685,24 @@ def _maybe_schedule_fund_snapshot_refresh(payload: Dict[str, Any]) -> Dict[str, 
 
     metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
     target_date = str(metadata.get("snapshot_target_date") or "unknown").strip()
+    snapshot_as_of = str(metadata.get("snapshot_as_of") or payload.get("as_of") or "").strip()
+    truncated_flag = bool(metadata.get("truncated_refresh_observed"))
     backend = _get_cache()
+    preflight_key = (id(backend), target_date, snapshot_as_of, truncated_flag)
+    l1_preflight = _FUND_AUTO_REFRESH_PREFLIGHT_L1.get(preflight_key)
+    now_mono = time.monotonic()
+    if isinstance(l1_preflight, dict) and float(l1_preflight.get("_exp") or 0.0) > now_mono:
+        cached_job = l1_preflight.get("job")
+        if cached_job is None:
+            return payload
+        if isinstance(cached_job, dict):
+            out = dict(payload)
+            out["refresh_pending"] = bool(payload.get("refresh_pending")) or str(cached_job.get("status") or "") in {"queued", "running"}
+            out["refresh_job"] = cached_job
+            return out
+
     job = _active_fund_refresh_job()
+    started_new_job = False
     if job is None:
         cooldown_key = f"{_FUND_REFRESH_AUTO_KEY_PREFIX}:{target_date}"
         cooldown_value = backend.get(cooldown_key)
@@ -701,6 +720,7 @@ def _maybe_schedule_fund_snapshot_refresh(payload: Dict[str, Any]) -> Dict[str, 
             ttl_seconds=max(60, _FUND_REFRESH_AUTO_COOLDOWN_SECONDS),
         )
         if claimed:
+            started_new_job = True
             try:
                 job = _start_fund_refresh_job(_FUND_REFRESH_MAX_LOOKBACK_DAYS)
                 backend.set(
@@ -721,11 +741,15 @@ def _maybe_schedule_fund_snapshot_refresh(payload: Dict[str, Any]) -> Dict[str, 
                 LOGGER.exception("stale fund catalogue background refresh could not be scheduled")
 
     if job is None:
+        _FUND_AUTO_REFRESH_PREFLIGHT_L1[preflight_key] = {"job": None, "_exp": time.monotonic() + 20.0}
         return payload
 
+    public_job = _public_fund_refresh_job(job)
+    if not started_new_job:
+        _FUND_AUTO_REFRESH_PREFLIGHT_L1[preflight_key] = {"job": public_job, "_exp": time.monotonic() + 5.0}
     out = dict(payload)
     out["refresh_pending"] = bool(payload.get("refresh_pending")) or str(job.get("status") or "") in {"queued", "running"}
-    out["refresh_job"] = _public_fund_refresh_job(job)
+    out["refresh_job"] = public_job
     return out
 
 async def _execute_fund_price_collector_cycle(
@@ -882,6 +906,45 @@ def _funds_listing_payload(
     return payload
 
 
+_FUNDS_SEARCH_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=128, default_ttl=300.0)
+_FUND_DETAIL_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=300.0)
+_FUND_ALLOCATIONS_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=600.0)
+_FUND_AUTO_REFRESH_PREFLIGHT_L1: BoundedMemoryCache = BoundedMemoryCache(max_entries=32, default_ttl=20.0)
+_FOREIGN_IDENTITIES_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=512, default_ttl=24 * 60 * 60)
+
+_FOREIGN_IDENTITIES_BULK_KEY = "api:funds:foreign-identities:v2"
+_FOREIGN_IDENTITIES_BULK_TTL = 30 * 24 * 60 * 60
+_FOREIGN_QUOTES_BULK_KEY = "api:funds:foreign-quotes:v1"
+
+
+def _prune_bulk_ttl_dict(
+    raw: Dict[str, Any],
+    *,
+    now: Optional[float] = None,
+    max_entries: int = 500,
+) -> Dict[str, Any]:
+    current = now if now is not None else time.time()
+    kept: List[tuple[str, Dict[str, Any]]] = []
+    for k, v in raw.items():
+        if not isinstance(k, str) or not isinstance(v, dict):
+            continue
+        exp = v.get("exp")
+        if not isinstance(exp, (int, float)) or float(exp) <= current:
+            continue
+        kept.append((k, v))
+    if len(kept) > max_entries:
+        kept.sort(key=lambda item: float(item[1].get("exp") or 0.0), reverse=True)
+        kept = kept[:max_entries]
+    return dict(kept)
+
+
+def _clear_single_fund_l1_caches(normalized: str) -> None:
+    for cache_key in [k for k in list(_FUND_DETAIL_L1_CACHE.keys()) if isinstance(k, tuple) and len(k) >= 5 and k[4] == normalized]:
+        _FUND_DETAIL_L1_CACHE.pop(cache_key, None)
+    for cache_key in [k for k in list(_FUND_ALLOCATIONS_L1_CACHE.keys()) if isinstance(k, tuple) and len(k) >= 4 and k[3] == normalized]:
+        _FUND_ALLOCATIONS_L1_CACHE.pop(cache_key, None)
+
+
 def _funds_search_payload(*, q: str, limit: int = 50) -> Dict[str, Any]:
     from app.fund_service import fund_listing_revision, get_funds_payload
 
@@ -889,14 +952,20 @@ def _funds_search_payload(*, q: str, limit: int = 50) -> Dict[str, Any]:
         revision = fund_listing_revision(CONFIG.paths.processed_dir)
     except Exception:
         revision = {}
-    cache_key = (
-        f"api:funds-search:v1:q={_normalized_cache_text(q, max_length=80)}"
-        f"|limit={int(limit)}|rev={int(revision.get('catalog_generation') or 0)}:{int(revision.get('price_generation') or 0)}"
-    )
+    norm_q = _normalized_cache_text(q, max_length=80)
+    rev_token = f"{int(revision.get('catalog_generation') or 0)}:{int(revision.get('price_generation') or 0)}"
     backend = _get_cache()
-    cached = backend.get(cache_key)
-    if isinstance(cached, dict) and isinstance(cached.get("rows"), list):
-        return dict(cached)
+    l1_key = (id(backend), str(CONFIG.paths.processed_dir), rev_token, norm_q, int(limit))
+    l1_hit = _FUNDS_SEARCH_L1_CACHE.get(l1_key)
+    if isinstance(l1_hit, dict) and isinstance(l1_hit.get("rows"), list):
+        return dict(l1_hit)
+
+    cache_key = f"api:funds-search:v1:q={norm_q}|limit={int(limit)}|rev={rev_token}"
+    if not norm_q or not database_enabled():
+        cached = backend.get(cache_key)
+        if isinstance(cached, dict) and isinstance(cached.get("rows"), list):
+            _FUNDS_SEARCH_L1_CACHE[l1_key] = dict(cached)
+            return dict(cached)
 
     payload = get_funds_payload(
         CONFIG.paths.processed_dir,
@@ -910,7 +979,11 @@ def _funds_search_payload(*, q: str, limit: int = 50) -> Dict[str, Any]:
         auto_refresh=False,
     )
     if _fund_listing_cacheable(payload):
-        backend.set(cache_key, payload, ttl_seconds=600)
+        _FUNDS_SEARCH_L1_CACHE[l1_key] = dict(payload)
+        # Avoid flooding Upstash Redis with unbounded per-keystroke prefix keys when
+        # Postgres/L1 snapshot search already answers sub-2ms locally.
+        if not norm_q or not database_enabled():
+            backend.set(cache_key, payload, ttl_seconds=600)
     return payload
 
 _FUNDS_CATEGORIES_L1_LOCK = threading.Lock()
@@ -1323,7 +1396,7 @@ def _run_fund_history_job(fund_code: str, job_id: str) -> None:
                     "error": None,
                 }
             )
-            _invalidate_single_fund_response_cache(normalized)
+            _invalidate_single_fund_response_cache(normalized, include_holdings=False)
             _history_job_set(normalized, latest)
             backend.set(_history_last_key(normalized), latest, ttl_seconds=_FUND_HISTORY_JOB_TTL_SECONDS)
             return
@@ -1395,7 +1468,7 @@ def _fund_yield_summary_payload(*, normalized: str) -> Dict[str, Any]:
 
 @_background_cached_response(
     key_fn=lambda *, normalized: f"api:fund-holdings:{normalized}:response:v{_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION}",
-    ttl_seconds=15,
+    ttl_seconds=90,
     stale_seconds=24 * 60 * 60,
     pending_fn=lambda *, normalized: {"fund_code": normalized, "status": "pending", "positions": []},
 )
@@ -1405,7 +1478,7 @@ def _fund_holdings_response_payload(*, normalized: str) -> Dict[str, Any]:
 
 @_cached_response(
     key_fn=lambda *, normalized: f"api:fund-holdings:{normalized}:v{_FUND_HOLDINGS_RESPONSE_SCHEMA_VERSION}",
-    ttl_seconds=_FUND_HOLDINGS_RESPONSE_CACHE_TTL,
+    ttl_seconds=_FUND_HOLDINGS_STATIC_CACHE_TTL,
     skip_when=lambda *, normalized: not normalized,
     single_flight=True,
     lock_timeout=_FUND_HOLDINGS_RESPONSE_LOCK_TIMEOUT,
@@ -1854,6 +1927,7 @@ def _quote_map_for_foreign_holdings(positions: List[Dict[str, Any]]) -> Dict[str
 
     now = time.time()
     quotes: Dict[str, Dict[str, Any]] = {}
+    l1_missing: List[str] = []
     for symbol in symbols:
         cached = _FOREIGN_HOLDING_QUOTE_CACHE.get(symbol)
         if cached and now - float(cached.get("_ts") or 0.0) < _FOREIGN_HOLDING_QUOTE_CACHE_TTL:
@@ -1861,9 +1935,23 @@ def _quote_map_for_foreign_holdings(positions: List[Dict[str, Any]]) -> Dict[str
             if data:
                 quotes[symbol] = data
             continue
-        cache_key = f"api:funds:foreign-holding-quote:{re.sub(r'[^A-Z0-9_.-]+', '_', symbol)}:v4"
-        shared_cached = _shared_cache_get_dict(cache_key)
-        if shared_cached is not None:
+        l1_missing.append(symbol)
+
+    if not l1_missing:
+        return quotes
+
+    raw_bulk = _shared_cache_get_dict(_FOREIGN_QUOTES_BULK_KEY)
+    bulk_quotes: Dict[str, Any] = dict(raw_bulk) if isinstance(raw_bulk, dict) else {}
+    bulk_dirty = False
+    for symbol in l1_missing:
+        shared_entry = bulk_quotes.get(symbol)
+        if (
+            isinstance(shared_entry, dict)
+            and isinstance(shared_entry.get("exp"), (int, float))
+            and float(shared_entry["exp"]) > now
+            and isinstance(shared_entry.get("d"), dict)
+        ):
+            shared_cached = dict(shared_entry["d"])
             _FOREIGN_HOLDING_QUOTE_CACHE[symbol] = {"_ts": now, "data": shared_cached}
             if shared_cached:
                 quotes[symbol] = dict(shared_cached)
@@ -1887,7 +1975,18 @@ def _quote_map_for_foreign_holdings(positions: List[Dict[str, Any]]) -> Dict[str
             }
             quotes[symbol] = data
         _FOREIGN_HOLDING_QUOTE_CACHE[symbol] = {"_ts": now, "data": data}
-        _shared_cache_set(cache_key, data, ttl_seconds=_FOREIGN_HOLDING_QUOTE_CACHE_TTL)
+        bulk_quotes[symbol] = {
+            "d": data,
+            "exp": now + _FOREIGN_HOLDING_QUOTE_CACHE_TTL,
+        }
+        bulk_dirty = True
+
+    if bulk_dirty:
+        _shared_cache_set(
+            _FOREIGN_QUOTES_BULK_KEY,
+            _prune_bulk_ttl_dict(bulk_quotes, now=now, max_entries=500),
+            ttl_seconds=_FOREIGN_HOLDING_QUOTE_CACHE_TTL,
+        )
     return quotes
 
 def _foreign_holding_provider_name(quote: Dict[str, Any]) -> Optional[str]:
@@ -2148,9 +2247,71 @@ def _enrich_fund_holdings_with_daily_market_data(payload: Dict[str, Any], fund_c
 
     normalized_fund = normalize_fund_code(fund_code)
     raw_positions = [dict(position) for position in list(payload.get("positions") or []) if isinstance(position, dict)]
+    backend_id = id(_get_cache())
+    bulk_identities_loaded = False
+    bulk_identities: Dict[str, Any] = {}
+    bulk_identities_dirty = False
+    now_epoch = time.time()
+
+    def _foreign_identity_cache_get(cache_key: str) -> Optional[Dict[str, Any]]:
+        nonlocal bulk_identities_loaded, bulk_identities
+        l1_key = (backend_id, cache_key)
+        l1_hit = _FOREIGN_IDENTITIES_L1_CACHE.get(l1_key)
+        now_check = time.time()
+        if (
+            isinstance(l1_hit, dict)
+            and float(l1_hit.get("_exp") or 0.0) > now_check
+            and isinstance(l1_hit.get("d"), dict)
+        ):
+            return dict(l1_hit["d"])
+        if not bulk_identities_loaded:
+            bulk_identities_loaded = True
+            loaded = _shared_cache_get_dict(_FOREIGN_IDENTITIES_BULK_KEY)
+            if isinstance(loaded, dict):
+                bulk_identities = dict(loaded)
+        entry = bulk_identities.get(cache_key)
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("exp"), (int, float))
+            and float(entry["exp"]) > now_epoch
+            and isinstance(entry.get("d"), dict)
+        ):
+            data = dict(entry["d"])
+            _FOREIGN_IDENTITIES_L1_CACHE[l1_key] = {"d": dict(data), "_exp": float(entry["exp"])}
+            return data
+        return None
+
+    def _foreign_identity_cache_set(
+        cache_key: str,
+        value: Dict[str, Any],
+        ttl_seconds: Optional[int] = None,
+        **_: Any,
+    ) -> None:
+        nonlocal bulk_identities_loaded, bulk_identities, bulk_identities_dirty
+        effective_ttl = max(30, int(ttl_seconds or _FOREIGN_IDENTITIES_BULK_TTL))
+        data = dict(value) if isinstance(value, dict) else {}
+        expires_at = time.time() + effective_ttl
+        _FOREIGN_IDENTITIES_L1_CACHE[(backend_id, cache_key)] = {"d": data, "_exp": expires_at}
+        if not bulk_identities_loaded:
+            bulk_identities_loaded = True
+            loaded = _shared_cache_get_dict(_FOREIGN_IDENTITIES_BULK_KEY)
+            if isinstance(loaded, dict):
+                bulk_identities = dict(loaded)
+        bulk_identities[cache_key] = {
+            "d": data,
+            "exp": expires_at,
+        }
+        bulk_identities_dirty = True
+
     raw_positions = resolve_foreign_holdings(
-        raw_positions, cache_get=_shared_cache_get_dict, cache_set=_shared_cache_set,
+        raw_positions, cache_get=_foreign_identity_cache_get, cache_set=_foreign_identity_cache_set,
     )
+    if bulk_identities_dirty:
+        _shared_cache_set(
+            _FOREIGN_IDENTITIES_BULK_KEY,
+            _prune_bulk_ttl_dict(bulk_identities, now=time.time(), max_entries=1000),
+            ttl_seconds=_FOREIGN_IDENTITIES_BULK_TTL,
+        )
     positions, holdings_quality = _validate_fund_holding_weights(raw_positions)
     fund_rows, fund_rows_meta = _fund_snapshot_row_map_with_meta()
     fund_row = fund_rows.get(normalized_fund) or {}
@@ -2395,6 +2556,7 @@ def _run_allocation_history_refresh_job(fund_code: str, lookback_days: int, job_
         )
         job.update({"status": "succeeded", "finished_at": _fund_refresh_now_iso(), "error": None})
         _allocation_history_job_set(job)
+        _clear_single_fund_l1_caches(normalized)
     except Exception as exc:
         job.update({"status": "failed", "finished_at": _fund_refresh_now_iso(), "error": str(exc)})
         _allocation_history_job_set(job)
@@ -2468,17 +2630,56 @@ def _fund_detail_payload(*, normalized: str) -> Dict[str, Any]:
     except Exception:
         revision = {}
     detail_rev = f"{int(revision.get('catalog_generation') or 0)}:{int(revision.get('price_generation') or 0)}"
-    cache_key = f"api:fund-detail:{normalized}"
     backend = _get_cache()
+    l1_key = (id(backend), id(get_fund_detail_payload), str(CONFIG.paths.processed_dir), detail_rev, normalized)
+    l1_hit = _FUND_DETAIL_L1_CACHE.get(l1_key)
+    if isinstance(l1_hit, dict) and l1_hit.get("fund_code") == normalized:
+        return dict(l1_hit)
+
+    cache_key = f"api:fund-detail:{normalized}"
     cached = backend.get(cache_key)
     if isinstance(cached, dict) and cached.get("fund_code") == normalized and cached.get("_rev") == detail_rev:
         out = dict(cached)
         out.pop("_rev", None)
+        _FUND_DETAIL_L1_CACHE[l1_key] = dict(out)
         return out
 
     payload = get_fund_detail_payload(CONFIG.paths.processed_dir, normalized)
     if isinstance(payload, dict) and str(payload.get("status") or "").strip().lower() not in {"unavailable", "pending"}:
+        _FUND_DETAIL_L1_CACHE[l1_key] = dict(payload)
         backend.set(cache_key, {**payload, "_rev": detail_rev}, ttl_seconds=900)
+    return payload
+
+
+def _fund_allocations_cached(normalized: str) -> Dict[str, Any]:
+    from app.fund_service import get_fund_allocations_payload
+
+    l1_key = (id(_get_cache()), id(get_fund_allocations_payload), str(CONFIG.paths.processed_dir), normalized, "allocations", 0)
+    l1_hit = _FUND_ALLOCATIONS_L1_CACHE.get(l1_key)
+    if isinstance(l1_hit, dict):
+        return dict(l1_hit)
+    payload = get_fund_allocations_payload(CONFIG.paths.processed_dir, normalized)
+    if isinstance(payload, dict) and not payload.get("stale") and str(payload.get("status") or "") not in {"pending", "unavailable"}:
+        _FUND_ALLOCATIONS_L1_CACHE[l1_key] = dict(payload)
+    return payload
+
+
+def _fund_allocations_history_cached(normalized: str, *, lookback_days: int) -> Dict[str, Any]:
+    from app.fund_service import get_fund_allocations_history_payload
+
+    l1_key = (id(_get_cache()), id(get_fund_allocations_history_payload), str(CONFIG.paths.processed_dir), normalized, "allocations_history", int(lookback_days))
+    l1_hit = _FUND_ALLOCATIONS_L1_CACHE.get(l1_key)
+    if isinstance(l1_hit, dict):
+        return dict(l1_hit)
+    payload = get_fund_allocations_history_payload(
+        CONFIG.paths.processed_dir,
+        normalized,
+        lookback_days=lookback_days,
+        auto_refresh=False,
+    )
+    needs_refresh = bool(payload.get("stale")) or str(payload.get("status")) == "pending"
+    if isinstance(payload, dict) and not needs_refresh:
+        _FUND_ALLOCATIONS_L1_CACHE[l1_key] = dict(payload)
     return payload
 
 def _require_known_fund_code(fund_code: str) -> str:
@@ -2516,6 +2717,10 @@ def _invalidate_fund_response_cache() -> str:
 
     with _FUNDS_CATEGORIES_L1_LOCK:
         _FUNDS_CATEGORIES_L1_CACHE.clear()
+    _FUNDS_SEARCH_L1_CACHE.clear()
+    _FUND_DETAIL_L1_CACHE.clear()
+    _FUND_ALLOCATIONS_L1_CACHE.clear()
+    _FUND_AUTO_REFRESH_PREFLIGHT_L1.clear()
     backend = _get_cache()
     outcomes: List[bool] = []
     for prefix in (
@@ -2544,18 +2749,21 @@ def _invalidate_fund_response_cache() -> str:
     return _finish_fund_cache_invalidation(outcomes, scope="snapshot")
 
 
-def _invalidate_single_fund_response_cache(normalized: str) -> str:
+def _invalidate_single_fund_response_cache(normalized: str, *, include_holdings: bool = True) -> str:
     """Drop one fund's cached responses and report shared invalidation status."""
 
+    _clear_single_fund_l1_caches(normalized)
     backend = _get_cache()
     outcomes: List[bool] = []
-    for key_or_prefix in (
+    targets = [
         f"api:fund-performance:{normalized}:",
         f"api:fund-performance:v{_FUND_HISTORY_KEY_VERSION}:{normalized}:",
         f"api:fund-detail:{normalized}",
         f"api:fund-yield-summary:{normalized}",
-        f"api:fund-holdings:{normalized}:",
-    ):
+    ]
+    if include_holdings:
+        targets.append(f"api:fund-holdings:{normalized}:")
+    for key_or_prefix in targets:
         try:
             if key_or_prefix.endswith(":"):
                 result = backend.delete_prefix_with_status(key_or_prefix)

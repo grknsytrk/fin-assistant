@@ -209,12 +209,11 @@ const FUND_TABS: Array<{ key: FundTab; label: string; icon: typeof BarChart3 }> 
 
 type FundHistorySubtab = 'prices' | 'allocation';
 
-const FUND_HOLDINGS_LIVE_REFRESH_MS = 15_000;
+const FUND_HOLDINGS_LIVE_REFRESH_MS = 30_000;
 const FUND_HOLDINGS_LIVE_MAX_BACKOFF_MS = 60_000;
-// KAP portfolio reports do not have a push/webhook channel. Revalidate the
-// selected fund's disclosure list while its holdings panel is visible so a
-// newly published report is picked up without a full page reload.
-const FUND_HOLDINGS_REPORT_REFRESH_MS = 60_000;
+// KAP portfolio reports publish monthly and have no push/webhook channel.
+// Revalidate at a low cadence while visible so newly published reports still surface without polling storms.
+const FUND_HOLDINGS_REPORT_REFRESH_MS = 15 * 60_000;
 const FUND_HOLDINGS_LIVE_FLASH_MS = 900;
 // The first chart view is six months. The backend may still warm the shared
 // history job up to one year, but that wider fetch must not change the UI range.
@@ -721,6 +720,27 @@ async function fetchFundsCatalog(options: { bypassMemoryCache?: boolean } = {}):
         }).catch(() => undefined);
     }
     return task;
+}
+
+function searchCachedFundCatalog(queryText: string, limit: number): FundSummary[] | null {
+    const rows = fundsCatalogMemoryCache?.funds?.rows;
+    if (!rows || rows.length === 0) return null;
+    const needle = normalizeCompareSearch(queryText.trim());
+    if (!needle) return [];
+    const exactCode: FundSummary[] = [];
+    const prefixCode: FundSummary[] = [];
+    const otherMatches: FundSummary[] = [];
+    for (const row of rows) {
+        const code = normalizeCompareSearch(row.fund_code || '');
+        const haystack = normalizeCompareSearch(
+            `${row.fund_code || ''} ${row.name || ''} ${row.founder_company || ''} ${row.manager_company || ''}`,
+        );
+        if (!haystack.includes(needle)) continue;
+        if (code === needle) exactCode.push(row);
+        else if (code.startsWith(needle)) prefixCode.push(row);
+        else otherMatches.push(row);
+    }
+    return [...exactCode, ...prefixCode, ...otherMatches].slice(0, limit);
 }
 
 function fundSortValue(row: FundSummary, key: FundSortKey): string | number | null {
@@ -4554,6 +4574,12 @@ function FundComparisonPage({
             setSearchLoading(false);
             return;
         }
+        const cachedMatches = searchCachedFundCatalog(trimmed, 12);
+        if (cachedMatches !== null) {
+            setSearchRows(cachedMatches);
+            setSearchLoading(false);
+            return;
+        }
         let alive = true;
         const controller = new AbortController();
         setSearchLoading(true);
@@ -5093,6 +5119,12 @@ function useFundComparisonState({
         const trimmed = query.trim();
         if (!searchOpen || !trimmed) {
             setFundSearchRows([]);
+            setFundSearchLoading(false);
+            return;
+        }
+        const cachedMatches = searchCachedFundCatalog(trimmed, 10);
+        if (cachedMatches !== null) {
+            setFundSearchRows(cachedMatches);
             setFundSearchLoading(false);
             return;
         }
@@ -6243,7 +6275,7 @@ export default function FundsPage({
 
         const revalidate = () => {
             if (!alive || document.visibilityState !== 'visible') return;
-            void loadHoldings(normalizedCode, { silent: true, force: true });
+            void loadHoldings(normalizedCode, { silent: true });
         };
         const onFocus = () => revalidate();
         const onVisibilityChange = () => revalidate();

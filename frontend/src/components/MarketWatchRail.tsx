@@ -28,9 +28,11 @@ type StockRailTab = Extract<RailTab, 'xutum' | 'xu100' | 'xu030'>;
 type RailSortKey = 'symbol' | 'price' | 'changePct';
 type RailSortDirection = 'asc' | 'desc';
 
-const LIVE_MARKET_QUOTE_REFRESH_MS = 3000;
+const LIVE_MARKET_QUOTE_REFRESH_MS = 10000;
 const LIVE_RAIL_REFRESH_DESKTOP_MS = LIVE_MARKET_QUOTE_REFRESH_MS;
 const LIVE_RAIL_REFRESH_MOBILE_MS = LIVE_MARKET_QUOTE_REFRESH_MS;
+const RAIL_STOCKS_LIVE_REVALIDATE_MS = 15_000;
+const RAIL_STOCKS_OFFHOURS_REVALIDATE_MS = 120_000;
 const STOCK_TAB_TO_INDEX: Record<StockRailTab, MarketStockIndex> = {
     xutum: 'XUTUM',
     xu100: 'XU100',
@@ -51,8 +53,10 @@ const DEFAULT_ORDER: Partial<Record<RailTab, string[]>> = {
 // şerit ile panel aynı sayıyı aynı anda gösteriyor ve tekrar istek atılmıyor.
 const railCache: {
     stocks: Partial<Record<StockRailTab, MarketStocksResponse>>;
+    stockFetchedAt: Partial<Record<StockRailTab, number>>;
 } = {
     stocks: {},
+    stockFetchedAt: {},
 };
 
 interface RailRow {
@@ -402,28 +406,50 @@ export default function MarketWatchRail({
     }, [watchlistItems]);
 
     useEffect(() => {
-        const cachedCodes = watchlistFundCodes.filter((code) => getCachedWatchlistFund(code));
-        if (cachedCodes.length) {
-            setWatchlistFundRows((current) => {
-                const next = { ...current };
-                let changed = false;
-                for (const code of cachedCodes) {
-                    const cached = getCachedWatchlistFund(code);
-                    if (cached && current[code] !== cached) {
-                        next[code] = cached;
-                        changed = true;
-                    }
+        const cachedCatalog = apiClient.getCachedFundsCatalog();
+        const freshCatalogRows = (
+            cachedCatalog
+            && Date.now() - cachedCatalog.fetchedAt < 5 * 60_000
+            && Array.isArray(cachedCatalog.payload?.rows)
+        )
+            ? cachedCatalog.payload.rows
+            : null;
+        const catalogByCode = freshCatalogRows
+            ? new Map(freshCatalogRows.map((row) => [normalizeWatchlistSymbol(row.fund_code), row]))
+            : null;
+
+        const cachedUpdates: Record<string, FundSummary> = {};
+        const stillMissingCodes: string[] = [];
+        for (const code of watchlistFundCodes) {
+            const localCached = getCachedWatchlistFund(code);
+            if (localCached) {
+                if (watchlistFundRows[code] !== localCached) {
+                    cachedUpdates[code] = localCached;
                 }
-                return changed ? next : current;
-            });
+                continue;
+            }
+            const catalogMatch = catalogByCode?.get(code);
+            if (catalogMatch) {
+                cacheWatchlistFund(catalogMatch);
+                if (watchlistFundRows[code] !== catalogMatch) {
+                    cachedUpdates[code] = catalogMatch;
+                }
+                continue;
+            }
+            if (!(code in watchlistFundRows)) {
+                stillMissingCodes.push(code);
+            }
         }
 
-        const missingCodes = watchlistFundCodes.filter((code) => !(code in watchlistFundRows) && !getCachedWatchlistFund(code));
-        if (!missingCodes.length) return;
+        if (Object.keys(cachedUpdates).length > 0) {
+            setWatchlistFundRows((current) => ({ ...current, ...cachedUpdates }));
+        }
+
+        if (!stillMissingCodes.length) return;
 
         let cancelled = false;
         Promise.all(
-            missingCodes.map((code) =>
+            stillMissingCodes.map((code) =>
                 fetchWatchlistFund(code)
                     .then((detail) => [code, detail] as const)
                     .catch(() => [code, null] as const),
@@ -448,6 +474,27 @@ export default function MarketWatchRail({
         const query = watchlistSearch.trim();
         if (!query) {
             setWatchlistFundSearchRows([]);
+            setWatchlistFundSearchLoading(false);
+            return undefined;
+        }
+
+        const cachedCatalog = apiClient.getCachedFundsCatalog();
+        if (
+            cachedCatalog
+            && Date.now() - cachedCatalog.fetchedAt < 5 * 60_000
+            && Array.isArray(cachedCatalog.payload?.rows)
+            && cachedCatalog.payload.rows.length > 0
+        ) {
+            const needle = query.toLocaleLowerCase('tr');
+            const localMatches = cachedCatalog.payload.rows
+                .filter((row) =>
+                    String(row.fund_code || '').toLocaleLowerCase('tr').includes(needle)
+                    || String(row.name || '').toLocaleLowerCase('tr').includes(needle)
+                    || String(row.founder_company || '').toLocaleLowerCase('tr').includes(needle),
+                )
+                .slice(0, 20);
+            for (const item of localMatches) cacheWatchlistFund(item);
+            setWatchlistFundSearchRows(localMatches);
             setWatchlistFundSearchLoading(false);
             return undefined;
         }
@@ -671,6 +718,17 @@ export default function MarketWatchRail({
         });
     };
 
+    const hasStockRowsRef = useRef<Record<StockRailTab, boolean>>({
+        xutum: Boolean((xutumPayload?.rows?.length || xu100Rows.length) > 0),
+        xu100: Boolean(xu100Payload?.rows?.length),
+        xu030: Boolean(xu030Payload?.rows?.length),
+    });
+    hasStockRowsRef.current = {
+        xutum: Boolean((xutumPayload?.rows?.length || xu100Rows.length) > 0),
+        xu100: Boolean(xu100Payload?.rows?.length),
+        xu030: Boolean(xu030Payload?.rows?.length),
+    };
+
     const loadStockTab = useCallback((tab: StockRailTab, options?: { silent?: boolean; refresh?: boolean }) => {
         if (inFlightRef.current[tab]) return;
         inFlightRef.current[tab] = true;
@@ -682,6 +740,7 @@ export default function MarketWatchRail({
             .marketStocks({ index: STOCK_TAB_TO_INDEX[tab], refresh: options?.refresh })
             .then((payload) => {
                 railCache.stocks[tab] = payload;
+                railCache.stockFetchedAt[tab] = Date.now();
                 if (tab === 'xutum') setXutumPayload(payload);
                 else if (tab === 'xu100') setXu100Payload(payload);
                 else setXu030Payload(payload);
@@ -694,13 +753,7 @@ export default function MarketWatchRail({
                         : tab === 'xu100'
                             ? 'XU100 verisi alınamadı.'
                             : 'XU030 verisi alınamadı.';
-                const hasRows =
-                    tab === 'xutum'
-                        ? Boolean((xutumPayload?.rows?.length || xu100Rows.length) > 0)
-                        : tab === 'xu100'
-                          ? Boolean(xu100Payload?.rows?.length)
-                          : Boolean(xu030Payload?.rows?.length);
-                if (!options?.silent || !hasRows) {
+                if (!options?.silent || !hasStockRowsRef.current[tab]) {
                     setTabError(tab, error instanceof Error ? error.message : fallback);
                 }
             })
@@ -708,18 +761,24 @@ export default function MarketWatchRail({
                 inFlightRef.current[tab] = false;
                 if (!options?.silent) setTabLoading(tab, false);
             });
-    }, [xutumPayload?.rows?.length, xu030Payload?.rows?.length, xu100Payload?.rows?.length, xu100Rows.length]);
+    }, []);
 
     useEffect(() => {
         if (panelCollapsed || activeTool !== 'markets') return;
 
         if (activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030') {
-            const hasCurrentRows =
-                activeTab === 'xutum'
-                    ? Boolean((xutumPayload?.rows?.length || xu100Rows.length) > 0)
-                    : activeTab === 'xu100'
-                      ? Boolean(xu100Payload?.rows?.length)
-                      : Boolean(xu030Payload?.rows?.length);
+            const hasCurrentRows = hasStockRowsRef.current[activeTab];
+            const targetIndex = STOCK_TAB_TO_INDEX[activeTab];
+            if (hasCurrentRows && apiClient.isMarketStocksStreamActive(targetIndex)) {
+                return;
+            }
+            const maxAgeMs = isBistTradingHours()
+                ? RAIL_STOCKS_LIVE_REVALIDATE_MS
+                : RAIL_STOCKS_OFFHOURS_REVALIDATE_MS;
+            const lastFetchedAt = railCache.stockFetchedAt[activeTab] ?? 0;
+            if (hasCurrentRows && lastFetchedAt > 0 && Date.now() - lastFetchedAt < maxAgeMs) {
+                return;
+            }
             loadStockTab(activeTab, { silent: hasCurrentRows, refresh: false });
         }
     }, [
@@ -727,23 +786,23 @@ export default function MarketWatchRail({
         activeTool,
         panelCollapsed,
         loadStockTab,
-        xutumPayload?.rows?.length,
-        xu030Payload?.rows?.length,
-        xu100Payload?.rows?.length,
-        xu100Rows.length,
     ]);
 
     // Paylaşımlı bellek önbelleği / SSE delta güncellemelerini dinle
     useEffect(() => {
         return apiClient.subscribeMarketStocks((index, payload) => {
+            const now = Date.now();
             if (index === 'XUTUM') {
                 railCache.stocks.xutum = payload;
+                railCache.stockFetchedAt.xutum = now;
                 setXutumPayload(payload);
             } else if (index === 'XU100') {
                 railCache.stocks.xu100 = payload;
+                railCache.stockFetchedAt.xu100 = now;
                 setXu100Payload(payload);
             } else if (index === 'XU030') {
                 railCache.stocks.xu030 = payload;
+                railCache.stockFetchedAt.xu030 = now;
                 setXu030Payload(payload);
             }
         });

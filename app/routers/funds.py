@@ -192,10 +192,10 @@ def fund_holdings_live(fund_code: str) -> Dict[str, Any]:
 
 @router.get("/funds/{fund_code}/allocations")
 def fund_allocations(fund_code: str) -> Dict[str, Any]:
-    from app.fund_service import get_fund_allocations_payload, normalize_fund_code
+    from app.fund_service import normalize_fund_code
 
     normalized = normalize_fund_code(fund_code)
-    payload = get_fund_allocations_payload(CONFIG.paths.processed_dir, normalized)
+    payload = _fund_allocations_cached(normalized)
     if not payload.get("stale"):
         response = dict(payload)
         response["refresh_pending"] = False
@@ -218,14 +218,10 @@ def fund_allocations_history(
     fund_code: str,
     lookback_days: int = Query(30, ge=1, le=365),
 ) -> Any:
-    from app.fund_service import get_fund_allocations_history_payload
-
     normalized = _require_known_fund_code(fund_code)
-    payload = get_fund_allocations_history_payload(
-        CONFIG.paths.processed_dir,
+    payload = _fund_allocations_history_cached(
         normalized,
         lookback_days=lookback_days,
-        auto_refresh=False,
     )
     needs_refresh = bool(payload.get("stale")) or str(payload.get("status")) == "pending"
     if not needs_refresh:

@@ -107,3 +107,52 @@ def test_market_stream_endpoint_once_mode():
     assert res.status_code == 200
     assert "event: stocks_delta" in res.text
     assert "data: " in res.text
+
+
+def test_fx_and_index_return_bases_use_bulk_redis_keys(monkeypatch):
+    from app import cache as cache_module
+    from app import market_service
+
+    cache_module.reset_cache_for_tests()
+    market_service._MARKET_INDEX_RETURN_CACHE.clear()
+    market_service._FX_RETURN_CACHE.clear()
+    market_service._MARKET_INDICES_CACHE.clear()
+    market_service._FX_CACHE.clear()
+    market_service._MARKET_INDEX_QUOTE_CACHE.clear()
+
+    set_keys: list[str] = []
+    orig_shared_set = market_service._shared_cache_set
+
+    def recording_shared_set(key: str, value, ttl_seconds: int) -> None:
+        set_keys.append(key)
+        orig_shared_set(key, value, ttl_seconds)
+
+    monkeypatch.setattr(market_service, "_shared_cache_set", recording_shared_set)
+    monkeypatch.setattr(
+        market_service,
+        "_fetch_yahoo_quote",
+        lambda sym: {"ok": True, "price": 100.0, "prev_close": 99.0, "change": 1.0, "change_pct": 1.0, "currency": "TRY"},
+    )
+    monkeypatch.setattr(
+        market_service,
+        "_fetch_yahoo_chart_raw",
+        lambda sym, interval="1d", range_="1y": {
+            "ok": True,
+            "points": [
+                {"time": "2026-01-05T00:00:00+00:00", "close": 90.0},
+                {"time": "2026-11-10T00:00:00+00:00", "close": 100.0},
+            ],
+        },
+    )
+
+    fx_payload = market_service._market_fx_payload()
+    assert len(fx_payload["items"]) > 0
+    assert market_service._FX_RETURN_BASES_BULK_KEY in set_keys
+    assert not any(k.startswith("api:market:fx-return-bases:") and k != market_service._FX_RETURN_BASES_BULK_KEY for k in set_keys)
+
+    set_keys.clear()
+    idx_payload = market_service._market_indices_payload()
+    assert len(idx_payload["rows"]) == len(market_service._MARKET_INDEX_ORDER)
+    assert market_service._INDEX_RETURN_BASES_BULK_KEY in set_keys
+    assert not any(k.startswith("api:market:index-return-bases:") and k != market_service._INDEX_RETURN_BASES_BULK_KEY for k in set_keys)
+    cache_module.reset_cache_for_tests()

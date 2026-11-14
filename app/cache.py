@@ -865,6 +865,15 @@ def _build_backend() -> CacheBackend:
     return InMemoryCache()
 
 
+_CACHE_RESET_EPOCH = 0
+
+
+def cache_reset_epoch() -> int:
+    """Return a monotonic counter incremented on test cache resets."""
+
+    return _CACHE_RESET_EPOCH
+
+
 def get_cache() -> CacheBackend:
     global _BACKEND
     if _BACKEND is not None:
@@ -878,9 +887,10 @@ def get_cache() -> CacheBackend:
 def reset_cache_for_tests() -> None:
     """Drop the cached backend instance and any in-memory state."""
 
-    global _BACKEND
+    global _BACKEND, _CACHE_RESET_EPOCH
     with _BACKEND_LOCK:
         _BACKEND = None
+        _CACHE_RESET_EPOCH += 1
 
 
 def cache_status() -> Dict[str, Any]:

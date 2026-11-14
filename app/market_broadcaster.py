@@ -221,7 +221,7 @@ class MarketStreamBroadcaster:
                     self._fanout(heartbeat_msg)
                     last_heartbeat = now_mono
 
-                sleep_seconds = 3.0 if market_open else 30.0
+                sleep_seconds = 3.0 if market_open else 120.0
                 sleep_fn = _resolve_sleep_fn()
                 await sleep_fn(sleep_seconds)
         except asyncio.CancelledError:

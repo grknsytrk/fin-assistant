@@ -13,7 +13,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from app.cache import get_cache
+from app.cache import BoundedMemoryCache, cache_reset_epoch, get_cache
 from app.database import (
     database_enabled,
     read_kap_flow_events,
@@ -31,7 +31,16 @@ _LOCAL_REDIS_EVENTS_BY_SCOPE: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
 FLOW_HEAD_CACHE_PREFIX = "api:kap:flow:head:v1:"
 FLOW_STATUS_CACHE_KEY = "api:kap:flow:status:v1"
 FLOW_REDIS_STORE_KEY = "api:kap:flow:events:v1"
-FLOW_HEAD_CACHE_TTL_SECONDS = int(os.getenv("RAGFIN_KAP_FLOW_HEAD_CACHE_TTL_SECONDS", "60"))
+# New disclosures explicitly invalidate FLOW_HEAD_CACHE_PREFIX, so unchanged
+# windows can safely stay in Redis longer without polling Postgres every minute.
+FLOW_HEAD_CACHE_TTL_SECONDS = int(os.getenv("RAGFIN_KAP_FLOW_HEAD_CACHE_TTL_SECONDS", "300"))
+FLOW_HEAD_L1_TTL_SECONDS = max(1, int(os.getenv("RAGFIN_KAP_FLOW_HEAD_L1_TTL_SECONDS", "10")))
+FLOW_PAGE_L1_TTL_SECONDS = max(1, int(os.getenv("RAGFIN_KAP_FLOW_PAGE_L1_TTL_SECONDS", "30")))
+FLOW_STATUS_L1_TTL_SECONDS = max(1, int(os.getenv("RAGFIN_KAP_FLOW_STATUS_L1_TTL_SECONDS", "10")))
+
+_FLOW_HEAD_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=32, default_ttl=FLOW_HEAD_L1_TTL_SECONDS)
+_FLOW_PAGE_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=FLOW_PAGE_L1_TTL_SECONDS)
+_FLOW_STATUS_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=8, default_ttl=FLOW_STATUS_L1_TTL_SECONDS)
 # Keep the Redis fallback slightly wider than the 2,000-row public window when no
 # database is configured; when Postgres is active, keep a compact fallback tail.
 FLOW_RETAINED_EVENTS = max(100, int(os.getenv("RAGFIN_KAP_FLOW_RETAINED_EVENTS", "2500")))
@@ -235,12 +244,35 @@ def _build_page(
     }
 
 
+def _invalidate_flow_l1_read_caches() -> None:
+    _FLOW_HEAD_L1_CACHE.clear()
+    _FLOW_PAGE_L1_CACHE.clear()
+
+
+def _flow_l1_scope(backend: Any = None) -> tuple[Any, ...]:
+    resolved = get_cache() if backend is None else backend
+    return (
+        cache_reset_epoch(),
+        id(resolved),
+        bool(database_enabled()),
+        os.getenv("RAGFIN_DATABASE_URL", "") or os.getenv("DATABASE_URL", ""),
+    )
+
+
+def _flow_status_l1_key(backend: Any = None) -> tuple[Any, ...]:
+    resolved = get_cache() if backend is None else backend
+    return (cache_reset_epoch(), id(resolved))
+
+
 def clear_persisted_flow_hashes() -> None:
     """Clear the process-local dedup table (primarily for tests)."""
 
     with _PERSISTED_FLOW_HASH_LOCK:
         _PERSISTED_FLOW_HASHES.clear()
         _LOCAL_REDIS_EVENTS_BY_SCOPE.clear()
+    _FLOW_HEAD_L1_CACHE.clear()
+    _FLOW_PAGE_L1_CACHE.clear()
+    _FLOW_STATUS_L1_CACHE.clear()
 
 
 def _flow_hash_scope() -> tuple[Any, ...]:
@@ -330,6 +362,7 @@ def persist_flow_items(items: list[dict[str, Any]], *, source: str, as_of: Optio
 
     backend = get_cache()
     if changed_rows or redis_changed:
+        _invalidate_flow_l1_read_caches()
         try:
             backend.delete_prefix(FLOW_HEAD_CACHE_PREFIX)
         except Exception:
@@ -349,6 +382,7 @@ def persist_flow_items(items: list[dict[str, Any]], *, source: str, as_of: Optio
         "database_written": database_written,
     }
     backend.set(FLOW_STATUS_CACHE_KEY, status)
+    _FLOW_STATUS_L1_CACHE[_flow_status_l1_key(backend)] = dict(status)
     return status
 
 
@@ -368,10 +402,16 @@ def read_flow_page(
     if after and after_tuple is None:
         raise ValueError("after cursor geçersiz")
 
+    backend = get_cache()
     cache_key = _head_key(limit, category)
+    l1_key = (*_flow_l1_scope(backend), cache_key)
     if not before_tuple and not after_tuple:
-        cached_head = get_cache().get(cache_key)
+        cached_l1 = _FLOW_PAGE_L1_CACHE.get(l1_key)
+        if isinstance(cached_l1, dict) and isinstance(cached_l1.get("items"), list):
+            return dict(cached_l1)
+        cached_head = backend.get(cache_key)
         if isinstance(cached_head, dict) and isinstance(cached_head.get("items"), list):
+            _FLOW_PAGE_L1_CACHE[l1_key] = dict(cached_head)
             return dict(cached_head)
 
     rows: list[dict[str, Any]] = []
@@ -405,13 +445,21 @@ def read_flow_page(
 
     page = _build_page(rows, has_more=has_more, status=get_flow_status())
     if not before_tuple and not after_tuple:
-        get_cache().set(cache_key, page, ttl_seconds=max(1, FLOW_HEAD_CACHE_TTL_SECONDS))
+        backend.set(cache_key, page, ttl_seconds=max(1, FLOW_HEAD_CACHE_TTL_SECONDS))
+        _FLOW_PAGE_L1_CACHE[l1_key] = dict(page)
     return page
 
 
 def get_flow_status() -> dict[str, Any]:
-    cached = get_cache().get(FLOW_STATUS_CACHE_KEY)
-    return dict(cached) if isinstance(cached, dict) else {}
+    backend = get_cache()
+    l1_key = _flow_status_l1_key(backend)
+    cached_l1 = _FLOW_STATUS_L1_CACHE.get(l1_key)
+    if isinstance(cached_l1, dict):
+        return dict(cached_l1)
+    cached = backend.get(FLOW_STATUS_CACHE_KEY)
+    status = dict(cached) if isinstance(cached, dict) else {}
+    _FLOW_STATUS_L1_CACHE[l1_key] = dict(status)
+    return status
 
 
 def update_flow_status(**updates: Any) -> dict[str, Any]:
@@ -421,6 +469,7 @@ def update_flow_status(**updates: Any) -> dict[str, Any]:
     current = get_flow_status()
     current.update(updates)
     backend.set(FLOW_STATUS_CACHE_KEY, current)
+    _FLOW_STATUS_L1_CACHE[_flow_status_l1_key(backend)] = dict(current)
     return current
 
 
@@ -437,9 +486,15 @@ def store_is_configured() -> bool:
 def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[str, Any]:
     del limit  # Head queries only inspect the newest cursor.
     norm_category = str(category or "").strip() or None
+    backend = get_cache()
     cache_key = f"{FLOW_HEAD_CACHE_PREFIX}cursor:{norm_category or ''}"
-    cached = get_cache().get(cache_key)
+    l1_key = (*_flow_l1_scope(backend), cache_key)
+    cached_l1 = _FLOW_HEAD_L1_CACHE.get(l1_key)
+    if isinstance(cached_l1, dict) and cached_l1.get("latest_cursor"):
+        return dict(cached_l1)
+    cached = backend.get(cache_key)
     if isinstance(cached, dict) and cached.get("latest_cursor"):
+        _FLOW_HEAD_L1_CACHE[l1_key] = dict(cached)
         return dict(cached)
 
     head_row: Optional[dict[str, Any]] = None
@@ -486,5 +541,6 @@ def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[st
         "refresh_status": status.get("refresh_status") or "unknown",
         "source": status.get("source") or "kap_flow_store",
     }
-    get_cache().set(cache_key, result, ttl_seconds=max(1, FLOW_HEAD_CACHE_TTL_SECONDS))
+    backend.set(cache_key, result, ttl_seconds=max(1, FLOW_HEAD_CACHE_TTL_SECONDS))
+    _FLOW_HEAD_L1_CACHE[l1_key] = dict(result)
     return result
