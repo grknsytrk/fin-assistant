@@ -128,6 +128,7 @@ export default function MarketsNavigation({
                                     setFundsExpanded(true);
                                     return;
                                 }
+                                setFundsExpanded(true);
                                 handleLinkClick(event, onFundSectionChange
                                     ? () => onFundSectionChange('investment')
                                     : () => onSectionChange('funds'));
@@ -150,26 +151,32 @@ export default function MarketsNavigation({
                             </button>
                         )}
                     </div>
-                    {!collapsed && fundsExpanded && (
-                        <div className="mn-submenu" aria-label="Fonlar alt menüsü">
-                            <Link
-                                to={toFunds()}
-                                className={`mn-submenu-item ${activeSection === 'funds' && activeFundSection === 'investment' ? 'active' : ''}`}
-                                onClick={(event) => handleLinkClick(event, onFundSectionChange
-                                    ? () => onFundSectionChange('investment')
-                                    : () => onSectionChange('funds'))}
-                            >
-                                Yatırım Fonları
-                            </Link>
-                            <Link
-                                to={toFundComparison()}
-                                className={`mn-submenu-item ${activeSection === 'funds' && activeFundSection === 'compare' ? 'active' : ''}`}
-                                onClick={(event) => handleLinkClick(event, onFundSectionChange
-                                    ? () => onFundSectionChange('compare')
-                                    : undefined)}
-                            >
-                                Fon Karşılaştırma
-                            </Link>
+                    {!collapsed && (
+                        <div className={`mn-submenu-collapse ${fundsExpanded ? 'is-open' : ''}`} aria-hidden={!fundsExpanded}>
+                            <div className="mn-submenu-collapse-inner">
+                                <div className="mn-submenu" aria-label="Fonlar alt menüsü">
+                                    <Link
+                                        to={toFunds()}
+                                        tabIndex={fundsExpanded ? undefined : -1}
+                                        className={`mn-submenu-item ${activeSection === 'funds' && activeFundSection === 'investment' ? 'active' : ''}`}
+                                        onClick={(event) => handleLinkClick(event, onFundSectionChange
+                                            ? () => onFundSectionChange('investment')
+                                            : () => onSectionChange('funds'))}
+                                    >
+                                        Yatırım Fonları
+                                    </Link>
+                                    <Link
+                                        to={toFundComparison()}
+                                        tabIndex={fundsExpanded ? undefined : -1}
+                                        className={`mn-submenu-item ${activeSection === 'funds' && activeFundSection === 'compare' ? 'active' : ''}`}
+                                        onClick={(event) => handleLinkClick(event, onFundSectionChange
+                                            ? () => onFundSectionChange('compare')
+                                            : undefined)}
+                                    >
+                                        Fon Karşılaştırma
+                                    </Link>
+                                </div>
+                            </div>
                         </div>
                     )}
                 </div>

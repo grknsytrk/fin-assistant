@@ -10,6 +10,8 @@ import {
     ChevronRight,
     Clock,
     ExternalLink,
+    Eye,
+    EyeOff,
     History,
     KeyRound,
     Lock,
@@ -17,7 +19,6 @@ import {
     Pencil,
     Plus,
     RefreshCw,
-    Ruler,
     Search,
     Sparkles,
     SlidersHorizontal,
@@ -57,7 +58,7 @@ import './MarketsView.css';
 import './ModelPortfolioPage.css';
 
 type PortfolioTab = 'active' | 'closed' | 'changelog';
-type PerfRange = '1m' | '3m' | '6m' | 'ytd' | '1y' | 'all';
+type PerfRange = '1w' | '1m' | '3m' | '6m' | 'ytd' | '1y' | 'all';
 type PerformanceSeries = 'portfolio' | 'xu100' | 'xu030';
 
 type ExplainedOption = {
@@ -69,6 +70,7 @@ type ExplainedOption = {
 };
 
 const PERF_RANGES: Array<{ id: PerfRange; label: string }> = [
+    { id: '1w', label: '1H' },
     { id: '1m', label: '1A' },
     { id: '3m', label: '3A' },
     { id: '6m', label: '6A' },
@@ -398,7 +400,11 @@ function sliceAndNormalizePerformance(
     const lastDate = new Date(`${lastDateStr}T00:00:00Z`);
     let cutoffIso = weekdayPoints[0].date;
 
-    if (range === '1m') {
+    if (range === '1w') {
+        const d = new Date(lastDate);
+        d.setUTCDate(d.getUTCDate() - 7);
+        cutoffIso = d.toISOString().slice(0, 10);
+    } else if (range === '1m') {
         const d = new Date(lastDate);
         d.setUTCDate(d.getUTCDate() - 30);
         cutoffIso = d.toISOString().slice(0, 10);
@@ -498,6 +504,7 @@ export default function ModelPortfolioPage() {
     const [isAdminVerified, setIsAdminVerified] = useState(false);
     const [adminModalOpen, setAdminModalOpen] = useState(false);
     const [adminTokenInput, setAdminTokenInput] = useState('');
+    const [showAdminToken, setShowAdminToken] = useState(false);
     const [adminAuthError, setAdminAuthError] = useState<string | null>(null);
     const [adminAuthLoading, setAdminAuthLoading] = useState(false);
     const adminDialogRef = useAccessibleDialog<HTMLDivElement>(adminModalOpen, () => setAdminModalOpen(false));
@@ -835,16 +842,14 @@ export default function ModelPortfolioPage() {
                     {/* Header */}
                     <header className="market-header mp-header">
                         <div className="market-title">
-                            <span className="model-portfolio-kicker">ARAŞTIRMA & YATIRIM STRATEJİLERİ</span>
-                            <h1 tabIndex={-1} data-dialog-return-focus>Model Portföy</h1>
-                            <p>
-                                Temel analizle seçilen hisseleri canlı fiyatlarla ve yatırım tezleriyle takip edin. Geçmiş grafik, kapanan pozisyonları çıkış tarihine kadar dahil ederek model portföyün BIST 100 karşısındaki kümülatif performansını gösterir.
-                            </p>
-                            {hasPortfolioSetup && portfolioData?.updated_at && (
-                                <span className="mp-update-meta">
-                                    <Clock size={12} /> Son portföy düzenlemesi: {formatDateTimeTR(portfolioData.updated_at)}
-                                </span>
-                            )}
+                            <div className="mp-title-row">
+                                <h1 tabIndex={-1} data-dialog-return-focus>Model Portföy</h1>
+                                {hasPortfolioSetup && portfolioData?.updated_at && (
+                                    <span className="mp-update-meta">
+                                        <Clock size={12} /> {formatDateTimeTR(portfolioData.updated_at)}
+                                    </span>
+                                )}
+                            </div>
                         </div>
                     </header>
 
@@ -861,20 +866,20 @@ export default function ModelPortfolioPage() {
                     {/* Portfolio Summary Strip */}
                     <section className="mp-kpi-strip" aria-label="Model portföy özet göstergeleri">
                         <div className="mp-kpi-item">
-                            <span className="mp-kpi-label">Ağırlıklı getiri</span>
+                            <span className="mp-kpi-label">Getiri</span>
                             <strong
                                 className={`mp-kpi-value ${toneClass(liveSummary.invested_return_pct)}`}
-                                title="Her pozisyonun getirisi kendi giriş gününden bugüne hesaplanır ve ağırlıkla birleştirilir."
+                                title="Her pozisyonun getirisi giriş gününden bugüne ağırlıklı olarak hesaplanır."
                             >
                                 {formatPct(liveSummary.invested_return_pct)}
                             </strong>
                             <span className="mp-kpi-sub">
-                                Nakit dâhil: <b>{formatPct(liveSummary.portfolio_return_pct)}</b>
+                                Nakit dahil <b>{formatPct(liveSummary.portfolio_return_pct)}</b>
                             </span>
                         </div>
 
                         <div className="mp-kpi-item">
-                            <span className="mp-kpi-label">XU100’e göre alfa</span>
+                            <span className="mp-kpi-label">XU100 Alfa</span>
                             <strong className={`mp-kpi-value ${toneClass(liveSummary.relative_return_pct)}`}>
                                 {formatPct(liveSummary.relative_return_pct)}
                             </strong>
@@ -882,38 +887,38 @@ export default function ModelPortfolioPage() {
                                 className="mp-kpi-sub"
                                 title="Her pozisyon, kendi giriş günündeki XU100 seviyesinden itibaren kıyaslanır."
                             >
-                                XU100 getirisi: <b>{formatPct(liveSummary.xu100_return_pct)}</b>
+                                XU100 <b>{formatPct(liveSummary.xu100_return_pct)}</b>
                             </span>
                         </div>
 
                         <div className="mp-kpi-item">
-                            <span className="mp-kpi-label">Hedef potansiyeli</span>
+                            <span className="mp-kpi-label">Hedef Potansiyel</span>
                             <strong className={`mp-kpi-value ${toneClass(liveSummary.weighted_target_upside_pct)}`}>
                                 {formatPct(liveSummary.weighted_target_upside_pct)}
                             </strong>
-                            <span className="mp-kpi-sub">Ağırlıklı, nakit hariç · garanti değildir</span>
+                            <span className="mp-kpi-sub">Nakit hariç</span>
                         </div>
 
                         <div className="mp-kpi-item">
-                            <span className="mp-kpi-label">Pozisyon ve nakit</span>
+                            <span className="mp-kpi-label">Dağılım</span>
                             <strong className={`mp-kpi-value${!hasPortfolioSetup ? ' mp-kpi-empty-value' : ''}`}>
                                 {!hasPortfolioSetup
-                                    ? 'Kurulmadı'
+                                    ? '—'
                                     : liveSummary.active_count > 0
                                         ? `${liveSummary.active_count} hisse`
-                                        : 'Pozisyon yok'}
+                                        : 'Nakit'}
                             </strong>
                             <span className="mp-kpi-sub">
                                 {!hasPortfolioSetup
-                                    ? 'Portföy verisi henüz eklenmedi'
+                                    ? 'Pozisyon yok'
                                     : liveSummary.active_count > 0
-                                        ? <>Yatırım <b>%{liveSummary.total_weight_pct.toFixed(0)}</b> · Nakit <b>%{liveSummary.cash_weight_pct.toFixed(1)}</b></>
-                                        : 'Kapanmış kayıtlar Geçmiş sekmesinde'}
+                                        ? <>Hisse <b>%{liveSummary.total_weight_pct.toFixed(0)}</b> · Nakit <b>%{liveSummary.cash_weight_pct.toFixed(1)}</b></>
+                                        : 'Tümü kapatıldı'}
                             </span>
                         </div>
 
                         <div className="mp-kpi-item">
-                            <span className="mp-kpi-label">XU100’ü geçen işlemler</span>
+                            <span className="mp-kpi-label">Başarı Oranı</span>
                             <strong className="mp-kpi-value mp-tone-accent">
                                 {liveSummary.closed_hit_rate_pct != null
                                     ? `%${liveSummary.closed_hit_rate_pct.toFixed(0)}`
@@ -921,8 +926,8 @@ export default function ModelPortfolioPage() {
                             </strong>
                             <span className="mp-kpi-sub">
                                 {liveSummary.closed_count > 0
-                                    ? `${liveSummary.closed_win_count}/${liveSummary.closed_count} kapalı işlem`
-                                    : 'Henüz kapanan pozisyon yok'}
+                                    ? `${liveSummary.closed_win_count}/${liveSummary.closed_count} XU100 üstü`
+                                    : 'Kapalı işlem yok'}
                             </span>
                         </div>
                     </section>
@@ -933,13 +938,12 @@ export default function ModelPortfolioPage() {
                             {/* Left: Cumulative Return vs XU100 SVG Chart */}
                             <div className="mp-panel mp-chart-panel">
                                 <div className="mp-panel-header">
-                                    <div>
-                                        <span className="mp-panel-kicker">MODEL PORTFÖYÜN KÜMÜLATİF PERFORMANSI</span>
-                                        <h2 className="mp-panel-title">Model Portföy vs. BIST 100 / BIST 30 (100 ₺ Bazlı)</h2>
-                                        <p className="mp-chart-note">
-                                            Kapanan pozisyonlar çıkış tarihine kadar katkı verir ve gerçekleşen getiri grafikte kalır. Ağırlıklar güncel ağırlıklardır; geçmiş ağırlık değişiklikleri ayrıca modellenmez.
-                                        </p>
-                                    </div>
+                                    <h2
+                                        className="mp-panel-title"
+                                        title="Kapanan pozisyonlar çıkış tarihine kadar katkı verir; ağırlıklar güncel dağılıma göredir."
+                                    >
+                                        Kümülatif Performans (100 ₺)
+                                    </h2>
                                     <div className="mp-range-tabs" role="tablist" aria-label="Grafik periyodu">
                                         {PERF_RANGES.map((r) => (
                                             <button
@@ -974,10 +978,7 @@ export default function ModelPortfolioPage() {
                             {/* Right: Allocation Donut & Return Attribution */}
                             <div className="mp-panel mp-allocation-panel">
                                 <div className="mp-panel-header">
-                                    <div>
-                                        <span className="mp-panel-kicker">VARLIK DAĞILIMI & KATKI ANALİZİ</span>
-                                        <h2 className="mp-panel-title">Ağırlık & Getiri Katkısı</h2>
-                                    </div>
+                                    <h2 className="mp-panel-title">Dağılım ve Katkı</h2>
                                 </div>
 
                                 {liveActivePositions.length > 0 ? (
@@ -1024,9 +1025,7 @@ export default function ModelPortfolioPage() {
                                     </div>
                                 ) : (
                                     <div className="mp-allocation-body mp-allocation-empty">
-                                        <p className="mp-chart-note">
-                                            Aktif pozisyon kalmadı. Kapatılan işlemlerin gerçekleşen getirisi yukarıdaki grafikte çıkış tarihine kadar korunur.
-                                        </p>
+                                        <p className="mp-chart-note">Aktif pozisyon bulunmuyor.</p>
                                     </div>
                                 )}
                             </div>
@@ -1079,7 +1078,7 @@ export default function ModelPortfolioPage() {
                                         <>
                                             <span className="mp-admin-badge" title="Kurucu düzenleme modu aktif">
                                                 <span className="mp-admin-pulse-dot" aria-hidden="true" />
-                                                <span>Kurucu Modu</span>
+                                                <span>Kurucu</span>
                                             </span>
                                             <button
                                                 type="button"
@@ -1124,13 +1123,13 @@ export default function ModelPortfolioPage() {
                             ) : liveActivePositions.length === 0 ? (
                                 <div className="mp-empty-box">
                                     <BriefcaseBusiness size={26} className="mp-empty-icon" />
-                                    <h3>{hasPortfolioSetup ? 'Aktif Pozisyon Bulunmuyor' : 'Model Portföy Henüz Oluşturulmadı'}</h3>
+                                    <h3>{hasPortfolioSetup ? 'Aktif Pozisyon Yok' : 'Model Portföy Boş'}</h3>
                                     <p>
                                         {hasPortfolioSetup
-                                            ? 'Aktif hisseler kapatıldı. Geçmiş sekmesinden gerçekleşen işlemleri, Değişiklik Günlüğü sekmesinden portföy hareketlerini inceleyebilirsiniz.'
+                                            ? 'Tüm pozisyonlar kapatılmış. Geçmiş işlemler Kapatılanlar sekmesinde.'
                                             : isAdminVerified
-                                                ? 'Kurucu modu açık. Hisse, hedef fiyat ve yatırım tezi ekleyerek portföyü oluşturabilirsiniz.'
-                                                : 'Model portföye hisse eklendiğinde aktif öneriler, hedef fiyatlar ve yatırım tezleri burada listelenecektir.'}
+                                                ? 'Hisse, hedef fiyat ve yatırım tezi ekleyerek başlayın.'
+                                                : 'Henüz aktif hisse önerisi bulunmuyor.'}
                                     </p>
                                     {isAdminVerified && !hasPortfolioSetup && (
                                         <button
@@ -1309,8 +1308,8 @@ export default function ModelPortfolioPage() {
                                         .pop();
                                     return (
                                         <p className="mp-table-footnote">
-                                            Satıra tıklayarak yatırım tezini açabilirsiniz.
-                                            {latestPriceAsOf ? ` Fiyatlar: ${formatCompactDateTimeTR(latestPriceAsOf)}.` : ''}
+                                            Tez detayı için satıra tıklayın
+                                            {latestPriceAsOf ? ` · ${formatCompactDateTimeTR(latestPriceAsOf)}` : ''}
                                         </p>
                                     );
                                 })()}
@@ -1322,12 +1321,9 @@ export default function ModelPortfolioPage() {
                         {activeTab === 'closed' && (
                             (portfolioData?.closed_positions.length || 0) === 0 ? (
                                 <div className="mp-empty-box">
-                                    <Award size={26} className="mp-empty-icon" />
-                                    <h3>Henüz kapatılan pozisyon bulunmuyor</h3>
-                                    <p>
-                                        Hedef fiyatına ulaşan veya portföyden çıkarılan hisseler gerçekleşen getiri ve
-                                        BIST 100 rölatif performans karnesiyle bu sekmede arşivlenir.
-                                    </p>
+                                    <Award size={24} className="mp-empty-icon" />
+                                    <h3>Kapatılan Pozisyon Yok</h3>
+                                    <p>Kapatılan işlemler gerçekleşen getiri ve alfa verileriyle burada listelenir.</p>
                                 </div>
                             ) : (
                                 <div className="mp-closed-section">
@@ -1462,12 +1458,9 @@ export default function ModelPortfolioPage() {
                         {activeTab === 'changelog' && (
                             (portfolioData?.changelog.length || 0) === 0 ? (
                                 <div className="mp-empty-box">
-                                    <History size={26} className="mp-empty-icon" />
-                                    <h3>Henüz portföy hareketi kaydedilmedi</h3>
-                                    <p>
-                                        Model portföye hisse eklendiğinde, hedef fiyat/ağırlık revizyonu yapıldığında veya
-                                        pozisyon kapatıldığında tüm değişiklikler tarih sırasıyla burada listelenir.
-                                    </p>
+                                    <History size={24} className="mp-empty-icon" />
+                                    <h3>Değişiklik Kaydı Yok</h3>
+                                    <p>Yeni giriş, hedef/ağırlık revizyonu ve kapanış hareketleri burada listelenir.</p>
                                 </div>
                             ) : (
                                 <div className="mp-changelog-list">
@@ -1570,31 +1563,34 @@ export default function ModelPortfolioPage() {
                                 <div className="mp-modal-icon-badge is-lock">
                                     <KeyRound size={15} />
                                 </div>
-                                <div>
-                                    <h3 id="mp-admin-dialog-title">Kurucu Girişi</h3>
-                                    <span className="mp-modal-subtitle">Model portföy yönetimi için yönetici erişim anahtarı</span>
-                                </div>
+                                <h3 id="mp-admin-dialog-title">Kurucu Girişi</h3>
                             </div>
                             <button type="button" className="mp-icon-btn" aria-label="Giriş penceresini kapat" onClick={() => setAdminModalOpen(false)}>
                                 <X size={15} />
                             </button>
                         </div>
                         <form onSubmit={handleAdminVerifySubmit} className="mp-modal-body">
-                            <p className="mp-modal-desc">
-                                Model portföye hisse eklemek, hedef fiyat revize etmek ve yatırım tezi yazmak için
-                                yönetici anahtarınızı girin.
-                            </p>
                             <label className="mp-field">
-                                <span>Yönetici Anahtarı</span>
-                                <input
-                                    type="password"
-                                    data-dialog-autofocus
-                                    value={adminTokenInput}
-                                    onChange={(e) => setAdminTokenInput(e.target.value)}
-                                    placeholder="••••••••••••••••"
-                                    autoComplete="off"
-                                    autoFocus
-                                />
+                                <span className="mp-field-label">Yönetici Anahtarı</span>
+                                <div className="mp-password-input-wrap">
+                                    <input
+                                        type={showAdminToken ? 'text' : 'password'}
+                                        data-dialog-autofocus
+                                        value={adminTokenInput}
+                                        onChange={(e) => setAdminTokenInput(e.target.value)}
+                                        placeholder="Anahtarı girin"
+                                        autoComplete="off"
+                                        autoFocus
+                                    />
+                                    <button
+                                        type="button"
+                                        className="mp-password-toggle"
+                                        aria-label={showAdminToken ? 'Anahtarı gizle' : 'Anahtarı göster'}
+                                        onClick={() => setShowAdminToken((v) => !v)}
+                                    >
+                                        {showAdminToken ? <EyeOff size={15} /> : <Eye size={15} />}
+                                    </button>
+                                </div>
                             </label>
                             {adminAuthError && <div className="mp-form-error">{adminAuthError}</div>}
                             <div className="mp-modal-footer">
@@ -1732,7 +1728,6 @@ function ModelPortfolioPerformanceChart({
     onHoverIndexChange: (idx: number | null) => void;
 }) {
     const isMobile = useMobileChartLayout();
-    const [isMeasureMode, setIsMeasureMode] = useState(false);
     const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
     const [selectedMeasureRange, setSelectedMeasureRange] = useState<{ start: number; end: number } | null>(null);
     const [visibleSeries, setVisibleSeries] = useState<Record<PerformanceSeries, boolean>>({
@@ -1741,13 +1736,26 @@ function ModelPortfolioPerformanceChart({
         xu030: true,
     });
     const lastPointerTypeRef = useRef<string>('mouse');
+    const chartStageRef = useRef<HTMLDivElement>(null);
     const pointWindowKey = `${points.length}:${points[0]?.date || ''}:${points[points.length - 1]?.date || ''}`;
 
     useEffect(() => {
         setMeasureAnchorIndex(null);
         setSelectedMeasureRange(null);
-        setIsMeasureMode(false);
     }, [pointWindowKey]);
+
+    useEffect(() => {
+        if (!selectedMeasureRange && hoverIndex == null) return;
+        const handleOutsidePointerDown = (e: PointerEvent) => {
+            if (chartStageRef.current && !chartStageRef.current.contains(e.target as Node)) {
+                setSelectedMeasureRange(null);
+                setMeasureAnchorIndex(null);
+                onHoverIndexChange(null);
+            }
+        };
+        document.addEventListener('pointerdown', handleOutsidePointerDown);
+        return () => document.removeEventListener('pointerdown', handleOutsidePointerDown);
+    }, [selectedMeasureRange, hoverIndex, onHoverIndexChange]);
 
     const width = isMobile ? 420 : 900;
     const height = isMobile ? 245 : 340;
@@ -1861,7 +1869,6 @@ function ModelPortfolioPerformanceChart({
     const measureRelativeXu100Return = compoundAlpha(measurePortfolioReturn, measureXu100Return);
     const measureRelativeXu030Return = compoundAlpha(measurePortfolioReturn, measureXu030Return);
 
-    // Only series currently drawn on the chart are reported; alpha needs both sides visible.
     const measureTooltipItems: Array<{ label: string; color?: string; change: number | null }> = [];
     const measureAlphaItems: Array<{ label: string; change: number | null }> = [];
     if (measureStartPt && measureEndPt) {
@@ -1917,9 +1924,6 @@ function ModelPortfolioPerformanceChart({
         }
     }
 
-    // Desktop floating tooltip positioning:
-    // - Range measure tooltip pins above/below the selected span.
-    // - Point hover tooltip flips cleanly to the left or right of the crosshair so it never clips or covers the dot.
     let measureLineTop = Infinity;
     let measureLineBottom = -Infinity;
     if (visibleMeasureRange) {
@@ -1955,6 +1959,8 @@ function ModelPortfolioPerformanceChart({
                   : { bottom: '8px' }),
         };
 
+    // Desktop floating tooltip positioning:
+    // Point hover tooltip flips cleanly to the left or right of the crosshair so it never clips or covers the dot.
     const hoverXPct = (toX(activeIdx) / width) * 100;
     const placeHoverLeft = activeIdx > points.length * 0.58;
     const hoverYs = [
@@ -1998,35 +2004,11 @@ function ModelPortfolioPerformanceChart({
         lastPointerTypeRef.current = e.pointerType;
         const idx = resolveIndexFromClientX(e.currentTarget, e.clientX);
         if (idx == null) return;
-
-        // In Measure Mode (great for mobile & deliberate range picking): tap 1 = anchor, tap 2 = commit range.
-        if (isMeasureMode) {
-            e.preventDefault();
-            onHoverIndexChange(idx);
-            if (measureAnchorIndex == null) {
-                setSelectedMeasureRange(null);
-                setMeasureAnchorIndex(idx);
-            } else if (idx !== measureAnchorIndex) {
-                setSelectedMeasureRange({
-                    start: Math.min(measureAnchorIndex, idx),
-                    end: Math.max(measureAnchorIndex, idx),
-                });
-                setMeasureAnchorIndex(null);
-                setIsMeasureMode(false);
-            } else {
-                setMeasureAnchorIndex(null);
-            }
-            return;
-        }
-
-        // Touch scrubbing outside Measure Mode: smoothly update hoverIndex without hijacking vertical scroll.
         if (e.pointerType !== 'mouse') {
             setSelectedMeasureRange(null);
             onHoverIndexChange(idx);
             return;
         }
-
-        // Desktop mouse drag-to-measure.
         e.preventDefault();
         setSelectedMeasureRange(null);
         setMeasureAnchorIndex(idx);
@@ -2035,7 +2017,7 @@ function ModelPortfolioPerformanceChart({
     };
 
     const finishPointerMeasure = (e: ReactPointerEvent<SVGSVGElement>, commit: boolean) => {
-        if (isMeasureMode || e.pointerType !== 'mouse') return;
+        if (e.pointerType !== 'mouse') return;
         if (commit && measureAnchorIndex != null) {
             const endIndex = resolveIndexFromClientX(e.currentTarget, e.clientX);
             if (endIndex != null) {
@@ -2062,7 +2044,7 @@ function ModelPortfolioPerformanceChart({
         if (e.key === 'Escape') {
             setMeasureAnchorIndex(null);
             setSelectedMeasureRange(null);
-            setIsMeasureMode(false);
+            onHoverIndexChange(null);
             return;
         }
         if (e.key === ' ' || e.key === 'Enter') {
@@ -2078,7 +2060,6 @@ function ModelPortfolioPerformanceChart({
                     });
                 }
                 setMeasureAnchorIndex(null);
-                setIsMeasureMode(false);
             }
             return;
         }
@@ -2091,22 +2072,6 @@ function ModelPortfolioPerformanceChart({
                     ? points.length - 1
                     : Math.max(0, Math.min(points.length - 1, current + (e.key === 'ArrowRight' ? 1 : -1)));
             onHoverIndexChange(next);
-        }
-    };
-
-    const clearMeasure = () => {
-        setSelectedMeasureRange(null);
-        setMeasureAnchorIndex(null);
-        setIsMeasureMode(false);
-    };
-
-    const toggleMeasureMode = () => {
-        if (isMeasureMode || visibleMeasureRange) {
-            clearMeasure();
-        } else {
-            setSelectedMeasureRange(null);
-            setMeasureAnchorIndex(null);
-            setIsMeasureMode(true);
         }
     };
 
@@ -2164,12 +2129,12 @@ function ModelPortfolioPerformanceChart({
                 </div>
             </div>
 
-            <div className="mp-chart-stage">
+            <div className="mp-chart-stage" ref={chartStageRef}>
                 <svg
-                    className={`mp-perf-svg${isMeasureMode ? ' is-measuring' : ''}`}
+                    className="mp-perf-svg"
                     viewBox={`0 0 ${width} ${height}`}
                     role="group"
-                    aria-label="Model portföyü, XU100 ve XU030 performans grafiği. Serileri göstermek veya gizlemek için lejantlarına basın. İki tarih arasındaki değişimi görmek için grafikte sürükleyin veya Aralık Ölç düğmesini kullanın."
+                    aria-label="Model portföyü, XU100 ve XU030 performans grafiği. Serileri göstermek veya gizlemek için lejantlarına basın. İki tarih arasındaki değişimi görmek için grafikte sürükleyin."
                     tabIndex={0}
                     onPointerMove={handlePointerMove}
                     onPointerDown={handlePointerDown}
@@ -2246,17 +2211,6 @@ function ModelPortfolioPerformanceChart({
                         <text x={width / 2} y={padTop + plotH / 2} textAnchor="middle" className="mp-chart-no-series">
                             Görmek için üstteki serilerden birine basın
                         </text>
-                    )}
-
-                    {/* Anchor line when waiting for 2nd tap in Measure Mode */}
-                    {measureAnchorIndex != null && !visibleMeasureRange && (
-                        <line
-                            x1={toX(measureAnchorIndex)}
-                            y1={padTop}
-                            x2={toX(measureAnchorIndex)}
-                            y2={padTop + plotH}
-                            className="mp-chart-measure-anchor"
-                        />
                     )}
 
                     {/* Active crosshair & dots */}
@@ -2340,7 +2294,7 @@ function ModelPortfolioPerformanceChart({
                                     type="button"
                                     aria-label="Ölçümü temizle"
                                     title="Ölçümü temizle"
-                                    onClick={clearMeasure}
+                                    onClick={() => setSelectedMeasureRange(null)}
                                 >
                                     <X size={12} />
                                 </button>
@@ -2413,27 +2367,6 @@ function ModelPortfolioPerformanceChart({
                         )}
                     </div>
                 )}
-            </div>
-
-            <div className="mp-chart-footer">
-                <p className="mp-chart-footnote">
-                    {isMeasureMode
-                        ? measureAnchorIndex == null
-                            ? 'Başlangıç tarihini seçin.'
-                            : 'Bitiş tarihini seçin.'
-                        : isMobile
-                          ? 'Tarihler için grafikte parmağınızı kaydırın.'
-                          : 'Sürükleyerek aralık ölçün · Başlıklara tıklayıp serileri gizleyin.'}
-                </p>
-                <button
-                    type="button"
-                    className={`mp-chart-measure-btn${isMeasureMode || visibleMeasureRange ? ' is-active' : ''}`}
-                    aria-pressed={isMeasureMode}
-                    onClick={toggleMeasureMode}
-                >
-                    <Ruler size={13} />
-                    <span>{visibleMeasureRange ? 'Ölçümü Temizle' : isMeasureMode ? 'İptal Et' : 'Aralık Ölç'}</span>
-                </button>
             </div>
         </div>
     );
@@ -2852,11 +2785,7 @@ function MpExplainedDropdown({
                 onClick={() => setOpen((p) => !p)}
             >
                 <div className="mp-explained-trigger-main">
-                    <div className="mp-explained-trigger-top">
-                        <span className="mp-explained-trigger-title">{selected.label}</span>
-                        <span className={`mp-explained-badge is-${selected.tone}`}>{selected.badge}</span>
-                    </div>
-                    <span className="mp-explained-trigger-desc">{selected.description}</span>
+                    <span className="mp-explained-trigger-title">{selected.label}</span>
                 </div>
                 <ChevronDown size={15} className={`mp-explained-chevron${open ? ' is-open' : ''}`} />
             </button>
@@ -2871,19 +2800,14 @@ function MpExplainedDropdown({
                                 type="button"
                                 role="option"
                                 aria-selected={isSelected}
+                                title={opt.description}
                                 className={`mp-explained-option${isSelected ? ' is-selected' : ''}`}
                                 onClick={() => {
                                     onChange(opt.value);
                                     setOpen(false);
                                 }}
                             >
-                                <div className="mp-explained-option-body">
-                                    <div className="mp-explained-option-top">
-                                        <strong>{opt.label}</strong>
-                                        <span className={`mp-explained-badge is-${opt.tone}`}>{opt.badge}</span>
-                                    </div>
-                                    <p>{opt.description}</p>
-                                </div>
+                                <span className="mp-explained-option-label">{opt.label}</span>
                                 <span className="mp-explained-check">
                                     {isSelected && <Check size={14} />}
                                 </span>
@@ -3294,16 +3218,9 @@ function ModelPortfolioEditorModal({
                         <div className="mp-modal-icon-badge">
                             <BriefcaseBusiness size={15} />
                         </div>
-                        <div>
-                            <h3 id="mp-editor-dialog-title">
-                                {isEdit
-                                    ? `${editingPosition?.symbol} Pozisyonunu Düzenle / Revize Et`
-                                    : 'Model Portföye Hisse Ekle'}
-                            </h3>
-                            <span className="mp-modal-subtitle">
-                                Hisse ve giriş parametrelerini belirleyin; piyasa verileri otomatik çekilir.
-                            </span>
-                        </div>
+                        <h3 id="mp-editor-dialog-title">
+                            {isEdit ? `${editingPosition?.symbol} Pozisyonunu Düzenle` : 'Hisse Ekle'}
+                        </h3>
                     </div>
                     <button type="button" className="mp-icon-btn" aria-label="Pozisyon formunu kapat" onClick={onClose}>
                         <X size={15} />
@@ -3314,10 +3231,6 @@ function ModelPortfolioEditorModal({
                     <div className="mp-modal-body mp-editor-form">
                         {/* SECTION 1: Stock Selection, Date & Sector */}
                         <div className="mp-editor-section">
-                            <div className="mp-editor-section-header">
-                                <h4>Hisse ve Giriş Parametreleri</h4>
-                            </div>
-
                             <div className="mp-form-grid-3">
                                 <div className="mp-field mp-symbol-picker">
                                     <div className="mp-field-label-row">
@@ -3394,7 +3307,7 @@ function ModelPortfolioEditorModal({
 
                                 <div className="mp-field">
                                     <div className="mp-field-label-row">
-                                        <span className="mp-field-label">Portföye Giriş Tarihi *</span>
+                                        <span className="mp-field-label">Giriş Tarihi *</span>
                                         <button
                                             type="button"
                                             className="mp-mini-preset-btn"
@@ -3409,7 +3322,7 @@ function ModelPortfolioEditorModal({
                                     </div>
                                     <input
                                         type="date"
-                                        aria-label="Portföye giriş tarihi"
+                                        aria-label="Giriş tarihi"
                                         value={entryDate}
                                         onChange={(e) => {
                                             const nextDate = e.target.value;
@@ -3518,10 +3431,6 @@ function ModelPortfolioEditorModal({
 
                         {/* SECTION 2: Price, Target Price & Weight */}
                         <div className="mp-editor-section">
-                            <div className="mp-editor-section-header">
-                                <h4>Fiyat ve Portföy Ağırlığı</h4>
-                            </div>
-
                             <div className="mp-form-grid-3">
                                 <div className="mp-field">
                                     <div className="mp-field-label-row">
@@ -3543,7 +3452,7 @@ function ModelPortfolioEditorModal({
                                         <span className="mp-field-label">Hedef Fiyat (₺) *</span>
                                         {impliedUpsidePct != null && (
                                             <span className={`mp-upside-live-pill ${toneClass(impliedUpsidePct)}`}>
-                                                Potansiyel: {formatPct(impliedUpsidePct)}
+                                                {formatPct(impliedUpsidePct)}
                                             </span>
                                         )}
                                     </div>
@@ -3601,9 +3510,10 @@ function ModelPortfolioEditorModal({
                                         <button
                                             type="button"
                                             className="mp-quick-pill"
+                                            title={`Kullanılabilir maksimum: %${availableWeightPct.toFixed(0)}`}
                                             onClick={() => setWeightPct(String(availableWeightPct))}
                                         >
-                                            Maks (%{availableWeightPct.toFixed(0)})
+                                            Maks
                                         </button>
                                     </div>
                                     {!isEdit && availableWeightPct <= 0 && (
@@ -3617,19 +3527,15 @@ function ModelPortfolioEditorModal({
 
                         {/* SECTION 3: Strategy & Horizon */}
                         <div className="mp-editor-section">
-                            <div className="mp-editor-section-header">
-                                <h4>Strateji ve Hedef Vade</h4>
-                            </div>
-
                             <div className="mp-form-grid-2">
                                 <MpExplainedDropdown
-                                    label="Tavsiye Etiketi"
+                                    label="Tavsiye"
                                     value={rating}
                                     options={RATING_OPTIONS}
                                     onChange={setRating}
                                 />
                                 <MpExplainedDropdown
-                                    label="Beklenen Vade Ufku"
+                                    label="Vade"
                                     value={horizon}
                                     options={HORIZON_OPTIONS}
                                     onChange={setHorizon}
@@ -3639,10 +3545,6 @@ function ModelPortfolioEditorModal({
 
                         {/* SECTION 4: Thesis & Catalysts */}
                         <div className="mp-editor-section">
-                            <div className="mp-editor-section-header">
-                                <h4>Yatırım Tezi ve Beklentiler</h4>
-                            </div>
-
                             <div className="mp-field">
                                 <span className="mp-field-label">Beklenti Etiketleri</span>
                                 <div className="mp-catalyst-choices" role="group" aria-label="Beklenti etiketleri">
@@ -3682,7 +3584,7 @@ function ModelPortfolioEditorModal({
                                         aria-label="Başka bir beklenti etiketi ekle"
                                         value={customCatalyst}
                                         onChange={(e) => setCustomCatalyst(e.target.value)}
-                                        placeholder="Özel beklenti etiketi yazın..."
+                                        placeholder="Özel etiket..."
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter') {
                                                 e.preventDefault();
@@ -3703,7 +3605,7 @@ function ModelPortfolioEditorModal({
 
                             <div className="mp-field">
                                 <div className="mp-field-label-row">
-                                    <span className="mp-field-label">Yatırım Gerekçesi (Opsiyonel)</span>
+                                    <span className="mp-field-label">Yatırım Tezi</span>
                                     <button
                                         type="button"
                                         className="mp-btn mp-btn-subtle mp-ai-refine-button"
@@ -3716,10 +3618,10 @@ function ModelPortfolioEditorModal({
                                 </div>
                                 <textarea
                                     rows={3}
-                                    aria-label="Yatırım gerekçesi"
+                                    aria-label="Yatırım tezi"
                                     value={thesis}
                                     onChange={(e) => setThesis(e.target.value)}
-                                    placeholder="Şirketi model portföye ekleme tezinizi ve temel beklentileri yazın..."
+                                    placeholder="Katalizörler ve temel beklentiler..."
                                     disabled={improvingField === 'thesis'}
                                 />
                                 {improveError?.field === 'thesis' && (
@@ -3729,7 +3631,7 @@ function ModelPortfolioEditorModal({
 
                             <div className="mp-field">
                                 <div className="mp-field-label-row">
-                                    <span className="mp-field-label">Takip Edilecek Temel Riskler (Opsiyonel)</span>
+                                    <span className="mp-field-label">Temel Riskler</span>
                                     <button
                                         type="button"
                                         className="mp-btn mp-btn-subtle mp-ai-refine-button"
@@ -3742,10 +3644,10 @@ function ModelPortfolioEditorModal({
                                 </div>
                                 <textarea
                                     rows={2}
-                                    aria-label="Takip edeceğim risk"
+                                    aria-label="Temel riskler"
                                     value={riskNote}
                                     onChange={(e) => setRiskNote(e.target.value)}
-                                    placeholder="Olası marj baskısı, kur veya talep daralması riskleri..."
+                                    placeholder="Marj baskısı, kur, talep riskleri..."
                                     disabled={improvingField === 'risk_note'}
                                 />
                                 {improveError?.field === 'risk_note' && (
@@ -3755,12 +3657,12 @@ function ModelPortfolioEditorModal({
 
                             {isEdit && (
                                 <label className="mp-field">
-                                    <span className="mp-field-label">Revizyon Notu (Değişiklik Günlüğünde Görünür)</span>
+                                    <span className="mp-field-label">Revizyon Notu</span>
                                     <input
                                         type="text"
                                         value={revisionNote}
                                         onChange={(e) => setRevisionNote(e.target.value)}
-                                        placeholder="Örn: Güçlü 3Ç bilançosu sonrası hedef fiyat yukarı revize edildi."
+                                        placeholder="Örn: 3Ç bilançosu sonrası hedef revizesi"
                                     />
                                 </label>
                             )}
@@ -3783,7 +3685,7 @@ function ModelPortfolioEditorModal({
                                     )}
                                 </span>
                             ) : (
-                                <span>Başlamak için bir BIST hisse kodu seçin.</span>
+                                <span>Hisse kodu seçin</span>
                             )}
                         </div>
                         <div className="mp-footer-btns">
@@ -3791,7 +3693,7 @@ function ModelPortfolioEditorModal({
                                 İptal
                             </button>
                             <button type="submit" className="mp-btn mp-btn-primary" disabled={saving || improvingField !== null}>
-                                {saving ? 'Kaydediliyor...' : isEdit ? 'Değişiklikleri Kaydet' : 'Model Portföye Ekle'}
+                                {saving ? 'Kaydediliyor...' : isEdit ? 'Kaydet' : 'Portföye Ekle'}
                             </button>
                         </div>
                     </div>
