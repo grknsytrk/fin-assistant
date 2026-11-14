@@ -211,6 +211,8 @@ KAP_HOLDINGS_LOOKBACK_DAYS = int(os.getenv("RAGFIN_KAP_HOLDINGS_LOOKBACK_DAYS", 
 KAP_HOLDINGS_ATTACHMENT_TEXT_CACHE_VERSION = 2
 
 _MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
+_SNAPSHOT_ALL_ROWS_CACHE: Dict[str, Dict[str, Any]] = {}
+_LATEST_PRICE_POINTS_SUPERSET_CACHE: Dict[str, Dict[str, Any]] = {}
 try:
     _MEMORY_CACHE_MAX_ENTRIES = max(
         16,
@@ -225,6 +227,46 @@ except ValueError:
 _FUND_LISTING_STATE_MEMO_TTL_SECONDS = float(
     os.getenv("RAGFIN_FUND_LISTING_STATE_MEMO_SECONDS", "30")
 )
+
+
+def _clear_all_fund_memory_caches() -> None:
+    _MEMORY_CACHE.clear()
+    _SNAPSHOT_ALL_ROWS_CACHE.clear()
+    _LATEST_PRICE_POINTS_SUPERSET_CACHE.clear()
+
+
+def _invalidate_fund_price_memory_caches() -> None:
+    """Drop price/listing state entries while keeping catalog-only snapshot tables warm."""
+    for cache_key in [
+        key
+        for key in list(_MEMORY_CACHE.keys())
+        if str(key).startswith(
+            ("fund-listing-state:", "latest-fund-price-points:", "snapshot:")
+        )
+    ]:
+        _MEMORY_CACHE.pop(cache_key, None)
+    _LATEST_PRICE_POINTS_SUPERSET_CACHE.clear()
+
+
+def _peek_all_snapshot_rows(
+    processed_dir: Path,
+    generation: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    if not database_enabled():
+        return None
+    if generation is None:
+        generation = fund_listing_revision(processed_dir).get("catalog_generation", 0)
+    all_rows_cache_key = f"fund-snapshot-all-rows:{_fund_prices_db_path(processed_dir)}:{generation}"
+    cached = _SNAPSHOT_ALL_ROWS_CACHE.get(all_rows_cache_key) or _MEMORY_CACHE.get(all_rows_cache_key)
+    ttl = 21600.0 if generation else 3600.0
+    if (
+        isinstance(cached, dict)
+        and isinstance(cached.get("cached_at"), (int, float))
+        and time.time() - float(cached["cached_at"]) <= ttl
+        and isinstance(cached.get("rows"), list)
+    ):
+        return cached
+    return None
 
 
 def _memory_cache_put(cache_key: str, value: Dict[str, Any]) -> None:
@@ -467,7 +509,7 @@ class FundSnapshotFetchResult:
 
 
 def reset_fund_caches_for_tests() -> None:
-    _MEMORY_CACHE.clear()
+    _clear_all_fund_memory_caches()
     with _AUTO_FETCH_LOCK:
         _AUTO_FETCH_IN_FLIGHT.clear()
         _AUTO_FETCH_NEGATIVE_CACHE.clear()
@@ -1133,13 +1175,8 @@ def _read_fund_snapshot_rows(
     if use_all_rows_cache:
         catalog_gen = fund_listing_revision(processed_dir).get("catalog_generation", 0)
         all_rows_cache_key = f"fund-snapshot-all-rows:{_fund_prices_db_path(processed_dir)}:{catalog_gen}"
-        cached = _MEMORY_CACHE.get(all_rows_cache_key)
-        if (
-            isinstance(cached, dict)
-            and isinstance(cached.get("cached_at"), (int, float))
-            and time.time() - float(cached["cached_at"]) <= 3600.0
-            and isinstance(cached.get("rows"), list)
-        ):
+        cached = _peek_all_snapshot_rows(processed_dir, catalog_gen)
+        if cached is not None:
             return [dict(row) for row in cached["rows"]]
 
     columns = ", ".join(_FUND_SNAPSHOT_READ_COLUMNS)
@@ -1153,10 +1190,15 @@ def _read_fund_snapshot_rows(
             for row in rows
             if row.get("fund_code")
         }
-        _memory_cache_put(
-            all_rows_cache_key,
-            {"cached_at": time.time(), "rows": [dict(row) for row in rows], "catalog_dates": catalog_dates},
-        )
+        entry = {
+            "cached_at": time.time(),
+            "rows": [dict(row) for row in rows],
+            "catalog_dates": catalog_dates,
+        }
+        if len(_SNAPSHOT_ALL_ROWS_CACHE) >= 2:
+            oldest_key = next(iter(_SNAPSHOT_ALL_ROWS_CACHE))
+            _SNAPSHOT_ALL_ROWS_CACHE.pop(oldest_key, None)
+        _SNAPSHOT_ALL_ROWS_CACHE[all_rows_cache_key] = entry
     return rows
 
 
@@ -1181,6 +1223,22 @@ def _read_fund_snapshot_category_returns(
             {"period_returns": dict(item.get("period_returns") or {})}
             for item in list(cached.get("rows") or [])
             if isinstance(item, dict)
+        ]
+
+    cached_all = _peek_all_snapshot_rows(processed_dir)
+    if cached_all is not None:
+        rows = [
+            {"period_returns": dict(item.get("period_returns") or {})}
+            for item in cached_all["rows"]
+            if isinstance(item, dict)
+            and str(item.get("fund_type") or "").strip().lower() == normalized_type
+            and _is_tefas_open_row(item)
+            and _meets_min_aum(item, min_aum)
+        ]
+        _memory_cache_put(cache_key, {"cached_at": time.time(), "rows": rows})
+        return [
+            {"period_returns": dict(item.get("period_returns") or {})}
+            for item in rows
         ]
 
     conditions = ["fund_type_key = ?"]
@@ -1297,7 +1355,7 @@ def ensure_fund_snapshot_store(processed_dir: Path) -> Dict[str, Any]:
                     and current_meta.get("catalog_storage") == "fund_snapshots"
                 ):
                     conn.rollback()
-                    _MEMORY_CACHE.clear()
+                    _clear_all_fund_memory_caches()
                     return dict(current_payload)
                 cache_version = int(cache_row.get("version") or 0) if isinstance(cache_row, dict) else 0
                 if count:
@@ -1372,7 +1430,7 @@ def ensure_fund_snapshot_store(processed_dir: Path) -> Dict[str, Any]:
                 )
                 _set_fund_listing_catalog_revision(conn, generation, summary_payload)
             _write_local_json(_snapshot_path(processed_dir), summary_payload)
-        _MEMORY_CACHE.clear()
+        _clear_all_fund_memory_caches()
         logging.getLogger("uvicorn.error").info(
             "fund_catalog migration rows=%d generation=%d", len(rows), generation
         )
@@ -1465,12 +1523,12 @@ def _read_local_json(path: Path) -> Optional[Dict[str, Any]]:
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     _write_local_json(path, payload)
     write_json_cache(path, payload)
-    _MEMORY_CACHE.clear()
+    _clear_all_fund_memory_caches()
 
 
 def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
     json_cache_store.write_local_json(path, payload)
-    _MEMORY_CACHE.clear()
+    _clear_all_fund_memory_caches()
 
 
 def _commit_local_fund_snapshot_rows(
@@ -1612,7 +1670,7 @@ def commit_funds_snapshot(
             _write_local_json(path, summary)
         except Exception:
             LOGGER.warning("fund snapshot local metadata mirror failed", exc_info=True)
-    _MEMORY_CACHE.clear()
+    _clear_all_fund_memory_caches()
     return True
 
 
@@ -2872,7 +2930,7 @@ def upsert_fund_price_points(
                 _bump_fund_listing_price_revision(conn)
             conn.commit()
         if upserted_count:
-            _MEMORY_CACHE.clear()
+            _invalidate_fund_price_memory_caches()
             invalidate_fund_price_points_cache()
         return {
             "db_path": str(_fund_prices_db_path(processed_dir)),
@@ -2965,7 +3023,7 @@ def upsert_fund_price_points(
             _bump_fund_listing_price_revision(conn)
         conn.commit()
     if upserted_count:
-        _MEMORY_CACHE.clear()
+        _invalidate_fund_price_memory_caches()
         invalidate_fund_price_points_cache()
     return {
         "db_path": str(_fund_prices_db_path(processed_dir)),
@@ -3310,7 +3368,7 @@ def read_latest_fund_price_points(
     is_postgres = database_enabled()
     price_gen = fund_listing_revision(processed_dir).get("price_generation", 0) if is_postgres else 0
     ttl = (
-        max(3600, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
+        max(21600, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
         if (is_postgres and FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS >= 900)
         else max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
     )
@@ -3331,7 +3389,7 @@ def read_latest_fund_price_points(
         }
 
     superset_key = f"{db_key_prefix}:__superset__"
-    superset = _MEMORY_CACHE.get(superset_key)
+    superset = _LATEST_PRICE_POINTS_SUPERSET_CACHE.get(superset_key) or _MEMORY_CACHE.get(superset_key)
     superset_at = superset.get("cached_at") if isinstance(superset, dict) else None
     superset_codes = superset.get("covered_codes") if isinstance(superset, dict) else None
     if (
@@ -3417,14 +3475,14 @@ def read_latest_fund_price_points(
         or not isinstance(superset_codes, set)
         or len(normalized_codes) >= len(superset_codes)
     ):
-        _memory_cache_put(
-            superset_key,
-            {
-                "cached_at": now_stored,
-                "covered_codes": set(normalized_codes),
-                "points": points,
-            },
-        )
+        if len(_LATEST_PRICE_POINTS_SUPERSET_CACHE) >= 4:
+            oldest_key = next(iter(_LATEST_PRICE_POINTS_SUPERSET_CACHE))
+            _LATEST_PRICE_POINTS_SUPERSET_CACHE.pop(oldest_key, None)
+        _LATEST_PRICE_POINTS_SUPERSET_CACHE[superset_key] = {
+            "cached_at": now_stored,
+            "covered_codes": set(normalized_codes),
+            "points": points,
+        }
     return {code: dict(point) for code, point in points.items()}
 
 
@@ -3763,7 +3821,7 @@ def _persist_daily_return_overrides(
             )
         _bump_fund_listing_price_revision(conn)
         conn.commit()
-    _MEMORY_CACHE.clear()
+    _invalidate_fund_price_memory_caches()
     invalidate_fund_price_points_cache()
 
 
@@ -6908,7 +6966,7 @@ def _catalog_price_overlay_metadata(processed_dir: Path, payload: Dict[str, Any]
     is_postgres = database_enabled()
     generation = payload.get("snapshot_generation")
     ttl = (
-        max(3600, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
+        max(21600, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
         if (generation and is_postgres and FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS >= 900)
         else max(1, FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS)
     )
@@ -6918,7 +6976,7 @@ def _catalog_price_overlay_metadata(processed_dir: Path, payload: Dict[str, Any]
     )
     cached_dates_entry = _MEMORY_CACHE.get(dates_cache_key)
     all_rows_cached = (
-        _MEMORY_CACHE.get(f"fund-snapshot-all-rows:{_fund_prices_db_path(processed_dir)}:{generation}")
+        _peek_all_snapshot_rows(processed_dir, generation)
         if (generation is not None and is_postgres)
         else None
     )
@@ -7878,8 +7936,16 @@ def _sort_rows(rows: List[Dict[str, Any]], sort: str, order: str) -> List[Dict[s
     key = sort if sort in allowed else "fund_code"
     descending = order.lower() == "desc"
 
-    def sort_key(row: Dict[str, Any]) -> Tuple[int, Any]:
+    def _typed_value(row: Dict[str, Any]) -> Any:
         value = row.get(key)
+        if key == "risk_value" and value is not None:
+            numeric = _coerce_float(value)
+            if numeric is not None:
+                return numeric
+        return value
+
+    def sort_key(row: Dict[str, Any]) -> Tuple[int, Any]:
+        value = _typed_value(row)
         if value is None:
             return (1, "")
         if isinstance(value, (int, float)):
@@ -7887,9 +7953,10 @@ def _sort_rows(rows: List[Dict[str, Any]], sort: str, order: str) -> List[Dict[s
         return (0, str(value).lower())
 
     ordered = sorted(rows, key=sort_key)
-    if descending and ordered and not isinstance(next((row.get(key) for row in ordered if row.get(key) is not None), ""), (int, float)):
-        valued = [row for row in ordered if row.get(key) is not None]
-        missing = [row for row in ordered if row.get(key) is None]
+    first_valued = next((_typed_value(row) for row in ordered if _typed_value(row) is not None), "")
+    if descending and ordered and not isinstance(first_valued, (int, float)):
+        valued = [row for row in ordered if _typed_value(row) is not None]
+        missing = [row for row in ordered if _typed_value(row) is None]
         valued.reverse()
         return valued + missing
     return ordered
@@ -7909,6 +7976,28 @@ def _query_fund_snapshot_rows(
     limit: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Filter and sort the current catalogue in SQL, returning only matches."""
+
+    if database_enabled():
+        all_rows = _read_fund_snapshot_rows(processed_dir)
+        matched = [
+            row
+            for row in all_rows
+            if _is_tefas_open_row(row)
+            and _meets_min_aum(row, min_aum)
+            and _row_matches(
+                row,
+                q=q,
+                fund_type=fund_type,
+                founder=founder,
+                manager=manager,
+                risk=risk,
+            )
+        ]
+        matching_count = len(matched)
+        ordered = _sort_rows(matched, sort=sort, order=order)
+        if limit is not None:
+            ordered = ordered[: max(0, int(limit))]
+        return ordered, matching_count
 
     conditions: List[str] = []
     params: List[Any] = []
@@ -8200,6 +8289,17 @@ def _find_fund_row(processed_dir: Path, fund_code: str) -> Optional[Dict[str, An
     )
     metadata = snapshot.get("source_metadata") if isinstance(snapshot.get("source_metadata"), dict) else {}
     if metadata.get("catalog_storage") == "fund_snapshots":
+        cached_all = _peek_all_snapshot_rows(processed_dir, snapshot.get("snapshot_generation"))
+        if cached_all is not None:
+            for candidate in cached_all["rows"]:
+                if not isinstance(candidate, dict):
+                    continue
+                if (
+                    normalize_fund_code(str(candidate.get("fund_code") or candidate.get("fonKodu") or "")) == normalized
+                    and _is_tefas_open_row(candidate)
+                ):
+                    return dict(candidate)
+            return None
         where = "fund_code = ?"
         params: List[Any] = [normalized]
         if TEFAS_OPEN_ONLY:

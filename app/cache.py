@@ -505,7 +505,15 @@ class RedisCache(CacheBackend):
     def _remember_error(self, exc: Exception) -> Tuple[bool, bool]:
         now = time.monotonic()
         message = str(exc).casefold()
-        is_plan_limit = "fixed plan limits" in message
+        is_plan_limit = any(
+            token in message
+            for token in (
+                "fixed plan limits",
+                "max daily request limit",
+                "max monthly request limit",
+                "max requests limit",
+            )
+        )
         with self._circuit_lock:
             already_cooling_down = self._circuit_open and now < self._cooldown_until
             self.last_error = str(exc)
@@ -551,9 +559,37 @@ class RedisCache(CacheBackend):
                 exc,
             )
 
-    @staticmethod
-    def _serialize(value: Any) -> str:
-        return json.dumps(value, default=str, separators=(",", ":"))
+    _COMPRESSED_PREFIX = "__ragfin_z1__:"
+    _COMPRESS_THRESHOLD_BYTES = max(512, int(os.getenv("RAGFIN_REDIS_COMPRESS_MIN_BYTES", "4096")))
+
+    @classmethod
+    def _serialize(cls, value: Any) -> str:
+        raw = json.dumps(value, default=str, separators=(",", ":"))
+        raw_bytes = raw.encode("utf-8")
+        if len(raw_bytes) < cls._COMPRESS_THRESHOLD_BYTES:
+            return raw
+        import base64
+        import zlib
+
+        compressed = zlib.compress(raw_bytes, level=6)
+        encoded = f"{cls._COMPRESSED_PREFIX}{base64.b64encode(compressed).decode('ascii')}"
+        return encoded if len(encoded) < len(raw_bytes) else raw
+
+    @classmethod
+    def _deserialize(cls, raw: Any) -> Any:
+        if isinstance(raw, str) and raw.startswith(cls._COMPRESSED_PREFIX):
+            import base64
+            import zlib
+
+            try:
+                payload = base64.b64decode(raw[len(cls._COMPRESSED_PREFIX) :], validate=True)
+                raw = zlib.decompress(payload).decode("utf-8")
+            except (ValueError, zlib.error, UnicodeDecodeError):
+                return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
 
     def get(self, key: str) -> Any:
         self._record_metrics(key, get_calls=1)
@@ -573,10 +609,7 @@ class RedisCache(CacheBackend):
             return None
         self._remember_success()
         self._record_metrics(key, get_hits=1, get_payload_bytes=_text_payload_bytes(raw))
-        try:
-            return json.loads(raw)
-        except (TypeError, ValueError):
-            return raw
+        return self._deserialize(raw)
 
     def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
         self._record_metrics(key, set_calls=1)

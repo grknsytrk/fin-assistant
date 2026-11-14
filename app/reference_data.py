@@ -61,6 +61,7 @@ _INSTRUMENTS_CACHE: Dict[
     str,
     tuple[float, Dict[tuple[str, str], Dict[str, Any]], Dict[tuple[str, str], str]],
 ] = {}
+_INSTRUMENTS_STAMP_CACHE: Dict[str, tuple[str, str]] = {}
 
 
 def _instruments_cache_key(processed_dir: Path) -> str:
@@ -75,8 +76,24 @@ def clear_instruments_cache(processed_dir: Optional[Path] = None) -> None:
     with _INSTRUMENTS_CACHE_LOCK:
         if processed_dir is None:
             _INSTRUMENTS_CACHE.clear()
+            _INSTRUMENTS_STAMP_CACHE.clear()
         else:
-            _INSTRUMENTS_CACHE.pop(_instruments_cache_key(processed_dir), None)
+            cache_key = _instruments_cache_key(processed_dir)
+            _INSTRUMENTS_CACHE.pop(cache_key, None)
+            _INSTRUMENTS_STAMP_CACHE.pop(cache_key, None)
+
+
+def _read_instruments_stamp(conn: Any) -> Optional[tuple[str, str]]:
+    row = conn.execute(
+        """
+        SELECT
+            (SELECT COALESCE(MAX(updated_at), '') || ':' || COUNT(*) FROM instruments) AS instruments_stamp,
+            (SELECT COALESCE(MAX(updated_at), '') || ':' || COUNT(*) FROM instrument_aliases) AS aliases_stamp
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return (str(row["instruments_stamp"] or ""), str(row["aliases_stamp"] or ""))
 
 
 def _copy_instrument_dict(inst: Dict[str, Any]) -> Dict[str, Any]:
@@ -99,7 +116,22 @@ def _ensure_instruments_cache(
 
         by_kind_symbol: Dict[tuple[str, str], Dict[str, Any]] = {}
         aliases_by_kind_alias: Dict[tuple[str, str], str] = {}
+        stamp: Optional[tuple[str, str]] = None
         with _connect(processed_dir) as conn:
+            if getattr(conn, "is_postgres", False):
+                stamp = _read_instruments_stamp(conn)
+                if (
+                    cached is not None
+                    and stamp is not None
+                    and _INSTRUMENTS_STAMP_CACHE.get(cache_key) == stamp
+                ):
+                    if _INSTRUMENTS_CACHE_TTL_SECONDS > 0:
+                        _INSTRUMENTS_CACHE[cache_key] = (
+                            time.monotonic() + _INSTRUMENTS_CACHE_TTL_SECONDS,
+                            cached[1],
+                            cached[2],
+                        )
+                    return cached[1], cached[2]
             rows = conn.execute("SELECT * FROM instruments").fetchall()
             alias_rows = conn.execute("SELECT alias, kind, symbol FROM instrument_aliases").fetchall()
         for row in rows:
@@ -121,6 +153,8 @@ def _ensure_instruments_cache(
                 by_kind_symbol,
                 aliases_by_kind_alias,
             )
+            if stamp is not None:
+                _INSTRUMENTS_STAMP_CACHE[cache_key] = stamp
         return by_kind_symbol, aliases_by_kind_alias
 
 
@@ -334,6 +368,27 @@ def _merge_normalized_records(existing: Dict[str, Any], incoming: Dict[str, Any]
     return merged
 
 
+def _instrument_row_matches_existing(
+    existing: Any,
+    row: Dict[str, Any],
+    metadata_json: str,
+) -> bool:
+    if existing is None:
+        return False
+    existing_active = int(existing["active"]) if existing["active"] is not None else 1
+    return (
+        existing["name"] == row.get("name")
+        and existing["short_name"] == row.get("short_name")
+        and existing["source"] == row.get("source")
+        and existing["source_id"] == row.get("source_id")
+        and existing["logo_url"] == row.get("logo_url")
+        and existing["logo_source"] == row.get("logo_source")
+        and existing_active == int(row.get("active", 1))
+        and existing["as_of"] == row.get("as_of")
+        and (existing["metadata_json"] or "{}") == metadata_json
+    )
+
+
 def upsert_instruments(
     processed_dir: Path,
     records: Iterable[Dict[str, Any]],
@@ -388,27 +443,50 @@ def upsert_instruments(
                 existing = existing_by_key.get((incoming["kind"], incoming["symbol"]))
                 row = _merge_record(existing, incoming)
                 created_at = existing["created_at"] if existing else now
-                instrument_rows.append(
-                    (
-                        row["kind"],
-                        row["symbol"],
-                        row.get("name"),
-                        row.get("short_name"),
-                        row.get("source"),
-                        row.get("source_id"),
-                        row.get("logo_url"),
-                        row.get("logo_source"),
-                        int(row.get("active", 1)),
-                        row.get("as_of"),
-                        _stable_json(row.get("metadata") or {}),
-                        created_at,
-                        now,
+                metadata_json = _stable_json(row.get("metadata") or {})
+                if not _instrument_row_matches_existing(existing, row, metadata_json):
+                    instrument_rows.append(
+                        (
+                            row["kind"],
+                            row["symbol"],
+                            row.get("name"),
+                            row.get("short_name"),
+                            row.get("source"),
+                            row.get("source_id"),
+                            row.get("logo_url"),
+                            row.get("logo_source"),
+                            int(row.get("active", 1)),
+                            row.get("as_of"),
+                            metadata_json,
+                            created_at,
+                            now,
+                        )
                     )
-                )
                 for alias in row.get("aliases") or []:
                     alias_by_key[str(alias)] = (alias, row["kind"], row["symbol"], row.get("source"), now)
 
-            alias_rows = list(alias_by_key.values())
+            alias_rows: List[tuple[Any, ...]] = []
+            if alias_by_key:
+                existing_aliases: Dict[str, tuple[Any, ...]] = {}
+                alias_keys = list(alias_by_key.keys())
+                for offset in range(0, len(alias_keys), 500):
+                    chunk = alias_keys[offset : offset + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    for existing_alias in conn.execute(
+                        f"SELECT alias, kind, symbol, source FROM instrument_aliases WHERE alias IN ({placeholders})",
+                        tuple(chunk),
+                    ).fetchall():
+                        existing_aliases[str(existing_alias["alias"])] = (
+                            str(existing_alias["alias"]),
+                            str(existing_alias["kind"]),
+                            str(existing_alias["symbol"]),
+                            existing_alias["source"],
+                        )
+                alias_rows = [
+                    candidate
+                    for alias, candidate in alias_by_key.items()
+                    if existing_aliases.get(alias) != candidate[:4]
+                ]
 
             instrument_insert_sql = """
                 INSERT INTO instruments (
@@ -453,7 +531,9 @@ def upsert_instruments(
                         alias_insert_sql.format(values=", ".join(value_group for _ in chunk)),
                         [value for row in chunk for value in row],
                     )
-            conn.commit()
+            if instrument_rows or alias_rows:
+                conn.commit()
+                clear_instruments_cache(processed_dir)
             return {
                 "db_path": str(reference_data_db_path(processed_dir)),
                 "upserted_count": len(instrument_rows),

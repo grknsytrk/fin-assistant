@@ -4614,3 +4614,140 @@ def test_write_time_return_overrides_leave_no_read_time_candidates() -> None:
     # not scan the 5-day price window for them again.
     assert fund_service._daily_return_reconciliation_candidates(applied, include_missing=True) == {}
 
+
+def test_fund_price_write_preserves_snapshot_all_rows_and_postgres_queries_reuse_cache(tmp_path, monkeypatch) -> None:
+    from app import fund_service
+
+    fund_service.reset_fund_caches_for_tests()
+    sample_rows = [
+        {
+            "fund_code": "AAA",
+            "name": "Alpha Equity Fund",
+            "fund_type": "Hisse Senedi Fonu",
+            "founder_company": "Alpha PY",
+            "manager_company": "Alpha PY",
+            "price": 12.5,
+            "daily_return": 1.2,
+            "aum": 500_000_000.0,
+            "investor_count": 1000,
+            "share_count": 40_000_000.0,
+            "risk_value": 6,
+            "currency": "TRY",
+            "as_of": "2026-11-13",
+            "source": "tefasfon_funds",
+            "period_returns": {"1m": 4.2},
+            "tefas_open": True,
+        },
+        {
+            "fund_code": "BBB",
+            "name": "Beta Bond Fund",
+            "fund_type": "Borçlanma Araçları Fonu",
+            "founder_company": "Beta PY",
+            "manager_company": "Beta PY",
+            "price": 4.1,
+            "daily_return": 0.4,
+            "aum": 900_000_000.0,
+            "investor_count": 2000,
+            "share_count": 200_000_000.0,
+            "risk_value": 3,
+            "currency": "TRY",
+            "as_of": "2026-11-13",
+            "source": "tefasfon_funds",
+            "period_returns": {"1m": 2.1},
+            "tefas_open": True,
+        },
+    ]
+
+    monkeypatch.setattr(fund_service, "database_enabled", lambda: True)
+    monkeypatch.setattr(
+        fund_service,
+        "fund_listing_revision",
+        lambda _p: {"catalog_generation": 7, "price_generation": 3},
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "ensure_fund_snapshot_store",
+        lambda _p: {"source_metadata": {"catalog_storage": "fund_snapshots"}, "snapshot_generation": 7},
+    )
+
+    read_calls = 0
+
+    class _FakeRowsConn:
+        is_postgres = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql: str, params=()):
+            nonlocal read_calls
+            del params
+            assert "FROM fund_snapshots" in sql
+            read_calls += 1
+
+            class _Res:
+                def fetchall(self):
+                    return [
+                        {
+                            **row,
+                            "period_returns_json": json.dumps(row["period_returns"]),
+                            "risk_value_json": json.dumps(row["risk_value"]),
+                            "attributes_json": "{}",
+                            "present_fields_json": "{}",
+                        }
+                        for row in sample_rows
+                    ]
+
+            return _Res()
+
+    monkeypatch.setattr(fund_service, "_connect_fund_prices_db", lambda _p: _FakeRowsConn())
+
+    # First query hydrates _SNAPSHOT_ALL_ROWS_CACHE once; all filter/sort/detail/category
+    # lookups for catalog_generation=7 must reuse RAM with 0 additional SQL reads.
+    matched, total = fund_service._query_fund_snapshot_rows(
+        tmp_path,
+        q="beta",
+        fund_type=None,
+        founder=None,
+        manager=None,
+        risk=None,
+        sort="aum",
+        order="desc",
+        min_aum=None,
+        limit=10,
+    )
+    assert read_calls == 1
+    assert total == 1 and [r["fund_code"] for r in matched] == ["BBB"]
+
+    matched_sorted, total_sorted = fund_service._query_fund_snapshot_rows(
+        tmp_path,
+        q=None,
+        fund_type=None,
+        founder=None,
+        manager=None,
+        risk=None,
+        sort="risk_value",
+        order="desc",
+        min_aum=600_000_000.0,
+        limit=10,
+    )
+    assert total_sorted == 1 and [r["fund_code"] for r in matched_sorted] == ["BBB"]
+    assert fund_service._find_fund_row(tmp_path, "AAA")["name"] == "Alpha Equity Fund"
+    cat_rows = fund_service._read_fund_snapshot_category_returns(
+        tmp_path, fund_type="Hisse Senedi Fonu", min_aum=None
+    )
+    assert cat_rows == [{"period_returns": {"1m": 4.2}}]
+    assert read_calls == 1
+
+    # Price-only cache invalidation must preserve the catalog-only _SNAPSHOT_ALL_ROWS_CACHE.
+    fund_service._MEMORY_CACHE["fund-listing-state:dummy"] = {"cached_at": 1.0}
+    fund_service._MEMORY_CACHE["latest-fund-price-points:quote:dummy"] = {"cached_at": 1.0}
+    fund_service._invalidate_fund_price_memory_caches()
+    assert "fund-listing-state:dummy" not in fund_service._MEMORY_CACHE
+    assert "latest-fund-price-points:quote:dummy" not in fund_service._MEMORY_CACHE
+    assert fund_service._peek_all_snapshot_rows(tmp_path, 7) is not None
+
+    fund_service.reset_fund_caches_for_tests()
+

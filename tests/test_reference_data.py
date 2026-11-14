@@ -161,3 +161,109 @@ def test_instruments_lookup_uses_memory_cache_and_invalidates_on_upsert(tmp_path
     assert refreshed is not None and refreshed["name"] == "THYAO UPDATED"
     assert connect_calls == 3
     ref_data.reset_reference_data_state_for_tests()
+
+
+def test_postgres_instruments_stamp_skips_full_scan_and_noop_upsert(tmp_path, monkeypatch) -> None:
+    from app import reference_data as ref_data
+
+    ref_data.reset_reference_data_state_for_tests()
+    queries: list[str] = []
+    instruments_rows = [
+        {
+            "kind": "stock",
+            "symbol": "THYAO",
+            "name": "Türk Hava Yolları",
+            "short_name": "THYAO",
+            "source": "kap",
+            "source_id": "100",
+            "logo_url": None,
+            "logo_source": None,
+            "active": 1,
+            "as_of": "2026-11-14",
+            "metadata_json": "{}",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-11-14T10:00:00+00:00",
+        }
+    ]
+    alias_rows: list[dict] = []
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return list(self._rows)
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+    class _FakePgConn:
+        is_postgres = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql: str, params=()):
+            del params
+            normalized = " ".join(sql.split())
+            queries.append(normalized)
+            if "AS instruments_stamp" in normalized:
+                return _FakeResult([{"instruments_stamp": "2026-11-14T10:00:00+00:00:1", "aliases_stamp": ":0"}])
+            if normalized.startswith("SELECT * FROM instruments WHERE kind ="):
+                return _FakeResult(instruments_rows)
+            if normalized.startswith("SELECT * FROM instruments"):
+                return _FakeResult(instruments_rows)
+            if normalized.startswith("SELECT alias, kind, symbol FROM instrument_aliases"):
+                return _FakeResult(alias_rows)
+            if normalized.startswith("SELECT alias, kind, symbol, source FROM instrument_aliases"):
+                return _FakeResult([])
+            return _FakeResult([])
+
+        def commit(self):
+            return None
+
+    monkeypatch.setattr(ref_data, "database_enabled", lambda: True)
+    monkeypatch.setattr(ref_data, "ensure_reference_data_schema", lambda _p: None)
+    monkeypatch.setattr(ref_data, "_connect", lambda _p: _FakePgConn())
+    monkeypatch.setattr(ref_data, "_INSTRUMENTS_CACHE_TTL_SECONDS", 60.0)
+    monkeypatch.setattr(ref_data, "_MANUAL_INSTRUMENTS", [])
+
+    first = get_instrument(tmp_path, "stock", "THYAO")
+    assert first is not None and first["name"] == "Türk Hava Yolları"
+    assert sum(1 for q in queries if q == "SELECT * FROM instruments") == 1
+
+    # Simulate TTL expiry: Postgres stamp matches, so full-table SELECT * FROM instruments must NOT rerun.
+    cache_key = ref_data._instruments_cache_key(tmp_path)
+    old_exp, sym_map, alias_map = ref_data._INSTRUMENTS_CACHE[cache_key]
+    ref_data._INSTRUMENTS_CACHE[cache_key] = (old_exp - 1000.0, sym_map, alias_map)
+
+    second = get_instrument(tmp_path, "stock", "THYAO")
+    assert second is not None and second["name"] == "Türk Hava Yolları"
+    assert sum(1 for q in queries if q == "SELECT * FROM instruments") == 1
+    assert sum(1 for q in queries if "AS instruments_stamp" in q) == 2
+
+    # Unchanged upsert must skip INSERT ... ON CONFLICT DO UPDATE and keep cache intact.
+    noop = ref_data.upsert_instruments(
+        tmp_path,
+        [
+            {
+                "kind": "stock",
+                "symbol": "THYAO",
+                "name": "Türk Hava Yolları",
+                "short_name": "THYAO",
+                "source": "kap",
+                "source_id": "100",
+                "active": 1,
+                "as_of": "2026-11-14",
+                "metadata": {},
+            }
+        ],
+        seed_manual=False,
+    )
+    assert noop["upserted_count"] == 0
+    assert not any(q.startswith("INSERT INTO instruments") for q in queries)
+    assert cache_key in ref_data._INSTRUMENTS_CACHE
+    ref_data.reset_reference_data_state_for_tests()

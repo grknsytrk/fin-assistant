@@ -2837,11 +2837,15 @@
 }
 
 .stocks-rank {
-    width: 36px;
+    width: 48px;
+    min-width: 48px;
+    padding-left: 0.4rem !important;
+    padding-right: 0.4rem !important;
     color: #52525b;
     font-size: 0.72rem;
     font-weight: 400;
     text-align: center;
+    font-variant-numeric: tabular-nums;
 }
 
 .stocks-symbol-cell {

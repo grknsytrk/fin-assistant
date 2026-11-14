@@ -8287,4 +8287,130 @@ def test_fund_detail_categories_search_payload_caches_and_invalidates(
     assert search_calls == 2
 
 
+def test_fetch_stock_return_bases_bulk_batches_spark_and_caches_over_512(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_urls: List[str] = []
+    timestamps = [
+        datetime(2025, 11, 10, tzinfo=timezone.utc).timestamp(),
+        datetime(2026, 11, 6, tzinfo=timezone.utc).timestamp(),
+        datetime(2026, 11, 13, tzinfo=timezone.utc).timestamp(),
+    ]
+
+    class FakeResp:
+        def __init__(self, body: Dict[str, Any]) -> None:
+            self._body = json.dumps(body).encode("utf-8")
+
+        def __enter__(self) -> "FakeResp":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self._body
+
+    def fake_urlopen(request: Any, **_kwargs: Any) -> FakeResp:
+        url = request.full_url
+        requested_urls.append(url)
+        if "/v7/finance/spark" in url:
+            return FakeResp({
+                "spark": {
+                    "result": [
+                        {
+                            "symbol": "AAA.IS",
+                            "response": [{
+                                "timestamp": timestamps,
+                                "indicators": {"quote": [{"close": [10.0, 20.0, 25.0]}]},
+                            }],
+                        }
+                    ]
+                }
+            })
+        return FakeResp({
+            "chart": {
+                "result": [{
+                    "timestamp": timestamps,
+                    "indicators": {"quote": [{"close": [50.0, 80.0, 100.0], "high": [50.0, 80.0, 100.0], "low": [50.0, 80.0, 100.0]}]},
+                }]
+            }
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(api_module._market_database, "read_json_cache", lambda *_a, **_kw: pytest.fail("should not read Supabase"))
+    monkeypatch.setattr(api_module._market_database, "write_json_cache", lambda *_a, **_kw: pytest.fail("should not write Supabase"))
+
+    assert api_module._STOCK_RETURN_BASE_CACHE.max_entries >= 1024
+    res = api_module._fetch_stock_return_bases_bulk(["AAA", "BBB"])
+
+    assert any("/v7/finance/spark" in u for u in requested_urls)
+    assert res["AAA"]["base_1w"] == 20.0
+    assert res["AAA"]["latest_close"] == 25.0
+    # BBB was absent from Spark response and cleanly fell back to v8 chart
+    assert res["BBB"]["base_1w"] == 80.0
+    assert res["BBB"]["latest_close"] == 100.0
+
+    # Subsequent cached XUTUM lookup hits bulk cache without network or Supabase calls
+    requested_urls.clear()
+    cached = api_module._cached_stock_return_bases_bulk(["AAA", "BBB"])
+    assert requested_urls == []
+    assert cached["AAA"]["base_1w"] == 20.0
+    assert cached["BBB"]["base_1w"] == 80.0
+
+
+def test_warm_stock_return_bases_sync_populates_and_refreshes_xutum_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.kap_service.get_bist_all_companies", lambda: ["AAA"])
+    monkeypatch.setattr(
+        "app.kap_service.get_bist_index_universe",
+        lambda _idx, force_refresh=False: {
+            "index": "XUTUM",
+            "symbols": ["AAA"],
+            "count": 1,
+            "source": "test",
+            "source_url": "test://bist",
+            "source_date": "14/11/2026",
+            "fetched_at": "2026-11-14T12:00:00+00:00",
+            "cache_hit": False,
+            "fallback_used": False,
+        },
+    )
+    monkeypatch.setattr(api_module, "_fetch_isyatirim_basic_summary_map", lambda: {})
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_market_price_map",
+        lambda symbols, index_name="XUTUM": {
+            s: {"price": 120.0, "currency": "TRY", "change": 2.0, "change_pct": 1.69, "volume": 1000.0, "as_of": "2026-11-14T12:00:00+00:00"}
+            for s in symbols
+        },
+    )
+    monkeypatch.setattr(api_module, "_market_stock_benchmarks", lambda: {})
+    monkeypatch.setattr(api_module, "get_financial_snapshots_map", lambda *_a, **_kw: {})
+
+    # First XUTUM request is cold for return bases
+    cold_payload = api_module._market_stocks_payload(index_name="XUTUM")
+    assert cold_payload["rows"][0]["return_1w_pct"] is None
+
+    # Inject Spark-style bases during warmup
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_stock_return_bases_spark_batch",
+        lambda _syms: {},
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_fetch_stock_return_bases",
+        lambda sym: {"base_1w": 100.0, "base_1m": 80.0, "latest_close": 120.0} if sym == "AAA" else {},
+    )
+
+    summary = api_module._warm_stock_return_bases_sync(["AAA"])
+    assert summary == {"requested": 1, "populated": 1}
+
+    # Cached XUTUM payload was refreshed in-place with populated returns
+    warmed_payload = api_module._market_stocks_payload(index_name="XUTUM")
+    assert warmed_payload["rows"][0]["return_1w_pct"] == 20.0
+    assert warmed_payload["rows"][0]["return_1m_pct"] == 50.0
+
+
 # endregion

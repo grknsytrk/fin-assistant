@@ -494,11 +494,29 @@ _MARKET_STOCK_CARD_CHART_RANGES: Dict[str, Dict[str, Any]] = {
     "5y": {"interval": "1wk", "range": "5y", "ttl": 3600},
 }
 
-_STOCK_RETURN_BASE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=512, default_ttl=900)
+_STOCK_RETURN_BASE_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=1024, default_ttl=21600)
 
-_STOCK_RETURN_BASE_CACHE_TTL = 900
+_STOCK_RETURN_BASE_TRADING_TTL = int(os.getenv("RAGFIN_STOCK_RETURN_BASE_TTL_SECONDS", "3600"))
+
+_STOCK_RETURN_BASE_OFFHOURS_TTL = int(os.getenv("RAGFIN_STOCK_RETURN_BASE_OFFHOURS_TTL_SECONDS", "21600"))
+
+_STOCK_RETURN_BASE_CACHE_TTL = _STOCK_RETURN_BASE_TRADING_TTL
+
+_STOCK_RETURN_BASE_STALE_TTL = int(os.getenv("RAGFIN_STOCK_RETURN_BASE_STALE_TTL_SECONDS", str(7 * 86400)))
 
 _STOCK_RETURN_BASE_CACHE_VERSION = "v2"
+
+_STOCK_RETURN_BASE_BULK_CACHE_KEY = "api:stock-return-bases:bulk:XUTUM:v3"
+
+_STOCK_RETURN_BASE_SPARK_BATCH_SIZE = 20
+
+_STOCK_RETURN_BASE_WARMUP_COOLDOWN_SECONDS = 120.0
+
+_STOCK_RETURN_BASE_WARMUP_LOCK = threading.Lock()
+
+_STOCK_RETURN_BASE_WARMUP_RUNNING = False
+
+_STOCK_RETURN_BASE_WARMUP_LAST_FINISHED = 0.0
 
 _ISYATIRIM_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=900)
 
@@ -506,7 +524,9 @@ _ISYATIRIM_CACHE_TTL = 900
 
 _ISYATIRIM_BASIC_SUMMARY_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=256, default_ttl=300)
 
-_ISYATIRIM_BASIC_SUMMARY_CACHE_TTL = 60
+_ISYATIRIM_BASIC_SUMMARY_CACHE_TTL = max(
+    60, int(os.getenv("RAGFIN_ISYATIRIM_BASIC_SUMMARY_CACHE_TTL_SECONDS", "1800"))
+)
 _ISYATIRIM_BASIC_SUMMARY_PERSIST_LOCK = threading.Lock()
 _ISYATIRIM_BASIC_SUMMARY_PERSISTED_SIGNATURES: BoundedMemoryCache = BoundedMemoryCache(max_entries=512, default_ttl=3600)
 
@@ -781,10 +801,35 @@ def _extract_infoyatirim_stock_page_quote(symbol: str, html_text: str) -> Dict[s
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
 
-def _fetch_infoyatirim_stock_page_quote(symbol: str) -> Dict[str, Any]:
+def _fetch_infoyatirim_html(
+    url: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 10,
+) -> Optional[str]:
     import urllib.error
     import urllib.request
 
+    req_headers = headers or {"User-Agent": "Mozilla/5.0"}
+    request = urllib.request.Request(url, headers=req_headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="ignore")
+    except (urllib.error.URLError, Exception) as exc:
+        # Windows system trust store may lack InfoYatirim's intermediate CA; fall back to httpx/certifi.
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc) or "SSL" in type(exc).__name__.upper():
+            try:
+                import httpx
+
+                resp = httpx.get(url, headers=req_headers, follow_redirects=True, timeout=timeout)
+                if resp.status_code == 200 and resp.text:
+                    return resp.text
+            except Exception:
+                return None
+        return None
+
+
+def _fetch_infoyatirim_stock_page_quote(symbol: str) -> Dict[str, Any]:
     ticker = str(symbol or "").strip().upper()
     if not ticker:
         return {}
@@ -799,17 +844,15 @@ def _fetch_infoyatirim_stock_page_quote(symbol: str) -> Dict[str, Any]:
         _INFOYATIRIM_STOCK_PAGE_CACHE[ticker] = {"_ts": now, "data": shared_cached}
         return dict(shared_cached)
 
-    request = urllib.request.Request(
+    html_text = _fetch_infoyatirim_html(
         _infoyatirim_stock_page_url(ticker),
         headers={
             "User-Agent": "Mozilla/5.0",
             "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
         },
+        timeout=8,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            html_text = response.read().decode("utf-8", errors="ignore")
-    except (urllib.error.URLError, Exception):
+    if html_text is None:
         _INFOYATIRIM_STOCK_PAGE_CACHE[ticker] = {"_ts": now, "data": {}}
         _shared_cache_set(shared_key, {}, ttl_seconds=_INFOYATIRIM_STOCK_PAGE_CACHE_TTL)
         return {}
@@ -1041,15 +1084,9 @@ def _clear_market_price_snapshot_failure() -> None:
 def _build_market_price_snapshot(
     normalized_symbols: List[str],
 ) -> Optional[Dict[str, Dict[str, Any]]]:
-    import urllib.error
-    import urllib.request
-
     url = _market_price_source_url(_MARKET_QUOTE_SOURCE_INDEX)
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            html_text = resp.read().decode("utf-8", errors="ignore")
-    except (urllib.error.URLError, Exception):
+    html_text = _fetch_infoyatirim_html(url, timeout=10)
+    if html_text is None:
         return None
 
     items: Dict[str, Dict[str, Any]] = {}
@@ -1262,6 +1299,210 @@ def _pick_series_value_at_or_after(
 def _stock_return_base_cache_key(symbol: str) -> str:
     return f"api:stock-return-bases:{symbol}:{_STOCK_RETURN_BASE_CACHE_VERSION}"
 
+def _stock_return_base_disk_path() -> Path:
+    return CONFIG.paths.processed_dir / "_shared" / "stock_return_bases_xutum.json"
+
+def _effective_stock_return_base_ttl(now_ts: Optional[float] = None) -> int:
+    """Keep 1h base-price freshness in session and 6h off-hours/weekends."""
+    dt = (
+        datetime.fromtimestamp(now_ts, tz=_TURKEY_TIMEZONE)
+        if now_ts is not None
+        else None
+    )
+    if _is_bist_market_open(dt):
+        return max(60, int(_STOCK_RETURN_BASE_TRADING_TTL), int(_STOCK_RETURN_BASE_CACHE_TTL))
+    return max(
+        60,
+        int(_STOCK_RETURN_BASE_TRADING_TTL),
+        int(_STOCK_RETURN_BASE_OFFHOURS_TTL),
+        int(_STOCK_RETURN_BASE_CACHE_TTL),
+    )
+
+def _stock_return_bases_from_series(series: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not series:
+        return {}
+
+    ordered = sorted(series, key=lambda x: x["dt"])
+    latest = ordered[-1]
+    latest_dt = latest["dt"]
+    latest_close = latest["close"]
+    year_start = datetime(latest_dt.year, 1, 1, tzinfo=timezone.utc)
+    points_for_base = [(s["dt"], s["close"]) for s in ordered]
+
+    def _get_range_stats(start_dt: datetime) -> tuple[Optional[float], Optional[float], Optional[float]]:
+        relevant = [s for s in ordered if s["dt"] >= start_dt]
+        if not relevant:
+            return None, None, None
+
+        base_val = _pick_series_value_at_or_before(points_for_base, start_dt)
+        high_val = max(s["high"] for s in relevant)
+        low_val = min(s["low"] for s in relevant)
+        return base_val, high_val, low_val
+
+    b1w, h1w, l1w = _get_range_stats(latest_dt - timedelta(days=7))
+    b1m, h1m, l1m = _get_range_stats(latest_dt - timedelta(days=30))
+    b3m, h3m, l3m = _get_range_stats(latest_dt - timedelta(days=91))
+    b6m, h6m, l6m = _get_range_stats(latest_dt - timedelta(days=182))
+    bytd, hytd, lytd = _get_range_stats(year_start)
+    b1y, h1y, l1y = _get_range_stats(latest_dt - timedelta(days=365))
+
+    return {
+        "base_1w": b1w, "high_1w": h1w, "low_1w": l1w,
+        "base_1m": b1m, "high_1m": h1m, "low_1m": l1m,
+        "base_3m": b3m, "high_3m": h3m, "low_3m": l3m,
+        "base_6m": b6m, "high_6m": h6m, "low_6m": l6m,
+        "base_ytd": bytd, "high_ytd": hytd, "low_ytd": lytd,
+        "base_1y": b1y, "high_1y": h1y, "low_1y": l1y,
+        "latest_close": latest_close,
+        "as_of": latest_dt.isoformat(),
+    }
+
+def _build_ohlc_series(
+    timestamps: List[Any],
+    closes: List[Any],
+    highs: Optional[List[Any]] = None,
+    lows: Optional[List[Any]] = None,
+) -> List[Dict[str, Any]]:
+    series: List[Dict[str, Any]] = []
+    high_seq = highs if highs else [None] * len(timestamps)
+    low_seq = lows if lows else [None] * len(timestamps)
+    for ts, close, high, low in zip(timestamps, closes, high_seq, low_seq):
+        if close is None or not isinstance(ts, (int, float)):
+            continue
+        try:
+            dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+            close_val = float(close)
+            if not math.isfinite(close_val) or close_val <= 0:
+                continue
+            high_val = float(high) if high is not None and math.isfinite(float(high)) else close_val
+            low_val = float(low) if low is not None and math.isfinite(float(low)) else close_val
+            series.append({
+                "dt": dt,
+                "close": close_val,
+                "high": high_val,
+                "low": low_val,
+            })
+        except (TypeError, ValueError):
+            continue
+    return series
+
+def _remember_stock_return_bases_bulk(
+    items: Dict[str, Dict[str, Any]],
+    *,
+    now_ts: Optional[float] = None,
+    write_shared_bulk: bool = True,
+    write_disk: bool = True,
+) -> None:
+    if not items:
+        return
+    now = time.time() if now_ts is None else now_ts
+    ttl = _effective_stock_return_base_ttl(now)
+    stale_ttl = max(ttl, int(_STOCK_RETURN_BASE_STALE_TTL))
+
+    clean_items: Dict[str, Dict[str, Any]] = {}
+    for sym, bases in items.items():
+        ticker = str(sym or "").strip().upper()
+        if not ticker or not isinstance(bases, dict) or not bases:
+            continue
+        payload = dict(bases)
+        _STOCK_RETURN_BASE_CACHE[ticker] = {"_ts": now, "data": payload}
+        clean_items[ticker] = payload
+    if not clean_items:
+        return
+
+    if write_shared_bulk:
+        existing_bulk = _shared_cache_get_dict(_STOCK_RETURN_BASE_BULK_CACHE_KEY)
+        merged_items: Dict[str, Any] = (
+            dict(existing_bulk.get("items") or {})
+            if isinstance(existing_bulk, dict) and isinstance(existing_bulk.get("items"), dict)
+            else {}
+        )
+        for ticker, payload in clean_items.items():
+            merged_items[ticker] = {"_ts": now, "data": payload}
+        _shared_cache_set(
+            _STOCK_RETURN_BASE_BULK_CACHE_KEY,
+            {"created_at": now, "items": merged_items},
+            stale_ttl,
+        )
+
+    if write_disk and not os.getenv("PYTEST_CURRENT_TEST"):
+        _persist_stock_return_bases_disk(now_ts=now)
+
+def _persist_stock_return_bases_disk(*, now_ts: Optional[float] = None) -> None:
+    """Persist return bases ONLY to local disk (never Supabase) for fast restarts."""
+    try:
+        path = _stock_return_base_disk_path()
+        items: Dict[str, Dict[str, Any]] = {}
+        for ticker in list(_STOCK_RETURN_BASE_CACHE.keys()):
+            entry = _STOCK_RETURN_BASE_CACHE.get(ticker)
+            if not isinstance(entry, dict):
+                continue
+            data = entry.get("data")
+            if not isinstance(data, dict) or not data:
+                continue
+            items[str(ticker).upper()] = {
+                "_ts": float(entry.get("_ts") or 0.0),
+                "data": data,
+            }
+        if not items:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": _STOCK_RETURN_BASE_CACHE_VERSION,
+            "updated_at": time.time() if now_ts is None else now_ts,
+            "items": items,
+        }
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        tmp_path.replace(path)
+    except Exception as exc:
+        LOGGER.debug("stock return base local disk persist skipped: %s", exc)
+
+def _hydrate_stock_return_bases_from_disk() -> int:
+    """Load local disk return bases into process memory/Redis without touching Supabase."""
+    path = _stock_return_base_disk_path()
+    if not path.exists():
+        return 0
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if not isinstance(raw, dict):
+        return 0
+    items = raw.get("items")
+    if not isinstance(items, dict):
+        return 0
+
+    now = time.time()
+    max_age = max(3600, int(_STOCK_RETURN_BASE_STALE_TTL))
+    hydrated = 0
+    bulk_items: Dict[str, Dict[str, Any]] = {}
+    for sym, entry in items.items():
+        ticker = str(sym or "").strip().upper()
+        if not ticker or not isinstance(entry, dict):
+            continue
+        data = entry.get("data")
+        try:
+            ts = float(entry.get("_ts") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if not isinstance(data, dict) or not data or (ts > 0 and (now - ts) > max_age):
+            continue
+        _STOCK_RETURN_BASE_CACHE[ticker] = {"_ts": ts, "data": dict(data)}
+        bulk_items[ticker] = {"_ts": ts, "data": dict(data)}
+        hydrated += 1
+    if bulk_items:
+        existing_bulk = _shared_cache_get_dict(_STOCK_RETURN_BASE_BULK_CACHE_KEY)
+        existing_items = (existing_bulk or {}).get("items") if isinstance(existing_bulk, dict) else None
+        if isinstance(existing_items, dict) and len(existing_items) >= len(bulk_items):
+            return hydrated
+        _shared_cache_set(
+            _STOCK_RETURN_BASE_BULK_CACHE_KEY,
+            {"created_at": now, "items": bulk_items},
+            max_age,
+        )
+    return hydrated
+
 def _fetch_stock_return_bases(symbol: str) -> Dict[str, Any]:
     import urllib.error
     import urllib.request
@@ -1271,8 +1512,9 @@ def _fetch_stock_return_bases(symbol: str) -> Dict[str, Any]:
         return {}
 
     now = time.time()
+    ttl = _effective_stock_return_base_ttl(now)
     cached = _STOCK_RETURN_BASE_CACHE.get(ticker)
-    if cached and now - cached.get("_ts", 0) < _STOCK_RETURN_BASE_CACHE_TTL:
+    if cached and now - cached.get("_ts", 0) < ttl:
         return dict(cached.get("data") or {})
     shared_key = _stock_return_base_cache_key(ticker)
     shared_cached = _shared_cache_get_dict(shared_key)
@@ -1306,64 +1548,54 @@ def _fetch_stock_return_bases(symbol: str) -> Dict[str, Any]:
     except (KeyError, IndexError, TypeError):
         return {}
 
-    series: List[Dict[str, Any]] = []
-    for ts, close, high, low in zip(timestamps, closes, highs, lows):
-        if close is None or not isinstance(ts, (int, float)):
-            continue
-        try:
-            dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-            series.append({
-                "dt": dt,
-                "close": float(close),
-                "high": float(high) if high is not None else float(close),
-                "low": float(low) if low is not None else float(close),
-            })
-        except (TypeError, ValueError):
-            continue
-
-    if not series:
+    series = _build_ohlc_series(timestamps, closes, highs, lows)
+    bases = _stock_return_bases_from_series(series)
+    if not bases:
         return {}
 
-    series.sort(key=lambda x: x["dt"])
-    latest = series[-1]
-    latest_dt = latest["dt"]
-    latest_close = latest["close"]
-    year_start = datetime(latest_dt.year, 1, 1, tzinfo=timezone.utc)
-
-    def _get_base_price(target_dt: datetime) -> Optional[float]:
-        points_for_base = [(s["dt"], s["close"]) for s in series]
-        return _pick_series_value_at_or_before(points_for_base, target_dt)
-
-    def _get_range_stats(start_dt: datetime):
-        relevant = [s for s in series if s["dt"] >= start_dt]
-        if not relevant:
-            return None, None, None
-
-        base_val = _get_base_price(start_dt)
-        high_val = max(s["high"] for s in relevant)
-        low_val = min(s["low"] for s in relevant)
-        return base_val, high_val, low_val
-
-    b1w, h1w, l1w = _get_range_stats(latest_dt - timedelta(days=7))
-    b1m, h1m, l1m = _get_range_stats(latest_dt - timedelta(days=30))
-    b3m, h3m, l3m = _get_range_stats(latest_dt - timedelta(days=91))
-    b6m, h6m, l6m = _get_range_stats(latest_dt - timedelta(days=182))
-    bytd, hytd, lytd = _get_range_stats(year_start)
-    b1y, h1y, l1y = _get_range_stats(latest_dt - timedelta(days=365))
-
-    bases = {
-        "base_1w": b1w, "high_1w": h1w, "low_1w": l1w,
-        "base_1m": b1m, "high_1m": h1m, "low_1m": l1m,
-        "base_3m": b3m, "high_3m": h3m, "low_3m": l3m,
-        "base_6m": b6m, "high_6m": h6m, "low_6m": l6m,
-        "base_ytd": bytd, "high_ytd": hytd, "low_ytd": lytd,
-        "base_1y": b1y, "high_1y": h1y, "low_1y": l1y,
-        "latest_close": latest_close,
-        "as_of": latest_dt.isoformat(),
-    }
     _STOCK_RETURN_BASE_CACHE[ticker] = {"_ts": now, "data": bases}
-    _shared_cache_set(shared_key, bases, _STOCK_RETURN_BASE_CACHE_TTL)
+    _shared_cache_set(shared_key, bases, ttl)
     return dict(bases)
+
+def _fetch_stock_return_bases_spark_batch(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Fetch multi-symbol 2y daily closes in one Yahoo v7 spark call (~20 tickers/req)."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    cleaned = [str(s or "").strip().upper() for s in symbols if str(s or "").strip()]
+    if not cleaned:
+        return {}
+
+    yahoo_to_ticker = {f"{ticker}.IS": ticker for ticker in cleaned}
+    encoded_syms = urllib.parse.quote(",".join(yahoo_to_ticker.keys()), safe=",")
+    url = f"https://query1.finance.yahoo.com/v7/finance/spark?symbols={encoded_syms}&range=2y&interval=1d"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, Exception):
+        return {}
+
+    items = ((data.get("spark") or {}).get("result") or []) if isinstance(data, dict) else []
+    parsed: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_sym = str(item.get("symbol") or "").strip().upper()
+        ticker = yahoo_to_ticker.get(raw_sym) or raw_sym.removesuffix(".IS")
+        responses = item.get("response") or []
+        if not ticker or not responses or not isinstance(responses[0], dict):
+            continue
+        r0 = responses[0]
+        timestamps = r0.get("timestamp") or []
+        quote = ((r0.get("indicators") or {}).get("quote") or [{}])[0]
+        closes = quote.get("close") or []
+        series = _build_ohlc_series(timestamps, closes)
+        bases = _stock_return_bases_from_series(series)
+        if bases:
+            parsed[ticker] = bases
+    return parsed
 
 def _fetch_stock_return_bases_bulk(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
     normalized_symbols = [str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()]
@@ -1373,30 +1605,94 @@ def _fetch_stock_return_bases_bulk(symbols: List[str]) -> Dict[str, Dict[str, An
     result: Dict[str, Dict[str, Any]] = {}
     stale: List[str] = []
     now = time.time()
+    ttl = _effective_stock_return_base_ttl(now)
+
+    missing_from_memory: List[str] = []
     for symbol in normalized_symbols:
         cached = _STOCK_RETURN_BASE_CACHE.get(symbol)
-        if cached and now - cached.get("_ts", 0) < _STOCK_RETURN_BASE_CACHE_TTL:
+        if cached and now - cached.get("_ts", 0) < ttl:
             result[symbol] = dict(cached.get("data") or {})
-            continue
-        shared_cached = _shared_cache_get_dict(_stock_return_base_cache_key(symbol))
-        if shared_cached:
-            _STOCK_RETURN_BASE_CACHE[symbol] = {"_ts": now, "data": shared_cached}
-            result[symbol] = dict(shared_cached)
-            continue
-        stale.append(symbol)
+        else:
+            missing_from_memory.append(symbol)
+
+    if missing_from_memory:
+        bulk_cached = _shared_cache_get_dict(_STOCK_RETURN_BASE_BULK_CACHE_KEY)
+        bulk_items = (
+            bulk_cached.get("items")
+            if isinstance(bulk_cached, dict) and isinstance(bulk_cached.get("items"), dict)
+            else {}
+        )
+        still_missing: List[str] = []
+        for symbol in missing_from_memory:
+            bulk_entry = bulk_items.get(symbol)
+            if (
+                isinstance(bulk_entry, dict)
+                and isinstance(bulk_entry.get("data"), dict)
+                and bulk_entry["data"]
+                and now - float(bulk_entry.get("_ts") or 0.0) < ttl
+            ):
+                _STOCK_RETURN_BASE_CACHE[symbol] = {
+                    "_ts": float(bulk_entry.get("_ts") or now),
+                    "data": dict(bulk_entry["data"]),
+                }
+                result[symbol] = dict(bulk_entry["data"])
+                continue
+            shared_cached = _shared_cache_get_dict(_stock_return_base_cache_key(symbol))
+            if shared_cached:
+                _STOCK_RETURN_BASE_CACHE[symbol] = {"_ts": now, "data": shared_cached}
+                result[symbol] = dict(shared_cached)
+                continue
+            still_missing.append(symbol)
+        stale = still_missing
 
     if not stale:
         return result
 
+    if len(stale) == 1:
+        symbol = stale[0]
+        bases = _fetch_stock_return_bases(symbol)
+        result[symbol] = bases
+        if bases:
+            _remember_stock_return_bases_bulk({symbol: bases}, now_ts=now)
+        return result
+
     from concurrent.futures import ThreadPoolExecutor
 
+    batches = [
+        stale[i : i + _STOCK_RETURN_BASE_SPARK_BATCH_SIZE]
+        for i in range(0, len(stale), _STOCK_RETURN_BASE_SPARK_BATCH_SIZE)
+    ]
+    fetched_map: Dict[str, Dict[str, Any]] = {}
     try:
-        with ThreadPoolExecutor(max_workers=12) as pool:
-            for symbol, bases in zip(stale, pool.map(_fetch_stock_return_bases, stale)):
-                result[symbol] = bases
+        with ThreadPoolExecutor(max_workers=min(6, len(batches))) as pool:
+            for batch_res in pool.map(_fetch_stock_return_bases_spark_batch, batches):
+                fetched_map.update(batch_res)
     except Exception:
-        for symbol in stale:
-            result[symbol] = _fetch_stock_return_bases(symbol)
+        for batch in batches:
+            fetched_map.update(_fetch_stock_return_bases_spark_batch(batch))
+
+    missed = [symbol for symbol in stale if symbol not in fetched_map]
+    if missed:
+        try:
+            with ThreadPoolExecutor(max_workers=min(6, len(missed))) as pool:
+                for symbol, bases in zip(missed, pool.map(_fetch_stock_return_bases, missed)):
+                    if bases:
+                        fetched_map[symbol] = bases
+        except Exception:
+            for symbol in missed:
+                bases = _fetch_stock_return_bases(symbol)
+                if bases:
+                    fetched_map[symbol] = bases
+
+    if fetched_map:
+        _remember_stock_return_bases_bulk(fetched_map, now_ts=now)
+
+    for symbol in stale:
+        bases = fetched_map.get(symbol, {})
+        result[symbol] = bases
+        if not bases and symbol not in _STOCK_RETURN_BASE_CACHE:
+            # Avoid repeatedly hammering upstream for delisted/suspended tickers.
+            _STOCK_RETURN_BASE_CACHE[symbol] = {"_ts": 0.0, "_neg_ts": now, "data": {}}
     return result
 
 def _return_pct(current_price: Any, base_price: Any) -> Optional[float]:
@@ -1522,18 +1818,150 @@ def _market_stock_symbols_for_index(index_name: str) -> List[str]:
 
 def _cached_stock_return_bases_bulk(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
     now = time.time()
+    max_stale = max(_effective_stock_return_base_ttl(now), int(_STOCK_RETURN_BASE_STALE_TTL))
     result: Dict[str, Dict[str, Any]] = {}
+    missing_from_memory: List[str] = []
+
     for symbol in symbols:
         normalized = str(symbol or "").strip().upper()
-        cached = _STOCK_RETURN_BASE_CACHE.get(normalized)
-        if cached and now - cached.get("_ts", 0) < _STOCK_RETURN_BASE_CACHE_TTL:
-            result[normalized] = dict(cached.get("data") or {})
+        if not normalized:
             continue
-        shared_cached = _shared_cache_get_dict(_stock_return_base_cache_key(normalized))
-        if shared_cached:
-            _STOCK_RETURN_BASE_CACHE[normalized] = {"_ts": now, "data": shared_cached}
-            result[normalized] = dict(shared_cached)
+        cached = _STOCK_RETURN_BASE_CACHE.get(normalized)
+        if cached and now - float(cached.get("_ts", 0.0)) < max_stale:
+            result[normalized] = dict(cached.get("data") or {})
+        else:
+            missing_from_memory.append(normalized)
+
+    if missing_from_memory:
+        bulk_cached = _shared_cache_get_dict(_STOCK_RETURN_BASE_BULK_CACHE_KEY)
+        bulk_items = (
+            bulk_cached.get("items")
+            if isinstance(bulk_cached, dict) and isinstance(bulk_cached.get("items"), dict)
+            else {}
+        )
+        for normalized in missing_from_memory:
+            bulk_entry = bulk_items.get(normalized)
+            if (
+                isinstance(bulk_entry, dict)
+                and isinstance(bulk_entry.get("data"), dict)
+                and bulk_entry["data"]
+                and now - float(bulk_entry.get("_ts") or 0.0) < max_stale
+            ):
+                _STOCK_RETURN_BASE_CACHE[normalized] = {
+                    "_ts": float(bulk_entry.get("_ts") or now),
+                    "data": dict(bulk_entry["data"]),
+                }
+                result[normalized] = dict(bulk_entry["data"])
+                continue
+            shared_cached = _shared_cache_get_dict(_stock_return_base_cache_key(normalized))
+            if shared_cached:
+                _STOCK_RETURN_BASE_CACHE[normalized] = {"_ts": now, "data": shared_cached}
+                result[normalized] = dict(shared_cached)
     return result
+
+def _stock_return_base_stale_symbols(symbols: List[str], *, now_ts: Optional[float] = None) -> List[str]:
+    now = time.time() if now_ts is None else now_ts
+    ttl = _effective_stock_return_base_ttl(now)
+    stale: List[str] = []
+    for raw_symbol in symbols:
+        symbol = str(raw_symbol or "").strip().upper()
+        if not symbol:
+            continue
+        cached = _STOCK_RETURN_BASE_CACHE.get(symbol)
+        if cached and not cached.get("data") and (now - float(cached.get("_neg_ts", 0.0))) < 1800:
+            continue
+        if not cached or (now - float(cached.get("_ts", 0.0))) >= ttl or not cached.get("data"):
+            stale.append(symbol)
+    return stale
+
+def _refresh_cached_xutum_stocks_payload() -> None:
+    """Update cached XUTUM stocks payload once return bases finish warming."""
+    local_key = "payload:XUTUM"
+    shared_key = "api:market:stocks:XUTUM:v4"
+    if _STOCKS_CACHE.get(local_key) is None and _shared_cache_get_dict(shared_key) is None:
+        return
+    try:
+        built = _build_market_stocks_payload(index_name="XUTUM", force_refresh=False)
+        quote_stale = bool(built.pop("quote_stale", False))
+        if not _market_payload_has_quote(built):
+            return
+        now = time.time()
+        effective_fresh_ttl = _effective_market_quotes_fresh_ttl()
+        effective_stale_ttl = max(effective_fresh_ttl, _MARKET_QUOTES_STALE_TTL)
+        entry = {
+            "payload": built,
+            "quote_stale": quote_stale,
+            "fresh_until": now + max(1, effective_fresh_ttl),
+            "stale_until": now + max(1, effective_stale_ttl),
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _STOCKS_CACHE[local_key] = {"_ts": now, "entry": entry}
+        _shared_cache_set(shared_key, entry, max(1, effective_stale_ttl))
+    except Exception as exc:
+        LOGGER.debug("refreshing cached XUTUM payload after return warmup failed: %s", exc)
+
+def _warm_stock_return_bases_sync(symbols: Optional[List[str]] = None) -> Dict[str, int]:
+    """Fetch stale/missing return bases via batched Spark calls and refresh XUTUM cache."""
+    target_symbols = (
+        [str(s or "").strip().upper() for s in symbols if str(s or "").strip()]
+        if symbols is not None
+        else _market_stock_symbols_for_index("XUTUM")
+    )
+    stale_symbols = _stock_return_base_stale_symbols(target_symbols)
+    if not stale_symbols:
+        return {"requested": 0, "populated": 0}
+    fetched = _fetch_stock_return_bases_bulk(stale_symbols)
+    populated = sum(1 for val in fetched.values() if isinstance(val, dict) and bool(val))
+    if populated > 0:
+        _refresh_cached_xutum_stocks_payload()
+    return {"requested": len(stale_symbols), "populated": populated}
+
+def _schedule_xutum_return_bases_warmup_if_needed(symbols: Optional[List[str]] = None) -> bool:
+    """Kick off a single-flight non-blocking batch warmup when XUTUM bases are cold/stale."""
+    global _STOCK_RETURN_BASE_WARMUP_RUNNING, _STOCK_RETURN_BASE_WARMUP_LAST_FINISHED
+
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+
+    target_symbols = (
+        list(symbols)
+        if symbols is not None
+        else _market_stock_symbols_for_index("XUTUM")
+    )
+    if not target_symbols:
+        return False
+
+    now = time.time()
+    stale_symbols = _stock_return_base_stale_symbols(target_symbols, now_ts=now)
+    if not stale_symbols:
+        return False
+
+    with _STOCK_RETURN_BASE_WARMUP_LOCK:
+        if _STOCK_RETURN_BASE_WARMUP_RUNNING:
+            return False
+        if (now - _STOCK_RETURN_BASE_WARMUP_LAST_FINISHED) < _STOCK_RETURN_BASE_WARMUP_COOLDOWN_SECONDS:
+            return False
+        _STOCK_RETURN_BASE_WARMUP_RUNNING = True
+
+    def _run_warmup() -> None:
+        global _STOCK_RETURN_BASE_WARMUP_RUNNING, _STOCK_RETURN_BASE_WARMUP_LAST_FINISHED
+        try:
+            summary = _warm_stock_return_bases_sync(stale_symbols)
+            LOGGER.info("XUTUM return-bases warmup finished: %s", summary)
+        except Exception as exc:
+            LOGGER.warning("XUTUM return-bases warmup failed: %s", exc)
+        finally:
+            with _STOCK_RETURN_BASE_WARMUP_LOCK:
+                _STOCK_RETURN_BASE_WARMUP_LAST_FINISHED = time.time()
+                _STOCK_RETURN_BASE_WARMUP_RUNNING = False
+
+    try:
+        _MARKET_SWR_REVALIDATION_EXECUTOR.submit(_run_warmup)
+        return True
+    except Exception:
+        with _STOCK_RETURN_BASE_WARMUP_LOCK:
+            _STOCK_RETURN_BASE_WARMUP_RUNNING = False
+        return False
 
 def _market_stock_row(
     symbol: str,
@@ -1656,11 +2084,11 @@ def _build_market_stocks_payload(
         ),
         None,
     )
-    return_base_map = (
-        _cached_stock_return_bases_bulk(symbols)
-        if normalized_index == "XUTUM"
-        else _fetch_stock_return_bases_bulk(symbols)
-    )
+    if normalized_index == "XUTUM":
+        return_base_map = _cached_stock_return_bases_bulk(symbols)
+        _schedule_xutum_return_bases_warmup_if_needed(symbols)
+    else:
+        return_base_map = _fetch_stock_return_bases_bulk(symbols)
     if basic_summary_map is None:
         basic_summary_map = _fetch_isyatirim_basic_summary_map()
     try:
@@ -1811,6 +2239,8 @@ _MARKET_QUOTES_OFFHOURS_FRESH_TTL = int(
 
 _MARKET_STOCK_DELTA_TRACKED_KEYS = (
     "price", "change", "change_pct", "volume", "market_cap",
+    "return_1w_pct", "return_1m_pct", "return_3m_pct", "return_6m_pct",
+    "return_ytd_pct", "return_1y_pct",
     "latest_quarter", "fundamental_period", "sector", "has_kap_cache",
     "fk", "pd_dd", "fd_favok", "fd_satis", "net_borc_favok", "roe_pct",
     "favok_margin_pct", "net_margin_pct", "free_float_pct", "ttm_net_kar",
@@ -3224,7 +3654,8 @@ def _fetch_isyatirim_basic_summary_map() -> Dict[str, Dict[str, Any]]:
         with urllib.request.urlopen(request, timeout=10) as response:
             html_text = response.read().decode("utf-8", errors="replace")
     except (urllib.error.URLError, Exception):
-        _ISYATIRIM_BASIC_SUMMARY_CACHE["payload"] = {"_ts": now, "items": {}}
+        retry_offset = max(0, _ISYATIRIM_BASIC_SUMMARY_CACHE_TTL - 60)
+        _ISYATIRIM_BASIC_SUMMARY_CACHE["payload"] = {"_ts": now - retry_offset, "items": {}}
         return {}
 
     items = _extract_isyatirim_basic_summary_map(html_text)

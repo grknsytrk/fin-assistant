@@ -887,3 +887,69 @@ def test_market_snapshot_legacy_expired_row_is_usable_but_not_fresh() -> None:
     }
     assert market_service._market_price_snapshot_is_usable(aged_out) is True
     assert market_service._market_price_snapshot_is_fresh(aged_out) is False
+
+
+def test_redis_compresses_large_payloads_and_recognizes_upstash_request_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Large Redis JSON blobs are compressed transparently and record wire bytes."""
+    import json
+    import sys
+
+    stored: dict[str, str] = {}
+
+    class _FakeRedisClient:
+        def ping(self):
+            return True
+
+        def get(self, key: str):
+            return stored.get(key)
+
+        def set(self, key: str, payload: str, ex=None):
+            del ex
+            stored[key] = payload
+            return True
+
+    class _FakeRedisModule:
+        class Redis:
+            @staticmethod
+            def from_url(*_args, **_kwargs):
+                return _FakeRedisClient()
+
+    monkeypatch.setenv("RAGFIN_CACHE_BACKEND", "redis")
+    monkeypatch.setenv("RAGFIN_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("RAGFIN_CACHE_NAMESPACE", "ragfin-test")
+    monkeypatch.setattr(cache_module, "_BACKEND", None)
+    sys.modules["redis"] = _FakeRedisModule  # type: ignore[assignment]
+    try:
+        backend = cache_module.get_cache()
+    finally:
+        sys.modules.pop("redis", None)
+
+    large_payload = {
+        "rows": [
+            {"code": f"F{i:03d}", "title": "TEFAS ORNEK FON UZUN UNVAN ACILIMI", "price": 10.5 + i}
+            for i in range(120)
+        ]
+    }
+    raw_len = len(json.dumps(large_payload, separators=(",", ":")).encode("utf-8"))
+    backend.set("api:funds:snapshot-row-map:test:v1", large_payload, ttl_seconds=60)
+
+    wire_value = stored["ragfin-test:api:funds:snapshot-row-map:test:v1"]
+    assert isinstance(wire_value, str)
+    assert wire_value.startswith(backend._COMPRESSED_PREFIX)
+    assert len(wire_value.encode("utf-8")) < raw_len * 0.4
+    assert backend.get("api:funds:snapshot-row-map:test:v1") == large_payload
+
+    metrics = backend.metrics_snapshot()["by_key_prefix"]["snapshot-row-map"]
+    assert metrics["set_payload_bytes"] == len(wire_value.encode("utf-8"))
+    assert metrics["get_payload_bytes"] == len(wire_value.encode("utf-8"))
+
+    # Small values remain plain JSON and corrupt compressed blobs fail safe as cache miss.
+    backend.set("api:funds:tiny", {"ok": True}, ttl_seconds=60)
+    assert stored["ragfin-test:api:funds:tiny"] == '{"ok":true}'
+    assert backend._deserialize(f"{backend._COMPRESSED_PREFIX}not-valid-base64!") is None
+
+    # Upstash request limit error trips long quota cooldown immediately.
+    is_new, should_log = backend._remember_error(RuntimeError("ERR max daily request limit exceeded"))
+    assert is_new is False
+    assert should_log is True
+    assert backend.circuit_snapshot()["quota_limited"] is True

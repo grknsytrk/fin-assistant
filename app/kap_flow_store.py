@@ -26,14 +26,22 @@ LOGGER = logging.getLogger(__name__)
 _PERSISTED_FLOW_HASH_LOCK = threading.Lock()
 _PERSISTED_FLOW_HASHES: dict[tuple[Any, ...], str] = {}
 _PERSISTED_FLOW_HASH_MAX = 5000
+_LOCAL_REDIS_EVENTS_BY_SCOPE: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
 
 FLOW_HEAD_CACHE_PREFIX = "api:kap:flow:head:v1:"
 FLOW_STATUS_CACHE_KEY = "api:kap:flow:status:v1"
 FLOW_REDIS_STORE_KEY = "api:kap:flow:events:v1"
 FLOW_HEAD_CACHE_TTL_SECONDS = int(os.getenv("RAGFIN_KAP_FLOW_HEAD_CACHE_TTL_SECONDS", "60"))
-# Keep the Redis fallback slightly wider than the 2,000-row public window so
-# category-specific backfill rows remain available during a Postgres outage.
+# Keep the Redis fallback slightly wider than the 2,000-row public window when no
+# database is configured; when Postgres is active, keep a compact fallback tail.
 FLOW_RETAINED_EVENTS = max(100, int(os.getenv("RAGFIN_KAP_FLOW_RETAINED_EVENTS", "2500")))
+FLOW_DB_REDIS_FALLBACK_EVENTS = max(
+    50, int(os.getenv("RAGFIN_KAP_FLOW_REDIS_FALLBACK_EVENTS", "300"))
+)
+
+
+def _retained_redis_limit() -> int:
+    return min(FLOW_RETAINED_EVENTS, FLOW_DB_REDIS_FALLBACK_EVENTS) if database_enabled() else FLOW_RETAINED_EVENTS
 
 
 def _normalize_datetime(raw: Any) -> Optional[str]:
@@ -174,7 +182,11 @@ def _redis_events() -> list[dict[str, Any]]:
 
 
 def _write_redis_events(events: list[dict[str, Any]]) -> None:
-    get_cache().set(FLOW_REDIS_STORE_KEY, events[:FLOW_RETAINED_EVENTS])
+    trimmed = list(events[: _retained_redis_limit()])
+    get_cache().set(FLOW_REDIS_STORE_KEY, trimmed)
+    scope = _flow_hash_scope()
+    with _PERSISTED_FLOW_HASH_LOCK:
+        _LOCAL_REDIS_EVENTS_BY_SCOPE[scope] = trimmed
 
 
 def _page_from_events(
@@ -228,6 +240,7 @@ def clear_persisted_flow_hashes() -> None:
 
     with _PERSISTED_FLOW_HASH_LOCK:
         _PERSISTED_FLOW_HASHES.clear()
+        _LOCAL_REDIS_EVENTS_BY_SCOPE.clear()
 
 
 def _flow_hash_scope() -> tuple[Any, ...]:
@@ -282,22 +295,38 @@ def persist_flow_items(items: list[dict[str, Any]], *, source: str, as_of: Optio
                 _PERSISTED_FLOW_HASHES[key] = digest
 
     # Redis remains a useful local fallback when database persistence is not
-    # configured, and always provides the fast head cache.
-    existing = {row["event_key"]: row for row in _redis_events()}
-    redis_changed = False
-    for row in changed_rows if existing else normalized:
-        event_key = row["event_key"]
-        candidate = {
-            "event_key": event_key,
-            "published_at": row["published_at"],
-            "payload": row["payload"],
-        }
-        if existing.get(event_key) != candidate:
-            existing[event_key] = candidate
-            redis_changed = True
-    merged = sorted(existing.values(), key=_sort_key, reverse=True)[:FLOW_RETAINED_EVENTS]
-    if redis_changed or (normalized and not existing):
-        _write_redis_events(merged)
+    # configured, and always provides the fast head cache. Avoid re-reading or
+    # rewriting the full multi-hundred-KB Redis list on every cron tick when the
+    # process already synced it and nothing changed.
+    with _PERSISTED_FLOW_HASH_LOCK:
+        local_existing_list = _LOCAL_REDIS_EVENTS_BY_SCOPE.get(scope)
+    if not changed_rows and local_existing_list is not None:
+        merged = list(local_existing_list[: _retained_redis_limit()])
+        redis_changed = False
+    else:
+        base_events = (
+            local_existing_list
+            if local_existing_list is not None and database_enabled()
+            else _redis_events()
+        )
+        existing = {row["event_key"]: row for row in base_events}
+        redis_changed = False
+        for row in changed_rows if existing else normalized:
+            event_key = row["event_key"]
+            candidate = {
+                "event_key": event_key,
+                "published_at": row["published_at"],
+                "payload": row["payload"],
+            }
+            if existing.get(event_key) != candidate:
+                existing[event_key] = candidate
+                redis_changed = True
+        merged = sorted(existing.values(), key=_sort_key, reverse=True)[: _retained_redis_limit()]
+        if redis_changed or (normalized and not existing):
+            _write_redis_events(merged)
+        else:
+            with _PERSISTED_FLOW_HASH_LOCK:
+                _LOCAL_REDIS_EVENTS_BY_SCOPE[scope] = list(merged)
 
     backend = get_cache()
     if changed_rows or redis_changed:

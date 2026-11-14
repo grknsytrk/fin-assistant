@@ -913,6 +913,10 @@ def _funds_search_payload(*, q: str, limit: int = 50) -> Dict[str, Any]:
         backend.set(cache_key, payload, ttl_seconds=600)
     return payload
 
+_FUNDS_CATEGORIES_L1_LOCK = threading.Lock()
+_FUNDS_CATEGORIES_L1_CACHE: Dict[str, Any] = {}
+
+
 def _funds_categories_payload() -> Dict[str, Any]:
     from app.fund_service import fund_listing_revision, get_fund_categories_payload
 
@@ -921,17 +925,29 @@ def _funds_categories_payload() -> Dict[str, Any]:
     except Exception:
         revision = {}
     cat_rev = f"{int(revision.get('catalog_generation') or 0)}:{int(revision.get('price_generation') or 0)}"
+    now_mono = time.monotonic()
+    with _FUNDS_CATEGORIES_L1_LOCK:
+        l1 = _FUNDS_CATEGORIES_L1_CACHE.get(cat_rev)
+        if l1 and l1.get("expires_at", 0.0) > now_mono and isinstance(l1.get("payload"), dict):
+            return dict(l1["payload"])
+
     cache_key = "api:funds-categories:v2"
     backend = _get_cache()
     cached = backend.get(cache_key)
     if isinstance(cached, dict) and cached.get("fund_types") is not None and cached.get("_rev") == cat_rev:
         out = dict(cached)
         out.pop("_rev", None)
+        with _FUNDS_CATEGORIES_L1_LOCK:
+            _FUNDS_CATEGORIES_L1_CACHE.clear()
+            _FUNDS_CATEGORIES_L1_CACHE[cat_rev] = {"expires_at": now_mono + 300.0, "payload": dict(out)}
         return out
 
     payload = get_fund_categories_payload(CONFIG.paths.processed_dir)
     if isinstance(payload, dict) and str(payload.get("status") or "").strip().lower() == "ok":
-        backend.set(cache_key, {**payload, "_rev": cat_rev}, ttl_seconds=1800)
+        with _FUNDS_CATEGORIES_L1_LOCK:
+            _FUNDS_CATEGORIES_L1_CACHE.clear()
+            _FUNDS_CATEGORIES_L1_CACHE[cat_rev] = {"expires_at": now_mono + 300.0, "payload": dict(payload)}
+        backend.set(cache_key, {**payload, "_rev": cat_rev}, ttl_seconds=3600)
     return payload
 
 def _history_job_key(fund_code: str, job_id: str) -> str:
@@ -1626,7 +1642,7 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
         except Exception:
             version_token = None
     if cached and stat is None and version_token and cached.get("version_token") == version_token:
-        cached["expires_at"] = now_mono + 300.0
+        cached["expires_at"] = now_mono + 600.0
         return dict(cached.get("rows") or {}), {
             "cache_hit": True,
             "row_count": cached.get("row_count", 0),
@@ -1637,10 +1653,11 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
         shared_cached = _shared_cache_get_dict(shared_key)
         if shared_cached is not None:
             rows = dict(shared_cached.get("rows") or {})
+            l1_ttl = 600.0 if (stat is None and version_token) else 60.0
             cache_payload = {
                 "mtime": stat.st_mtime if stat else None,
                 "version_token": version_token,
-                "expires_at": now_mono + 60.0,
+                "expires_at": now_mono + l1_ttl,
                 "rows": rows,
                 "row_count": shared_cached.get("row_count", len(rows)),
                 "as_of": shared_cached.get("as_of"),
@@ -1665,10 +1682,11 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
         if code:
             rows[code] = row
     if stat or rows:
+        l1_ttl = 600.0 if (stat is None and version_token) else 60.0
         _FUND_SNAPSHOT_ROW_MAP_CACHE[cache_key] = {
             "mtime": stat.st_mtime if stat else None,
             "version_token": version_token,
-            "expires_at": now_mono + 60.0,
+            "expires_at": now_mono + l1_ttl,
             "rows": rows,
             "row_count": len(rows),
             "as_of": snapshot.get("as_of"),
@@ -1681,7 +1699,7 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
                     "row_count": len(rows),
                     "as_of": snapshot.get("as_of"),
                 },
-                ttl_seconds=300,
+                ttl_seconds=3600 if version_token else 300,
             )
     return dict(rows), {"cache_hit": False, "row_count": len(rows), "as_of": snapshot.get("as_of")}
 
@@ -2496,6 +2514,8 @@ def _finish_fund_cache_invalidation(outcomes: List[bool], *, scope: str) -> str:
 def _invalidate_fund_response_cache() -> str:
     """Drop cached fund responses and report whether shared invalidation completed."""
 
+    with _FUNDS_CATEGORIES_L1_LOCK:
+        _FUNDS_CATEGORIES_L1_CACHE.clear()
     backend = _get_cache()
     outcomes: List[bool] = []
     for prefix in (

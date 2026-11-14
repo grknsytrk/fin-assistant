@@ -127,3 +127,60 @@ def test_persist_flow_items_skips_unchanged_db_upsert_and_read_flow_head_avoids_
     assert head2["latest_cursor"] == head1["latest_cursor"]
     assert head_db_calls == 1
     store.clear_persisted_flow_hashes()
+
+
+def test_persist_flow_items_skips_unchanged_redis_event_list_gets_and_sets(monkeypatch) -> None:
+    from app.cache import InMemoryCache
+
+    store.clear_persisted_flow_hashes()
+    inner = InMemoryCache()
+    flow_gets = 0
+    flow_sets = 0
+
+    class _CountingCache:
+        name = "redis"
+
+        def get(self, key: str):
+            nonlocal flow_gets
+            if key == store.FLOW_REDIS_STORE_KEY:
+                flow_gets += 1
+            return inner.get(key)
+
+        def set(self, key: str, value, ttl_seconds=None):
+            nonlocal flow_sets
+            if key == store.FLOW_REDIS_STORE_KEY:
+                flow_sets += 1
+            inner.set(key, value, ttl_seconds=ttl_seconds)
+
+        def delete(self, key: str) -> None:
+            inner.delete(key)
+
+        def delete_prefix(self, prefix: str) -> None:
+            inner.delete_prefix(prefix)
+
+    counting = _CountingCache()
+    monkeypatch.setattr(store, "get_cache", lambda: counting)
+    monkeypatch.setattr(store, "database_enabled", lambda: True)
+    monkeypatch.setattr(store, "upsert_kap_flow_events", lambda rows: {"upserted_count": len(rows)})
+
+    items = [
+        {
+            "id": "510001",
+            "disclosureIndex": 510001,
+            "published_at": "2026-09-09T10:05:00+00:00",
+            "company": "THYAO",
+            "title": "İlk duyuru",
+            "category": "ODA",
+        }
+    ]
+    store.persist_flow_items(items, source="kap_public_website", as_of="2026-09-09T10:05:00+00:00")
+    assert flow_gets == 1
+    assert flow_sets == 1
+
+    # Repeated 1-minute cron ticks with unchanged items must not GET or SET the full event list.
+    for _ in range(3):
+        store.persist_flow_items(items, source="kap_public_website", as_of="2026-09-09T10:06:00+00:00")
+
+    assert flow_gets == 1
+    assert flow_sets == 1
+    store.clear_persisted_flow_hashes()

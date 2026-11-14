@@ -96,6 +96,8 @@ def bootstrap_application_storage() -> None:
     snapshot_sync = sync_financial_snapshots_from_kap_cache(CONFIG.paths.processed_dir)
     if snapshot_sync.get("upserted_count") or snapshot_sync.get("error_count"):
         LOGGER.info("KAP financial snapshot sync: %s", snapshot_sync)
+    _market_service._hydrate_stock_return_bases_from_disk()
+    _market_service._schedule_xutum_return_bases_warmup_if_needed()
 
 
 @asynccontextmanager
