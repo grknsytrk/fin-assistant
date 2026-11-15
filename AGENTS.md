@@ -159,3 +159,24 @@ Common CLI options:
 - Prefer `get_portfolio()` range calls for allocation history. Per-day portfolio calls are a slow fallback and should not be the first strategy.
 - A slow first `Geçmişi gör` load usually means the cache is cold and the backend is fetching TEFAS allocation history. If the range query returns empty, the current fallback may fan out into one request per business day.
 - Preserve TEFAS fields that are not yet mapped; allocation columns can expand over time.
+
+## Codebase Architecture & Modular Layout
+
+- **Python environment**: Use `.external\venv311\Scripts\python.exe` for pytest and scripts.
+- **No wildcard imports**: `app/`, `src/`, and `tests/` use explicit imports (`0` `from ... import *`).
+- **Backend facades & submodules** (preserve `dir()` parity and monkeypatch seams when editing):
+  - `app/api.py`: composition root; `app/routers/{funds,kap,market,model_portfolio}.py` + `app/api_runtime.py`.
+  - `app/fund_service.py` (facade) -> `app/funds/{providers,price_store,snapshot_store,performance_and_allocations,holdings_kap_parser}.py`.
+  - `app/fund_api_service.py` (facade) -> `app/funds_api/{jobs_and_collector,holdings_enrichment}.py`.
+  - `app/market_service.py` (facade) -> `app/market/{isyatirim_client,historical_valuations,universe_and_quotes,screener_stocks,cards_indices_fx}.py`.
+  - `app/kap_api_service.py` (facade) -> `app/kap_api/{flow_and_feeds,valuation_and_snapshot}.py`.
+  - `src/kap_fetcher.py` (facade) -> `src/kap/{exceptions,html_parser,metric_scoring,insurance_premium}.py`.
+- **Frontend modular pages**:
+  - `frontend/src/styles/market-shared.css`: shared styles for Markets and Model Portfolio.
+  - `frontend/src/pages/funds/`: `FundsPage.tsx` + `sections/`, `components/`, lazy-loaded comparison.
+  - `frontend/src/pages/markets/`: `MarketsView.tsx` + `components/`, `stockScreenerConfig.ts`.
+  - `frontend/src/pages/model-portfolio/`: `ModelPortfolioPage.tsx` + `components/`, lazy-loaded editor/close modals.
+  - `frontend/src/pages/stock/`: `StockDetailPage.tsx` + `sections/`.
+- **Tests**:
+  - `tests/test_api*.py` (domain-split API tests + `tests/api_test_helpers.py`, `tests/api_module_facade.py`).
+  - `tests/test_fund_service*.py` (domain-split fund service tests).

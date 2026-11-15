@@ -154,12 +154,20 @@ Eski `/stocks/:ticker/ask` adresleri bozulmaz; frontend bu yolu şirketin Genel 
 
 KAP AI yorumunda IFM kullanılır. `IFM_API_KEY` değerini yerelde proje kökündeki `.env` dosyasına, Hugging Face dağıtımında ise Space'in **Settings → Variables and secrets** bölümüne secret olarak ekleyin. İsteğe bağlı model/endpoint ayarları `IFM_MODEL` ve `IFM_BASE_URL` ile belirlenir; varsayılan model `IFM/K2-Horizon-375B-A23B`, endpoint `https://api.ifm.ai/v1` olur. Anahtar yalnızca backend'de okunur. IFM anahtarı yoksa eski NVIDIA ayarları geriye dönük fallback olarak kullanılabilir. Yorum özelliği isteğe bağlıdır; yapılandırılmış KAP tablolarının çalışması için gerekli değildir.
 
+## Kod yapısı
+
+- **Backend (`app/`, `src/`)**: `app/api.py` ve `app/routers/{funds,kap,market,model_portfolio}.py` katmanları alan bazlı servislere bağlanır:
+  - Fon çekirdeği ve API servisi: `app/fund_service.py` → `app/funds/` (`providers`, `price_store`, `snapshot_store`, `performance_and_allocations`, `holdings_kap_parser`) ve `app/fund_api_service.py` → `app/funds_api/` (`jobs_and_collector`, `holdings_enrichment`).
+  - Piyasa servisi: `app/market_service.py` → `app/market/` (`isyatirim_client`, `historical_valuations`, `universe_and_quotes`, `screener_stocks`, `cards_indices_fx`).
+  - KAP servisi ve parser: `app/kap_api_service.py` → `app/kap_api/` (`flow_and_feeds`, `valuation_and_snapshot`) ve `src/kap_fetcher.py` → `src/kap/` (`exceptions`, `html_parser`, `metric_scoring`, `insurance_premium`).
+- **Frontend (`frontend/src/`)**: Sayfa ve bileşenler alan klasörlerine ayrılmıştır (`pages/funds/`, `pages/markets/`, `pages/model-portfolio/`, `pages/stock/`); ortak piyasa stilleri `styles/market-shared.css` içindedir.
+
 ## Test ve doğrulama
 
 ```powershell
 python -m compileall app src
-pytest
+.external\venv311\Scripts\python.exe -m pytest
 git diff --check
 ```
 
-Frontend için `npm run build` çalıştırın. Runtime SQLite WAL/SHM, KAP cache'leri ve diğer çalışma çıktıları kaynak kodun parçası değildir.
+Frontend için `npm --prefix frontend run build` çalıştırın. Runtime SQLite WAL/SHM, KAP cache'leri ve diğer çalışma çıktıları kaynak kodun parçası değildir.
