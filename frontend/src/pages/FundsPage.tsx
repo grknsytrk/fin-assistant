@@ -1775,13 +1775,7 @@ function FundPerformanceChart({
     ) : null;
 
     if (loading) {
-        const loadingValues = [18, 22, 20, 27, 24, 30, 26, 34, 32, 38, 35, 42];
-        const loadingMin = Math.min(...loadingValues);
-        const loadingSpan = Math.max(0.01, Math.max(...loadingValues) - loadingMin);
-        const loadingLine = loadingValues.map((value, index) =>
-            `${index === 0 ? 'M' : 'L'} ${padding.left + index / (loadingValues.length - 1) * (width - padding.left - padding.right)} ${padding.top + plotHeight - (value - loadingMin) / loadingSpan * Math.max(80, plotHeight * 0.72)}`,
-        ).join(' ');
-        const loadingTicks = [padding.top, padding.top + plotHeight / 3, padding.top + (plotHeight * 2) / 3, padding.top + plotHeight];
+        const loadingTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => padding.top + ratio * plotHeight);
         return (
             <section className="fund-chart-panel" aria-busy="true" aria-label={`${fundCode} fiyat grafiği`}>
                 {controls}
@@ -1796,9 +1790,7 @@ function FundPerformanceChart({
                     {loadingTicks.map((y) => (
                         <line key={y} x1={padding.left} x2={width - padding.right} y1={y} y2={y} className="fund-chart-gridline" />
                     ))}
-                    <path className="fund-chart-loading-track" d={loadingLine} />
-                    <path className="fund-chart-loading-line" d={loadingLine} pathLength={100} />
-                    <text x={width / 2} y={height - (isMobileChart ? 32 : 18)} className="fund-chart-loading-label" textAnchor="middle">
+                    <text x={width / 2} y={padding.top + plotHeight / 2} className="fund-chart-loading-label" textAnchor="middle">
                         {historyPending ? 'Getiri geçmişi hazırlanıyor…' : 'Grafik verisi yükleniyor…'}
                     </text>
                 </svg>
