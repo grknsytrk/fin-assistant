@@ -567,12 +567,13 @@ def upsert_kap_flow_events(events: list[dict[str, Any]]) -> int:
         return 0
     value_tuple = "(?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?::jsonb, NOW(), NOW())"
     chunk_size = 150
+    modified_count = 0
     with connect_postgres() as conn:
         for offset in range(0, len(rows), chunk_size):
             chunk = rows[offset : offset + chunk_size]
             placeholders = ", ".join(value_tuple for _ in chunk)
             flat_params = [col for row in chunk for col in row]
-            conn.execute(
+            cursor = conn.execute(
                 f"""
                 INSERT INTO ragfin_kap_flow_events (
                     event_key, source, disclosure_id, published_at, symbol,
@@ -594,17 +595,26 @@ def upsert_kap_flow_events(events: list[dict[str, Any]]) -> int:
                     payload = EXCLUDED.payload,
                     updated_at = NOW()
                 WHERE ragfin_kap_flow_events.payload IS DISTINCT FROM EXCLUDED.payload
+                   OR ragfin_kap_flow_events.source IS DISTINCT FROM EXCLUDED.source
+                   OR ragfin_kap_flow_events.disclosure_id IS DISTINCT FROM EXCLUDED.disclosure_id
+                   OR ragfin_kap_flow_events.stock_codes IS DISTINCT FROM EXCLUDED.stock_codes
+                   OR ragfin_kap_flow_events.related_symbols IS DISTINCT FROM EXCLUDED.related_symbols
                    OR ragfin_kap_flow_events.title IS DISTINCT FROM EXCLUDED.title
                    OR ragfin_kap_flow_events.subject IS DISTINCT FROM EXCLUDED.subject
                    OR ragfin_kap_flow_events.category IS DISTINCT FROM EXCLUDED.category
                    OR ragfin_kap_flow_events.published_at IS DISTINCT FROM EXCLUDED.published_at
                    OR ragfin_kap_flow_events.symbol IS DISTINCT FROM EXCLUDED.symbol
                    OR ragfin_kap_flow_events.kap_url IS DISTINCT FROM EXCLUDED.kap_url
+                RETURNING 1
                 """,
                 tuple(flat_params),
             )
+            if hasattr(cursor, "fetchall"):
+                modified_count += len(cursor.fetchall() or [])
+            else:
+                modified_count += len(chunk)
         conn.commit()
-    return len(rows)
+    return modified_count
 
 
 def read_kap_flow_head(*, category: Optional[str] = None) -> Optional[dict[str, Any]]:
@@ -1164,7 +1174,6 @@ def hydrate_json_cache(
         where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
         with connect_postgres() as conn:
-            excluded_rows = 0
             rows = conn.execute(
                 f"SELECT cache_key, payload, updated_at::text AS updated_at, COALESCE(version, 0) AS version FROM ragfin_json_cache {where_clause} ORDER BY cache_key",
                 tuple(query_params),
@@ -1207,10 +1216,10 @@ def hydrate_json_cache(
             remember_json_cache_read(target, remote_stamp=stamp)
             hydrated += 1
         LOGGER.info(
-            "json_cache_hydrate rows=%d hydrated=%d excluded_rows=%d excluded_prefixes=%s approximate_payload_bytes=%d over_1mib=%s",
+            "json_cache_hydrate rows=%d hydrated=%d excluded_in_sql=%s excluded_prefixes=%s approximate_payload_bytes=%d over_1mib=%s",
             len(rows),
             hydrated,
-            excluded_rows,
+            bool(excludes),
             ",".join(excludes),
             measured_bytes,
             measured_bytes > 1024 * 1024,

@@ -267,3 +267,45 @@ def test_read_flow_head_and_status_l1_cache_avoids_repeated_redis_and_db_polls(m
     assert db_head_calls == 2
     assert refreshed_head["latest_cursor"] != head["latest_cursor"]
     store.clear_persisted_flow_hashes()
+
+
+def test_persist_flow_items_retries_failed_db_upsert_and_caches_empty_head(monkeypatch) -> None:
+    store.clear_persisted_flow_hashes()
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:supersecret@db.example/postgres")
+    monkeypatch.setattr(store, "database_enabled", lambda: True)
+
+    scope_text = repr((store._flow_l1_scope(), store._flow_hash_scope()))
+    assert "supersecret" not in scope_text
+
+    head_db_calls = 0
+
+    def fake_empty_head(*, category=None):
+        nonlocal head_db_calls
+        head_db_calls += 1
+        return None
+
+    monkeypatch.setattr(store, "read_kap_flow_head", fake_empty_head)
+    empty1 = store.read_flow_head()
+    empty2 = store.read_flow_head()
+    assert empty1["refresh_status"] == "empty"
+    assert empty2["refresh_status"] == "empty"
+    assert head_db_calls == 1
+
+    attempts = 0
+
+    def flaky_upsert(rows: list[dict]) -> int:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient db error")
+        return len(rows)
+
+    monkeypatch.setattr(store, "upsert_kap_flow_events", flaky_upsert)
+    items = [_item(5, 10)]
+    first = store.persist_flow_items(items, source="kap_public_website")
+    assert first["database_written"] is False
+
+    second = store.persist_flow_items(items, source="kap_public_website")
+    assert second["database_written"] is True
+    assert attempts == 2
+    store.clear_persisted_flow_hashes()

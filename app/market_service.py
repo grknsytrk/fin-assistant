@@ -523,7 +523,7 @@ _STOCK_HIST_MULTIPLES_TTL = int(os.getenv("RAGFIN_STOCK_HIST_MULTIPLES_TTL_SECON
 
 _STOCK_HIST_MULTIPLES_STALE_TTL = int(os.getenv("RAGFIN_STOCK_HIST_MULTIPLES_STALE_TTL_SECONDS", str(7 * 86400)))
 
-_STOCK_HIST_MULTIPLES_CACHE_VERSION = "v1"
+_STOCK_HIST_MULTIPLES_CACHE_VERSION = "v2"
 
 _STOCK_HIST_MULTIPLES_WARMUP_COOLDOWN_SECONDS = 300.0
 
@@ -2056,16 +2056,76 @@ def _fetch_stock_weekly_5y_spark_batch(symbols: List[str]) -> Dict[str, List[tup
     return parsed
 
 
+def _parse_split_events(split_events: Optional[List[Dict[str, Any]]]) -> List[tuple[date, float]]:
+    parsed: List[tuple[date, float]] = []
+    for event in split_events or []:
+        if not isinstance(event, dict):
+            continue
+        try:
+            event_dt = date.fromisoformat(str(event.get("date") or "")[:10])
+        except ValueError:
+            continue
+        ratio = _as_finite_float(event.get("ratio"))
+        if ratio is not None and ratio > 0:
+            parsed.append((event_dt, ratio))
+    return parsed
+
+
+def _has_unmatched_capital_jump(
+    reporting_quarters: List[Dict[str, Any]],
+    parsed_splits: List[tuple[date, float]],
+    *,
+    quarter_end_fn: Any,
+) -> bool:
+    """Detect >=1.5x consecutive-quarter capital jumps lacking a nearby Yahoo split event."""
+    prev_shares: Optional[float] = None
+    prev_end: Optional[date] = None
+    for quarter in reporting_quarters:
+        q_shares = _extract_quarter_metric(
+            quarter,
+            "odenmis_sermaye",
+            priority=["metrics", "metrics_ytd"],
+        ) or _extract_quarter_metric(
+            quarter,
+            "cikarilmis_sermaye",
+            priority=["metrics", "metrics_ytd"],
+        )
+        q_end = quarter_end_fn(quarter)
+        if q_shares is None or q_shares <= 0:
+            continue
+        if prev_shares is not None and prev_shares > 0:
+            jump_ratio = float(q_shares) / float(prev_shares)
+            if jump_ratio >= 1.5 or jump_ratio <= (1.0 / 1.5):
+                if prev_end is not None and q_end is not None:
+                    win_start = prev_end - timedelta(days=45)
+                    win_end = q_end + timedelta(days=60)
+                    matched = any(win_start <= ev_dt <= win_end for ev_dt, _ in parsed_splits)
+                elif q_end is not None:
+                    win_start = q_end - timedelta(days=135)
+                    win_end = q_end + timedelta(days=60)
+                    matched = any(win_start <= ev_dt <= win_end for ev_dt, _ in parsed_splits)
+                else:
+                    matched = bool(parsed_splits)
+                if not matched:
+                    return True
+        prev_shares = float(q_shares)
+        prev_end = q_end
+    return False
+
+
 def _compute_kap_historical_averages_for_snapshot(
     snapshot: Dict[str, Any],
     price_points: List[tuple[str, float]],
     *,
     current_shares: Optional[float] = None,
+    split_events: Optional[List[Dict[str, Any]]] = None,
+    on_missing_split_fallback: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Compute 5Y historical valuation multiple averages from a KAP snapshot + weekly prices."""
+    """Compute historical valuation multiple averages from a KAP snapshot + weekly prices."""
     from app.kap_api_service import (
         _build_kap_historical_ttm,
         _kap_history_trading_date,
+        _kap_quarter_end_date,
     )
 
     if not isinstance(snapshot, dict) or not price_points:
@@ -2127,6 +2187,18 @@ def _compute_kap_historical_averages_for_snapshot(
 
     ordered_prices = sorted(price_points, key=lambda item: item[0])
     price_dates = [item[0] for item in ordered_prices]
+    parsed_splits = _parse_split_events(split_events) if split_events is not None else []
+    use_split_adjusted_shares = split_events is not None
+    if use_split_adjusted_shares and _has_unmatched_capital_jump(
+        reporting_quarters,
+        parsed_splits,
+        quarter_end_fn=_kap_quarter_end_date,
+    ):
+        # Fall back to current shares when KAP reports a >=1.5x capital jump
+        # without a matching Yahoo split event, avoiding split-adjusted price vs raw share mismatch.
+        use_split_adjusted_shares = False
+        if callable(on_missing_split_fallback):
+            on_missing_split_fallback()
     fk_vals: List[float] = []
     pd_dd_vals: List[float] = []
     fd_favok_vals: List[float] = []
@@ -2148,7 +2220,27 @@ def _compute_kap_historical_averages_for_snapshot(
         if price is None or price <= 0:
             continue
 
-        market_cap = price * cur_shares
+        quarter_shares = cur_shares
+        if use_split_adjusted_shares:
+            raw_quarter_shares = _extract_quarter_metric(
+                quarter,
+                "odenmis_sermaye",
+                priority=["metrics", "metrics_ytd"],
+            ) or _extract_quarter_metric(
+                quarter,
+                "cikarilmis_sermaye",
+                priority=["metrics", "metrics_ytd"],
+            )
+            if raw_quarter_shares is not None and raw_quarter_shares > 0:
+                quarter_end = _kap_quarter_end_date(quarter)
+                split_factor = 1.0
+                if quarter_end is not None:
+                    for event_dt, ratio in parsed_splits:
+                        if event_dt > quarter_end:
+                            split_factor *= ratio
+                quarter_shares = float(raw_quarter_shares) * split_factor
+
+        market_cap = price * quarter_shares
         ttm_net_kar = _build_kap_historical_ttm(reporting_quarters, index, "net_kar")
         equity = _extract_quarter_metric(quarter, "ozkaynaklar", priority=["metrics", "metrics_ytd"])
         if ttm_net_kar is not None and ttm_net_kar > 0:
@@ -2180,6 +2272,9 @@ def _compute_kap_historical_averages_for_snapshot(
     hist_fk_avg = _avg_positive(fk_vals)
     hist_pd_dd_avg = _avg_positive(pd_dd_vals)
     hist_fd_favok_avg = None if financial_company else _avg_positive(fd_favok_vals)
+    hist_fk_quarters = len(fk_vals) if hist_fk_avg is not None else None
+    hist_pd_dd_quarters = len(pd_dd_vals) if hist_pd_dd_avg is not None else None
+    hist_fd_favok_quarters = len(fd_favok_vals) if hist_fd_favok_avg is not None else None
     hist_quarters = max(len(fk_vals), len(pd_dd_vals), len(fd_favok_vals), 0)
     if hist_fk_avg is None and hist_pd_dd_avg is None and hist_fd_favok_avg is None:
         return {}
@@ -2188,11 +2283,14 @@ def _compute_kap_historical_averages_for_snapshot(
         "hist_pd_dd_avg": hist_pd_dd_avg,
         "hist_fd_favok_avg": hist_fd_favok_avg,
         "hist_quarters": hist_quarters,
+        "hist_fk_quarters": hist_fk_quarters,
+        "hist_pd_dd_quarters": hist_pd_dd_quarters,
+        "hist_fd_favok_quarters": hist_fd_favok_quarters,
     }
 
 
 def _persist_stock_hist_multiples_disk(items: Dict[str, Dict[str, Any]], *, now_ts: Optional[float] = None) -> None:
-    """Persist computed historical multiple averages ONLY to local disk (zero egress)."""
+    """Persist compact historical multiple averages locally and to _shared/ Supabase cache."""
     try:
         path = _stock_hist_multiples_disk_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2204,8 +2302,10 @@ def _persist_stock_hist_multiples_disk(items: Dict[str, Dict[str, Any]], *, now_
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         tmp_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         tmp_path.replace(path)
+        if _market_database.database_enabled():
+            _market_database.write_json_cache(path, payload)
     except Exception as exc:
-        LOGGER.debug("stock historical multiples disk persist skipped: %s", exc)
+        LOGGER.warning("stock historical multiples disk persist skipped: %s", exc)
 
 
 def _hydrate_stock_hist_multiples_from_disk() -> int:
@@ -2218,7 +2318,8 @@ def _hydrate_stock_hist_multiples_from_disk() -> int:
         return 0
     if not isinstance(raw, dict):
         return 0
-    if raw.get("version") != _STOCK_HIST_MULTIPLES_CACHE_VERSION:
+    version = raw.get("version")
+    if version not in {"v1", _STOCK_HIST_MULTIPLES_CACHE_VERSION}:
         return 0
     items = raw.get("items")
     if not isinstance(items, dict) or not items:
@@ -2233,8 +2334,9 @@ def _hydrate_stock_hist_multiples_from_disk() -> int:
             clean[ticker] = dict(entry)
     if not clean:
         return 0
+    hydrated_ts = updated_at if version == _STOCK_HIST_MULTIPLES_CACHE_VERSION else 0.0
     with _STOCK_HIST_MULTIPLES_LOCK:
-        _STOCK_HIST_MULTIPLES_STATE["_ts"] = updated_at
+        _STOCK_HIST_MULTIPLES_STATE["_ts"] = hydrated_ts
         _STOCK_HIST_MULTIPLES_STATE["items"] = clean
     return len(clean)
 
@@ -2249,6 +2351,59 @@ def _cached_stock_hist_multiples_map() -> Dict[str, Dict[str, Any]]:
     with _STOCK_HIST_MULTIPLES_LOCK:
         items = _STOCK_HIST_MULTIPLES_STATE.get("items")
         return dict(items) if isinstance(items, dict) else {}
+
+
+def _snapshot_has_capital_changes(snapshot: Dict[str, Any]) -> bool:
+    capitals: set[float] = set()
+    for quarter in snapshot.get("quarters") or []:
+        if not isinstance(quarter, dict):
+            continue
+        q_metrics = {
+            **quarter,
+            "metrics": quarter.get("metrics_original") or quarter.get("metrics") or {},
+            "metrics_ytd": quarter.get("metrics_ytd_original") or quarter.get("metrics_ytd") or {},
+        }
+        val = _extract_quarter_metric(
+            q_metrics,
+            "odenmis_sermaye",
+            priority=["metrics", "metrics_ytd"],
+        ) or _extract_quarter_metric(
+            q_metrics,
+            "cikarilmis_sermaye",
+            priority=["metrics", "metrics_ytd"],
+        )
+        if val is not None and val > 0:
+            capitals.add(round(float(val), 4))
+            if len(capitals) > 1:
+                return True
+    return False
+
+
+def _fetch_stock_split_events_cached(
+    symbol: str,
+    *,
+    start_date: date,
+    end_date: date,
+) -> Optional[List[Dict[str, Any]]]:
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return None
+    cache_key = f"api:stock:splits:v1:{normalized}"
+    cached = _shared_cache_get_dict(cache_key)
+    if isinstance(cached, dict) and isinstance(cached.get("splits"), list):
+        return cached["splits"]
+    chart = _fetch_yahoo_chart_period_raw(
+        f"{normalized}.IS",
+        interval="1mo",
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if not chart.get("ok"):
+        return None
+    splits = chart.get("splits") if isinstance(chart.get("splits"), list) else []
+    split_ttl = max(3600, int(_STOCK_HIST_MULTIPLES_TTL)) if splits else 3600
+    _shared_cache_set(cache_key, {"splits": splits}, split_ttl)
+    return splits
 
 
 def _warm_stock_hist_multiples_sync(
@@ -2289,28 +2444,68 @@ def _warm_stock_hist_multiples_sync(
     if not price_map:
         return {"requested": len(kap_symbols), "populated": 0}
 
-    fin_map = financial_snapshot_map or {}
-    bs_map = basic_summary_map or {}
-    computed: Dict[str, Dict[str, Any]] = {}
+    snapshots_by_sym: Dict[str, Dict[str, Any]] = {}
+    capital_changed_syms: List[str] = []
     for sym in kap_symbols:
-        pts = price_map.get(sym)
-        if not pts:
+        if not price_map.get(sym):
             continue
         cache_path = kap_cache_dir / f"{sym}.json"
         try:
             raw_kap = json.loads(cache_path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        if not isinstance(raw_kap, dict):
+            continue
+        snapshots_by_sym[sym] = raw_kap
+        if _snapshot_has_capital_changes(raw_kap):
+            capital_changed_syms.append(sym)
+
+    today = date.today()
+    splits_start = today - timedelta(days=6 * 366)
+    splits_by_sym: Dict[str, Optional[List[Dict[str, Any]]]] = {}
+    if capital_changed_syms:
+        try:
+            with ThreadPoolExecutor(max_workers=min(4, len(capital_changed_syms))) as pool:
+                results = pool.map(
+                    lambda s: _fetch_stock_split_events_cached(s, start_date=splits_start, end_date=today),
+                    capital_changed_syms,
+                )
+                for sym, splits in zip(capital_changed_syms, results):
+                    splits_by_sym[sym] = splits
+        except Exception:
+            for sym in capital_changed_syms:
+                splits_by_sym[sym] = _fetch_stock_split_events_cached(
+                    sym, start_date=splits_start, end_date=today
+                )
+
+    fin_map = financial_snapshot_map or {}
+    bs_map = basic_summary_map or {}
+    computed: Dict[str, Dict[str, Any]] = {}
+    missing_split_fallback_syms: List[str] = []
+    for sym, raw_kap in snapshots_by_sym.items():
+        pts = price_map.get(sym) or []
         provider_shares = _as_finite_float((bs_map.get(sym) or {}).get("shares_outstanding"))
         meta_shares = _as_finite_float((fin_map.get(sym) or {}).get("shares_outstanding"))
         cur_shares = provider_shares if (provider_shares and provider_shares > 0) else meta_shares
+        # Constant-capital snapshots pass [] directly (zero HTTP calls); changed-capital
+        # snapshots pass fetched split events, or None to fall back safely if Yahoo failed.
+        sym_splits = splits_by_sym.get(sym, []) if sym in splits_by_sym else []
         summary = _compute_kap_historical_averages_for_snapshot(
             raw_kap,
             pts,
             current_shares=cur_shares,
+            split_events=sym_splits,
+            on_missing_split_fallback=lambda s=sym: missing_split_fallback_syms.append(s),
         )
         if summary:
             computed[sym] = summary
+
+    if missing_split_fallback_syms:
+        LOGGER.warning(
+            "stock historical multiples fell back to current_shares due to unmatched capital jumps for %d symbols (%s)",
+            len(missing_split_fallback_syms),
+            ", ".join(missing_split_fallback_syms[:10]),
+        )
 
     now = time.time()
     if computed:
@@ -2439,10 +2634,15 @@ def _market_stock_row(
         if company_kind in {"bank", "insurance"}
         else _as_finite_float(hist.get("hist_fd_favok_avg"))
     )
-    hist_quarters = (
-        int(hist["hist_quarters"])
-        if isinstance(hist.get("hist_quarters"), int) and not isinstance(hist.get("hist_quarters"), bool)
-        else None
+    def _opt_int(key: str) -> Optional[int]:
+        val = hist.get(key)
+        return int(val) if isinstance(val, int) and not isinstance(val, bool) else None
+
+    hist_quarters = _opt_int("hist_quarters")
+    hist_fk_quarters = _opt_int("hist_fk_quarters")
+    hist_pd_dd_quarters = _opt_int("hist_pd_dd_quarters")
+    hist_fd_favok_quarters = (
+        None if company_kind in {"bank", "insurance"} else _opt_int("hist_fd_favok_quarters")
     )
     return {
         "company": symbol,
@@ -2470,6 +2670,9 @@ def _market_stock_row(
         "pd_dd_hist_diff_pct": _return_pct(valuation.get("pd_dd"), hist_pd_dd_avg),
         "fd_favok_hist_diff_pct": _return_pct(valuation.get("fd_favok"), hist_fd_favok_avg),
         "hist_quarters": hist_quarters,
+        "hist_fk_quarters": hist_fk_quarters,
+        "hist_pd_dd_quarters": hist_pd_dd_quarters,
+        "hist_fd_favok_quarters": hist_fd_favok_quarters,
         "roe_pct": _as_finite_float(cached_meta.get("roe_pct")),
         "favok_margin_pct": _as_finite_float(cached_meta.get("favok_margin_pct")),
         "net_margin_pct": _as_finite_float(cached_meta.get("net_margin_pct")),
@@ -2685,7 +2888,8 @@ _MARKET_STOCK_DELTA_TRACKED_KEYS = (
     "latest_quarter", "fundamental_period", "sector", "has_kap_cache",
     "fk", "pd_dd", "fd_favok", "fd_satis", "net_borc_favok",
     "hist_fk_avg", "hist_pd_dd_avg", "hist_fd_favok_avg",
-    "fk_hist_diff_pct", "pd_dd_hist_diff_pct", "fd_favok_hist_diff_pct", "hist_quarters",
+    "fk_hist_diff_pct", "pd_dd_hist_diff_pct", "fd_favok_hist_diff_pct",
+    "hist_quarters", "hist_fk_quarters", "hist_pd_dd_quarters", "hist_fd_favok_quarters",
     "roe_pct",
     "favok_margin_pct", "net_margin_pct", "free_float_pct", "ttm_net_kar",
     "ttm_satis_gelirleri", "ttm_favok", "ttm_fcf", "ozkaynaklar", "net_borc",
@@ -2731,6 +2935,9 @@ _MARKET_STOCK_DELTA_PAYLOAD_KEYS = (
     "pd_dd_hist_diff_pct",
     "fd_favok_hist_diff_pct",
     "hist_quarters",
+    "hist_fk_quarters",
+    "hist_pd_dd_quarters",
+    "hist_fd_favok_quarters",
     "roe_pct",
     "favok_margin_pct",
     "net_margin_pct",

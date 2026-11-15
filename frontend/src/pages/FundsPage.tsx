@@ -733,7 +733,7 @@ function searchCachedFundCatalog(queryText: string, limit: number): FundSummary[
     for (const row of rows) {
         const code = normalizeCompareSearch(row.fund_code || '');
         const haystack = normalizeCompareSearch(
-            `${row.fund_code || ''} ${row.name || ''} ${row.founder_company || ''} ${row.manager_company || ''}`,
+            `${row.fund_code || ''} ${row.name || ''} ${row.fund_type || ''} ${row.founder_company || ''} ${row.manager_company || ''}`,
         );
         if (!haystack.includes(needle)) continue;
         if (code === needle) exactCode.push(row);

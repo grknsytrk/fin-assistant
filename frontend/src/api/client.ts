@@ -9,8 +9,6 @@ import type {
     MarketStocksDeltaEvent,
     MarketStockSearchResponse,
     MarketStockIndex,
-    MarketScreenerParams,
-    MarketScreenerResponse,
     MarketIndexCode,
     MarketIndicesResponse,
     MarketIndexDetailResponse,
@@ -694,18 +692,6 @@ export const apiClient = {
         marketStocksInFlight.set(cacheKey, request);
         return request;
     },
-    marketScreener: (options: MarketScreenerParams, requestOptions?: { signal?: AbortSignal }) => {
-        const params = new URLSearchParams({ index: options.index });
-        for (const [key, rawValue] of Object.entries(options)) {
-            if (key === 'index' || rawValue == null || rawValue === false) continue;
-            const value = typeof rawValue === 'string' ? rawValue.trim() : String(rawValue);
-            if (!value) continue;
-            params.append(key, value);
-        }
-        return fetchApi<MarketScreenerResponse>(`/market/screener?${params.toString()}`, {
-            signal: requestOptions?.signal,
-        });
-    },
     getCachedMarketStocks: (index: MarketStockIndex) => marketStocksMemoryCache.get(index)?.payload || null,
     getCachedMarketStocksEntry: (index: MarketStockIndex) => marketStocksMemoryCache.get(index) || null,
     subscribeMarketStocks: (listener: (index: MarketStockIndex, payload: MarketStocksResponse) => void) => {
@@ -856,21 +842,34 @@ export const apiClient = {
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
         const ttlMs = isGlobalFxTradingHours() ? MARKET_WATCH_LIVE_TTL_MS : MARKET_WATCH_OFFHOURS_TTL_MS;
+        const shouldCache = (payload: UnifiedMarketWatchResponse) =>
+            (payload?.indices?.length ?? 0) > 0
+            || (payload?.fx?.length ?? 0) > 0
+            || (payload?.commodities?.length ?? 0) > 0;
+        const url = query ? `/market/watch/unified?${query}` : '/market/watch/unified';
+        if (options?.signal) {
+            if (!options.refresh && !options.signal.aborted) {
+                const cached = marketWatchUnifiedMemoryCache.get('unified');
+                if (cached && Date.now() - cached.fetchedAt < ttlMs) {
+                    return Promise.resolve(cached.payload);
+                }
+            }
+            return fetchApi<UnifiedMarketWatchResponse>(url, { signal: options.signal }).then((payload) => {
+                if (shouldCache(payload)) {
+                    marketWatchUnifiedMemoryCache.set('unified', { payload, fetchedAt: Date.now() });
+                }
+                return payload;
+            });
+        }
         return cachedFetch(
             marketWatchUnifiedMemoryCache,
             marketWatchUnifiedInFlight,
             'unified',
             ttlMs,
-            () => fetchApi<UnifiedMarketWatchResponse>(
-                query ? `/market/watch/unified?${query}` : '/market/watch/unified',
-                { signal: options?.signal },
-            ),
+            () => fetchApi<UnifiedMarketWatchResponse>(url),
             {
-                bypassCache: Boolean(options?.refresh || options?.signal),
-                shouldCache: (payload) =>
-                    (payload?.indices?.length ?? 0) > 0
-                    || (payload?.fx?.length ?? 0) > 0
-                    || (payload?.commodities?.length ?? 0) > 0,
+                bypassCache: Boolean(options?.refresh),
+                shouldCache,
             },
         );
     },

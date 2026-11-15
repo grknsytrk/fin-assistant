@@ -490,7 +490,9 @@ export default function MarketWatchRail({
                 .filter((row) =>
                     String(row.fund_code || '').toLocaleLowerCase('tr').includes(needle)
                     || String(row.name || '').toLocaleLowerCase('tr').includes(needle)
-                    || String(row.founder_company || '').toLocaleLowerCase('tr').includes(needle),
+                    || String(row.fund_type || '').toLocaleLowerCase('tr').includes(needle)
+                    || String(row.founder_company || '').toLocaleLowerCase('tr').includes(needle)
+                    || String(row.manager_company || '').toLocaleLowerCase('tr').includes(needle),
                 )
                 .slice(0, 20);
             for (const item of localMatches) cacheWatchlistFund(item);

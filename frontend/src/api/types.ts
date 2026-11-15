@@ -67,6 +67,9 @@ export interface MarketStockRow extends MarketUniverseRow {
   pd_dd_hist_diff_pct?: number | null;
   fd_favok_hist_diff_pct?: number | null;
   hist_quarters?: number | null;
+  hist_fk_quarters?: number | null;
+  hist_pd_dd_quarters?: number | null;
+  hist_fd_favok_quarters?: number | null;
   sma_50?: number | null;
   sma_200?: number | null;
   high_1y?: number | null;
@@ -75,33 +78,6 @@ export interface MarketStockRow extends MarketUniverseRow {
   sma_200_diff_pct?: number | null;
   high_52w_dist_pct?: number | null;
   low_52w_dist_pct?: number | null;
-}
-
-export interface MarketScreenerParams {
-  index: MarketStockIndex;
-  sector?: string;
-  min_fk?: number;
-  max_fk?: number;
-  min_pd_dd?: number;
-  max_pd_dd?: number;
-  min_fd_favok?: number;
-  max_fd_favok?: number;
-  max_net_borc_favok?: number;
-  min_roe_pct?: number;
-  min_favok_margin_pct?: number;
-  positive_net_profit?: boolean;
-  net_cash_only?: boolean;
-  sort_by?: string;
-  sort_dir?: 'asc' | 'desc';
-}
-
-export interface MarketScreenerResponse {
-  index: MarketStockIndex;
-  count: number;
-  rows: MarketStockRow[];
-  sectors: string[];
-  as_of: string | null;
-  filters?: Omit<MarketScreenerParams, 'index'>;
 }
 
 export type MarketStockIndex = 'XUTUM' | 'XU100' | 'XU030';

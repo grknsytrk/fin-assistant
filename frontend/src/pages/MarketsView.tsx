@@ -214,13 +214,13 @@ const SCREENER_RANGE_SPECS: ScreenerRangeSpec[] = [
     { card: 'returns', category: 'market', field: 'return_3m_pct', minKey: 'min_return_3m_pct', maxKey: 'max_return_3m_pct', label: '3 Ay Getiri', hint: 'Çeyreklik Performans', unit: '%' },
     { card: 'returns', category: 'market', field: 'return_ytd_pct', minKey: 'min_return_ytd_pct', maxKey: 'max_return_ytd_pct', label: 'Yılbaşı (YTD)', hint: 'Yıl Başından Bugüne', unit: '%' },
     { card: 'returns', category: 'market', field: 'return_1y_pct', minKey: 'min_return_1y_pct', maxKey: 'max_return_1y_pct', label: '1 Yıl Getiri', hint: 'Yıllık Performans', unit: '%' },
-    // Tarihsel Çarpan Ortalamaları (5Y KAP)
-    { card: 'hist_multiples', category: 'historical', field: 'fk_hist_diff_pct', minKey: 'min_fk_hist_diff_pct', maxKey: 'max_fk_hist_diff_pct', label: 'F/K Tarihsel Fark', hint: 'Negatif = 5Y ort. iskontolu', unit: '%' },
-    { card: 'hist_multiples', category: 'historical', field: 'pd_dd_hist_diff_pct', minKey: 'min_pd_dd_hist_diff_pct', maxKey: 'max_pd_dd_hist_diff_pct', label: 'PD/DD Tarihsel Fark', hint: 'Negatif = 5Y ort. iskontolu', unit: '%' },
-    { card: 'hist_multiples', category: 'historical', field: 'fd_favok_hist_diff_pct', minKey: 'min_fd_favok_hist_diff_pct', maxKey: 'max_fd_favok_hist_diff_pct', label: 'FD/FAVÖK Tarihsel Fark', hint: 'Negatif = 5Y ort. iskontolu', unit: '%' },
-    { card: 'hist_multiples', category: 'historical', field: 'hist_fk_avg', minKey: 'min_hist_fk_avg', maxKey: 'max_hist_fk_avg', label: '5Y Ort. F/K', hint: 'Tarihsel Ortalama', unit: 'x' },
-    { card: 'hist_multiples', category: 'historical', field: 'hist_pd_dd_avg', minKey: 'min_hist_pd_dd_avg', maxKey: 'max_hist_pd_dd_avg', label: '5Y Ort. PD/DD', hint: 'Tarihsel Ortalama', unit: 'x' },
-    { card: 'hist_multiples', category: 'historical', field: 'hist_fd_favok_avg', minKey: 'min_hist_fd_favok_avg', maxKey: 'max_hist_fd_favok_avg', label: '5Y Ort. FD/FAVÖK', hint: 'Tarihsel Ortalama', unit: 'x' },
+    // Tarihsel Çarpan Ortalamaları (KAP)
+    { card: 'hist_multiples', category: 'historical', field: 'fk_hist_diff_pct', minKey: 'min_fk_hist_diff_pct', maxKey: 'max_fk_hist_diff_pct', label: 'F/K Tarihsel Fark', hint: 'Negatif = KAP ort. iskontolu', unit: '%' },
+    { card: 'hist_multiples', category: 'historical', field: 'pd_dd_hist_diff_pct', minKey: 'min_pd_dd_hist_diff_pct', maxKey: 'max_pd_dd_hist_diff_pct', label: 'PD/DD Tarihsel Fark', hint: 'Negatif = KAP ort. iskontolu', unit: '%' },
+    { card: 'hist_multiples', category: 'historical', field: 'fd_favok_hist_diff_pct', minKey: 'min_fd_favok_hist_diff_pct', maxKey: 'max_fd_favok_hist_diff_pct', label: 'FD/FAVÖK Tarihsel Fark', hint: 'Negatif = KAP ort. iskontolu', unit: '%' },
+    { card: 'hist_multiples', category: 'historical', field: 'hist_fk_avg', minKey: 'min_hist_fk_avg', maxKey: 'max_hist_fk_avg', label: 'Tarihsel Ort. F/K', hint: 'Mevcut KAP çeyrek ortalaması', unit: 'x' },
+    { card: 'hist_multiples', category: 'historical', field: 'hist_pd_dd_avg', minKey: 'min_hist_pd_dd_avg', maxKey: 'max_hist_pd_dd_avg', label: 'Tarihsel Ort. PD/DD', hint: 'Mevcut KAP çeyrek ortalaması', unit: 'x' },
+    { card: 'hist_multiples', category: 'historical', field: 'hist_fd_favok_avg', minKey: 'min_hist_fd_favok_avg', maxKey: 'max_hist_fd_favok_avg', label: 'Tarihsel Ort. FD/FAVÖK', hint: 'Mevcut KAP çeyrek ortalaması', unit: 'x' },
     // Fiyat Hareketli Ortalamaları & 52H Zirve/Dip
     { card: 'technicals', category: 'historical', field: 'sma_50_diff_pct', minKey: 'min_sma_50_diff_pct', maxKey: 'max_sma_50_diff_pct', label: '50G Ort. Fark', hint: 'Fiyat / 50G Ort. Uzaklık', unit: '%' },
     { card: 'technicals', category: 'historical', field: 'sma_200_diff_pct', minKey: 'min_sma_200_diff_pct', maxKey: 'max_sma_200_diff_pct', label: '200G Ort. Fark', hint: 'Fiyat / 200G Ort. Uzaklık', unit: '%' },
@@ -322,17 +322,17 @@ const STOCK_FUNDAMENTAL_COLUMNS: StockTableColumn[] = [
     { key: 'fk', label: 'F/K', align: 'right', width: 85 },
     { key: 'pd_dd', label: 'PD/DD', align: 'right', width: 85 },
     { key: 'fd_favok', label: 'FD/FAVÖK', align: 'right', width: 95 },
-    { key: 'fd_satis', label: 'FD/Satış', align: 'right', width: 95 },
-    { key: 'hist_fk_avg', label: 'Ort. F/K', sublabel: '5Y KAP', align: 'right', width: 95 },
-    { key: 'fk_hist_diff_pct', label: 'F/K Fark %', sublabel: 'vs 5Y Ort.', align: 'right', width: 105 },
-    { key: 'hist_pd_dd_avg', label: 'Ort. PD/DD', sublabel: '5Y KAP', align: 'right', width: 100 },
-    { key: 'pd_dd_hist_diff_pct', label: 'PD/DD Fark %', sublabel: 'vs 5Y Ort.', align: 'right', width: 110 },
-    { key: 'hist_fd_favok_avg', label: 'Ort. FD/FAVÖK', sublabel: '5Y KAP', align: 'right', width: 115 },
-    { key: 'fk_sector_diff_pct', label: 'Sektör F/K %', align: 'right', width: 105 },
-    { key: 'sma_50_diff_pct', label: '50G Ort. %', align: 'right', width: 95 },
-    { key: 'sma_200_diff_pct', label: '200G Ort. %', align: 'right', width: 100 },
-    { key: 'high_52w_dist_pct', label: '52H Zirve %', align: 'right', width: 105 },
-    { key: 'net_borc_favok', label: 'Net Borç/FAVÖK', align: 'right', width: 120 },
+    { key: 'fd_satis', label: 'FD/Satış', align: 'right', width: 96 },
+    { key: 'hist_fk_avg', label: 'Ort. F/K', sublabel: 'KAP Ort.', align: 'right', width: 124 },
+    { key: 'fk_hist_diff_pct', label: 'F/K Fark %', sublabel: 'vs KAP Ort.', align: 'right', width: 108 },
+    { key: 'hist_pd_dd_avg', label: 'Ort. PD/DD', sublabel: 'KAP Ort.', align: 'right', width: 124 },
+    { key: 'pd_dd_hist_diff_pct', label: 'PD/DD Fark %', sublabel: 'vs KAP Ort.', align: 'right', width: 118 },
+    { key: 'hist_fd_favok_avg', label: 'Ort. FD/FAVÖK', sublabel: 'KAP Ort.', align: 'right', width: 140 },
+    { key: 'fk_sector_diff_pct', label: 'Sektör F/K %', align: 'right', width: 120 },
+    { key: 'sma_50_diff_pct', label: '50G Ort. %', align: 'right', width: 112 },
+    { key: 'sma_200_diff_pct', label: '200G Ort. %', align: 'right', width: 114 },
+    { key: 'high_52w_dist_pct', label: '52H Zirve %', align: 'right', width: 116 },
+    { key: 'net_borc_favok', label: 'Net Borç/FAVÖK', align: 'right', width: 130 },
     { key: 'ttm_net_kar', label: 'TTM Net Kâr', align: 'right', width: 125 },
     { key: 'ttm_fcf', label: 'TTM Serbest Nakit Akışı', align: 'right', width: 150 },
     { key: 'ttm_satis_gelirleri', label: 'TTM Satışlar', align: 'right', width: 125 },
@@ -1544,15 +1544,30 @@ const StockTableRow = memo(function StockTableRow({
                     <td className="stocks-cell-right">{formatFundamentalRatio(row.pd_dd)}</td>
                     <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_favok)}</td>
                     <td className="stocks-cell-right">{formatFundamentalRatio(row.fd_satis)}</td>
-                    <td className="stocks-cell-right">{formatFundamentalRatio(row.hist_fk_avg)}</td>
+                    <td className="stocks-cell-right" title={(row.hist_fk_quarters ?? row.hist_quarters) != null ? `Son ${row.hist_fk_quarters ?? row.hist_quarters} çeyrek KAP ortalaması` : undefined}>
+                        {formatFundamentalRatio(row.hist_fk_avg)}
+                        {row.hist_fk_avg != null && (row.hist_fk_quarters ?? row.hist_quarters) != null ? (
+                            <span className="stocks-cell-muted"> ({row.hist_fk_quarters ?? row.hist_quarters}Ç)</span>
+                        ) : null}
+                    </td>
                     <td className={`stocks-cell-right ${row.fk_hist_diff_pct == null ? 'stocks-cell-muted' : row.fk_hist_diff_pct < 0 ? 'stocks-up' : row.fk_hist_diff_pct > 0 ? 'stocks-down' : 'stocks-flat'}`}>
                         {formatTablePct(row.fk_hist_diff_pct ?? null)}
                     </td>
-                    <td className="stocks-cell-right">{formatFundamentalRatio(row.hist_pd_dd_avg)}</td>
+                    <td className="stocks-cell-right" title={(row.hist_pd_dd_quarters ?? row.hist_quarters) != null ? `Son ${row.hist_pd_dd_quarters ?? row.hist_quarters} çeyrek KAP ortalaması` : undefined}>
+                        {formatFundamentalRatio(row.hist_pd_dd_avg)}
+                        {row.hist_pd_dd_avg != null && (row.hist_pd_dd_quarters ?? row.hist_quarters) != null ? (
+                            <span className="stocks-cell-muted"> ({row.hist_pd_dd_quarters ?? row.hist_quarters}Ç)</span>
+                        ) : null}
+                    </td>
                     <td className={`stocks-cell-right ${row.pd_dd_hist_diff_pct == null ? 'stocks-cell-muted' : row.pd_dd_hist_diff_pct < 0 ? 'stocks-up' : row.pd_dd_hist_diff_pct > 0 ? 'stocks-down' : 'stocks-flat'}`}>
                         {formatTablePct(row.pd_dd_hist_diff_pct ?? null)}
                     </td>
-                    <td className="stocks-cell-right">{formatFundamentalRatio(row.hist_fd_favok_avg)}</td>
+                    <td className="stocks-cell-right" title={(row.hist_fd_favok_quarters ?? row.hist_quarters) != null ? `Son ${row.hist_fd_favok_quarters ?? row.hist_quarters} çeyrek KAP ortalaması` : undefined}>
+                        {formatFundamentalRatio(row.hist_fd_favok_avg)}
+                        {row.hist_fd_favok_avg != null && (row.hist_fd_favok_quarters ?? row.hist_quarters) != null ? (
+                            <span className="stocks-cell-muted"> ({row.hist_fd_favok_quarters ?? row.hist_quarters}Ç)</span>
+                        ) : null}
+                    </td>
                     <td className={`stocks-cell-right ${sectorDiff?.fk_sector_diff_pct == null ? 'stocks-cell-muted' : sectorDiff.fk_sector_diff_pct < 0 ? 'stocks-up' : sectorDiff.fk_sector_diff_pct > 0 ? 'stocks-down' : 'stocks-flat'}`}>
                         {formatTablePct(sectorDiff?.fk_sector_diff_pct ?? null)}
                     </td>
@@ -4077,6 +4092,12 @@ export default function MarketsView({
         return sortedStocks.slice(stockStartIndex, stockEndIndex);
     }, [sortedStocks, stockStartIndex, stockEndIndex]);
 
+    const activeStockColumns = stockTableMode === 'fundamentals' ? STOCK_FUNDAMENTAL_COLUMNS : STOCK_COLUMNS;
+    const stockTableTotalWidth = useMemo(
+        () => 48 + activeStockColumns.reduce((sum, column) => sum + (column.width || 100), 0),
+        [activeStockColumns],
+    );
+
     const stockCardsBySymbol = useMemo(() => {
         const map = new Map<string, MarketStockCardItem>();
         for (const item of stockCards?.items || []) {
@@ -5188,7 +5209,7 @@ export default function MarketsView({
                                                 <div className="screener-modal-card">
                                                     <div className="screener-card-header">
                                                         <History size={14} aria-hidden="true" />
-                                                        <span>Tarihsel Çarpan Ortalamaları (5Y KAP)</span>
+                                                        <span>Tarihsel Çarpan Ortalamaları (KAP)</span>
                                                     </div>
                                                     <div className="screener-card-content">
                                                         {renderScreenerRangeRows('hist_multiples')}
@@ -5340,11 +5361,15 @@ export default function MarketsView({
                                     <div className="stocks-table-wrap" ref={stockTableWrapCallbackRef}>
                                         <table
                                             className={`stocks-table${stockTableMode === 'fundamentals' ? ' stocks-fundamental-table' : ''}`}
+                                            style={{
+                                                width: `${stockTableTotalWidth}px`,
+                                                minWidth: stockTableMode === 'fundamentals' ? `${stockTableTotalWidth}px` : '100%',
+                                            }}
                                             aria-rowcount={sortedStocks.length + 1}
                                         >
                                             <colgroup>
-                                                <col style={{ width: '44px', minWidth: '44px' }} />
-                                                {(stockTableMode === 'fundamentals' ? STOCK_FUNDAMENTAL_COLUMNS : STOCK_COLUMNS).map((column) => (
+                                                <col style={{ width: '48px', minWidth: '48px' }} />
+                                                {activeStockColumns.map((column) => (
                                                     <col
                                                         key={column.key}
                                                         style={{ width: `${column.width || 100}px`, minWidth: `${column.width || 100}px` }}
@@ -5354,7 +5379,7 @@ export default function MarketsView({
                                             <thead>
                                                 <tr>
                                                     <th className="stocks-rank">#</th>
-                                                    {(stockTableMode === 'fundamentals' ? STOCK_FUNDAMENTAL_COLUMNS : STOCK_COLUMNS).map((column) => (
+                                                    {activeStockColumns.map((column) => (
                                                         <th
                                                             key={column.key}
                                                             className={column.align === 'right' ? 'stocks-cell-right' : undefined}
@@ -5371,8 +5396,10 @@ export default function MarketsView({
                                                                         : 'none'
                                                                 }
                                                             >
-                                                                <span>{stockTableMode === 'fundamentals' ? column.label : getColumnLabel(column.key, returnMode)}</span>
-                                                                {column.sublabel && <small>{column.sublabel}</small>}
+                                                                <span className="stocks-sort-label-stack">
+                                                                    <span>{stockTableMode === 'fundamentals' ? column.label : getColumnLabel(column.key, returnMode)}</span>
+                                                                    {column.sublabel && <small>{column.sublabel}</small>}
+                                                                </span>
                                                                 {stockSort.key === column.key && (
                                                                     <span className="stocks-sort-indicator">
                                                                         {stockSort.direction === 'asc' ? '↑' : '↓'}
@@ -5387,7 +5414,7 @@ export default function MarketsView({
                                                 {stockTopSpacerHeight > 0 && (
                                                     <tr className="stocks-spacer-row" style={{ height: `${stockTopSpacerHeight}px` }} aria-hidden="true">
                                                         <td
-                                                            colSpan={(stockTableMode === 'fundamentals' ? STOCK_FUNDAMENTAL_COLUMNS.length : STOCK_COLUMNS.length) + 1}
+                                                            colSpan={activeStockColumns.length + 1}
                                                             style={{ height: `${stockTopSpacerHeight}px` }}
                                                         />
                                                     </tr>
@@ -5410,7 +5437,7 @@ export default function MarketsView({
                                                 {stockBottomSpacerHeight > 0 && (
                                                     <tr className="stocks-spacer-row" style={{ height: `${stockBottomSpacerHeight}px` }} aria-hidden="true">
                                                         <td
-                                                            colSpan={(stockTableMode === 'fundamentals' ? STOCK_FUNDAMENTAL_COLUMNS.length : STOCK_COLUMNS.length) + 1}
+                                                            colSpan={activeStockColumns.length + 1}
                                                             style={{ height: `${stockBottomSpacerHeight}px` }}
                                                         />
                                                     </tr>

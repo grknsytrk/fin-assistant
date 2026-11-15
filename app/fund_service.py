@@ -169,9 +169,9 @@ FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS = int(
     os.getenv("RAGFIN_FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS", "2")
 )
 FUNDS_HOLDINGS_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_TTL_SECONDS", str(7 * 24 * 60 * 60)))
-# KAP's portfolio PDF is cached for days; revalidating its disclosure list
-# every 2 hours catches newly published monthly reports without hammering KAP
-# or rewriting Supabase JSON cache on every poll.
+# KAP's portfolio PDF is monthly; revalidating its disclosure list every
+# 2 hours catches newly published monthly reports without hammering KAP or
+# rewriting Supabase JSON cache on unchanged reports.
 FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS", "7200"))
 FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS", str(30 * 60)))
 FUNDS_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_FUNDS_HISTORY_CHUNK_DAYS", "60"))

@@ -9,7 +9,6 @@ EXPECTED_METHOD_PATHS = {
     ("GET", "/market/universe"),
     ("GET", "/market/stocks/search"),
     ("GET", "/market/stocks"),
-    ("GET", "/market/screener"),
     ("GET", "/market/stream"),
     ("GET", "/market/stocks/cards"),
     ("GET", "/market/stocks/cards/chart"),

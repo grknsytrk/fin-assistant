@@ -97,6 +97,7 @@ def bootstrap_application_storage() -> None:
     if snapshot_sync.get("upserted_count") or snapshot_sync.get("error_count"):
         LOGGER.info("KAP financial snapshot sync: %s", snapshot_sync)
     _market_service._hydrate_stock_return_bases_from_disk()
+    _market_service._hydrate_stock_hist_multiples_from_disk()
     _market_service._schedule_xutum_return_bases_warmup_if_needed()
 
 

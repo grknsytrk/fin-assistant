@@ -249,13 +249,18 @@ def _invalidate_flow_l1_read_caches() -> None:
     _FLOW_PAGE_L1_CACHE.clear()
 
 
+def _hashed_database_scope() -> str:
+    raw = os.getenv("RAGFIN_DATABASE_URL", "") or os.getenv("DATABASE_URL", "")
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16] if raw else ""
+
+
 def _flow_l1_scope(backend: Any = None) -> tuple[Any, ...]:
     resolved = get_cache() if backend is None else backend
     return (
         cache_reset_epoch(),
         id(resolved),
         bool(database_enabled()),
-        os.getenv("RAGFIN_DATABASE_URL", "") or os.getenv("DATABASE_URL", ""),
+        _hashed_database_scope(),
     )
 
 
@@ -278,7 +283,7 @@ def clear_persisted_flow_hashes() -> None:
 def _flow_hash_scope() -> tuple[Any, ...]:
     return (
         bool(database_enabled()),
-        os.getenv("RAGFIN_DATABASE_URL", "") or os.getenv("DATABASE_URL", ""),
+        _hashed_database_scope(),
         id(get_cache()),
     )
 
@@ -319,7 +324,8 @@ def persist_flow_items(items: list[dict[str, Any]], *, source: str, as_of: Optio
         except Exception:
             LOGGER.warning("durable KAP flow upsert failed", exc_info=True)
 
-    if changed_rows:
+    db_ok = (not database_enabled()) or database_written
+    if changed_rows and db_ok:
         with _PERSISTED_FLOW_HASH_LOCK:
             if len(_PERSISTED_FLOW_HASHES) > _PERSISTED_FLOW_HASH_MAX:
                 _PERSISTED_FLOW_HASHES.clear()
@@ -483,6 +489,12 @@ def store_is_configured() -> bool:
     return database_enabled() or get_cache().name == "redis" or bool(_redis_events())
 
 
+def _is_cached_flow_head(value: Any) -> bool:
+    return isinstance(value, dict) and (
+        bool(value.get("latest_cursor")) or value.get("refresh_status") == "empty"
+    )
+
+
 def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[str, Any]:
     del limit  # Head queries only inspect the newest cursor.
     norm_category = str(category or "").strip() or None
@@ -490,10 +502,10 @@ def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[st
     cache_key = f"{FLOW_HEAD_CACHE_PREFIX}cursor:{norm_category or ''}"
     l1_key = (*_flow_l1_scope(backend), cache_key)
     cached_l1 = _FLOW_HEAD_L1_CACHE.get(l1_key)
-    if isinstance(cached_l1, dict) and cached_l1.get("latest_cursor"):
+    if _is_cached_flow_head(cached_l1):
         return dict(cached_l1)
     cached = backend.get(cache_key)
-    if isinstance(cached, dict) and cached.get("latest_cursor"):
+    if _is_cached_flow_head(cached):
         _FLOW_HEAD_L1_CACHE[l1_key] = dict(cached)
         return dict(cached)
 
@@ -526,12 +538,16 @@ def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[st
             }
 
     if head_row is None:
-        return {
+        empty_result = {
             "latest_cursor": None,
             "as_of": None,
             "last_successful_refresh": None,
             "refresh_status": "empty",
         }
+        empty_ttl = min(30, max(1, FLOW_HEAD_CACHE_TTL_SECONDS))
+        backend.set(cache_key, empty_result, ttl_seconds=empty_ttl)
+        _FLOW_HEAD_L1_CACHE[l1_key] = dict(empty_result)
+        return empty_result
 
     status = get_flow_status()
     result = {
