@@ -499,7 +499,14 @@ function App() {
       )}
 
       <main className="app-main-full">
-        <Suspense fallback={<div className="app-route-loading">Yükleniyor...</div>}>
+        <Suspense
+          fallback={
+            <div className="app-route-loading" role="status" aria-live="polite">
+              <span className="spinner" aria-hidden="true" />
+              <span>Yükleniyor…</span>
+            </div>
+          }
+        >
           <Routes>
             <Route path={ROUTE_PATHS.landing} element={<LandingRoute />} />
 

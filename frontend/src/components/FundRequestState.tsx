@@ -1,3 +1,4 @@
+import { AlertCircle } from 'lucide-react';
 import './FundRequestState.css';
 
 interface FundRequestStateProps {
@@ -6,40 +7,6 @@ interface FundRequestStateProps {
     fundName?: string | null;
     compact?: boolean;
     onRetry?: () => void;
-}
-
-function FundPortfolioAnimation() {
-    return (
-        <svg
-            className="fund-request-art"
-            viewBox="0 0 228 144"
-            aria-hidden="true"
-            focusable="false"
-        >
-            <rect className="fund-request-card" x="42" y="13" width="126" height="104" rx="10" />
-            <rect className="fund-request-mark" x="54" y="25" width="24" height="24" rx="6" />
-            <path className="fund-request-mark-line" d="M61 42V34l5 3 5-6v11" />
-            <path className="fund-request-copy-line" d="M87 31h48M87 40h34" />
-
-            <rect className="fund-request-chart-panel" x="54" y="57" width="102" height="47" rx="5" />
-            <path className="fund-request-grid-line" d="M63 91h84M63 78h84M63 65h84" />
-            <g className="fund-request-bars">
-                <rect x="66" y="84" width="8" height="10" rx="2" />
-                <rect x="81" y="77" width="8" height="17" rx="2" />
-                <rect x="96" y="80" width="8" height="14" rx="2" />
-                <rect x="111" y="69" width="8" height="25" rx="2" />
-                <rect x="126" y="63" width="8" height="31" rx="2" />
-            </g>
-            <path className="fund-request-trend" d="m65 83 18-8 18 4 17-14 17 4" />
-
-            <g className="fund-request-units">
-                <path d="M177 93c0-3.6 8.1-6.5 18-6.5s18 2.9 18 6.5v17c0 3.6-8.1 6.5-18 6.5s-18-2.9-18-6.5V93Z" />
-                <ellipse cx="195" cy="93" rx="18" ry="6.5" />
-                <path d="M177 101c0 3.6 8.1 6.5 18 6.5s18-2.9 18-6.5" />
-                <path d="M177 109c0 3.6 8.1 6.5 18 6.5s18-2.9 18-6.5" />
-            </g>
-        </svg>
-    );
 }
 
 export default function FundRequestState({
@@ -52,32 +19,105 @@ export default function FundRequestState({
     const isLoading = mode === 'loading';
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
 
+    if (isLoading) {
+        const statusLabel = normalizedSymbol
+            ? `${normalizedSymbol} fon bilgileri yükleniyor`
+            : 'Fon bilgileri yükleniyor';
+
+        return (
+            <section
+                className={`fund-request-state loading${compact ? ' compact' : ''}`}
+                role="status"
+                aria-live="polite"
+                aria-label={statusLabel}
+            >
+                <div className="fund-request-skeleton-hero" aria-hidden="true">
+                    <div className="fund-request-skeleton-title-group">
+                        <div className="fund-request-skeleton-badge-row">
+                            {normalizedSymbol ? (
+                                <span className="fund-request-symbol-chip">{normalizedSymbol}</span>
+                            ) : (
+                                <span className="fund-request-sk-block fund-request-sk-code" />
+                            )}
+                            <span className="fund-request-sk-block fund-request-sk-kicker" />
+                        </div>
+                        {fundName ? (
+                            <p className="fund-request-loading-name">{fundName}</p>
+                        ) : (
+                            <span className="fund-request-sk-block fund-request-sk-title" />
+                        )}
+                        <span className="fund-request-sk-block fund-request-sk-subtitle" />
+                    </div>
+                    <div className="fund-request-skeleton-quote">
+                        <span className="fund-request-sk-block fund-request-sk-price" />
+                        <span className="fund-request-sk-block fund-request-sk-delta" />
+                    </div>
+                </div>
+
+                <div className="fund-request-skeleton-stats" aria-hidden="true">
+                    <div className="fund-request-skeleton-stat-card">
+                        <span className="fund-request-sk-block fund-request-sk-stat-label" />
+                        <span className="fund-request-sk-block fund-request-sk-stat-value" />
+                    </div>
+                    <div className="fund-request-skeleton-stat-card">
+                        <span className="fund-request-sk-block fund-request-sk-stat-label" />
+                        <span className="fund-request-sk-block fund-request-sk-stat-value" />
+                    </div>
+                    <div className="fund-request-skeleton-stat-card">
+                        <span className="fund-request-sk-block fund-request-sk-stat-label" />
+                        <span className="fund-request-sk-block fund-request-sk-stat-value" />
+                    </div>
+                    <div className="fund-request-skeleton-stat-card">
+                        <span className="fund-request-sk-block fund-request-sk-stat-label" />
+                        <span className="fund-request-sk-block fund-request-sk-stat-value" />
+                    </div>
+                </div>
+
+                {!compact ? (
+                    <div className="fund-request-skeleton-grid" aria-hidden="true">
+                        <div className="fund-request-skeleton-panel">
+                            <span className="fund-request-sk-block fund-request-sk-panel-head" />
+                            <span className="fund-request-sk-block fund-request-sk-panel-body" />
+                        </div>
+                        <div className="fund-request-skeleton-panel">
+                            <span className="fund-request-sk-block fund-request-sk-panel-head" />
+                            <span className="fund-request-sk-block fund-request-sk-panel-body" />
+                        </div>
+                    </div>
+                ) : null}
+            </section>
+        );
+    }
+
     return (
         <section
-            className={`fund-request-state ${mode}${compact ? ' compact' : ''}`}
-            role={isLoading ? 'status' : 'alert'}
-            aria-live={isLoading ? 'polite' : 'assertive'}
+            className={`fund-request-state error${compact ? ' compact' : ''}`}
+            role="alert"
+            aria-live="assertive"
         >
-            <div className="fund-request-illustration">
-                <FundPortfolioAnimation />
+            <div className="fund-request-error-icon" aria-hidden="true">
+                <AlertCircle size={18} />
             </div>
             <div className="fund-request-copy">
                 <p className="fund-request-kicker">
-                    Yatırım fonu{normalizedSymbol ? <span>{normalizedSymbol}</span> : null}
+                    Yatırım Fonu
+                    {normalizedSymbol ? (
+                        <span className="fund-request-symbol-chip">{normalizedSymbol}</span>
+                    ) : null}
                 </p>
-                <h2>{isLoading ? 'Fon bilgileri hazırlanıyor' : 'Fon bilgisine şu an ulaşamadık'}</h2>
+                <h2>Fon bilgisine şu an ulaşılamıyor</h2>
                 {fundName ? <p className="fund-request-name">{fundName}</p> : null}
                 <p className="fund-request-description">
-                    {isLoading
-                        ? 'Fonun fiyat ve portföy verileri getiriliyor.'
-                        : 'İstek zamanında tamamlanmadı. Sayfayı yenilemeden tekrar deneyebilirsiniz.'}
+                    İstek zamanında tamamlanamadı. Sayfayı yenilemeden tekrar deneyebilirsiniz.
                 </p>
-                {!isLoading && onRetry ? (
-                    <button type="button" className="fund-request-retry" onClick={onRetry}>
-                        Yeniden dene
-                    </button>
-                ) : null}
             </div>
+            {onRetry ? (
+                <div className="fund-request-actions">
+                    <button type="button" className="fund-request-retry" onClick={onRetry}>
+                        Tekrar Dene
+                    </button>
+                </div>
+            ) : null}
         </section>
     );
 }

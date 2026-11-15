@@ -1,4 +1,3 @@
-
 interface FinLoaderProps {
     message?: string;
     className?: string;
@@ -6,11 +5,13 @@ interface FinLoaderProps {
 
 export function FinLoader({ message = 'Yükleniyor', className = '' }: FinLoaderProps) {
     return (
-        <div className={`fin-loader-container ${className}`}>
-            <div className="fin-loader-spinner-wrap">
-                <div className="fin-loader-pulse-ring" />
-                <div className="fin-loader-ring-outer" />
-                <div className="fin-loader-ring-inner" />
+        <div
+            className={`fin-loader-container${className ? ` ${className}` : ''}`}
+            role="status"
+            aria-live="polite"
+        >
+            <div className="fin-loader-spinner-wrap" aria-hidden="true">
+                <div className="fin-loader-ring" />
             </div>
             <span className="fin-loader-text">{message}</span>
         </div>

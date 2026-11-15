@@ -198,25 +198,11 @@
     background: var(--surface-color);
     box-shadow: var(--shadow-sm);
     animation: kap-slide-up 420ms cubic-bezier(0.2, 0.9, 0.2, 1) both;
-    transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
-}
-
-.kap-multiple-group::before {
-    content: '';
-    position: absolute;
-    left: 10px;
-    right: 10px;
-    top: 0;
-    height: 2px;
-    border-radius: 999px;
-    background: var(--accent-color);
-    opacity: 0.82;
+    transition: border-color 0.18s ease;
 }
 
 .kap-multiple-group:hover {
-    transform: translateY(-2px);
-    border-color: color-mix(in srgb, var(--accent-color) 35%, var(--surface-border));
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.18);
+    border-color: color-mix(in srgb, var(--accent-color) 45%, var(--surface-border));
 }
 
 

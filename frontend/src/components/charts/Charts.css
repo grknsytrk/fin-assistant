@@ -31,15 +31,13 @@
 
 .kap-chart-card-clickable {
     cursor: zoom-in;
-    transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+    transition: border-color 0.18s ease;
 }
 
 .kap-chart-card-clickable:hover,
 .kap-chart-card-clickable:focus-visible {
     border-color: color-mix(in srgb, var(--accent-color) 58%, var(--surface-border));
-    box-shadow: 0 18px 42px color-mix(in srgb, #000 28%, transparent);
     outline: none;
-    transform: translateY(-2px);
 }
 
 .kap-chart-card h4 {
@@ -259,9 +257,7 @@
     justify-content: center;
     padding: clamp(1rem, 3vw, 2rem);
     overflow: auto;
-    background: color-mix(in srgb, #020617 76%, transparent);
-    backdrop-filter: blur(5px);
-    -webkit-backdrop-filter: blur(5px);
+    background: rgba(10, 12, 15, 0.82);
 }
 
 .kap-chart-modal {
@@ -277,10 +273,10 @@
     width: 100%;
     max-height: calc(100dvh - 3rem);
     padding: clamp(1.1rem, 2vw, 1.5rem);
-    border-color: color-mix(in srgb, var(--surface-border) 86%, var(--accent-color));
-    border-radius: 8px;
-    background: color-mix(in srgb, #101318 92%, var(--surface-color));
-    box-shadow: 0 24px 64px rgb(0 0 0 / 44%);
+    border-color: var(--surface-border);
+    border-radius: 6px;
+    background: var(--surface-color);
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
 }
 
