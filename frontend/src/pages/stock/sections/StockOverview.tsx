@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
-import { Check, ChevronRight, ChevronUp, RefreshCw, RotateCcw, Sparkles } from 'lucide-react';
+import { BarChart3, Check, ChevronRight, ChevronUp, RefreshCw, RotateCcw } from 'lucide-react';
 import type {
     KapSnapshotResponse,
     KapQuarter,
@@ -1358,7 +1358,7 @@ export default function StockOverview({
                                     </>
                                 ) : (
                                     <>
-                                        <Sparkles size={13} aria-hidden="true" />
+                                        <BarChart3 size={13} aria-hidden="true" />
                                         <span>AI Analiz ve Puan</span>
                                     </>
                                 )}

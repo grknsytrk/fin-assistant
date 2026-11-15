@@ -1,27 +1,11 @@
 .mw-strip {
     position: relative;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 88%, transparent);
+    border: 1px solid var(--surface-border);
     border-radius: var(--border-radius);
     padding: 0.95rem 1rem;
-    background:
-        linear-gradient(135deg, color-mix(in srgb, var(--surface-color) 92%, transparent), color-mix(in srgb, var(--surface-color) 86%, var(--bg-color))),
-        radial-gradient(circle at top right, color-mix(in srgb, var(--accent-color) 10%, transparent), transparent 52%);
+    background: var(--surface-color);
     box-shadow: var(--shadow-sm);
     overflow: hidden;
-}
-
-.mw-strip::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 0;
-    height: 1px;
-    background: linear-gradient(90deg,
-            transparent,
-            color-mix(in srgb, var(--accent-color) 55%, transparent),
-            transparent);
-    opacity: 0.85;
 }
 
 .mw-strip-header {
@@ -268,10 +252,6 @@
     box-shadow: none;
     overflow: hidden;
     position: relative;
-}
-
-.mw-strip-compact::before {
-    display: none;
 }
 
 .mw-ticker-viewport {

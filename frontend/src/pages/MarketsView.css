@@ -185,9 +185,9 @@
 .market-terminal-shell {
     flex: 0 0 auto;
     margin-top: 0.25rem;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 88%, transparent);
+    border: 1px solid var(--surface-border);
     border-radius: var(--border-radius);
-    background: #171716;
+    background: var(--surface-color);
     box-shadow: var(--shadow-sm);
     overflow: hidden;
 }
@@ -209,8 +209,8 @@
     justify-content: space-between;
     gap: 1rem;
     padding: 0 1.15rem;
-    background: #141413;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    background: color-mix(in srgb, var(--bg-color) 65%, var(--surface-color));
+    border-bottom: 1px solid var(--surface-border);
 }
 
 .market-session-date {
@@ -569,45 +569,43 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 86%, transparent);
-    background: #171716;
+    border: 1px solid var(--surface-border);
+    background: var(--surface-color);
     cursor: pointer;
-    overflow: visible;
-    transition: border-color 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease, transform 0.16s ease, z-index 0s;
+    overflow: hidden;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease, z-index 0s;
     position: relative;
 }
 
 .stock-card:hover,
 .stock-card:focus-within {
-    border-color: color-mix(in srgb, var(--accent-color) 38%, var(--surface-border));
-    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--accent-color) 48%, var(--surface-border));
     z-index: 100;
 }
 
 .stock-card-dragging {
     border-color: color-mix(in srgb, var(--accent-color) 62%, var(--surface-border));
-    box-shadow: 0 10px 22px rgba(0, 0, 0, 0.28);
+    box-shadow: var(--shadow-lg);
     opacity: 0.78;
     z-index: 110;
 }
 
 .stock-card-controls {
     position: absolute;
-    top: -0.45rem;
-    right: 0.58rem;
+    top: 0.45rem;
+    right: 0.5rem;
     z-index: 8;
     display: inline-flex;
     align-items: center;
     gap: 2px;
     padding: 2px;
-    border: 1px solid color-mix(in srgb, var(--text-secondary) 22%, transparent);
-    border-radius: 999px;
-    background: color-mix(in srgb, #2f2f2f 88%, #111);
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.38);
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    background: var(--surface-color);
+    box-shadow: var(--shadow-md);
     opacity: 0;
     pointer-events: none;
-    transform: translateY(3px);
-    transition: opacity 0.14s ease, transform 0.14s ease, border-color 0.14s ease;
+    transition: opacity 0.14s ease, border-color 0.14s ease;
 }
 
 .stock-card:hover .stock-card-controls,
@@ -615,7 +613,6 @@
 .stock-card-dragging .stock-card-controls {
     opacity: 1;
     pointer-events: auto;
-    transform: translateY(0);
 }
 
 .stock-card-control {
@@ -870,9 +867,9 @@
     height: 164px;
     min-height: 164px;
     margin-top: 0.65rem;
-    border-top: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
-    background: #141413;
+    border-top: 1px solid var(--surface-border);
+    border-bottom: 1px solid var(--surface-border);
+    background: color-mix(in srgb, var(--bg-color) 65%, var(--surface-color));
     display: flex;
     flex-direction: column;
 }
@@ -1010,14 +1007,6 @@
     100% { background-position: 200% 0; }
 }
 
-@keyframes stock-card-inline-line-draw {
-    0% { stroke-dashoffset: 100; opacity: 0; }
-    12% { opacity: 0.9; }
-    72% { stroke-dashoffset: 0; opacity: 0.92; }
-    88% { stroke-dashoffset: 0; opacity: 0.92; }
-    100% { stroke-dashoffset: 0; opacity: 0; }
-}
-
 .stock-card-inline-skeleton-pulse {
     background: linear-gradient(90deg, #1c1c1b 25%, #2a2a29 50%, #1c1c1b 75%);
     background-size: 200% 100%;
@@ -1093,24 +1082,19 @@
 }
 
 .stock-card-inline-chart-gridline {
-    stroke: rgba(255, 255, 255, 0.06);
+    stroke: color-mix(in srgb, var(--surface-border) 75%, transparent);
     stroke-width: 1;
     stroke-dasharray: 4 5;
 }
 
-.stock-card-inline-chart-area {
-    opacity: 0.5;
-}
-
-.stock-card-inline-chart-line {
-    fill: none;
-    stroke: rgba(255, 255, 255, 0.28);
-    stroke-width: 2;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-dasharray: 100;
-    stroke-dashoffset: 100;
-    animation: stock-card-inline-line-draw 2.05s linear infinite;
+.stock-card-inline-chart-baseline {
+    position: absolute;
+    top: 52%;
+    left: 0.75rem;
+    right: 0.75rem;
+    height: 2px;
+    border-radius: 1px;
+    transform: translateY(-50%);
 }
 
 .markets-workspace-with-rail .stock-card-inline-skeleton-price {
@@ -1230,28 +1214,26 @@
 .stock-card-performance-tooltip {
     position: fixed;
     pointer-events: none;
-    transform: translate(-50%, -100%) translateY(6px) scale(0.985);
-    background: rgba(32, 33, 35, 0.96);
-    color: #f4f4f4;
-    padding: 0.46rem 0.62rem;
-    border-radius: 8px;
+    transform: translate(-50%, -100%) translateY(6px);
+    background: var(--surface-color);
+    color: var(--text-primary);
+    padding: 0.45rem 0.6rem;
+    border-radius: 6px;
     font-size: 0.7rem;
     z-index: 9999;
     opacity: 0;
     visibility: hidden;
-    transition: opacity 0.12s ease, visibility 0.12s ease, transform 0.16s cubic-bezier(0.2, 0, 0, 1);
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.36), 0 2px 8px rgba(0, 0, 0, 0.22);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    transition: opacity 0.12s ease, visibility 0.12s ease, transform 0.14s ease;
+    box-shadow: var(--shadow-lg);
+    border: 1px solid var(--surface-border);
     white-space: normal;
-    backdrop-filter: blur(16px) saturate(115%);
-    -webkit-backdrop-filter: blur(16px) saturate(115%);
 }
 
 
 .stock-card-performance-tooltip.active {
     opacity: 1;
     visibility: visible;
-    transform: translate(-50%, -100%) translateY(-2px) scale(1);
+    transform: translate(-50%, -100%) translateY(-2px);
 }
 
 
@@ -1277,7 +1259,7 @@
     overflow: visible;
     text-overflow: clip;
     white-space: nowrap;
-    color: #b4b4b4;
+    color: var(--text-secondary);
     font-size: 0.6rem;
     font-weight: 600;
     line-height: 1.2;
@@ -1288,10 +1270,10 @@
     overflow: visible;
     text-overflow: clip;
     white-space: nowrap;
-    color: #f4f4f4;
+    color: var(--text-primary);
     font-family: var(--font-mono);
     font-size: 0.74rem;
-    font-weight: 800;
+    font-weight: 700;
     line-height: 1.15;
 }
 
@@ -1361,26 +1343,10 @@
 .market-page .panel {
     position: relative;
     background: var(--surface-color);
-    border: 1px solid color-mix(in srgb, var(--surface-border) 92%, transparent);
+    border: 1px solid var(--surface-border);
     border-radius: var(--border-radius);
     padding: 1.1rem 1.15rem 1.15rem;
     box-shadow: var(--shadow-sm);
-}
-
-.market-page .panel::before {
-    content: '';
-    position: absolute;
-    top: -1px;
-    left: 0;
-    right: 0;
-    height: 1px;
-    background: linear-gradient(
-        90deg,
-        transparent,
-        color-mix(in srgb, var(--accent-color) 60%, transparent),
-        transparent
-    );
-    opacity: 0.65;
 }
 
 .market-page .panel-header {
@@ -1631,14 +1597,16 @@
 .stocks-panel-title-group {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
+    gap: 0.45rem 0.65rem;
+    min-width: 0;
     flex-wrap: wrap;
 }
 
 .stocks-panel-title-group h2 {
     margin: 0;
-    font-size: 1.125rem;
+    font-size: 1.1rem;
     font-weight: 700;
+    line-height: 1.2;
     letter-spacing: -0.015em;
     color: var(--text-primary);
 }
@@ -1991,8 +1959,7 @@
     display: grid;
     place-items: center;
     padding: 1.25rem;
-    background: rgba(0, 0, 0, 0.76);
-    backdrop-filter: blur(8px);
+    background: rgba(10, 12, 15, 0.8);
     animation: screener-fade-in 0.16s ease-out;
 }
 
@@ -2008,10 +1975,10 @@
     max-height: min(90vh, 800px);
     display: flex;
     flex-direction: column;
-    background: #101216;
-    border: 1px solid rgba(255, 255, 255, 0.09);
-    border-radius: 12px;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.68);
+    background: var(--surface-color);
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
     animation: screener-zoom-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -3071,41 +3038,49 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 1rem;
-    padding: 1.2rem 0;
-    border-top: 1px solid color-mix(in srgb, var(--surface-border) 72%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 72%, transparent);
+    gap: 1.25rem;
+    padding: 1rem 0;
+    border-top: 1px solid var(--surface-border);
+    border-bottom: 1px solid var(--surface-border);
 }
 
 .indices-hero-main {
     display: flex;
     align-items: center;
-    gap: 0.95rem;
+    gap: 0.9rem;
+    min-width: 0;
+    flex: 1;
+}
+
+.indices-hero-main > div {
+    min-width: 0;
 }
 
 .indices-logo {
-    width: 64px;
-    height: 64px;
-    flex: 0 0 64px;
+    width: 60px;
+    height: 60px;
+    flex: 0 0 60px;
 }
 
 .indices-hero h2 {
     margin: 0;
     color: var(--text-primary);
-    font-size: 2.1rem;
-    line-height: 1;
+    font-size: 2rem;
+    line-height: 1.05;
 }
 
 .indices-hero p {
-    margin: 0.35rem 0 0;
+    margin: 0.3rem 0 0;
     color: var(--text-secondary);
+    line-height: 1.35;
 }
 
 .indices-hero-price {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 0.18rem;
+    flex-shrink: 0;
+    gap: 0.24rem;
     font-family: var(--font-mono);
 }
 
@@ -3925,8 +3900,8 @@
 }
 
 .stock-card-skeleton {
-    background: #171716;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 86%, transparent);
+    background: var(--surface-color);
+    border: 1px solid var(--surface-border);
     border-radius: 0;
     padding: 1rem 0.85rem;
     display: flex;
@@ -4770,5 +4745,153 @@
 @media (max-width: 760px) {
     .market-page > .market-content.mobile-watchlist-search-open {
         z-index: 160;
+    }
+}
+
+/* Structural Table & Index Detail Skeletons */
+.mv-table-skeleton {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    padding: 0.25rem 0 0.5rem;
+}
+
+.mv-table-skeleton-head,
+.mv-table-skeleton-row {
+    display: grid;
+    grid-template-columns: 36px minmax(140px, 2fr) repeat(5, minmax(60px, 1fr));
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.65rem 1.15rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 55%, transparent);
+}
+
+.mv-table-skeleton-head.is-indices,
+.mv-table-skeleton-row.is-indices {
+    grid-template-columns: 36px minmax(140px, 2fr) repeat(4, minmax(60px, 1fr));
+}
+
+.mv-table-skeleton-head {
+    border-bottom: 1px solid var(--surface-border);
+    padding-top: 0.6rem;
+    padding-bottom: 0.6rem;
+}
+
+.mv-table-skeleton-row:last-child {
+    border-bottom: 0;
+}
+
+.mv-sk-symbol {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    min-width: 0;
+}
+
+.mv-sk-avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+
+.mv-sk-cell {
+    display: block;
+    height: 12px;
+    border-radius: 3px;
+}
+
+.mv-sk-cell.is-xs {
+    width: 20px;
+}
+
+.mv-sk-cell.is-sm {
+    width: 68%;
+    justify-self: end;
+}
+
+.mv-sk-cell.is-md {
+    width: 82%;
+    justify-self: end;
+}
+
+.mv-sk-cell.is-lg {
+    width: 78%;
+}
+
+.mv-index-detail-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding-top: 0.5rem;
+}
+
+.mv-index-hero-skeleton {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 0;
+    border-top: 1px solid var(--surface-border);
+    border-bottom: 1px solid var(--surface-border);
+}
+
+.mv-index-hero-left {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+}
+
+.mv-index-logo-sk {
+    width: 60px;
+    height: 60px;
+    border-radius: 6px;
+}
+
+.mv-index-title-sk {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    width: 180px;
+}
+
+.mv-index-hero-right {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.45rem;
+    width: 120px;
+}
+
+.mv-index-returns-sk {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+}
+
+.mv-index-return-card-sk {
+    width: 100px;
+    height: 52px;
+    border-radius: 6px;
+}
+
+.mv-index-chart-sk {
+    width: 100%;
+    height: 280px;
+    border-radius: 6px;
+}
+
+@media (max-width: 760px) {
+    .mv-table-skeleton-head,
+    .mv-table-skeleton-row,
+    .mv-table-skeleton-head.is-indices,
+    .mv-table-skeleton-row.is-indices {
+        grid-template-columns: 28px minmax(110px, 2fr) repeat(2, minmax(56px, 1fr));
+        padding: 0.6rem 0.85rem;
+    }
+
+    .mv-table-skeleton-head > :nth-child(n+5),
+    .mv-table-skeleton-row > :nth-child(n+5) {
+        display: none;
     }
 }

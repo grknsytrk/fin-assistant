@@ -20,7 +20,6 @@ import {
     Plus,
     RefreshCw,
     Search,
-    Sparkles,
     SlidersHorizontal,
     Trash2,
     X,
@@ -1119,7 +1118,59 @@ export default function ModelPortfolioPage() {
                         {/* TAB 1: Active Positions */}
                         {activeTab === 'active' && (
                             loading && !portfolioData ? (
-                                <div className="mp-empty-box">Model portföy verileri yükleniyor...</div>
+                                <div className="mp-table-wrap" role="status" aria-busy="true" aria-label="Model portföy verileri yükleniyor">
+                                    <table className="mp-table mp-active-table mp-table-skeleton">
+                                        <thead>
+                                            <tr>
+                                                <th>Hisse</th>
+                                                <th className="num">Giriş</th>
+                                                <th className="num">Güncel</th>
+                                                <th className="mp-col-target">Hedef ve potansiyel</th>
+                                                <th className="num">Ağırlık</th>
+                                                <th className="num">Net getiri</th>
+                                                <th className="num">XU100’e göre</th>
+                                                <th className="act"><span className="mp-sr-only">İşlemler</span></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {[0, 1, 2, 3, 4, 5].map((idx) => (
+                                                <tr key={idx} className="mp-row mp-skeleton-row" aria-hidden="true">
+                                                    <td>
+                                                        <div className="mp-stock-cell">
+                                                            <span className="mp-skel-block mp-skel-logo" />
+                                                            <div className="mp-stock-meta">
+                                                                <span className="mp-skel-block mp-skel-ticker" />
+                                                                <span className="mp-skel-block mp-skel-company" />
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                    <td className="num" data-label="Giriş">
+                                                        <span className="mp-skel-block mp-skel-num" />
+                                                        <span className="mp-skel-block mp-skel-sub" />
+                                                    </td>
+                                                    <td className="num" data-label="Güncel">
+                                                        <span className="mp-skel-block mp-skel-num" />
+                                                    </td>
+                                                    <td className="mp-col-target" data-label="Hedef ve potansiyel">
+                                                        <span className="mp-skel-block mp-skel-target" />
+                                                    </td>
+                                                    <td className="num" data-label="Ağırlık">
+                                                        <span className="mp-skel-block mp-skel-num-sm" />
+                                                    </td>
+                                                    <td className="num" data-label="Net getiri">
+                                                        <span className="mp-skel-block mp-skel-num-sm" />
+                                                    </td>
+                                                    <td className="num" data-label="XU100’e göre">
+                                                        <span className="mp-skel-block mp-skel-num-sm" />
+                                                    </td>
+                                                    <td className="act">
+                                                        <span className="mp-skel-block mp-skel-act" />
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
                             ) : liveActivePositions.length === 0 ? (
                                 <div className="mp-empty-box">
                                     <BriefcaseBusiness size={26} className="mp-empty-icon" />
@@ -2204,7 +2255,6 @@ function ModelPortfolioPerformanceChart({
                         {visibleSeries.portfolio && <path d={portArea} fill="url(#mpPortFill)" />}
                         {visibleSeries.xu030 && <path d={xu030Path} fill="none" className="mp-line-xu030" />}
                         {visibleSeries.xu100 && <path d={xuPath} fill="none" className="mp-line-xu100" />}
-                        {visibleSeries.portfolio && <path d={portPath} fill="none" className="mp-line-portfolio-glow" />}
                         {visibleSeries.portfolio && <path d={portPath} fill="none" className="mp-line-portfolio" />}
                     </g>
                     {!hasVisibleSeries && (
@@ -3612,7 +3662,7 @@ function ModelPortfolioEditorModal({
                                         onClick={() => void improveText('thesis')}
                                         disabled={!thesis.trim() || improvingField !== null || saving}
                                     >
-                                        <Sparkles size={13} />
+                                        <Pencil size={13} />
                                         {improvingField === 'thesis' ? 'Düzenleniyor...' : 'AI ile iyileştir'}
                                     </button>
                                 </div>
@@ -3638,7 +3688,7 @@ function ModelPortfolioEditorModal({
                                         onClick={() => void improveText('risk_note')}
                                         disabled={!riskNote.trim() || improvingField !== null || saving}
                                     >
-                                        <Sparkles size={13} />
+                                        <Pencil size={13} />
                                         {improvingField === 'risk_note' ? 'Düzenleniyor...' : 'AI ile iyileştir'}
                                     </button>
                                 </div>
