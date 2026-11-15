@@ -444,7 +444,20 @@ export default function MarketFlowPanel({
             </div>
 
             {warning && <div className="mwr-flow-warning" role="status">{warning}</div>}
-            {loading && !items && <div className="mwr-flow-state">Akış yükleniyor…</div>}
+            {loading && !items && (
+                <div className="mwr-flow-skeleton-list" role="status" aria-label="Akış yükleniyor">
+                    {Array.from({ length: 6 }).map((_, index) => (
+                        <div className="mwr-flow-skeleton-row" key={index} aria-hidden="true">
+                            <div className="mwr-flow-skeleton-meta">
+                                <span className="mwr-skeleton-pulse mwr-flow-skeleton-source" />
+                                <span className="mwr-skeleton-pulse mwr-flow-skeleton-time" />
+                            </div>
+                            <span className="mwr-skeleton-pulse mwr-flow-skeleton-title" />
+                            <span className="mwr-skeleton-pulse mwr-flow-skeleton-title-short" />
+                        </div>
+                    ))}
+                </div>
+            )}
             {error && <div className="mwr-flow-state mwr-flow-error">{error}</div>}
             {!loading && !error && items && filteredItems.length === 0 && (
                 <div className="mwr-flow-state">

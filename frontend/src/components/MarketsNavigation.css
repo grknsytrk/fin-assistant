@@ -1,7 +1,7 @@
 .mn-sidebar {
     width: 260px;
-    background-color: #0d0f11;
-    border-right: 1px solid rgba(255, 255, 255, 0.05);
+    background-color: color-mix(in srgb, var(--bg-color) 94%, var(--surface-color));
+    border-right: 1px solid var(--surface-border);
     display: flex;
     flex-direction: column;
     height: 100vh;
@@ -10,7 +10,7 @@
     left: 0;
     z-index: 140;
     overflow-y: auto;
-    color: #e2e8f0;
+    color: var(--text-primary);
     font-family: inherit;
     padding-bottom: 20px;
     -ms-overflow-style: none;
@@ -102,10 +102,10 @@
     align-items: center;
     height: 32px;
     padding: 0 0.75rem;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 8px;
-    background: #12141a;
-    color: #fff;
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    background: var(--surface-color);
+    color: var(--text-primary);
     font-size: 0.9rem;
     font-weight: 700;
     white-space: nowrap;
@@ -184,13 +184,13 @@
 
 .mn-sidebar-search .global-search-shell {
     height: 42px;
-    background: #080a0d;
-    border-color: rgba(255, 255, 255, 0.08);
+    background: var(--bg-color);
+    border-color: var(--surface-border);
 }
 
 .mn-sidebar-search .global-search-action {
-    background: #12141a;
-    border-color: rgba(255, 255, 255, 0.1);
+    background: var(--surface-color);
+    border-color: var(--surface-border);
 }
 
 .mn-menu-group {
@@ -491,8 +491,7 @@
     left: 0;
     width: 100vw;
     height: 100vh;
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
+    background: rgba(10, 12, 15, 0.78);
     z-index: 99999;
     display: flex;
     justify-content: center;
@@ -503,12 +502,12 @@
 .mn-search-modal {
     width: 100%;
     max-width: 600px;
-    background: #1e1e1e;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 12px;
-    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    background: var(--surface-color);
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
-    color: #fff;
+    color: var(--text-primary);
     display: flex;
     flex-direction: column;
 }
@@ -517,12 +516,12 @@
     display: flex;
     align-items: center;
     padding: 1rem 1.5rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid var(--surface-border);
     gap: 1rem;
 }
 
 .mn-search-icon {
-    color: #94a3b8;
+    color: var(--text-secondary);
 }
 
 .mn-search-input {
@@ -530,12 +529,12 @@
     background: transparent;
     border: none;
     outline: none;
-    color: #fff;
+    color: var(--text-primary);
     font-size: 1.1rem;
 }
 
 .mn-search-input::placeholder {
-    color: #64748b;
+    color: var(--text-secondary);
 }
 
 .mn-search-body {
@@ -548,7 +547,7 @@
     padding: 0 1.5rem 0.5rem;
     font-size: 0.85rem;
     font-weight: 600;
-    color: #e2e8f0;
+    color: var(--text-primary);
 }
 
 .mn-search-results {
@@ -717,11 +716,11 @@
         flex-direction: row;
         align-items: stretch;
         padding: 0 0 env(safe-area-inset-bottom);
-        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        border-top: 1px solid var(--surface-border);
         border-right: 0;
         overflow-x: hidden;
         overflow-y: hidden;
-        box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.2);
+        box-shadow: var(--shadow-lg);
     }
 
     .mn-header,

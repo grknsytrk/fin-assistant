@@ -194,6 +194,14 @@ export default function MarketPage({ onOpenTicker, onOpenFund, onOpenMarkets }: 
         else window.location.href = `/?ticker=${encodeURIComponent(result.symbol)}`;
     };
 
+    const handleOpenMarkets = () => {
+        if (onOpenMarkets) {
+            onOpenMarkets();
+        } else {
+            window.location.href = '/?page=markets';
+        }
+    };
+
     const handleSearch = (e: React.FormEvent) => {
         e.preventDefault();
         if (!searchTerm.trim()) return;
@@ -239,100 +247,102 @@ export default function MarketPage({ onOpenTicker, onOpenFund, onOpenMarkets }: 
         <div className="landing-page">
             {/* HERO SECTION */}
             <section className="hero-section">
-                <div className="hero-glow"></div>
                 <div className="hero-content">
                     <h1 className="hero-title">Doğru yatırımı keşfedin</h1>
                     <p className="hero-subtitle">Türkiye'nin en kapsamlı halka açık hisse senedi temel ve teknik analiz platformu.</p>
                     
-                    <div
-                        className="hero-search-container"
-                        onBlur={(event) => {
-                            const nextTarget = event.relatedTarget as Node | null;
-                            if (!nextTarget || !event.currentTarget.contains(nextTarget)) setSearchOpen(false);
-                        }}
-                    >
-                        <form className="hero-search" onSubmit={handleSearch}>
-                            <Search className="hero-search-icon" size={16} aria-hidden="true" />
-                            <input
-                                type="text"
-                                placeholder="Hisse veya fon kodu, ad ya da kurucu ara"
-                                value={searchTerm}
-                                onFocus={() => setSearchOpen(true)}
-                                onKeyDown={handleSearchKeyDown}
-                                onChange={(event) => {
-                                    setSearchTerm(event.target.value);
-                                    setSearchOpen(true);
-                                    setHighlightedSearchIndex(0);
-                                }}
-                                role="combobox"
-                                aria-autocomplete="list"
-                                aria-expanded={searchOpen && Boolean(searchTerm.trim())}
-                                aria-controls="hero-search-results"
-                                aria-activedescendant={searchResults[highlightedSearchIndex]
-                                    ? `hero-search-option-${searchResults[highlightedSearchIndex].kind}-${searchResults[highlightedSearchIndex].symbol}`
-                                    : undefined}
-                            />
-                        </form>
-                        {searchOpen && searchTerm.trim() && (
-                            <div className="hero-search-results" id="hero-search-results" role="listbox" aria-label="Arama sonuçları">
-                                {searchLoading && searchResults.length === 0 ? (
-                                    <div className="hero-search-status">Aranıyor...</div>
-                                ) : searchResults.length === 0 ? (
-                                    <div className="hero-search-status">
-                                        {searchError ? 'Arama şu anda yapılamıyor.' : 'Sonuç bulunamadı.'}
-                                    </div>
-                                ) : (
-                                    (['stock', 'fund'] as const).map((kind) => {
-                                        const groupResults = searchResults
-                                            .map((result, index) => ({ result, index }))
-                                            .filter(({ result }) => result.kind === kind);
-                                        if (!groupResults.length) return null;
-                                        return (
-                                            <div className="hero-search-group" role="group" aria-label={kind === 'stock' ? 'Hisseler' : 'Fonlar'} key={kind}>
-                                                <div className="hero-search-group-title">{kind === 'stock' ? 'HİSSELER' : 'FONLAR'}</div>
-                                                {groupResults.map(({ result, index }) => (
-                                                    <AssetSearchResult
-                                                        id={`hero-search-option-${result.kind}-${result.symbol}`}
-                                                        key={`${result.kind}-${result.symbol}`}
-                                                        href={result.kind === 'fund' ? toFundDetail(result.symbol) : toStockDetail(result.symbol)}
-                                                        kind={result.kind}
-                                                        symbol={result.symbol}
-                                                        name={result.name}
-                                                        price={result.price}
-                                                        changePct={result.changePct}
-                                                        logoUrl={result.logoUrl}
-                                                        active={index === highlightedSearchIndex}
-                                                        onMouseDown={(event) => {
-                                                            if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+                    <div className="hero-actions">
+                        <div
+                            className="hero-search-container"
+                            onBlur={(event) => {
+                                const nextTarget = event.relatedTarget as Node | null;
+                                if (!nextTarget || !event.currentTarget.contains(nextTarget)) setSearchOpen(false);
+                            }}
+                        >
+                            <form className="hero-search" onSubmit={handleSearch}>
+                                <Search className="hero-search-icon" size={16} aria-hidden="true" />
+                                <input
+                                    type="text"
+                                    placeholder="Hisse veya fon kodu, ad ya da kurucu ara"
+                                    value={searchTerm}
+                                    onFocus={() => setSearchOpen(true)}
+                                    onKeyDown={handleSearchKeyDown}
+                                    onChange={(event) => {
+                                        setSearchTerm(event.target.value);
+                                        setSearchOpen(true);
+                                        setHighlightedSearchIndex(0);
+                                    }}
+                                    role="combobox"
+                                    aria-autocomplete="list"
+                                    aria-expanded={searchOpen && Boolean(searchTerm.trim())}
+                                    aria-controls="hero-search-results"
+                                    aria-activedescendant={searchResults[highlightedSearchIndex]
+                                        ? `hero-search-option-${searchResults[highlightedSearchIndex].kind}-${searchResults[highlightedSearchIndex].symbol}`
+                                        : undefined}
+                                />
+                            </form>
+                            {searchOpen && searchTerm.trim() && (
+                                <div className="hero-search-results" id="hero-search-results" role="listbox" aria-label="Arama sonuçları">
+                                    {searchLoading && searchResults.length === 0 ? (
+                                        <div className="hero-search-status">Aranıyor...</div>
+                                    ) : searchResults.length === 0 ? (
+                                        <div className="hero-search-status">
+                                            {searchError ? 'Arama şu anda yapılamıyor.' : 'Sonuç bulunamadı.'}
+                                        </div>
+                                    ) : (
+                                        (['stock', 'fund'] as const).map((kind) => {
+                                            const groupResults = searchResults
+                                                .map((result, index) => ({ result, index }))
+                                                .filter(({ result }) => result.kind === kind);
+                                            if (!groupResults.length) return null;
+                                            return (
+                                                <div className="hero-search-group" role="group" aria-label={kind === 'stock' ? 'Hisseler' : 'Fonlar'} key={kind}>
+                                                    <div className="hero-search-group-title">{kind === 'stock' ? 'HİSSELER' : 'FONLAR'}</div>
+                                                    {groupResults.map(({ result, index }) => (
+                                                        <AssetSearchResult
+                                                            id={`hero-search-option-${result.kind}-${result.symbol}`}
+                                                            key={`${result.kind}-${result.symbol}`}
+                                                            href={result.kind === 'fund' ? toFundDetail(result.symbol) : toStockDetail(result.symbol)}
+                                                            kind={result.kind}
+                                                            symbol={result.symbol}
+                                                            name={result.name}
+                                                            price={result.price}
+                                                            changePct={result.changePct}
+                                                            logoUrl={result.logoUrl}
+                                                            active={index === highlightedSearchIndex}
+                                                            onMouseDown={(event) => {
+                                                                if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+                                                                    event.preventDefault();
+                                                                }
+                                                            }}
+                                                            onMouseEnter={() => setHighlightedSearchIndex(index)}
+                                                            onClick={(event) => {
+                                                                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                                                                 event.preventDefault();
-                                                            }
-                                                        }}
-                                                        onMouseEnter={() => setHighlightedSearchIndex(index)}
-                                                        onClick={(event) => {
-                                                            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                                                            event.preventDefault();
-                                                            openSearchResult(result);
-                                                        }}
-                                                    />
-                                                ))}
-                                            </div>
-                                        );
-                                    })
-                                )}
-                            </div>
-                        )}
+                                                                openSearchResult(result);
+                                                            }}
+                                                        />
+                                                    ))}
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                        <button
+                            type="button"
+                            className="cta-btn hero-primary-btn"
+                            onClick={handleOpenMarkets}
+                        >
+                            Piyasalar Terminalini Aç <ChevronRight size={16} aria-hidden="true" />
+                        </button>
                     </div>
                 </div>
 
                 <div 
                     className="hero-mockup-wrapper" 
-                    onClick={() => {
-                        if (onOpenMarkets) {
-                            onOpenMarkets();
-                        } else {
-                            window.location.href = '/?page=markets';
-                        }
-                    }}
+                    onClick={handleOpenMarkets}
                     style={{ cursor: 'pointer' }}
                 >
                     <img
@@ -404,32 +414,32 @@ export default function MarketPage({ onOpenTicker, onOpenFund, onOpenMarkets }: 
                 
                 <div className="details-grid">
                     <div className="detail-card">
-                        <div className="dc-icon blue-bg"><BarChart2 size={20} /></div>
+                        <div className="dc-icon"><BarChart2 size={18} /></div>
                         <h3>Finansal Model</h3>
                         <p>Geçmiş ve gelecek finansal hedefleri kıyaslayarak detaylı görünüm elde edin.</p>
                     </div>
                     <div className="detail-card">
-                        <div className="dc-icon green-bg"><TrendingUp size={20} /></div>
+                        <div className="dc-icon"><TrendingUp size={18} /></div>
                         <h3>Temel Analiz</h3>
                         <p>Şirketleri çarpanlara ve temel göstergelere göre hızla değerlendirip konumlayın.</p>
                     </div>
                     <div className="detail-card">
-                        <div className="dc-icon purple-bg"><PieChart size={20} /></div>
+                        <div className="dc-icon"><PieChart size={18} /></div>
                         <h3>Rasyo Analizi</h3>
                         <p>Karşılaştırmalı rasyo oranlarıyla şirketin geçmişten bugüne performansını ölçün.</p>
                     </div>
                     <div className="detail-card">
-                        <div className="dc-icon orange-bg"><ShieldAlert size={20} /></div>
+                        <div className="dc-icon"><ShieldAlert size={18} /></div>
                         <h3>Risk Metrikleri</h3>
                         <p>Volatilite ve benzeri metrikler ile risk algınızı belirleyip portföyü dengede tutun.</p>
                     </div>
                     <div className="detail-card">
-                        <div className="dc-icon cyan-bg"><LineChart size={20} /></div>
+                        <div className="dc-icon"><LineChart size={18} /></div>
                         <h3>Gelişmiş Grafikler</h3>
                         <p>Hisse senedi verilerini interaktif grafiklerle zamana bazlı detaylıca analiz edin.</p>
                     </div>
                     <div className="detail-card">
-                        <div className="dc-icon red-bg"><Activity size={20} /></div>
+                        <div className="dc-icon"><Activity size={18} /></div>
                         <h3>Teknik Analiz</h3>
                         <p>Hacim, destek-direnç ve indikatör incelemesiyle yatırımlarınızı yönlendirin.</p>
                     </div>
@@ -442,16 +452,11 @@ export default function MarketPage({ onOpenTicker, onOpenFund, onOpenMarkets }: 
                     <h2>Doğru yatırımı keşfedin!</h2>
                     <p>Siz de profesyoneller gibi yatırım kararları alabilirsiniz.</p>
                     <button
+                        type="button"
                         className="cta-btn"
-                        onClick={() => {
-                            if (onOpenMarkets) {
-                                onOpenMarkets();
-                            } else {
-                                window.location.href = '/?page=markets';
-                            }
-                        }}
+                        onClick={handleOpenMarkets}
                     >
-                        Ücretsiz Başla <ChevronRight size={16} />
+                        Ücretsiz Başla <ChevronRight size={16} aria-hidden="true" />
                     </button>
                 </div>
                 <div className="cta-footer-links">
