@@ -1,0 +1,48 @@
+.mp-donut-wrap {
+    position: relative;
+    width: 148px;
+    height: 148px;
+    margin: 0 auto;
+}
+
+.mp-donut-svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.mp-donut-track {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.04);
+    stroke-width: 14;
+}
+
+.mp-donut-segment {
+    cursor: pointer;
+    transition: stroke-width 0.15s ease, opacity 0.15s ease;
+}
+
+.mp-donut-center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    text-align: center;
+}
+
+.mp-donut-center span {
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+
+.mp-donut-center strong {
+    font-size: 1.05rem;
+    color: var(--text-primary);
+    margin-top: 2px;
+}
