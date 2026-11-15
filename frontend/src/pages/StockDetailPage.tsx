@@ -826,6 +826,7 @@ export default function StockDetailPage({
         if (loading && !snapshot) {
             return (
                 <div className="sd-content-skeleton" role="status" aria-live="polite" aria-label="Finansal veriler yükleniyor">
+                    <span className="sr-only">Finansal veriler yükleniyor…</span>
                     <div className="sd-skeleton-panel">
                         <div className="sd-skeleton-head">
                             <span className="sd-skeleton-bar sd-skeleton-shimmer" style={{ width: '180px', height: '16px' }} />
