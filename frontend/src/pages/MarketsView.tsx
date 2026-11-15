@@ -38,6 +38,7 @@ import {
 import { searchWatchlistFunds } from '../utils/watchlistData';
 import { isBistTradingHours } from '../utils/marketHours';
 import { BoundedMemoryCache } from '../utils/lruCache';
+import '../styles/market-shared.css';
 import './MarketsView.css';
 
 type MarketSection = MarketsNavigationSection;

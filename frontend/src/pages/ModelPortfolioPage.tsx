@@ -53,7 +53,7 @@ import {
     toMarketsStocks,
     toStockDetail,
 } from '../routing/routes';
-import './MarketsView.css';
+import '../styles/market-shared.css';
 import './ModelPortfolioPage.css';
 
 type PortfolioTab = 'active' | 'closed' | 'changelog';

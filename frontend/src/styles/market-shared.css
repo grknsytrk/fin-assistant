@@ -1,0 +1,153 @@
+/* Shared Market & Model Portfolio Shell Layout Styles */
+
+.mn-layout {
+    --mn-sidebar-width: 260px;
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    overflow: hidden;
+    padding-left: var(--mn-sidebar-width);
+    transition: padding-left 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.mn-layout.mn-nav-collapsed {
+    --mn-sidebar-width: 60px;
+}
+
+@media (max-width: 760px) {
+    .mn-layout {
+        --mn-sidebar-width: 0px;
+        padding-left: 0;
+        padding-bottom: calc(66px + env(safe-area-inset-bottom));
+    }
+}
+
+.markets-workspace {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+}
+
+.markets-workspace-with-rail {
+    gap: 0;
+}
+
+.market-page {
+    --mv-scroll-track: #101214;
+    --mv-scroll-thumb: color-mix(in srgb, var(--text-secondary) 54%, #101214);
+    --mv-scroll-thumb-hover: color-mix(in srgb, var(--text-secondary) 78%, var(--accent-color));
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+    padding: 0 1.25rem 2rem;
+    max-width: 1540px;
+    margin: 0 auto;
+    flex: 1;
+    overflow-y: auto;
+    overflow-anchor: none;
+    height: 100%;
+    color-scheme: dark;
+    scrollbar-width: thin;
+    scrollbar-color: var(--mv-scroll-thumb) var(--mv-scroll-track);
+}
+
+.market-page::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+.market-page::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+    background: transparent;
+}
+
+.market-page::-webkit-scrollbar-track {
+    background: var(--mv-scroll-track);
+    border-left: 1px solid color-mix(in srgb, var(--surface-border) 66%, transparent);
+}
+
+.market-page::-webkit-scrollbar-track-piece {
+    background: var(--mv-scroll-track);
+}
+
+.market-page::-webkit-scrollbar-thumb {
+    min-height: 56px;
+    background: linear-gradient(180deg, var(--mv-scroll-thumb), color-mix(in srgb, var(--mv-scroll-thumb) 78%, #050607));
+    background-clip: padding-box;
+    border-radius: 999px;
+    border: 1px solid transparent;
+}
+
+.market-page::-webkit-scrollbar-thumb:hover {
+    background: var(--mv-scroll-thumb-hover);
+}
+
+.market-page::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+.markets-workspace-with-rail .market-page {
+    margin: 0;
+    max-width: none;
+    padding: 0 0.85rem 1.5rem;
+}
+
+.market-page::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 18%),
+        radial-gradient(circle at top right, rgba(59, 130, 246, 0.05), transparent 26%);
+    opacity: 0.9;
+}
+
+.market-page > * {
+    position: relative;
+    z-index: 1;
+}
+
+.market-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 1rem;
+    padding: 0 0 1.1rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 82%, transparent);
+}
+
+.market-title h1 {
+    margin: 0 0 0.35rem;
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--text-primary);
+}
+
+.market-title p {
+    margin: 0;
+    max-width: 62ch;
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    line-height: 1.5;
+}
+
+@media (max-width: 1099px) {
+    .market-header {
+        flex-direction: column;
+        align-items: stretch;
+    }
+}
+
+@media (max-width: 760px) {
+    .market-page {
+        padding: 0 0.9rem 1.5rem;
+    }
+}
