@@ -274,25 +274,42 @@ function StockDetailPriceChart({
             .filter(point => Number.isFinite(Number(point.close)) && Number.isFinite(Date.parse(point.time)))
             .sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
             .map(point => Number(point.close));
-        const values = previousValues.length >= 2 ? previousValues : [18, 22, 20, 27, 24, 30, 26, 34, 32, 38, 35, 42];
-        const min = Math.min(...values);
-        const span = Math.max(0.01, Math.max(...values) - min);
         const loadingHeight = isMobileChart ? 900 : 400;
         const loadingTop = isMobileChart ? 52 : 60;
         const loadingBottom = loadingHeight - (isMobileChart ? 112 : 60);
-        const line = values.map((value, index) =>
-            `${index === 0 ? 'M' : 'L'} ${16 + index / (values.length - 1) * 1028} ${loadingBottom - (value - min) / span * (loadingBottom - loadingTop) * 0.86}`,
-        ).join(' ');
+        const gridYs = [0.18, 0.4, 0.62, 0.84].map((ratio) => loadingTop + ratio * (loadingBottom - loadingTop));
+
+        if (previousValues.length >= 2) {
+            const min = Math.min(...previousValues);
+            const span = Math.max(0.01, Math.max(...previousValues) - min);
+            const line = previousValues.map((value, index) =>
+                `${index === 0 ? 'M' : 'L'} ${16 + index / (previousValues.length - 1) * 1028} ${loadingBottom - (value - min) / span * (loadingBottom - loadingTop) * 0.86}`,
+            ).join(' ');
+            return (
+                <section className="sd-price-chart-panel" aria-label={`${ticker} fiyat grafiği`} aria-busy="true">
+                    {controls}
+                    <svg className="sd-price-chart-svg sd-price-chart-loading" viewBox={`0 0 1120 ${loadingHeight}`} role="img" aria-label="Grafik yükleniyor">
+                        {gridYs.map((y) => (
+                            <line key={y} className="sd-price-chart-gridline" x1="16" x2="1044" y1={y} y2={y} />
+                        ))}
+                        <path className="sd-price-chart-loading-track" d={line} />
+                        <path className="sd-price-chart-loading-line" d={line} pathLength={100} />
+                    </svg>
+                </section>
+            );
+        }
+
         return (
             <section className="sd-price-chart-panel" aria-label={`${ticker} fiyat grafiği`} aria-busy="true">
                 {controls}
-                <svg className="sd-price-chart-svg sd-price-chart-loading" viewBox={`0 0 1120 ${loadingHeight}`} role="img" aria-label="Grafik yükleniyor">
-                    {[0.18, 0.4, 0.62, 0.84].map((ratio) => loadingTop + ratio * (loadingBottom - loadingTop)).map(y => (
-                        <line key={y} className="sd-price-chart-gridline" x1="16" x2="1044" y1={y} y2={y} />
-                    ))}
-                    <path className="sd-price-chart-loading-track" d={line} />
-                    <path className="sd-price-chart-loading-line" d={line} pathLength={100} />
-                </svg>
+                <div className="sd-price-chart-loading-empty" role="status">
+                    <svg className="sd-price-chart-svg" viewBox={`0 0 1120 ${loadingHeight}`} aria-hidden="true">
+                        {gridYs.map((y) => (
+                            <line key={y} className="sd-price-chart-gridline" x1="16" x2="1044" y1={y} y2={y} />
+                        ))}
+                    </svg>
+                    <span className="sd-price-chart-loading-label">Grafik verisi yükleniyor…</span>
+                </div>
             </section>
         );
     }
@@ -807,7 +824,34 @@ export default function StockDetailPage({
 
     const renderContent = () => {
         if (loading && !snapshot) {
-            return <div className="sd-loading" role="status" aria-live="polite"><div className="spinner" aria-hidden="true" /> Finansal veriler yükleniyor…</div>;
+            return (
+                <div className="sd-content-skeleton" role="status" aria-live="polite" aria-label="Finansal veriler yükleniyor">
+                    <div className="sd-skeleton-panel">
+                        <div className="sd-skeleton-head">
+                            <span className="sd-skeleton-bar sd-skeleton-shimmer" style={{ width: '180px', height: '16px' }} />
+                            <span className="sd-skeleton-bar sd-skeleton-shimmer" style={{ width: '96px', height: '12px' }} />
+                        </div>
+                        <div className="sd-skeleton-grid">
+                            {[0, 1].map((col) => (
+                                <div key={col} className="sd-skeleton-table">
+                                    <div className="sd-skeleton-row is-header">
+                                        <span className="sd-skeleton-bar sd-skeleton-shimmer" style={{ width: '44%' }} />
+                                        <span className="sd-skeleton-bar sd-skeleton-shimmer" style={{ width: '18%' }} />
+                                        <span className="sd-skeleton-bar sd-skeleton-shimmer" style={{ width: '18%' }} />
+                                    </div>
+                                    {[0, 1, 2, 3, 4].map((row) => (
+                                        <div key={row} className="sd-skeleton-row">
+                                            <span className="sd-skeleton-bar sd-skeleton-shimmer" style={{ width: `${46 + ((row + col) % 3) * 10}%` }} />
+                                            <span className="sd-skeleton-bar sd-skeleton-shimmer" style={{ width: '20%' }} />
+                                            <span className="sd-skeleton-bar sd-skeleton-shimmer" style={{ width: '16%' }} />
+                                        </div>
+                                    ))}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
         }
         
         if (!snapshot) return null;

@@ -54,21 +54,21 @@
 .stock-market-shell {
     overflow: hidden;
     margin: -0.1rem 0 1rem;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
-    border-radius: 8px;
-    background: color-mix(in srgb, #151515 86%, var(--surface-color));
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    background: var(--surface-color);
 }
 
 .stock-market-breadcrumb {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    min-height: 48px;
+    min-height: 44px;
     padding: 0 1.2rem;
-    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 70%, transparent);
+    border-bottom: 1px solid var(--surface-border);
     color: var(--text-secondary);
-    font-size: 0.88rem;
-    font-weight: 800;
+    font-size: 0.84rem;
+    font-weight: 600;
     overflow-x: auto;
 }
 
@@ -113,10 +113,13 @@
 }
 
 .stock-market-logo.symbol-logo-lg {
-    width: 80px;
-    height: 80px;
-    border-radius: 4px;
-    background: #ffffff;
+    width: 60px;
+    height: 60px;
+    border-radius: 6px;
+    border: 1px solid var(--surface-border);
+    background: color-mix(in srgb, var(--surface-color) 70%, white 6%);
+    color: var(--text-primary);
+    box-shadow: none;
 }
 
 .stock-market-copy {
@@ -133,25 +136,27 @@
 .stock-market-code-row h1 {
     margin: 0;
     color: var(--text-primary);
-    font-size: clamp(2rem, 4vw, 2.8rem);
+    font-size: clamp(2rem, 4vw, 2.75rem);
+    font-weight: 700;
     line-height: 1;
     letter-spacing: 0;
 }
 
 .stock-market-copy p {
-    margin: 0.48rem 0 0;
+    margin: 0.45rem 0 0;
     color: var(--text-primary);
-    font-size: 1.02rem;
-    font-weight: 750;
+    font-size: 1rem;
+    font-weight: 600;
     line-height: 1.35;
     overflow-wrap: anywhere;
 }
 
 .stock-market-copy small {
     display: block;
-    margin-top: 0.32rem;
+    margin-top: 0.3rem;
     color: var(--text-secondary);
     font-size: 0.82rem;
+    font-weight: 500;
     line-height: 1.35;
 }
 
@@ -159,13 +164,13 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 42px;
-    height: 36px;
+    width: 38px;
+    height: 34px;
     padding: 0;
-    border: 0;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--surface-color) 86%, #1f1f1f);
-    color: var(--text-primary);
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    background: var(--bg-color);
+    color: var(--text-secondary);
     cursor: pointer;
 }
 
@@ -204,14 +209,14 @@
     color: var(--text-primary);
     font-family: var(--font-mono);
     font-size: clamp(1.8rem, 3vw, 2.45rem);
-    font-weight: 900;
+    font-weight: 800;
     line-height: 1;
 }
 
 .stock-market-quote span {
     font-family: var(--font-mono);
     font-size: 1rem;
-    font-weight: 900;
+    font-weight: 700;
 }
 
 .stock-market-quote span.positive {
@@ -227,22 +232,22 @@
 }
 
 .stock-market-quote small {
-    margin-top: 0.38rem;
+    margin-top: 0.35rem;
     color: var(--text-secondary);
-    font-size: 0.88rem;
-    font-weight: 700;
+    font-size: 0.82rem;
+    font-weight: 500;
 }
 
 .stock-market-stats {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 0;
-    border-top: 1px solid color-mix(in srgb, var(--surface-border) 58%, transparent);
+    border-top: 1px solid var(--surface-border);
 }
 
 .stock-market-stats div {
     padding: 0.8rem 1.2rem;
-    border-right: 1px solid color-mix(in srgb, var(--surface-border) 42%, transparent);
+    border-right: 1px solid color-mix(in srgb, var(--surface-border) 65%, transparent);
     min-width: 0;
 }
 
@@ -254,9 +259,9 @@
     display: block;
     margin-bottom: 0.25rem;
     color: var(--text-secondary);
-    font-size: 0.66rem;
-    font-weight: 800;
-    letter-spacing: 0.08em;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
 }
 
@@ -264,7 +269,8 @@
     display: block;
     color: var(--text-primary);
     font-family: var(--font-mono);
-    font-size: 0.9rem;
+    font-size: 0.92rem;
+    font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -273,10 +279,10 @@
 .stock-tabs {
     display: flex;
     gap: 1.3rem;
-    min-height: 52px;
+    min-height: 48px;
     padding: 0 1.2rem;
     margin-top: 0;
-    border-top: 1px solid color-mix(in srgb, var(--surface-border) 58%, transparent);
+    border-top: 1px solid var(--surface-border);
     overflow-x: auto;
 }
 
@@ -291,8 +297,8 @@
     border-radius: 0;
     background: transparent;
     color: var(--text-secondary);
-    font-size: 0.9rem;
-    font-weight: 850;
+    font-size: 0.88rem;
+    font-weight: 600;
     white-space: nowrap;
     cursor: pointer;
     text-decoration: none;
@@ -324,9 +330,9 @@
 .sd-price-chart-panel {
     overflow: hidden;
     margin-bottom: 1rem;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
-    border-radius: 8px;
-    background: color-mix(in srgb, #151515 86%, var(--surface-color));
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    background: var(--surface-color);
 }
 
 .sd-price-chart-toolbar {
@@ -334,9 +340,9 @@
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
-    min-height: 58px;
-    padding: 0.7rem 1rem;
-    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 58%, transparent);
+    min-height: 54px;
+    padding: 0.65rem 1rem;
+    border-bottom: 1px solid var(--surface-border);
 }
 
 .sd-price-chart-toolbar > div:first-child {
@@ -349,8 +355,8 @@
 .sd-price-chart-kicker {
     color: var(--text-secondary);
     font-size: 0.7rem;
-    font-weight: 850;
-    letter-spacing: 0.08em;
+    font-weight: 600;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
 }
 
@@ -370,12 +376,12 @@
     min-width: 42px;
     padding: 0.38rem 0.55rem;
     border: 1px solid transparent;
-    border-radius: 5px;
-    background: color-mix(in srgb, var(--surface-color) 80%, #111111);
+    border-radius: 4px;
+    background: var(--bg-color);
     color: var(--text-secondary);
     font-family: var(--font-mono);
     font-size: 0.74rem;
-    font-weight: 850;
+    font-weight: 600;
     cursor: pointer;
 }
 
@@ -541,13 +547,101 @@
     fill: var(--danger-color);
 }
 
-.sd-loading {
+.sd-price-chart-loading-empty {
+    position: relative;
+    display: grid;
+    place-items: center;
+}
+
+.sd-price-chart-loading-label {
+    position: absolute;
+    padding: 0.38rem 0.8rem;
+    border: 1px solid var(--surface-border);
+    border-radius: 4px;
+    background: var(--bg-color);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-weight: 500;
+}
+
+@keyframes sd-skeleton-shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.sd-content-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.sd-skeleton-panel {
+    background: var(--surface-color);
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    padding: 1.2rem 1.35rem;
+}
+
+.sd-skeleton-head {
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 1rem;
-    height: 200px;
-    color: var(--text-secondary);
+    justify-content: space-between;
+    padding-bottom: 0.85rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--surface-border);
+}
+
+.sd-skeleton-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.5rem;
+}
+
+.sd-skeleton-table {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+
+.sd-skeleton-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 55%, transparent);
+}
+
+.sd-skeleton-row.is-header {
+    border-bottom: 1px solid var(--surface-border);
+}
+
+.sd-skeleton-row:last-child {
+    border-bottom: 0;
+}
+
+.sd-skeleton-bar {
+    display: inline-block;
+    height: 12px;
+    border-radius: 3px;
+}
+
+.sd-skeleton-shimmer {
+    background: linear-gradient(
+        90deg,
+        var(--bg-color) 25%,
+        var(--surface-hover) 50%,
+        var(--bg-color) 75%
+    );
+    background-size: 200% 100%;
+    animation: sd-skeleton-shimmer 1.6s infinite linear;
+}
+
+@media (max-width: 900px) {
+    .sd-skeleton-grid {
+        grid-template-columns: 1fr;
+    }
 }
 
 .sd-tab-content {

@@ -21,20 +21,16 @@ export function OverviewAiLoadingIllustration({
     reasoningEffort = 'low',
     supportsReasoningEffort = true,
 }: OverviewAiLoadingIllustrationProps) {
-    const [elapsedSeconds, setElapsedSeconds] = useState(0);
+    const [stepIndex, setStepIndex] = useState(0);
 
     useEffect(() => {
-        setElapsedSeconds(0);
+        setStepIndex(0);
         const timer = window.setInterval(() => {
-            setElapsedSeconds((prev) => prev + 1);
-        }, 1000);
+            setStepIndex((prev) => Math.min(prev + 1, THINKING_STEPS.length - 1));
+        }, 3000);
         return () => window.clearInterval(timer);
     }, []);
 
-    const stepIndex = Math.min(
-        Math.floor(elapsedSeconds / 3),
-        THINKING_STEPS.length - 1,
-    );
     const currentStep = THINKING_STEPS[stepIndex];
 
     const effortLabel =
@@ -57,13 +53,6 @@ export function OverviewAiLoadingIllustration({
     return (
         <div className="overview-ai-thinking-card" role="status" aria-live="polite">
             <div className="overview-ai-thinking-meta">
-                <span className="overview-ai-thinking-indicator" aria-hidden="true">
-                    <span className="overview-ai-thinking-dot" />
-                    <span className="overview-ai-thinking-ping" />
-                </span>
-                <span className="overview-ai-thinking-timer">
-                    {elapsedSeconds}sn süredir {elapsedSeconds >= 4 ? 'düşünüyor...' : 'çalışıyor...'}
-                </span>
                 <span className="overview-ai-thinking-badge">
                     {badgeText}
                 </span>
@@ -72,6 +61,11 @@ export function OverviewAiLoadingIllustration({
                 <span key={stepIndex} className="overview-ai-thinking-shimmer">
                     {currentStep}
                 </span>
+            </div>
+            <div className="overview-ai-thinking-lines" aria-hidden="true">
+                <span className="overview-ai-thinking-line is-wide" />
+                <span className="overview-ai-thinking-line is-medium" />
+                <span className="overview-ai-thinking-line is-short" />
             </div>
         </div>
     );

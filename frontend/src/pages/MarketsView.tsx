@@ -2136,64 +2136,30 @@ function StockCardMiniChart({
             )}
         </div>
     );
-    const skeletonTop = 10;
-    const skeletonBottom = height - 16;
-    const skeletonSpan = Math.max(1, skeletonBottom - skeletonTop);
-    const skeletonPointCount = 44;
-    let skeletonSeed = `${symbol}:${selectedRange}`
-        .split('')
-        .reduce((acc, char) => ((acc * 31 + char.charCodeAt(0)) >>> 0), 7);
-    const seededRandom = () => {
-        skeletonSeed = (1664525 * skeletonSeed + 1013904223) >>> 0;
-        return skeletonSeed / 0xffffffff;
-    };
-    const trend = (seededRandom() - 0.5) * 0.2;
-    let level = 0.56 + (seededRandom() - 0.5) * 0.16;
-    const skeletonPoints: Array<[number, number]> = Array.from({ length: skeletonPointCount }, (_, index) => {
-        if (index > 0) {
-            const burst = index % 7 === 0 ? (seededRandom() - 0.5) * 0.22 : 0;
-            const drift = trend / skeletonPointCount + (seededRandom() - 0.5) * 0.16 + burst;
-            level = clamp(level + drift, 0.08, 0.92);
-        }
-        const x = (index / Math.max(1, skeletonPointCount - 1)) * width;
-        const y = skeletonTop + level * skeletonSpan;
-        return [x, y];
-    });
-    const skeletonLinePath = skeletonPoints
-        .map(([x, y], index) => `${index === 0 ? 'M' : 'L'} ${x} ${y}`)
-        .join(' ');
-    const skeletonAreaPath = `${skeletonLinePath} L ${width} ${height - 2} L 0 ${height - 2} Z`;
-    const skeletonIdBase = `stock-card-skeleton-${symbol.replace(/[^a-zA-Z0-9]/g, '') || 'sym'}-${selectedRange}`;
-    const skeletonAreaGradientId = `${skeletonIdBase}-area`;
-
     if (isLoading) {
         return (
             <div className="stock-card-chart-shell">
                 {chartToolbar}
                 <div ref={canvasWrapRef} className="stock-card-chart-canvas-wrap">
-                    <div className="stock-card-inline-chart-skeleton" aria-hidden="true">
-                        <div className="stock-card-inline-chart-track">
-                            <svg
-                                className="stock-card-inline-chart-svg"
-                                viewBox={`0 0 ${width} ${height}`}
-                                preserveAspectRatio="none"
-                                shapeRendering="geometricPrecision"
-                            >
-                                <defs>
-                                    <linearGradient id={skeletonAreaGradientId} x1="0%" y1="0%" x2="0%" y2="100%">
-                                        <stop offset="0%" stopColor="rgba(255,255,255,0.04)" />
-                                        <stop offset="100%" stopColor="rgba(255,255,255,0)" />
-                                    </linearGradient>
-                                </defs>
-                                <line className="stock-card-inline-chart-gridline" x1={0} x2={width} y1={height * 0.52} y2={height * 0.52} />
-                                <path className="stock-card-inline-chart-area" d={skeletonAreaPath} fill={`url(#${skeletonAreaGradientId})`} />
-                                <path
-                                    className="stock-card-inline-chart-line"
-                                    d={skeletonLinePath}
-                                    pathLength={100}
+                    <div className="stock-card-inline-chart-skeleton" role="status" aria-label="Grafik yükleniyor">
+                        <svg
+                            className="stock-card-inline-chart-svg"
+                            viewBox={`0 0 ${width} ${height}`}
+                            preserveAspectRatio="none"
+                            aria-hidden="true"
+                        >
+                            {[0.28, 0.52, 0.76].map((ratio) => (
+                                <line
+                                    key={ratio}
+                                    className="stock-card-inline-chart-gridline"
+                                    x1={0}
+                                    x2={width}
+                                    y1={height * ratio}
+                                    y2={height * ratio}
                                 />
-                            </svg>
-                        </div>
+                            ))}
+                        </svg>
+                        <div className="stock-card-inline-chart-baseline stock-card-inline-skeleton-pulse" aria-hidden="true" />
                     </div>
                 </div>
             </div>
@@ -4596,7 +4562,35 @@ export default function MarketsView({
                 </div>
             )}
 
-            {activeSection === 'markets' && loading && <div className="loading-state"><div className="spinner"/> Yükleniyor...</div>}
+            {activeSection === 'markets' && loading && (
+                <div className="market-content market-content-terminal" role="status" aria-live="polite" aria-label="Piyasa verileri yükleniyor">
+                    <div className="market-main-column">
+                        <div className="stock-card-skeleton-grid" aria-hidden="true">
+                            {[0, 1, 2].map((cardIdx) => (
+                                <div key={cardIdx} className="stock-card-skeleton">
+                                    <div className="stock-card-skeleton-head">
+                                        <div className="stock-card-skeleton-logo stock-card-skeleton-pulse" />
+                                        <div className="stock-card-skeleton-id">
+                                            <div className="stock-card-skeleton-symbol stock-card-skeleton-pulse" />
+                                            <div className="stock-card-skeleton-company stock-card-skeleton-pulse" />
+                                        </div>
+                                    </div>
+                                    <div className="stock-card-skeleton-price-row">
+                                        <div className="stock-card-skeleton-price stock-card-skeleton-pulse" />
+                                        <div className="stock-card-skeleton-change stock-card-skeleton-pulse" />
+                                    </div>
+                                    <div className="stock-card-skeleton-metrics">
+                                        <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
+                                        <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
+                                        <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
+                                    </div>
+                                    <div className="stock-card-skeleton-chart stock-card-skeleton-pulse" />
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
             
             {activeSection === 'markets' && error && (
                 <div className="error-message">
@@ -5298,7 +5292,31 @@ export default function MarketsView({
                         )}
 
                         {stocksLoading && !stocks && (
-                            <div className="loading-state"><div className="spinner" /> Hisseler yükleniyor...</div>
+                            <div className="mv-table-skeleton" role="status" aria-live="polite" aria-label="Hisseler yükleniyor">
+                                <div className="mv-table-skeleton-head" aria-hidden="true">
+                                    <span className="mv-sk-cell is-xs stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-lg stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-md stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                </div>
+                                {Array.from({ length: 10 }, (_, idx) => (
+                                    <div key={idx} className="mv-table-skeleton-row" aria-hidden="true">
+                                        <span className="mv-sk-cell is-xs stock-card-skeleton-pulse" />
+                                        <div className="mv-sk-symbol">
+                                            <span className="mv-sk-avatar stock-card-skeleton-pulse" />
+                                            <span className="mv-sk-cell is-lg stock-card-skeleton-pulse" />
+                                        </div>
+                                        <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                        <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                        <span className="mv-sk-cell is-md stock-card-skeleton-pulse" />
+                                        <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                        <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                    </div>
+                                ))}
+                            </div>
                         )}
 
                         {stocksError && !stocks && (
@@ -5499,7 +5517,29 @@ export default function MarketsView({
                         </div>
 
                         {indicesLoading && !indices && (
-                            <div className="loading-state"><div className="spinner" /> Endeksler yükleniyor...</div>
+                            <div className="mv-table-skeleton" role="status" aria-live="polite" aria-label="Endeksler yükleniyor">
+                                <div className="mv-table-skeleton-head is-indices" aria-hidden="true">
+                                    <span className="mv-sk-cell is-xs stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-lg stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-md stock-card-skeleton-pulse" />
+                                    <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                </div>
+                                {Array.from({ length: 8 }, (_, idx) => (
+                                    <div key={idx} className="mv-table-skeleton-row is-indices" aria-hidden="true">
+                                        <span className="mv-sk-cell is-xs stock-card-skeleton-pulse" />
+                                        <div className="mv-sk-symbol">
+                                            <span className="mv-sk-avatar stock-card-skeleton-pulse" />
+                                            <span className="mv-sk-cell is-lg stock-card-skeleton-pulse" />
+                                        </div>
+                                        <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                        <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                        <span className="mv-sk-cell is-md stock-card-skeleton-pulse" />
+                                        <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                    </div>
+                                ))}
+                            </div>
                         )}
 
                         {indicesError && !indices && (
@@ -5623,7 +5663,27 @@ export default function MarketsView({
                     </div>
 
                     {indexDetailLoading && !indexDetail && (
-                        <div className="loading-state"><div className="spinner" /> Endeks detayı yükleniyor...</div>
+                        <div className="mv-index-detail-skeleton" role="status" aria-live="polite" aria-label="Endeks detayı yükleniyor">
+                            <div className="mv-index-hero-skeleton" aria-hidden="true">
+                                <div className="mv-index-hero-left">
+                                    <span className="mv-index-logo-sk stock-card-skeleton-pulse" />
+                                    <div className="mv-index-title-sk">
+                                        <span className="mv-sk-cell is-md stock-card-skeleton-pulse" style={{ height: '24px' }} />
+                                        <span className="mv-sk-cell is-lg stock-card-skeleton-pulse" />
+                                    </div>
+                                </div>
+                                <div className="mv-index-hero-right">
+                                    <span className="mv-sk-cell is-md stock-card-skeleton-pulse" style={{ height: '24px' }} />
+                                    <span className="mv-sk-cell is-sm stock-card-skeleton-pulse" />
+                                </div>
+                            </div>
+                            <div className="mv-index-returns-sk" aria-hidden="true">
+                                {[0, 1, 2, 3].map((i) => (
+                                    <span key={i} className="mv-index-return-card-sk stock-card-skeleton-pulse" />
+                                ))}
+                            </div>
+                            <div className="mv-index-chart-sk stock-card-skeleton-pulse" aria-hidden="true" />
+                        </div>
                     )}
 
                     {indexDetailError && !indexDetail && (
