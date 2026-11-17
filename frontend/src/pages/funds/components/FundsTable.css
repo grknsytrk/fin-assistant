@@ -369,8 +369,14 @@
     cursor: default;
 }
 
+@keyframes funds-table-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
 .funds-refresh-btn.is-spinning svg {
-    animation: funds-spin 0.9s linear infinite;
+    animation: funds-table-spin 0.9s linear infinite;
 }
 
 .funds-screener-active-banner {

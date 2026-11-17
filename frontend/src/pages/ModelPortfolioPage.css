@@ -975,11 +975,33 @@
     background: transparent;
 }
 
+@keyframes mp-skel-shimmer {
+    0% {
+        background-position: 200% 0;
+    }
+    100% {
+        background-position: -200% 0;
+    }
+}
+
 .mp-skel-block {
     display: inline-block;
     border-radius: 3px;
-    background: color-mix(in srgb, var(--surface-border) 72%, var(--surface-hover));
+    background: linear-gradient(
+        90deg,
+        color-mix(in srgb, var(--surface-border) 72%, var(--surface-hover)) 25%,
+        color-mix(in srgb, var(--surface-border) 78%, var(--text-secondary)) 50%,
+        color-mix(in srgb, var(--surface-border) 72%, var(--surface-hover)) 75%
+    );
+    background-size: 200% 100%;
+    animation: mp-skel-shimmer 1.6s infinite linear;
     vertical-align: middle;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mp-skel-block {
+        animation: none;
+    }
 }
 
 .mp-skel-logo {
@@ -1028,6 +1050,32 @@
 .mp-skel-act {
     width: 44px;
     height: 12px;
+}
+
+.mp-skel-kpi-value {
+    width: 78px;
+    height: 22px;
+    margin: 0.12rem 0;
+}
+
+.mp-skel-kpi-sub {
+    width: 108px;
+    height: 11px;
+    margin-top: 0.1rem;
+    opacity: 0.75;
+}
+
+.mp-skel-badge {
+    width: 92px;
+    height: 18px;
+    border-radius: 4px;
+}
+
+.mp-skel-summary {
+    width: min(360px, 85%);
+    height: 11px;
+    margin-top: 6px;
+    opacity: 0.75;
 }
 
 .mp-sr-only {

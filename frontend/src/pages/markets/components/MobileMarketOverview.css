@@ -115,10 +115,21 @@
         background: color-mix(in srgb, var(--bg-color) 72%, var(--surface-color));
     }
 
+    @keyframes mobile-market-shimmer {
+        0% { background-position: -200% 0; }
+        100% { background-position: 200% 0; }
+    }
+
     .mobile-market-index-chart.is-loading {
         background: linear-gradient(90deg, #1c1c1b 25%, #2a2a29 50%, #1c1c1b 75%);
         background-size: 200% 100%;
-        animation: stock-card-shimmer 1.6s infinite linear;
+        animation: mobile-market-shimmer 1.6s infinite linear;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .mobile-market-index-chart.is-loading {
+            animation: none;
+        }
     }
 
     .mobile-market-index-chart svg,

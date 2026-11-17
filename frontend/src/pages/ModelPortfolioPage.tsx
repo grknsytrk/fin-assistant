@@ -486,71 +486,71 @@ export default function ModelPortfolioPage() {
 
                     {/* Portfolio Summary Strip */}
                     <section className="mp-kpi-strip" aria-label="Model portföy özet göstergeleri">
-                        <div className="mp-kpi-item">
-                            <span className="mp-kpi-label">Getiri</span>
-                            <strong
-                                className={`mp-kpi-value ${toneClass(liveSummary.invested_return_pct)}`}
-                                title="Her pozisyonun getirisi giriş gününden bugüne ağırlıklı olarak hesaplanır."
-                            >
-                                {formatPct(liveSummary.invested_return_pct)}
-                            </strong>
-                            <span className="mp-kpi-sub">
-                                Nakit dahil <b>{formatPct(liveSummary.portfolio_return_pct)}</b>
-                            </span>
-                        </div>
-
-                        <div className="mp-kpi-item">
-                            <span className="mp-kpi-label">XU100 Alfa</span>
-                            <strong className={`mp-kpi-value ${toneClass(liveSummary.relative_return_pct)}`}>
-                                {formatPct(liveSummary.relative_return_pct)}
-                            </strong>
-                            <span
-                                className="mp-kpi-sub"
-                                title="Her pozisyon, kendi giriş günündeki XU100 seviyesinden itibaren kıyaslanır."
-                            >
-                                XU100 <b>{formatPct(liveSummary.xu100_return_pct)}</b>
-                            </span>
-                        </div>
-
-                        <div className="mp-kpi-item">
-                            <span className="mp-kpi-label">Hedef Potansiyel</span>
-                            <strong className={`mp-kpi-value ${toneClass(liveSummary.weighted_target_upside_pct)}`}>
-                                {formatPct(liveSummary.weighted_target_upside_pct)}
-                            </strong>
-                            <span className="mp-kpi-sub">Nakit hariç</span>
-                        </div>
-
-                        <div className="mp-kpi-item">
-                            <span className="mp-kpi-label">Dağılım</span>
-                            <strong className={`mp-kpi-value${!hasPortfolioSetup ? ' mp-kpi-empty-value' : ''}`}>
-                                {!hasPortfolioSetup
+                        {[
+                            {
+                                label: 'Getiri',
+                                value: formatPct(liveSummary.invested_return_pct),
+                                valueClass: toneClass(liveSummary.invested_return_pct),
+                                valueTitle: 'Her pozisyonun getirisi giriş gününden bugüne ağırlıklı olarak hesaplanır.',
+                                sub: <>Nakit dahil <b>{formatPct(liveSummary.portfolio_return_pct)}</b></>,
+                            },
+                            {
+                                label: 'XU100 Alfa',
+                                value: formatPct(liveSummary.relative_return_pct),
+                                valueClass: toneClass(liveSummary.relative_return_pct),
+                                subTitle: 'Her pozisyon, kendi giriş günündeki XU100 seviyesinden itibaren kıyaslanır.',
+                                sub: <>XU100 <b>{formatPct(liveSummary.xu100_return_pct)}</b></>,
+                            },
+                            {
+                                label: 'Hedef Potansiyel',
+                                value: formatPct(liveSummary.weighted_target_upside_pct),
+                                valueClass: toneClass(liveSummary.weighted_target_upside_pct),
+                                sub: 'Nakit hariç',
+                            },
+                            {
+                                label: 'Dağılım',
+                                value: !hasPortfolioSetup
                                     ? '—'
                                     : liveSummary.active_count > 0
                                         ? `${liveSummary.active_count} hisse`
-                                        : 'Nakit'}
-                            </strong>
-                            <span className="mp-kpi-sub">
-                                {!hasPortfolioSetup
+                                        : 'Nakit',
+                                valueClass: !hasPortfolioSetup ? 'mp-kpi-empty-value' : '',
+                                sub: !hasPortfolioSetup
                                     ? 'Pozisyon yok'
                                     : liveSummary.active_count > 0
                                         ? <>Hisse <b>%{liveSummary.total_weight_pct.toFixed(0)}</b> · Nakit <b>%{liveSummary.cash_weight_pct.toFixed(1)}</b></>
-                                        : 'Tümü kapatıldı'}
-                            </span>
-                        </div>
-
-                        <div className="mp-kpi-item">
-                            <span className="mp-kpi-label">Başarı Oranı</span>
-                            <strong className="mp-kpi-value mp-tone-accent">
-                                {liveSummary.closed_hit_rate_pct != null
+                                        : 'Tümü kapatıldı',
+                            },
+                            {
+                                label: 'Başarı Oranı',
+                                value: liveSummary.closed_hit_rate_pct != null
                                     ? `%${liveSummary.closed_hit_rate_pct.toFixed(0)}`
-                                    : '—'}
-                            </strong>
-                            <span className="mp-kpi-sub">
-                                {liveSummary.closed_count > 0
+                                    : '—',
+                                valueClass: 'mp-tone-accent',
+                                sub: liveSummary.closed_count > 0
                                     ? `${liveSummary.closed_win_count}/${liveSummary.closed_count} XU100 üstü`
-                                    : 'Kapalı işlem yok'}
-                            </span>
-                        </div>
+                                    : 'Kapalı işlem yok',
+                            },
+                        ].map((kpi) => (
+                            <div key={kpi.label} className="mp-kpi-item">
+                                <span className="mp-kpi-label">{kpi.label}</span>
+                                {loading && !portfolioData ? (
+                                    <>
+                                        <span className="mp-skel-block mp-skel-kpi-value" aria-hidden="true" />
+                                        <span className="mp-skel-block mp-skel-kpi-sub" aria-hidden="true" />
+                                    </>
+                                ) : (
+                                    <>
+                                        <strong className={`mp-kpi-value ${kpi.valueClass}`.trim()} title={kpi.valueTitle}>
+                                            {kpi.value}
+                                        </strong>
+                                        <span className="mp-kpi-sub" title={kpi.subTitle}>
+                                            {kpi.sub}
+                                        </span>
+                                    </>
+                                )}
+                            </div>
+                        ))}
                     </section>
 
                     {/* Analytics Grid: Left = Cumulative Performance Chart, Right = Allocation Donut & Attribution */}
@@ -992,7 +992,49 @@ export default function ModelPortfolioPage() {
 
                         {/* TAB 2: Closed Positions */}
                         {activeTab === 'closed' && (
-                            (portfolioData?.closed_positions.length || 0) === 0 ? (
+                            loading && !portfolioData ? (
+                                <div className="mp-table-wrap" role="status" aria-busy="true" aria-label="Kapatılan pozisyonlar yükleniyor">
+                                    <table className="mp-table mp-closed-table mp-table-skeleton">
+                                        <thead>
+                                            <tr>
+                                                <th>Hisse</th>
+                                                <th className="num">Tarih</th>
+                                                <th className="num">Giriş</th>
+                                                <th className="num">Çıkış</th>
+                                                <th className="num">Net getiri</th>
+                                                <th className="num">XU100’e göre</th>
+                                                <th>Gerekçe</th>
+                                                <th className="act"><span className="mp-sr-only">İşlemler</span></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {[0, 1, 2, 3].map((idx) => (
+                                                <tr key={idx} className="mp-row mp-skeleton-row" aria-hidden="true">
+                                                    <td>
+                                                        <div className="mp-stock-cell">
+                                                            <span className="mp-skel-block mp-skel-logo" />
+                                                            <div className="mp-stock-meta">
+                                                                <span className="mp-skel-block mp-skel-ticker" />
+                                                                <span className="mp-skel-block mp-skel-company" />
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                    <td className="num" data-label="Tarih">
+                                                        <span className="mp-skel-block mp-skel-num" />
+                                                        <span className="mp-skel-block mp-skel-sub" />
+                                                    </td>
+                                                    <td className="num" data-label="Giriş"><span className="mp-skel-block mp-skel-num-sm" /></td>
+                                                    <td className="num" data-label="Çıkış"><span className="mp-skel-block mp-skel-num-sm" /></td>
+                                                    <td className="num" data-label="Net getiri"><span className="mp-skel-block mp-skel-num-sm" /></td>
+                                                    <td className="num" data-label="XU100’e göre"><span className="mp-skel-block mp-skel-num-sm" /></td>
+                                                    <td data-label="Gerekçe"><span className="mp-skel-block mp-skel-target" /></td>
+                                                    <td className="act"><span className="mp-skel-block mp-skel-act" /></td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            ) : (portfolioData?.closed_positions.length || 0) === 0 ? (
                                 <div className="mp-empty-box">
                                     <Award size={24} className="mp-empty-icon" />
                                     <h3>Kapatılan Pozisyon Yok</h3>
@@ -1129,7 +1171,28 @@ export default function ModelPortfolioPage() {
 
                         {/* TAB 3: Changelog Timeline */}
                         {activeTab === 'changelog' && (
-                            (portfolioData?.changelog.length || 0) === 0 ? (
+                            loading && !portfolioData ? (
+                                <div className="mp-changelog-list" role="status" aria-busy="true" aria-label="Değişiklik günlüğü yükleniyor">
+                                    {[0, 1, 2, 3].map((idx) => (
+                                        <div key={idx} className="mp-changelog-item" aria-hidden="true">
+                                            <div className="mp-changelog-meta">
+                                                <span className="mp-skel-block mp-skel-badge" />
+                                                <span className="mp-skel-block mp-skel-num-sm" />
+                                            </div>
+                                            <div className="mp-changelog-body">
+                                                <span className="mp-skel-block mp-skel-logo" />
+                                                <div className="mp-changelog-content">
+                                                    <div className="mp-changelog-top">
+                                                        <span className="mp-skel-block mp-skel-ticker" />
+                                                        <span className="mp-skel-block mp-skel-company" />
+                                                    </div>
+                                                    <span className="mp-skel-block mp-skel-summary" />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (portfolioData?.changelog.length || 0) === 0 ? (
                                 <div className="mp-empty-box">
                                     <History size={24} className="mp-empty-icon" />
                                     <h3>Değişiklik Kaydı Yok</h3>

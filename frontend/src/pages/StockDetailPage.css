@@ -838,6 +838,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+    .sd-skeleton-shimmer {
+        animation: none;
+    }
+
     .sd-price-chart-loading-line {
         animation: none;
         stroke-dashoffset: 0;

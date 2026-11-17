@@ -103,9 +103,9 @@
     border-radius: 2px;
     background: linear-gradient(
         90deg,
-        color-mix(in srgb, var(--surface-border) 72%, var(--surface-color)) 25%,
-        color-mix(in srgb, var(--surface-hover) 88%, var(--surface-border)) 50%,
-        color-mix(in srgb, var(--surface-border) 72%, var(--surface-color)) 75%
+        color-mix(in srgb, var(--surface-border) 72%, var(--surface-hover)) 25%,
+        color-mix(in srgb, var(--surface-border) 78%, var(--text-secondary)) 50%,
+        color-mix(in srgb, var(--surface-border) 72%, var(--surface-hover)) 75%
     );
     background-size: 200% 100%;
     animation: fund-request-shimmer 1.6s infinite linear;
