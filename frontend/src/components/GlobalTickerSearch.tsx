@@ -33,6 +33,8 @@ type SearchCatalogStatus = 'loading' | 'ready' | 'error';
 
 interface GlobalTickerSearchProps {
   currentTicker?: string | null;
+  variant?: 'sidebar' | 'hero';
+  triggerLabel?: string;
   onSelectTicker: (ticker: string) => void;
   onSelectFund?: (fundCode: string) => void;
 }
@@ -42,12 +44,20 @@ const MAX_RECENT_SEARCHES = 8;
 const MIN_FUND_SEARCH_QUERY_LENGTH = 1;
 const SEARCH_CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
 const STOCK_SEARCH_CATALOG_CACHE_TTL_MS = 60 * 1000;
+const STOCK_QUOTE_CACHE_TTL_MS = 60 * 1000;
+const QUOTE_CACHE_INDICES = ['XUTUM', 'XU100', 'XU030'] as const;
 
 type SearchCatalogCache<T> = { rows: T[]; fetchedAt: number };
 let stockSearchCatalogCache: SearchCatalogCache<MarketUniverseRow> | null = null;
 let fundSearchCatalogCache: SearchCatalogCache<FundSummary> | null = null;
+let stockQuoteMemoryCache: SearchCatalogCache<MarketUniverseRow> | null = null;
 let stockSearchCatalogRequest: Promise<MarketUniverseRow[]> | null = null;
 let fundSearchCatalogRequest: Promise<FundSummary[]> | null = null;
+let stockQuoteRequest: Promise<MarketUniverseRow[]> | null = null;
+
+function validPositivePrice(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) && value > 0 ? value : null;
+}
 
 function cachedCatalogRows<T>(
   cache: SearchCatalogCache<T> | null,
@@ -80,9 +90,62 @@ function hasFundSearchRows(): boolean {
 }
 
 function cachedMarketStockRows(): MarketUniverseRow[] {
-  const cached = apiClient.getCachedMarketStocksEntry?.('XUTUM');
-  if (!cached || Date.now() - cached.fetchedAt >= 15_000) return [];
-  return cached.payload.rows || [];
+  const merged = new Map<string, MarketUniverseRow>();
+  for (const row of stockQuoteMemoryCache?.rows || []) {
+    const key = normalizeStockSymbol(row.symbol || row.company);
+    if (key) merged.set(key, row);
+  }
+  for (const indexCode of [...QUOTE_CACHE_INDICES].reverse()) {
+    const entry = apiClient.getCachedMarketStocksEntry?.(indexCode);
+    const payloadRows = entry?.payload?.rows || apiClient.getCachedMarketStocks?.(indexCode)?.rows || [];
+    for (const row of payloadRows) {
+      const key = normalizeStockSymbol(row.symbol || row.company);
+      if (!key) continue;
+      const existing = merged.get(key);
+      if (!existing || validPositivePrice(row.price) !== null) {
+        merged.set(key, {
+          ...existing,
+          ...row,
+          price: validPositivePrice(row.price) ?? validPositivePrice(existing?.price) ?? null,
+        });
+      }
+    }
+  }
+  return [...merged.values()];
+}
+
+function hasFreshStockQuotes(): boolean {
+  const xutumEntry = apiClient.getCachedMarketStocksEntry?.('XUTUM');
+  if (xutumEntry && Date.now() - xutumEntry.fetchedAt < STOCK_QUOTE_CACHE_TTL_MS) {
+    return true;
+  }
+  return Boolean(cachedCatalogRows(stockQuoteMemoryCache, STOCK_QUOTE_CACHE_TTL_MS));
+}
+
+function loadStockQuoteRows(): Promise<MarketUniverseRow[]> {
+  const xutumEntry = apiClient.getCachedMarketStocksEntry?.('XUTUM');
+  if (xutumEntry && Date.now() - xutumEntry.fetchedAt < STOCK_QUOTE_CACHE_TTL_MS) {
+    const rows = cachedMarketStockRows();
+    stockQuoteMemoryCache = { rows, fetchedAt: xutumEntry.fetchedAt };
+    return Promise.resolve(rows);
+  }
+  const cached = cachedCatalogRows(stockQuoteMemoryCache, STOCK_QUOTE_CACHE_TTL_MS);
+  if (cached) return Promise.resolve(cached);
+  if (stockQuoteRequest) return stockQuoteRequest;
+  if (!apiClient.marketStocks) return Promise.resolve(cachedMarketStockRows());
+
+  const request = Promise.resolve()
+    .then(() => apiClient.marketStocks({ index: 'XUTUM' }))
+    .then(() => {
+      const rows = cachedMarketStockRows();
+      stockQuoteMemoryCache = { rows, fetchedAt: Date.now() };
+      return rows;
+    })
+    .finally(() => {
+      if (stockQuoteRequest === request) stockQuoteRequest = null;
+    });
+  stockQuoteRequest = request;
+  return request;
 }
 
 function loadStockSearchCatalog(): Promise<MarketUniverseRow[]> {
@@ -249,7 +312,7 @@ function stockRowToResult(row: MarketUniverseRow): SearchResult {
     title: displayName,
     subtitle: displayName,
     aliases,
-    price: row.price ?? null,
+    price: validPositivePrice(row.price),
     changePct: row.change_pct ?? null,
     logoUrl: row.logo_url,
     logoName: displayName,
@@ -268,11 +331,11 @@ function mergeStockQuoteRows(
     if (!quote) return row;
     return {
       ...row,
-      price: quote.price,
-      price_currency: quote.price_currency,
-      change: quote.change,
-      change_pct: quote.change_pct,
-      price_as_of: quote.price_as_of,
+      price: validPositivePrice(quote.price) ?? validPositivePrice(row.price),
+      price_currency: quote.price_currency || row.price_currency,
+      change: quote.change ?? row.change,
+      change_pct: quote.change_pct ?? row.change_pct,
+      price_as_of: quote.price_as_of || row.price_as_of,
       market_cap: quote.market_cap ?? row.market_cap,
     };
   });
@@ -280,6 +343,7 @@ function mergeStockQuoteRows(
 
 function fundRowToResult(row: FundSummary): SearchResult {
   const symbol = normalizeSymbol(row.fund_code);
+  const price = validPositivePrice(row.price);
   return {
     id: resultId('fund', symbol),
     type: 'fund',
@@ -287,8 +351,8 @@ function fundRowToResult(row: FundSummary): SearchResult {
     title: symbol,
     subtitle: row.name,
     aliases: [row.fund_code, row.name, row.founder_company || '', row.manager_company || ''].filter(Boolean),
-    price: row.price,
-    changePct: row.daily_return,
+    price,
+    changePct: price !== null || (row.daily_return != null && row.daily_return !== 0) ? row.daily_return : null,
     logoName: row.founder_company || row.manager_company || row.name,
   };
 }
@@ -374,6 +438,8 @@ function rankSearchResults(results: SearchResult[], query: string, currentTicker
 
 export default function GlobalTickerSearch({
   currentTicker = null,
+  variant = 'sidebar',
+  triggerLabel,
   onSelectTicker,
   onSelectFund,
 }: GlobalTickerSearchProps) {
@@ -417,9 +483,11 @@ export default function GlobalTickerSearch({
     let active = true;
 
     setStockQuoteRows(cachedMarketStockRows());
-    const unsubscribeStocks = apiClient.subscribeMarketStocks?.((index, payload) => {
-      if (active && index === 'XUTUM') {
-        setStockQuoteRows(payload.rows || []);
+    const unsubscribeStocks = apiClient.subscribeMarketStocks?.((index) => {
+      if (active && (index === 'XUTUM' || index === 'XU100' || index === 'XU030')) {
+        const rows = cachedMarketStockRows();
+        stockQuoteMemoryCache = { rows, fetchedAt: Date.now() };
+        setStockQuoteRows(rows);
       }
     });
     const unsubscribeFunds = apiClient.subscribeFundsCatalog?.((payload) => {
@@ -430,11 +498,9 @@ export default function GlobalTickerSearch({
       setFundCatalogStatus('ready');
     });
 
-    // Warm both searchable catalogues when the navigation mounts. Once they
-    // are ready, keystrokes only filter these in-memory rows, just like the
-    // fund list search. The market and fund pages share the API client's
-    // existing request/cache paths, so an already-running catalogue load is
-    // reused where possible.
+    // Warm searchable catalogues and XUTUM stock quotes on mount so prices
+    // and instant filtering work identically across MarketPage, navigation,
+    // and recent searches without duplicate API calls.
     loadStockSearchCatalog()
       .then((rows) => {
         if (!active) return;
@@ -444,6 +510,12 @@ export default function GlobalTickerSearch({
       .catch(() => {
         if (active && !hasStockSearchRows()) setStockCatalogStatus('error');
       });
+
+    loadStockQuoteRows()
+      .then((rows) => {
+        if (active && rows.length > 0) setStockQuoteRows(rows);
+      })
+      .catch(() => {});
 
     loadFundSearchCatalog()
       .then((rows) => {
@@ -622,17 +694,38 @@ export default function GlobalTickerSearch({
   useEffect(() => {
     if (recentSearches.length === 0) return;
     const currentResults = new Map(allSearchCandidates.map((result) => [result.id, result]));
+    const quoteResultsById = new Map(
+      stockQuoteRows.map((row) => {
+        const res = stockRowToResult(row);
+        return [res.id, res] as const;
+      }),
+    );
     setRecentSearches((current) => {
       let changed = false;
       const next = current.map((recent) => {
-        const refreshed = currentResults.get(recent.id) || { ...recent, price: null, changePct: null };
-        if (refreshed.price !== recent.price || refreshed.changePct !== recent.changePct) changed = true;
+        const fromCandidate = currentResults.get(recent.id);
+        const fromQuote = quoteResultsById.get(recent.id);
+        const refreshed = fromCandidate || (fromQuote
+          ? {
+            ...recent,
+            price: validPositivePrice(fromQuote.price) ?? validPositivePrice(recent.price),
+            changePct: fromQuote.changePct ?? recent.changePct,
+            logoUrl: fromQuote.logoUrl || recent.logoUrl,
+          }
+          : { ...recent, price: validPositivePrice(recent.price), changePct: recent.changePct });
+        if (
+          refreshed.price !== recent.price
+          || refreshed.changePct !== recent.changePct
+          || refreshed.logoUrl !== recent.logoUrl
+        ) {
+          changed = true;
+        }
         return refreshed;
       });
       if (changed) writeRecentSearches(next);
       return changed ? next : current;
     });
-  }, [allSearchCandidates, recentSearches.length]);
+  }, [allSearchCandidates, recentSearches.length, stockQuoteRows]);
 
   const visibleResults = useMemo(() => {
     if (!normalizedQuery) return recentSearches;
@@ -681,6 +774,13 @@ export default function GlobalTickerSearch({
     setIsOpen(true);
 
     setStockQuoteRows(cachedMarketStockRows());
+    if (!hasFreshStockQuotes()) {
+      loadStockQuoteRows()
+        .then((rows) => {
+          if (rows.length > 0) setStockQuoteRows(rows);
+        })
+        .catch(() => {});
+    }
 
     if (!cachedCatalogRows(stockSearchCatalogCache, STOCK_SEARCH_CATALOG_CACHE_TTL_MS)) {
       if (!hasStockSearchRows()) setStockCatalogStatus('loading');
@@ -856,16 +956,16 @@ export default function GlobalTickerSearch({
   );
 
   return (
-    <div className="global-search">
+    <div className={`global-search${variant === 'hero' ? ' global-search-hero' : ''}`}>
       <button
         type="button"
-        className="global-search-trigger"
+        className={`global-search-trigger${variant === 'hero' ? ' is-hero' : ''}`}
         onClick={openSearch}
         aria-haspopup="dialog"
         aria-expanded={isOpen}
       >
-        <Search size={17} aria-hidden="true" />
-        <span>Ara</span>
+        <Search size={variant === 'hero' ? 16 : 17} aria-hidden="true" />
+        <span>{triggerLabel || (variant === 'hero' ? 'Hisse veya fon kodu, ad ya da kurucu ara' : 'Ara')}</span>
       </button>
 
       {isOpen && (

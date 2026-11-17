@@ -116,41 +116,26 @@ export default function MarketsNavigation({
                     </div>
                 </Link>
                 <div className={`mn-menu-subtree ${fundsExpanded ? 'is-open' : ''}`}>
-                    <div className="mn-submenu-head">
-                        <Link
-                            to={toFunds()}
-                            className={`mn-menu-item mn-submenu-link ${activeSection === 'funds' && !isModelPortfolioPage ? 'active' : ''}`}
-                            title="Fonlar"
-                            onClick={(event) => {
-                                if (collapsed && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
-                                    event.preventDefault();
-                                    onCollapsedChange(false);
-                                    setFundsExpanded(true);
-                                    return;
-                                }
+                    <button
+                        type="button"
+                        className={`mn-menu-item has-submenu ${activeSection === 'funds' && !isModelPortfolioPage ? 'active' : ''}`}
+                        title="Fonlar"
+                        aria-expanded={fundsExpanded}
+                        onClick={() => {
+                            if (collapsed) {
+                                onCollapsedChange(false);
                                 setFundsExpanded(true);
-                                handleLinkClick(event, onFundSectionChange
-                                    ? () => onFundSectionChange('investment')
-                                    : () => onSectionChange('funds'));
-                            }}
-                        >
-                            <div className="mn-item-main">
-                                <Coins size={18} className="mn-icon" />
-                                {!collapsed && <span className="mn-text">Fonlar</span>}
-                            </div>
-                        </Link>
-                        {!collapsed && (
-                            <button
-                                type="button"
-                                className="mn-submenu-toggle"
-                                aria-label={fundsExpanded ? 'Fonlar alt menüsünü daralt' : 'Fonlar alt menüsünü genişlet'}
-                                aria-expanded={fundsExpanded}
-                                onClick={() => setFundsExpanded((prev) => !prev)}
-                            >
-                                <ChevronRight size={14} className="mn-chevron" />
-                            </button>
-                        )}
-                    </div>
+                                return;
+                            }
+                            setFundsExpanded((prev) => !prev);
+                        }}
+                    >
+                        <div className="mn-item-main">
+                            <Coins size={18} className="mn-icon" />
+                            {!collapsed && <span className="mn-text">Fonlar</span>}
+                        </div>
+                        {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
+                    </button>
                     {!collapsed && (
                         <div className={`mn-submenu-collapse ${fundsExpanded ? 'is-open' : ''}`} aria-hidden={!fundsExpanded}>
                             <div className="mn-submenu-collapse-inner">

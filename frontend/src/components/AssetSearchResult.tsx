@@ -21,17 +21,18 @@ interface AssetSearchResultProps {
 }
 
 function formatSearchPrice(value: number | null, kind: AssetSearchResultKind): string | null {
-    if (value == null || !Number.isFinite(value)) return null;
-    return value.toLocaleString('tr-TR', {
+    if (value == null || !Number.isFinite(value) || value <= 0) return null;
+    const formatted = value.toLocaleString('tr-TR', {
         minimumFractionDigits: kind === 'fund' ? 4 : 2,
         maximumFractionDigits: kind === 'fund' ? 6 : 2,
     });
+    return `${formatted}\u00A0₺`;
 }
 
 function formatSearchChange(value: number | null): string | null {
     if (value == null || !Number.isFinite(value)) return null;
     const sign = value > 0 ? '+' : '';
-    return `% ${sign}${value.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return `%${sign}${value.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 export default function AssetSearchResult({
@@ -50,7 +51,8 @@ export default function AssetSearchResult({
     onClick,
 }: AssetSearchResultProps) {
     const formattedPrice = formatSearchPrice(price, kind);
-    const formattedChange = formatSearchChange(changePct);
+    const showChange = changePct != null && Number.isFinite(changePct) && (formattedPrice !== null || changePct !== 0);
+    const formattedChange = showChange ? formatSearchChange(changePct) : null;
 
     return (
         <a
@@ -77,7 +79,6 @@ export default function AssetSearchResult({
             <span className="asset-search-result-values">
                 {formattedPrice ? (
                     <span className="asset-search-result-price">
-                        {kind === 'stock' ? <small>G</small> : null}
                         {formattedPrice}
                     </span>
                 ) : null}

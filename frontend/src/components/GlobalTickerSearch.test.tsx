@@ -214,4 +214,18 @@ describe('GlobalTickerSearch', () => {
     expect(onSelectTicker).not.toHaveBeenCalled();
     expect(onSelectFund).not.toHaveBeenCalled();
   });
+
+  it('hides bogus zero prices for funds like 0,0000', async () => {
+    mocks.marketStockSearch.mockResolvedValue({ rows: [] });
+    mocks.fundSearch.mockResolvedValue({
+      rows: [{ ...fundRow('DOH'), price: 0, daily_return: 0 }],
+    });
+
+    const { input } = renderSearch();
+    fireEvent.change(input, { target: { value: 'DOH' } });
+
+    const fundOption = await screen.findByRole('option', { name: /DOH/ });
+    expect(fundOption).toBeTruthy();
+    expect(screen.queryByText(/0,0000/)).toBeNull();
+  });
 });
