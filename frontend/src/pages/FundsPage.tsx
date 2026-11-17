@@ -847,8 +847,8 @@ export default function FundsPage({
         latestPerformanceDate,
     ) || new Date().toISOString().slice(0, 10);
     const chartEndDate = chartRange === 'custom'
-        ? (customEndDate || latestAvailableDate)
-        : latestAvailableDate;
+        ? (customEndDate || latestPerformanceDate || latestAvailableDate)
+        : (latestPerformanceDate || latestAvailableDate);
     const chartPoints = useMemo(
         () => filterPointsForRange(visiblePerformancePoints, chartRange, chartEndDate, customStartDate, customEndDate),
         [visiblePerformancePoints, chartRange, chartEndDate, customStartDate, customEndDate],
@@ -978,6 +978,7 @@ export default function FundsPage({
         () => fundCode
             ? buildFundHistoryDiagnosticLines({
                 fundCode: fundCode.trim().toUpperCase(),
+                selectedFund,
                 performance,
                 points: performancePoints,
                 periodReturns: detailPeriodReturns,
@@ -999,6 +1000,7 @@ export default function FundsPage({
             performanceError,
             performanceLoading,
             performancePoints,
+            selectedFund,
             yieldError,
             yieldLoading,
             yieldSummary,

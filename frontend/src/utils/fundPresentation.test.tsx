@@ -232,4 +232,60 @@ describe('fund presentation helpers', () => {
 
         expect(lines.join('\n')).toContain('Hata: Geçmiş verisi alınamadı.');
     });
+
+    it('hides internal API telemetry warnings when there is no halted state or error', () => {
+        const performance = performancePayload(
+            [performancePoint('2026-09-10', 1.0, 'fintables_udf_history')],
+            {
+                coverage_state: 'range_incomplete',
+                warnings: ['Fund history has an internal gap: previous=2026-09-01, next=2026-09-10'],
+                coverage_gap_business_days: 0,
+            },
+        );
+
+        const lines = buildFundHistoryDiagnosticLines({
+            fundCode: 'BOH',
+            performance,
+            points: performance.points,
+        });
+
+        expect(lines).toEqual([]);
+    });
+
+    it('shows a calm Turkish pause/liquidation notice for zeroed or halted funds', () => {
+        const performance = performancePayload(
+            [performancePoint('2026-11-04', 1.0, 'tefasfon_funds')],
+            {
+                coverage_state: 'range_incomplete',
+                coverage_gap_business_days: 9,
+            },
+        );
+
+        const lines = buildFundHistoryDiagnosticLines({
+            fundCode: 'DOH',
+            selectedFund: {
+                fund_code: 'DOH',
+                name: 'TERA PORTFÖY DÖRDÜNCÜ HİSSE SENEDİ SERBEST (TL) FON',
+                fund_type: 'SERBEST',
+                founder_company: null,
+                manager_company: null,
+                price: 0,
+                daily_return: null,
+                period_returns: {},
+                risk_value: null,
+                currency: 'TRY',
+                as_of: '2026-11-17',
+                aum: 0,
+                source: 'tefasfon_funds',
+            },
+            performance,
+            points: performance.points,
+        });
+
+        const joined = lines.join('\n');
+        expect(joined).toContain('Fiyat veya işlem akışı duraklamış olabilir');
+        expect(joined).toContain('temerrüde düşen, tasfiye sürecine giren');
+        expect(joined).not.toContain('API durumu');
+        expect(joined).not.toContain('fintables_daily_tefas_fallback');
+    });
 });
