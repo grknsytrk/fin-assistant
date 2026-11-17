@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { MarketIndexDetailResponse } from '../../../api/types';
+import AnimatedChartSkeleton from '../../../components/charts/AnimatedChartSkeleton';
 import { formatIndexPrice, formatTablePct, isBistSymbol } from '../stockScreenerConfig';
 import './IndexLineChart.css';
 
@@ -9,6 +10,7 @@ export interface IndexLineChartProps {
     points: MarketIndexDetailResponse['line_points'];
     prevClose: number | null;
     changePct: number | null;
+    isLoading?: boolean;
 }
 
 export function IndexLineChart({
@@ -16,6 +18,7 @@ export function IndexLineChart({
     points,
     prevClose,
     changePct,
+    isLoading = false,
 }: IndexLineChartProps) {
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
@@ -31,6 +34,18 @@ export function IndexLineChart({
     }, [pointWindowKey]);
 
     if (validPoints.length < 2) {
+        if (isLoading) {
+            return (
+                <AnimatedChartSkeleton
+                    seed={`index-${symbol || 'IDX'}`}
+                    width={width}
+                    height={height}
+                    padding={padding}
+                    className="indices-line-chart"
+                    ariaLabel={`${symbol || 'Endeks'} grafiği yükleniyor`}
+                />
+            );
+        }
         return <div className="indices-chart-empty">Grafik verisi bekleniyor.</div>;
     }
 

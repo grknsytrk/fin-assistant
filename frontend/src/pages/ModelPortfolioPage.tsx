@@ -68,6 +68,7 @@ import {
     formatDateTR,
     formatPct,
     formatPrice,
+    formatSessionCountdown,
     mergeLiveMarketRows,
     quoteTimestampAtLeastAsRecent,
     sliceAndNormalizePerformance,
@@ -122,6 +123,7 @@ export default function ModelPortfolioPage() {
     // Short-lived admin session stays in memory and is never persisted in browser storage.
     const [adminToken, setAdminToken] = useState<string>('');
     const [adminSessionExpiresAt, setAdminSessionExpiresAt] = useState<number | null>(null);
+    const [adminRemainingSeconds, setAdminRemainingSeconds] = useState<number | null>(null);
     const [isAdminVerified, setIsAdminVerified] = useState(false);
     const [adminModalOpen, setAdminModalOpen] = useState(false);
     const [adminTokenInput, setAdminTokenInput] = useState('');
@@ -131,14 +133,25 @@ export default function ModelPortfolioPage() {
     const adminDialogRef = useAccessibleDialog<HTMLDivElement>(adminModalOpen, () => setAdminModalOpen(false));
 
     useEffect(() => {
-        if (!adminToken || adminSessionExpiresAt === null) return;
-        const timeoutId = window.setTimeout(() => {
-            setAdminToken('');
-            setAdminSessionExpiresAt(null);
-            setIsAdminVerified(false);
-        }, Math.max(0, adminSessionExpiresAt - Date.now()));
-        return () => window.clearTimeout(timeoutId);
+        if (!adminToken || adminSessionExpiresAt === null) {
+            setAdminRemainingSeconds(null);
+            return;
+        }
+        const updateRemaining = () => {
+            const remaining = Math.max(0, Math.ceil((adminSessionExpiresAt - Date.now()) / 1000));
+            setAdminRemainingSeconds(remaining);
+            if (remaining <= 0) {
+                setAdminToken('');
+                setAdminSessionExpiresAt(null);
+                setIsAdminVerified(false);
+            }
+        };
+        updateRemaining();
+        const intervalId = window.setInterval(updateRemaining, 1000);
+        return () => window.clearInterval(intervalId);
     }, [adminSessionExpiresAt, adminToken]);
+
+    const adminCountdown = formatSessionCountdown(adminRemainingSeconds);
 
     // Position Add / Edit / Close modal state
     const [editorModalOpen, setEditorModalOpen] = useState(false);
@@ -697,9 +710,16 @@ export default function ModelPortfolioPage() {
                                 <div className="mp-toolbar-actions">
                                     {isAdminVerified ? (
                                         <>
-                                            <span className="mp-admin-badge" title="Kurucu düzenleme modu aktif">
-                                                <span className="mp-admin-pulse-dot" aria-hidden="true" />
+                                            <span className="mp-admin-status" title="Kurucu oturumu aktif">
                                                 <span>Kurucu</span>
+                                                {adminCountdown && (
+                                                    <span
+                                                        className={`mp-admin-timer mp-mono${adminRemainingSeconds != null && adminRemainingSeconds <= 120 ? ' is-expiring' : ''}`}
+                                                        title="Oturum kalan süresi"
+                                                    >
+                                                        {adminCountdown}
+                                                    </span>
+                                                )}
                                             </span>
                                             <button
                                                 type="button"
@@ -709,16 +729,17 @@ export default function ModelPortfolioPage() {
                                                     setEditorModalOpen(true);
                                                 }}
                                             >
-                                                <Plus size={13} />
+                                                <Plus size={12} />
                                                 <span>Hisse Ekle</span>
                                             </button>
                                             <button
                                                 type="button"
                                                 className="mp-admin-logout-btn"
                                                 onClick={handleAdminLogout}
-                                                title="Kurucu modundan çık"
+                                                title="Kurucu oturumunu kapat"
+                                                aria-label="Kurucu oturumunu kapat"
                                             >
-                                                <LogOut size={13} />
+                                                <LogOut size={12} />
                                                 <span>Çıkış</span>
                                             </button>
                                         </>

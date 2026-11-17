@@ -38,7 +38,18 @@ export function mergeLiveMarketRows(
 
 export function formatPrice(val: number | null | undefined): string {
     if (val == null || !Number.isFinite(val)) return '—';
-    return `${val.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₺`;
+    return `${val.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\u00A0₺`;
+}
+
+export function formatSessionCountdown(totalSeconds: number | null): string | null {
+    if (totalSeconds == null || !Number.isFinite(totalSeconds)) return null;
+    const clamped = Math.max(0, Math.floor(totalSeconds));
+    const hours = Math.floor(clamped / 3600);
+    const mins = Math.floor((clamped % 3600) / 60);
+    const secs = clamped % 60;
+    const mm = String(mins).padStart(2, '0');
+    const ss = String(secs).padStart(2, '0');
+    return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
 export function formatPct(val: number | null | undefined, signed = true): string {

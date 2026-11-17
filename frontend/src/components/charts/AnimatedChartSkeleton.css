@@ -1,0 +1,85 @@
+@keyframes animated-chart-line-draw {
+    0% {
+        stroke-dashoffset: 100;
+        opacity: 0;
+    }
+    12% {
+        opacity: 0.92;
+    }
+    72%, 88% {
+        stroke-dashoffset: 0;
+        opacity: 0.92;
+    }
+    100% {
+        stroke-dashoffset: 0;
+        opacity: 0;
+    }
+}
+
+.animated-chart-skeleton {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.animated-chart-skeleton-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.animated-chart-skeleton-svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+}
+
+.animated-chart-skeleton-gridline {
+    stroke: color-mix(in srgb, var(--surface-border) 75%, transparent);
+    stroke-width: 1;
+    stroke-dasharray: 4 5;
+    vector-effect: non-scaling-stroke;
+}
+
+.animated-chart-skeleton-area {
+    opacity: 0.75;
+}
+
+.animated-chart-skeleton-track,
+.animated-chart-skeleton-line {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke;
+}
+
+.animated-chart-skeleton-track {
+    stroke: color-mix(in srgb, var(--text-secondary) 16%, transparent);
+}
+
+.animated-chart-skeleton-line {
+    stroke: color-mix(in srgb, var(--text-secondary) 78%, #dbe4f0);
+    stroke-dasharray: 100;
+    stroke-dashoffset: 100;
+    animation: animated-chart-line-draw 2.05s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .animated-chart-skeleton-line {
+        animation: none;
+        stroke-dashoffset: 0;
+        opacity: 0.55;
+    }
+}

@@ -9,6 +9,7 @@ import type {
 } from '../../../api/types';
 import { toStockDetail } from '../../../routing/routes';
 import SymbolLogo from '../../../components/SymbolLogo';
+import AnimatedChartSkeleton from '../../../components/charts/AnimatedChartSkeleton';
 import { IndexLineChart } from '../components/IndexLineChart';
 import {
     DETAIL_RETURN_KEYS,
@@ -382,7 +383,15 @@ export function IndicesSection({
                             <span key={i} className="mv-index-return-card-sk stock-card-skeleton-pulse" />
                         ))}
                     </div>
-                    <div className="mv-index-chart-sk stock-card-skeleton-pulse" aria-hidden="true" />
+                    <div className="mv-index-chart-sk">
+                        <AnimatedChartSkeleton
+                            seed={`index-${selectedIndex}`}
+                            width={1120}
+                            height={400}
+                            padding={{ top: 30, right: 65, bottom: 40, left: 16 }}
+                            ariaLabel={`${selectedIndex} endeks grafiği yükleniyor`}
+                        />
+                    </div>
                 </div>
             )}
 
@@ -449,6 +458,7 @@ export function IndicesSection({
                             points={indexDetail.line_points}
                             prevClose={indexDetail.prev_close}
                             changePct={indexDetail.change_pct}
+                            isLoading={indexDetailLoading}
                         />
                     </section>
 

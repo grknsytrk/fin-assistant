@@ -14,6 +14,7 @@ import type {
 } from '../api/types';
 import { prepareOrderedQuarters } from '../utils/chartBuilders';
 import SymbolLogo from '../components/SymbolLogo';
+import AnimatedChartSkeleton from '../components/charts/AnimatedChartSkeleton';
 import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
 import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useMobileChartLayout } from '../hooks/useMobileChartLayout';
@@ -275,41 +276,22 @@ function StockDetailPriceChart({
             .sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
             .map(point => Number(point.close));
         const loadingHeight = isMobileChart ? 900 : 400;
-        const loadingTop = isMobileChart ? 52 : 60;
-        const loadingBottom = loadingHeight - (isMobileChart ? 112 : 60);
-        const gridYs = [0.18, 0.4, 0.62, 0.84].map((ratio) => loadingTop + ratio * (loadingBottom - loadingTop));
-
-        if (previousValues.length >= 2) {
-            const min = Math.min(...previousValues);
-            const span = Math.max(0.01, Math.max(...previousValues) - min);
-            const line = previousValues.map((value, index) =>
-                `${index === 0 ? 'M' : 'L'} ${16 + index / (previousValues.length - 1) * 1028} ${loadingBottom - (value - min) / span * (loadingBottom - loadingTop) * 0.86}`,
-            ).join(' ');
-            return (
-                <section className="sd-price-chart-panel" aria-label={`${ticker} fiyat grafiği`} aria-busy="true">
-                    {controls}
-                    <svg className="sd-price-chart-svg sd-price-chart-loading" viewBox={`0 0 1120 ${loadingHeight}`} role="img" aria-label="Grafik yükleniyor">
-                        {gridYs.map((y) => (
-                            <line key={y} className="sd-price-chart-gridline" x1="16" x2="1044" y1={y} y2={y} />
-                        ))}
-                        <path className="sd-price-chart-loading-track" d={line} />
-                        <path className="sd-price-chart-loading-line" d={line} pathLength={100} />
-                    </svg>
-                </section>
-            );
-        }
+        const loadingTop = isMobileChart ? 52 : 30;
+        const loadingBottomPadding = isMobileChart ? 112 : 44;
 
         return (
             <section className="sd-price-chart-panel" aria-label={`${ticker} fiyat grafiği`} aria-busy="true">
                 {controls}
-                <div className="sd-price-chart-loading-empty" role="status">
-                    <svg className="sd-price-chart-svg" viewBox={`0 0 1120 ${loadingHeight}`} aria-hidden="true">
-                        {gridYs.map((y) => (
-                            <line key={y} className="sd-price-chart-gridline" x1="16" x2="1044" y1={y} y2={y} />
-                        ))}
-                    </svg>
-                    <span className="sd-price-chart-loading-label">Grafik verisi yükleniyor…</span>
-                </div>
+                <AnimatedChartSkeleton
+                    seed={`${ticker}:${selectedRange}`}
+                    values={previousValues.length >= 2 ? previousValues : undefined}
+                    width={1120}
+                    height={loadingHeight}
+                    padding={{ top: loadingTop, right: isMobileChart ? 190 : 76, bottom: loadingBottomPadding, left: 16 }}
+                    gridRatios={[0.18, 0.4, 0.62, 0.84]}
+                    className="sd-price-chart-loading"
+                    ariaLabel="Grafik verisi yükleniyor"
+                />
             </section>
         );
     }

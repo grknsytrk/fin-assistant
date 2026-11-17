@@ -12,6 +12,7 @@ import type {
 } from '../../../api/types';
 import MarketWatchStrip from '../../../components/MarketWatchStrip';
 import SymbolLogo from '../../../components/SymbolLogo';
+import AnimatedChartSkeleton from '../../../components/charts/AnimatedChartSkeleton';
 import { TerminalClock } from '../../../components/TerminalClock';
 import type { WatchlistItem } from '../../../hooks/useWatchlist';
 import { MarketStockCard } from '../components/MarketStockCard';
@@ -142,7 +143,15 @@ export function MarketOverviewSection({
                                         <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
                                         <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
                                     </div>
-                                    <div className="stock-card-skeleton-chart stock-card-skeleton-pulse" />
+                                    <div className="stock-card-skeleton-chart">
+                                        <AnimatedChartSkeleton
+                                            seed={`overview-loading-${cardIdx}`}
+                                            width={340}
+                                            height={100}
+                                            padding={{ top: 10, right: 6, bottom: 12, left: 6 }}
+                                            preserveAspectRatio="none"
+                                        />
+                                    </div>
                                 </div>
                             ))}
                         </div>
@@ -293,7 +302,16 @@ export function MarketOverviewSection({
                                                     <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
                                                     <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
                                                 </div>
-                                                <div className="stock-card-skeleton-chart stock-card-skeleton-pulse" />
+                                                <div className="stock-card-skeleton-chart">
+                                                    <AnimatedChartSkeleton
+                                                        seed={`overview-card-${symbol}`}
+                                                        width={340}
+                                                        height={100}
+                                                        padding={{ top: 10, right: 6, bottom: 12, left: 6 }}
+                                                        preserveAspectRatio="none"
+                                                        ariaLabel={`${symbol} grafiği yükleniyor`}
+                                                    />
+                                                </div>
                                             </div>
                                         ))}
                                     </div>

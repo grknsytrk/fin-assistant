@@ -9,6 +9,7 @@ import type {
     MarketStockCardItem,
 } from '../../../api/types';
 import SymbolLogo from '../../../components/SymbolLogo';
+import AnimatedChartSkeleton from '../../../components/charts/AnimatedChartSkeleton';
 import {
     STOCK_CARD_CHART_RANGES,
     STOCK_CARD_PERFORMANCE_KEYS,
@@ -168,26 +169,16 @@ export function StockCardMiniChart({
             <div className="stock-card-chart-shell">
                 {chartToolbar}
                 <div ref={canvasWrapRef} className="stock-card-chart-canvas-wrap">
-                    <div className="stock-card-inline-chart-skeleton" role="status" aria-label="Grafik yükleniyor">
-                        <svg
-                            className="stock-card-inline-chart-svg"
-                            viewBox={`0 0 ${width} ${height}`}
-                            preserveAspectRatio="none"
-                            aria-hidden="true"
-                        >
-                            {[0.28, 0.52, 0.76].map((ratio) => (
-                                <line
-                                    key={ratio}
-                                    className="stock-card-inline-chart-gridline"
-                                    x1={0}
-                                    x2={width}
-                                    y1={height * ratio}
-                                    y2={height * ratio}
-                                />
-                            ))}
-                        </svg>
-                        <div className="stock-card-inline-chart-baseline stock-card-inline-skeleton-pulse" aria-hidden="true" />
-                    </div>
+                    <AnimatedChartSkeleton
+                        seed={`${symbol}:${selectedRange}`}
+                        width={width}
+                        height={height}
+                        padding={{ top: 10, right: 0, bottom: 16, left: 0 }}
+                        gridRatios={[0.28, 0.52, 0.76]}
+                        preserveAspectRatio="none"
+                        className="stock-card-inline-chart-skeleton"
+                        ariaLabel={`${symbol} grafiği yükleniyor`}
+                    />
                 </div>
             </div>
         );
