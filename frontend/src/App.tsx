@@ -26,6 +26,7 @@ import {
   toMarketsOverview,
   toMarketsStocks,
   toStocksReturnModeSearch,
+  toStockComparison,
   toStockDetail,
 } from './routing/routes';
 import './index.css';
@@ -33,6 +34,7 @@ import './index.css';
 const MarketPage = lazy(() => import('./pages/MarketPage'));
 const MarketsView = lazy(() => import('./pages/MarketsView'));
 const StockDetailPage = lazy(() => import('./pages/StockDetailPage'));
+const StockComparisonPage = lazy(() => import('./pages/StockComparisonPage'));
 const FundsPage = lazy(() => import('./pages/FundsPage'));
 const ModelPortfolioPage = lazy(() => import('./pages/ModelPortfolioPage'));
 
@@ -79,6 +81,7 @@ function MarketsOverviewRoute() {
       routeStockIndex={DEFAULT_MARKET_INDEX}
       routeSelectedIndex={null}
       onNavigateSection={handleSectionNavigate}
+      onNavigateStockSection={(section) => navigate(section === 'compare' ? toStockComparison() : toMarketsStocks(DEFAULT_MARKET_INDEX))}
       onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onNavigateStockIndex={(nextIndex) => navigate(toMarketsStocks(nextIndex))}
       onNavigateIndexDetail={(nextIndex) => {
@@ -139,6 +142,7 @@ function MarketsStocksRoute() {
       routeReturnMode={returnMode}
       routeSelectedIndex={null}
       onNavigateSection={handleSectionNavigate}
+      onNavigateStockSection={(section) => navigate(section === 'compare' ? toStockComparison() : stocksPathWithMode(normalizedIndexCode))}
       onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onNavigateStockIndex={(nextIndex) => navigate(stocksPathWithMode(nextIndex))}
       onNavigateReturnMode={(nextMode) => {
@@ -182,6 +186,7 @@ function MarketsIndicesListRoute() {
         navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
       }}
       onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
+      onNavigateStockSection={(section) => navigate(section === 'compare' ? toStockComparison() : toMarketsStocks(DEFAULT_MARKET_INDEX))}
       onNavigateStockIndex={(nextIndex) => navigate(toMarketsStocks(nextIndex))}
       onNavigateIndexDetail={(nextIndex) => {
         if (!nextIndex) {
@@ -227,6 +232,7 @@ function MarketsIndicesDetailRoute() {
         navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
       }}
       onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
+      onNavigateStockSection={(section) => navigate(section === 'compare' ? toStockComparison() : toMarketsStocks(DEFAULT_MARKET_INDEX))}
       onNavigateStockIndex={(nextIndex) => navigate(toMarketsStocks(nextIndex))}
       onNavigateIndexDetail={(nextIndex) => {
         if (!nextIndex) {
@@ -235,6 +241,36 @@ function MarketsIndicesDetailRoute() {
         }
         navigate(toMarketsIndexDetail(nextIndex));
       }}
+      onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
+      onOpenFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
+    />
+  );
+}
+
+function StockComparisonRoute() {
+  const navigate = useNavigate();
+
+  const handleSectionNavigate = (section: MarketsNavigationSection) => {
+    if (section === 'markets') {
+      navigate(toMarketsOverview());
+      return;
+    }
+    if (section === 'funds') {
+      navigate(toFunds());
+      return;
+    }
+    if (section === 'indices') {
+      navigate(toMarketsIndices());
+      return;
+    }
+    navigate(toMarketsStocks(DEFAULT_MARKET_INDEX));
+  };
+
+  return (
+    <StockComparisonPage
+      onNavigateSection={handleSectionNavigate}
+      onNavigateStockSection={(section) => navigate(section === 'compare' ? toStockComparison() : toMarketsStocks(DEFAULT_MARKET_INDEX))}
+      onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
       onOpenFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
     />
@@ -291,6 +327,7 @@ function StockDetailRoute() {
       onTabChange={(nextTab) => navigate(toStockDetail(normalizedTicker, nextTab))}
       onBack={() => navigate(toMarketsStocks(DEFAULT_MARKET_INDEX))}
       onNavigateSection={handleSectionNavigate}
+      onNavigateStockSection={(section) => navigate(section === 'compare' ? toStockComparison() : toMarketsStocks(DEFAULT_MARKET_INDEX))}
       onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
       onOpenFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}
@@ -323,6 +360,7 @@ function FundsListRoute() {
       onTabChange={() => undefined}
       onBack={() => navigate(toFunds())}
       onNavigateSection={handleSectionNavigate}
+      onNavigateStockSection={(section) => navigate(section === 'compare' ? toStockComparison() : toMarketsStocks(DEFAULT_MARKET_INDEX))}
       onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
     />
@@ -355,6 +393,7 @@ function FundsComparisonRoute() {
       onTabChange={() => undefined}
       onBack={() => navigate(toFunds())}
       onNavigateSection={handleSectionNavigate}
+      onNavigateStockSection={(section) => navigate(section === 'compare' ? toStockComparison() : toMarketsStocks(DEFAULT_MARKET_INDEX))}
       onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
     />
@@ -409,6 +448,7 @@ function FundDetailRoute() {
       onTabChange={(nextTab) => navigate(toFundDetail(normalizedFundCode, nextTab))}
       onBack={() => navigate(toFunds())}
       onNavigateSection={handleSectionNavigate}
+      onNavigateStockSection={(section) => navigate(section === 'compare' ? toStockComparison() : toMarketsStocks(DEFAULT_MARKET_INDEX))}
       onNavigateFundSection={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
       onOpenTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
     />
@@ -432,9 +472,11 @@ function App() {
     const match = location.pathname.match(/^\/stocks\/([^/]+)/i);
     if (!match?.[1]) return null;
     try {
-      return normalizeTicker(decodeURIComponent(match[1]));
+      const normalized = normalizeTicker(decodeURIComponent(match[1]));
+      return normalized === 'COMPARE' ? null : normalized;
     } catch {
-      return normalizeTicker(match[1]);
+      const normalized = normalizeTicker(match[1]);
+      return normalized === 'COMPARE' ? null : normalized;
     }
   }, [location.pathname]);
 
@@ -524,6 +566,7 @@ function App() {
             <Route path={ROUTE_PATHS.fundDetail} element={<FundDetailRoute />} />
 
             <Route path={ROUTE_PATHS.stocks} element={<Navigate to={toMarketsStocks(DEFAULT_MARKET_INDEX)} replace />} />
+            <Route path={ROUTE_PATHS.stockComparison} element={<StockComparisonRoute />} />
             <Route path={ROUTE_PATHS.stockDetailNoTab} element={<StockTickerDefaultTabRedirect />} />
             <Route path={ROUTE_PATHS.stockDetail} element={<StockDetailRoute />} />
 

@@ -45,6 +45,7 @@ import {
     toMarketsIndices,
     toMarketsOverview,
     toMarketsStocks,
+    toStockComparison,
     toStockDetail,
 } from '../routing/routes';
 import '../styles/market-shared.css';
@@ -467,6 +468,7 @@ export default function ModelPortfolioPage() {
                 activeSection="markets"
                 onCollapsedChange={setNavCollapsed}
                 onSectionChange={handleSectionChange}
+                onStockSectionChange={(section) => navigate(section === 'compare' ? toStockComparison() : toMarketsStocks(DEFAULT_MARKET_INDEX))}
                 onFundSectionChange={(section) => navigate(section === 'compare' ? toFundComparison() : toFunds())}
                 onSelectTicker={(ticker) => navigate(toStockDetail(ticker, DEFAULT_STOCK_TAB))}
                 onSelectFund={(fundCode) => navigate(toFundDetail(fundCode, DEFAULT_FUND_TAB))}

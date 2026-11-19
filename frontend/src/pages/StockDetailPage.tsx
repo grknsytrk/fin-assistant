@@ -15,7 +15,11 @@ import type {
 import { prepareOrderedQuarters } from '../utils/chartBuilders';
 import SymbolLogo from '../components/SymbolLogo';
 import AnimatedChartSkeleton from '../components/charts/AnimatedChartSkeleton';
-import MarketsNavigation, { type MarketsNavigationFundSection, type MarketsNavigationSection } from '../components/MarketsNavigation';
+import MarketsNavigation, {
+    type MarketsNavigationFundSection,
+    type MarketsNavigationSection,
+    type MarketsNavigationStockSection,
+} from '../components/MarketsNavigation';
 import { buildDocumentTitle, formatTitleCurrency, formatTitlePct, useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useMobileChartLayout } from '../hooks/useMobileChartLayout';
 import { useWatchlist } from '../hooks/useWatchlist';
@@ -31,6 +35,7 @@ interface StockDetailPageProps {
     onTabChange?: (tab: StockTab) => void;
     onBack: () => void;
     onNavigateSection: (section: MarketsNavigationSection) => void;
+    onNavigateStockSection?: (section: MarketsNavigationStockSection) => void;
     onNavigateFundSection?: (section: MarketsNavigationFundSection) => void;
     onOpenTicker: (ticker: string) => void;
     onOpenFund: (fundCode: string) => void;
@@ -675,6 +680,7 @@ export default function StockDetailPage({
     onTabChange,
     onBack,
     onNavigateSection,
+    onNavigateStockSection,
     onNavigateFundSection,
     onOpenTicker,
     onOpenFund,
@@ -903,8 +909,10 @@ export default function StockDetailPage({
             <MarketsNavigation
                 collapsed={navCollapsed}
                 activeSection="stocks"
+                activeStockSection="list"
                 onCollapsedChange={setNavCollapsed}
                 onSectionChange={onNavigateSection}
+                onStockSectionChange={onNavigateStockSection}
                 onFundSectionChange={onNavigateFundSection}
                 onSelectTicker={onOpenTicker}
                 onSelectFund={onOpenFund}

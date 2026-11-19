@@ -14,6 +14,7 @@ export const ROUTE_PATHS = {
     fundDetail: '/funds/:fundCode/:tab',
     fundDetailNoTab: '/funds/:fundCode',
     stocks: '/stocks',
+    stockComparison: '/stocks/compare',
     stockDetail: '/stocks/:ticker/:tab',
     stockDetailNoTab: '/stocks/:ticker',
 } as const;
@@ -236,6 +237,10 @@ export function toStockDetail(
     const normalizedTicker = normalizeTicker(ticker);
     const safeTicker = normalizedTicker || 'UNKNOWN';
     return `${ROUTE_PATHS.stocks}/${encodeURIComponent(safeTicker)}/${normalizeStockTab(tab)}`;
+}
+
+export function toStockComparison(): string {
+    return ROUTE_PATHS.stockComparison;
 }
 
 export function legacySearchToCanonical(search: string): string | null {

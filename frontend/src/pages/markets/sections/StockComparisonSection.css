@@ -1,0 +1,13 @@
+@import '../../FundsPage.css';
+@import '../../funds/sections/FundComparisonSection.css';
+
+.fund-comparison-zero {
+    stroke: color-mix(in srgb, var(--text-secondary) 30%, transparent);
+}
+
+.fund-chart-error {
+    margin-top: 0.75rem;
+    color: var(--danger-color);
+    font-size: 0.85rem;
+    font-weight: 700;
+}

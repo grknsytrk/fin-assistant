@@ -8,7 +8,11 @@ import type {
     FundPerformanceResponse,
     FundsResponse,
 } from '../../api/types';
-import type { MarketsNavigationFundSection, MarketsNavigationSection } from '../../components/MarketsNavigation';
+import type {
+    MarketsNavigationFundSection,
+    MarketsNavigationSection,
+    MarketsNavigationStockSection,
+} from '../../components/MarketsNavigation';
 import type { FundTab } from '../../routing/routes';
 
 export type FundSortKey =
@@ -112,6 +116,7 @@ export type FundsPageProps = {
     onTabChange: (tab: FundTab) => void;
     onBack: () => void;
     onNavigateSection: (section: MarketsNavigationSection) => void;
+    onNavigateStockSection?: (section: MarketsNavigationStockSection) => void;
     onNavigateFundSection?: (section: MarketsNavigationFundSection) => void;
     onOpenTicker?: (ticker: string) => void;
 };

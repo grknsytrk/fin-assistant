@@ -22,18 +22,22 @@ import {
     toMarketsOverview,
     toMarketsStocks,
     toModelPortfolio,
+    toStockComparison,
 } from '../routing/routes';
 import './MarketsNavigation.css';
 
 export type MarketsNavigationSection = 'markets' | 'stocks' | 'funds' | 'indices';
+export type MarketsNavigationStockSection = 'list' | 'compare';
 export type MarketsNavigationFundSection = 'investment' | 'compare';
 
 type MarketsNavigationProps = {
     collapsed: boolean;
     activeSection: MarketsNavigationSection;
+    activeStockSection?: MarketsNavigationStockSection;
     activeFundSection?: MarketsNavigationFundSection;
     onCollapsedChange: (collapsed: boolean) => void;
     onSectionChange: (section: MarketsNavigationSection) => void;
+    onStockSectionChange?: (section: MarketsNavigationStockSection) => void;
     onFundSectionChange?: (section: MarketsNavigationFundSection) => void;
     onSelectTicker?: (ticker: string) => void;
     onSelectFund?: (fundCode: string) => void;
@@ -42,13 +46,16 @@ type MarketsNavigationProps = {
 export default function MarketsNavigation({
     collapsed,
     activeSection,
+    activeStockSection = 'list',
     activeFundSection = 'investment',
     onCollapsedChange,
     onSectionChange,
+    onStockSectionChange,
     onFundSectionChange,
     onSelectTicker,
     onSelectFund,
 }: MarketsNavigationProps) {
+    const [stocksExpanded, setStocksExpanded] = useState<boolean>(activeSection === 'stocks');
     const [fundsExpanded, setFundsExpanded] = useState<boolean>(activeSection === 'funds');
     const location = useLocation();
     const isModelPortfolioPage = location.pathname === ROUTE_PATHS.modelPortfolio;
@@ -71,9 +78,12 @@ export default function MarketsNavigation({
         action();
     };
 
-    // Auto-open the submenu whenever the user is already on the funds section
-    // (e.g. arriving via a fund detail URL), but allow manual collapse afterwards.
+    // Auto-open the submenu whenever the user is already on the stocks or funds section
+    // (e.g. arriving via a stock/fund detail URL), but allow manual collapse afterwards.
     useEffect(() => {
+        if (activeSection === 'stocks') {
+            setStocksExpanded(true);
+        }
         if (activeSection === 'funds') {
             setFundsExpanded(true);
         }
@@ -104,17 +114,60 @@ export default function MarketsNavigation({
                         {!collapsed && <span className="mn-text">Piyasalar</span>}
                     </div>
                 </Link>
-                <Link
-                    to={stockHref}
-                    className={`mn-menu-item ${activeSection === 'stocks' && !isModelPortfolioPage ? 'active' : ''}`}
-                    title="Hisseler"
-                    onClick={(event) => handleLinkClick(event, () => onSectionChange('stocks'))}
-                >
-                    <div className="mn-item-main">
-                        <Layers size={18} className="mn-icon" />
-                        {!collapsed && <span className="mn-text">Hisseler</span>}
-                    </div>
-                </Link>
+                <div className={`mn-menu-subtree ${stocksExpanded ? 'is-open' : ''}`}>
+                    <button
+                        type="button"
+                        className={`mn-menu-item has-submenu ${activeSection === 'stocks' && !isModelPortfolioPage ? 'active' : ''}`}
+                        title="Hisseler"
+                        aria-expanded={stocksExpanded}
+                        onClick={() => {
+                            if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 760px)').matches) {
+                                onSectionChange('stocks');
+                                return;
+                            }
+                            if (collapsed) {
+                                onCollapsedChange(false);
+                                setStocksExpanded(true);
+                                return;
+                            }
+                            setStocksExpanded((prev) => !prev);
+                        }}
+                    >
+                        <div className="mn-item-main">
+                            <Layers size={18} className="mn-icon" />
+                            {!collapsed && <span className="mn-text">Hisseler</span>}
+                        </div>
+                        {!collapsed && <ChevronRight size={14} className="mn-chevron" />}
+                    </button>
+                    {!collapsed && (
+                        <div className={`mn-submenu-collapse ${stocksExpanded ? 'is-open' : ''}`} aria-hidden={!stocksExpanded}>
+                            <div className="mn-submenu-collapse-inner">
+                                <div className="mn-submenu" aria-label="Hisseler alt menüsü">
+                                    <Link
+                                        to={stockHref}
+                                        tabIndex={stocksExpanded ? undefined : -1}
+                                        className={`mn-submenu-item ${activeSection === 'stocks' && activeStockSection === 'list' ? 'active' : ''}`}
+                                        onClick={(event) => handleLinkClick(event, onStockSectionChange
+                                            ? () => onStockSectionChange('list')
+                                            : () => onSectionChange('stocks'))}
+                                    >
+                                        Hisse Listesi
+                                    </Link>
+                                    <Link
+                                        to={toStockComparison()}
+                                        tabIndex={stocksExpanded ? undefined : -1}
+                                        className={`mn-submenu-item ${activeSection === 'stocks' && activeStockSection === 'compare' ? 'active' : ''}`}
+                                        onClick={(event) => handleLinkClick(event, onStockSectionChange
+                                            ? () => onStockSectionChange('compare')
+                                            : undefined)}
+                                    >
+                                        Hisse Karşılaştırma
+                                    </Link>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
                 <div className={`mn-menu-subtree ${fundsExpanded ? 'is-open' : ''}`}>
                     <button
                         type="button"

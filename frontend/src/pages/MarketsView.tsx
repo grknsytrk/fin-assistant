@@ -97,6 +97,7 @@ export default function MarketsView({
     routeSelectedIndex = null,
     routeReturnMode = DEFAULT_STOCK_RETURN_MODE,
     onNavigateSection,
+    onNavigateStockSection,
     onNavigateFundSection,
     onNavigateStockIndex,
     onNavigateReturnMode,
@@ -1297,8 +1298,10 @@ export default function MarketsView({
             <MarketsNavigation
                 collapsed={navCollapsed}
                 activeSection={activeSection}
+                activeStockSection="list"
                 onCollapsedChange={setNavCollapsed}
                 onSectionChange={handleSectionChange}
+                onStockSectionChange={onNavigateStockSection}
                 onFundSectionChange={onNavigateFundSection}
                 onSelectTicker={onCompanyClick}
                 onSelectFund={onOpenFund}

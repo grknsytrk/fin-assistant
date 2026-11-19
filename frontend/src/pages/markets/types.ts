@@ -6,7 +6,11 @@ import type {
     MarketStockIndex,
     MarketUniverseResponse,
 } from '../../api/types';
-import type { MarketsNavigationFundSection, MarketsNavigationSection } from '../../components/MarketsNavigation';
+import type {
+    MarketsNavigationFundSection,
+    MarketsNavigationSection,
+    MarketsNavigationStockSection,
+} from '../../components/MarketsNavigation';
 import type { StockReturnMode } from '../../routing/routes';
 
 export type MarketSection = MarketsNavigationSection;
@@ -234,6 +238,7 @@ export interface MarketsViewProps {
     routeSelectedIndex?: MarketIndexCode | null;
     routeReturnMode?: StockReturnMode;
     onNavigateSection?: (section: MarketSection) => void;
+    onNavigateStockSection?: (section: MarketsNavigationStockSection) => void;
     onNavigateFundSection?: (section: MarketsNavigationFundSection) => void;
     onNavigateStockIndex?: (index: MarketStockIndex) => void;
     onNavigateReturnMode?: (mode: StockReturnMode) => void;

@@ -131,6 +131,7 @@ export default function FundsPage({
     onTabChange,
     onBack,
     onNavigateSection,
+    onNavigateStockSection,
     onNavigateFundSection,
     onOpenTicker,
 }: FundsPageProps) {
@@ -1310,6 +1311,7 @@ export default function FundsPage({
                 activeFundSection={view === 'compare' ? 'compare' : 'investment'}
                 onCollapsedChange={setNavCollapsed}
                 onSectionChange={onNavigateSection}
+                onStockSectionChange={onNavigateStockSection}
                 onFundSectionChange={onNavigateFundSection}
                 onSelectTicker={onOpenTicker}
                 onSelectFund={(nextFundCode) => onOpenFund(nextFundCode, 'overview')}
