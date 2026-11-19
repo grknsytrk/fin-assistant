@@ -385,6 +385,8 @@ _DEBUG_SESSION_ID = "0cbd9f"
 _DEBUG_RUN_ID = "market-flow-debug-v1"
 
 def _debug_log(hypothesis_id: str, location: str, message: str, data: Dict[str, Any]) -> None:
+    if os.getenv("RAGFIN_DEBUG_LOG") != "1":
+        return
     try:
         payload = {
             "sessionId": _DEBUG_SESSION_ID,

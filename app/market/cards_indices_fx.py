@@ -606,9 +606,10 @@ def _stock_card_financial_ratios_from_snapshot(snapshot: Dict[str, Any], *, mark
     }
 
 
-def _stock_card_financial_ratios_from_cache(symbol: str) -> Dict[str, Optional[float]]:
+def _stock_card_financial_ratios_from_cached_snapshot(
+    snapshot: Dict[str, Any],
+) -> Dict[str, Optional[float]]:
     _ms = _market_service()
-    snapshot = _ms._stock_card_financial_snapshot_from_cache(symbol)
     ratios = _ms._stock_card_financial_ratios_from_snapshot(snapshot, market_cap=None)
     net_borc_favok = ratios.get("net_borc_favok")
     if net_borc_favok is None and snapshot:
@@ -620,6 +621,12 @@ def _stock_card_financial_ratios_from_cache(symbol: str) -> Dict[str, Optional[f
         except (TypeError, ValueError, ZeroDivisionError):
             net_borc_favok = None
     return {"net_borc_favok": net_borc_favok}
+
+
+def _stock_card_financial_ratios_from_cache(symbol: str) -> Dict[str, Optional[float]]:
+    _ms = _market_service()
+    snapshot = _ms._stock_card_financial_snapshot_from_cache(symbol)
+    return _stock_card_financial_ratios_from_cached_snapshot(snapshot)
 
 
 def _resolve_market_card_valuation_from_cached_data(
@@ -700,7 +707,7 @@ def _resolve_market_card_valuation(symbol: str, *, market_cap: Any) -> Dict[str,
         provider_payload = _ms._fetch_isyatirim_multiples(ticker)
         provider_ratios = _ms._resolve_market_card_multiples(ticker, provider_payload)
 
-    cache_ratios = _ms._stock_card_financial_ratios_from_cache(ticker)
+    cache_ratios = _stock_card_financial_ratios_from_cached_snapshot(snapshot)
     cached_payload = {
         "_ts": now,
         "financial_snapshot": snapshot,

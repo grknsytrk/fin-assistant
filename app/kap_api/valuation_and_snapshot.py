@@ -54,10 +54,11 @@ def _build_kap_snapshot_response(company: str, *, refresh: bool, max_quarters: i
         ).stat().st_mtime_ns
     except OSError:
         pass
+    normalized = normalize_snapshot_for_frontend(raw)
     try:
         financial_snapshot = kas.extract_financial_snapshot_from_kap_payload(
             snapshot_symbol,
-            raw,
+            normalized,
             source_mtime_ns=snapshot_mtime_ns,
         )
         if financial_snapshot:
@@ -65,7 +66,6 @@ def _build_kap_snapshot_response(company: str, *, refresh: bool, max_quarters: i
     except Exception:
         kas.LOGGER.exception("KAP financial snapshot upsert failed for %s", snapshot_symbol)
     kas._upsert_stock_reference_from_kap_payload(company, raw, source="kap")
-    normalized = normalize_snapshot_for_frontend(raw)
 
     symbol = normalized.get("stock_code") or company
     with kas.concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -358,8 +358,9 @@ def _fetch_kap_valuation_history_prices(
     # Anchor the start year to cover the full 44-quarter (~11-year) window so
     # progressive 5Q -> 20Q -> 44Q loads reuse one series per stock, and omit
     # end_date from the cache key so the 7-day SWR cache survives midnight.
+    clamped_start_year = max(2010, start_date.year)
     default_history_start_year = max(2014, end_date.year - 11)
-    start_of_year = kas.date(min(start_date.year, default_history_start_year), 1, 1)
+    start_of_year = kas.date(min(clamped_start_year, default_history_start_year), 1, 1)
     cache_key = (
         f"api:kap:valuation-history-prices:v2:{normalized}:"
         f"from={start_of_year.isoformat()}"
@@ -413,9 +414,9 @@ def _fetch_kap_valuation_history_prices(
         }
 
     local_entry = kas._KAP_VALUATION_HISTORY_PRICE_CACHE.get(local_key)
-    shared_entry = kas._shared_cache_get_dict(cache_key)
     if kas._swr_entry_is_fresh(local_entry):
         return kas._swr_entry_payload(local_entry), "local_hit", False, False
+    shared_entry = kas._shared_cache_get_dict(cache_key)
     if kas._swr_entry_is_fresh(shared_entry):
         kas._KAP_VALUATION_HISTORY_PRICE_CACHE[local_key] = shared_entry
         return kas._swr_entry_payload(shared_entry), "shared_hit", False, False

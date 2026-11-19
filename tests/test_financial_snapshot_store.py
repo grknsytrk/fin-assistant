@@ -233,14 +233,15 @@ def test_version_bump_invalidates_cache_across_simulated_multi_worker_instances(
     assert data2["AAA"]["sector"] == "Enerji"
     assert len(worker2_cache) == 1
 
-    # Worker 1 updates data and invalidates
+    # Worker 1 updates data, bumps version, and updates its own memory cache in place
     monkeypatch.setattr(store, "_SNAPSHOT_MEMORY_CACHE", worker1_cache)
     store.upsert_provider_fundamentals_bulk(processed_dir, {"AAA": {"sector": "Savunma"}})
-    assert len(worker1_cache) == 0  # Worker 1 cleared its own cache
+    key = store._cache_key(processed_dir)
+    assert len(worker1_cache) == 1
+    assert worker1_cache[key][2]["AAA"]["sector"] == "Savunma"
 
     # Worker 2 still has its old in-memory cache with sector 'Enerji'
     assert len(worker2_cache) == 1
-    key = store._cache_key(processed_dir)
     assert worker2_cache[key][2]["AAA"]["sector"] == "Enerji"
 
     # Worker 2 reads again using load_financial_snapshots_map / read_financial_snapshots_map
@@ -352,14 +353,15 @@ def test_expired_memory_ttl_with_unchanged_db_stamp_skips_full_table_scan(
 
     monkeypatch.setattr(store, "_connection", tracked_connection)
 
+    full_scan_sql = f"SELECT {', '.join(store._SNAPSHOT_COLUMNS)} FROM company_financial_snapshots"
     assert store.get_financial_snapshots_map(processed_dir)["AAA"]["sector"] == "Enerji"
-    full_scans = [q for q in queries if "SELECT * FROM company_financial_snapshots" in q]
+    full_scans = [q for q in queries if full_scan_sql in q]
     assert len(full_scans) == 1
 
     # Advance past 1800s TTL without changing version or DB rows: should only run lightweight stamp query
     FakeTime.now = 1905.0
     assert store.get_financial_snapshots_map(processed_dir)["AAA"]["sector"] == "Enerji"
-    full_scans_after = [q for q in queries if "SELECT * FROM company_financial_snapshots" in q]
+    full_scans_after = [q for q in queries if full_scan_sql in q]
     stamp_checks = [q for q in queries if "MAX(updated_at)" in q]
     assert len(full_scans_after) == 1
     assert len(stamp_checks) == 1

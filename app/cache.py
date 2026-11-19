@@ -309,11 +309,23 @@ class InMemoryCache(CacheBackend):
 
     name = "memory"
 
-    def __init__(self) -> None:
-        self._store: Dict[str, Tuple[float, Any]] = {}
+    def __init__(self, max_entries: int = 4096) -> None:
+        self._max_entries = max(1, int(max_entries))
+        self._store: OrderedDict[str, Tuple[float, Any]] = OrderedDict()
         self._mutex = threading.Lock()
-        self._locks: Dict[str, threading.Lock] = {}
-        self._locks_mutex = threading.Lock()
+        self._locks = tuple(threading.Lock() for _ in range(256))
+        self._last_sweep = time.monotonic()
+        self._sweep_interval_seconds = 60.0
+
+    def _evict_expired_locked(self, now: float) -> None:
+        expired = [k for k, (exp, _) in self._store.items() if exp and exp < now]
+        for k in expired:
+            self._store.pop(k, None)
+        self._last_sweep = time.monotonic()
+
+    def _maybe_sweep_locked(self, now: float) -> None:
+        if time.monotonic() - self._last_sweep >= self._sweep_interval_seconds:
+            self._evict_expired_locked(now)
 
     def get(self, key: str) -> Any:
         now = time.time()
@@ -325,22 +337,38 @@ class InMemoryCache(CacheBackend):
             if expires_at and expires_at < now:
                 self._store.pop(key, None)
                 return None
+            self._store.move_to_end(key)
             return value
 
     def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
-        expires_at = time.time() + ttl_seconds if ttl_seconds and ttl_seconds > 0 else 0
+        now = time.time()
+        expires_at = now + ttl_seconds if ttl_seconds and ttl_seconds > 0 else 0
         with self._mutex:
+            self._maybe_sweep_locked(now)
+            if key in self._store:
+                self._store.move_to_end(key)
+            elif len(self._store) >= self._max_entries:
+                self._evict_expired_locked(now)
+                while len(self._store) >= self._max_entries:
+                    self._store.popitem(last=False)
             self._store[key] = (expires_at, value)
 
     def set_if_absent(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
-        expires_at = time.time() + ttl_seconds if ttl_seconds and ttl_seconds > 0 else 0
+        now = time.time()
+        expires_at = now + ttl_seconds if ttl_seconds and ttl_seconds > 0 else 0
         with self._mutex:
+            self._maybe_sweep_locked(now)
             existing = self._store.get(key)
             if existing is not None:
                 existing_expires_at, _ = existing
-                if not existing_expires_at or existing_expires_at >= time.time():
+                if not existing_expires_at or existing_expires_at >= now:
+                    self._store.move_to_end(key)
                     return False
                 self._store.pop(key, None)
+            if len(self._store) >= self._max_entries:
+                self._evict_expired_locked(now)
+                while len(self._store) >= self._max_entries:
+                    self._store.popitem(last=False)
             self._store[key] = (expires_at, value)
             return True
 
@@ -384,12 +412,7 @@ class InMemoryCache(CacheBackend):
             return len(keys)
 
     def _lock_for(self, key: str) -> threading.Lock:
-        with self._locks_mutex:
-            existing = self._locks.get(key)
-            if existing is None:
-                existing = threading.Lock()
-                self._locks[key] = existing
-            return existing
+        return self._locks[hash(key) % len(self._locks)]
 
     @contextmanager
     def lock(self, key: str, *, timeout: float = 30.0) -> Iterator[bool]:
@@ -837,6 +860,25 @@ class RedisCache(CacheBackend):
                     self._record_metrics(lock_key, other_remote_errors=1)
                     self._log_remote_error("unlock", lock_key, exc)
 
+    def close(self) -> None:
+        """Close the underlying Redis client and connection pool."""
+        client = getattr(self, "_client", None)
+        if client is not None:
+            close_fn = getattr(client, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+            pool = getattr(client, "connection_pool", None)
+            if pool is not None:
+                disconnect_fn = getattr(pool, "disconnect", None)
+                if callable(disconnect_fn):
+                    try:
+                        disconnect_fn()
+                    except Exception:
+                        pass
+
 
 _BACKEND_LOCK = threading.Lock()
 _BACKEND: Optional[CacheBackend] = None
@@ -889,6 +931,13 @@ def reset_cache_for_tests() -> None:
 
     global _BACKEND, _CACHE_RESET_EPOCH
     with _BACKEND_LOCK:
+        if _BACKEND is not None:
+            close_fn = getattr(_BACKEND, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
         _BACKEND = None
         _CACHE_RESET_EPOCH += 1
 
@@ -1008,14 +1057,20 @@ def get_or_set(
             return compute_and_store(), False
 
         deadline = time.time() + max(0.05, lock_timeout)
-        while time.time() < deadline:
-            time.sleep(0.05)
+
+        def _read_cached() -> Any:
             try:
-                cached_value = backend.get(key)
+                return backend.get(key)
             except Exception:
-                cached_value = None
-            if cached_value is not None:
-                return cached_value, True
+                return None
+
+        cached_value = _wait_for_cache_value(
+            _read_cached,
+            deadline=deadline,
+            initial_poll_interval_seconds=0.05,
+        )
+        if cached_value is not None:
+            return cached_value, True
         return compute_and_store(), False
 
 

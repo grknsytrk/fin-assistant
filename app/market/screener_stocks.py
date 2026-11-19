@@ -776,19 +776,22 @@ def market_stocks_etag_revision(*, index_name: str, payload: Dict[str, Any]) -> 
     normalized_index = _ms._normalize_stock_index(index_name)
     local_key = f"payload:{normalized_index}"
     shared_key = f"api:market:stocks:{normalized_index}:v4"
-    local_entry = _ms._STOCKS_CACHE.get(local_key, {}).get("entry")
-    shared_entry = _ms._shared_cache_get_dict(shared_key)
-    source_revision = None
-    for entry in (local_entry, shared_entry):
+    def _extract_revision(entry: Any) -> Any:
         if not isinstance(entry, dict):
-            continue
-        source_revision = entry.get("cached_at")
-        if source_revision:
-            break
+            return None
+        rev = entry.get("cached_at")
+        if rev:
+            return rev
         cached_payload = entry.get("payload")
         if isinstance(cached_payload, dict) and cached_payload.get("as_of"):
-            source_revision = cached_payload.get("as_of")
-            break
+            return cached_payload.get("as_of")
+        return None
+
+    local_entry = _ms._STOCKS_CACHE.get(local_key, {}).get("entry")
+    source_revision = _extract_revision(local_entry)
+    if not source_revision:
+        shared_entry = _ms._shared_cache_get_dict(shared_key)
+        source_revision = _extract_revision(shared_entry)
     if not source_revision:
         return None
 

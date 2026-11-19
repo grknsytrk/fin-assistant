@@ -171,9 +171,13 @@ def market_flow(
 ) -> Dict[str, Any]:
     if before and after:
         raise HTTPException(status_code=400, detail="Aynı istekte before ve after cursor birlikte kullanılamaz.")
+    try:
+        normalized_category = _kap_flow_store.normalize_flow_category(category)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _market_flow_payload(
         limit=limit,
-        category=category,
+        category=normalized_category,
         force_refresh=refresh,
         before=before,
         after=after,
@@ -183,10 +187,14 @@ def market_flow(
 def market_flow_head(category: Optional[str] = Query(None)) -> Dict[str, Any]:
     """Return the light-weight cursor used to detect newly ingested KAP rows."""
 
+    try:
+        normalized_category = _kap_flow_store.normalize_flow_category(category)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     store_configured = _kap_flow_store.store_is_configured()
     if store_configured:
         _maybe_schedule_kap_flow_live_refresh()
-    response = _kap_flow_store.read_flow_head(category=category)
+    response = _kap_flow_store.read_flow_head(category=normalized_category)
     if store_configured:
         refresh_metadata = _kap_flow_refresh_metadata()
         response.update(refresh_metadata)

@@ -900,6 +900,7 @@ def _ensure_insurance_premium_disclosures(
     member: Optional[Dict[str, Any]] = None,
     force_refresh: bool = False,
     strict: bool = False,
+    persist: bool = True,
 ) -> Dict[str, Any]:
     if not _kf()._is_insurance_like_payload(payload, member):
         return payload
@@ -974,7 +975,7 @@ def _ensure_insurance_premium_disclosures(
         payload["insurance_premium_disclosures_checked_at"] = _kf()._utc_now().isoformat()
         payload["insurance_premium_disclosures_error"] = str(kap_error)
 
-    if payload.get("ok"):
+    if persist and payload.get("ok"):
         try:
             _kf()._write_cache(cache_path, payload)
         except Exception:

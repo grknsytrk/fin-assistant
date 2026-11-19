@@ -34,6 +34,7 @@ _KAP_CLIENT: Optional[httpx.Client] = None
 _FINTABLES_PROXY_CLIENT: Optional[httpx.Client] = None
 
 from app import json_cache as json_cache_store
+from app.cache import BoundedMemoryCache
 from app.database import (
     connect_postgres,
     database_enabled,
@@ -191,7 +192,7 @@ FUNDS_LIST_MIN_AUM = float(os.getenv("RAGFIN_FUNDS_LIST_MIN_AUM", "0"))
 FUND_PRICES_DB_FILENAME = os.getenv("RAGFIN_FUND_PRICES_DB_FILENAME", "fund_prices.sqlite3")
 FUND_PRICE_POINTS_CACHE_TTL_SECONDS = max(
     0,
-    int(os.getenv("RAGFIN_FUND_PRICE_POINTS_CACHE_TTL_SECONDS", "60")),
+    int(os.getenv("RAGFIN_FUND_PRICE_POINTS_CACHE_TTL_SECONDS", "600")),
 )
 FUND_PRICE_POINTS_CACHE_MAX_ENTRIES = 64
 FUND_PRICE_POINTS_CACHE_MAX_TOTAL_BYTES = 8 * 1024 * 1024
@@ -297,7 +298,10 @@ _FUND_SNAPSHOT_MIGRATION_LOCK = threading.Lock()
 _FUND_SNAPSHOT_COMMIT_LOCK = threading.Lock()
 _AUTO_FETCH_LOCK = threading.Lock()
 _AUTO_FETCH_IN_FLIGHT: Dict[str, threading.Event] = {}
-_AUTO_FETCH_NEGATIVE_CACHE: Dict[str, Dict[str, Any]] = {}
+_AUTO_FETCH_NEGATIVE_CACHE: BoundedMemoryCache = BoundedMemoryCache(
+    max_entries=1024,
+    default_ttl=FUNDS_AUTO_FETCH_NEGATIVE_TTL_SECONDS,
+)
 
 
 def _get_kap_client() -> httpx.Client:

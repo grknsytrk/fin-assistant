@@ -115,7 +115,7 @@ def shutdown_background_refresh_executor() -> None:
     _KAP_FLOW_REFRESH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
-_KAP_MARKET_METADATA_CACHE: Dict[str, Any] = {}
+_KAP_MARKET_METADATA_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=32)
 
 _KAP_MARKET_METADATA_CACHE_TTL = 6 * 60 * 60
 
@@ -161,7 +161,7 @@ async def _run_overview_commentary_until_done_or_disconnected(
         raise
 
 
-_FLOW_CACHE: Dict[str, Any] = {}
+_FLOW_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64)
 
 _FLOW_CACHE_TTL = 180
 
@@ -245,15 +245,18 @@ _KAP_FLOW_STORAGE_LIMIT = _VYK_DEFAULT_DETAIL_BUDGET_MAX + _KAP_FLOW_CATEGORY_BA
 
 _VYK_DETAIL_WORKERS = 8
 
-_KAP_MEMBER_OID_CACHE: Dict[str, str] = {}
+_KAP_MEMBER_OID_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=1024)
 
-_KAP_MEMBER_OID_NEGATIVE_CACHE: Dict[str, float] = {}
+_KAP_MEMBER_OID_NEGATIVE_CACHE: BoundedMemoryCache = BoundedMemoryCache(
+    max_entries=512,
+    default_ttl=1800,
+)
 
 _KAP_MEMBER_OID_NEGATIVE_TTL = 1800
 
 _KAP_MEMBER_OID_WARMED_FROM_CACHE = False
 
-_MARKET_KAP_LOGO_CACHE: Dict[str, Any] = {}
+_MARKET_KAP_LOGO_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=1024)
 
 _MARKET_KAP_LOGO_CACHE_TTL = 1800
 
@@ -261,11 +264,14 @@ _KAP_MEMBER_FEED_CACHE: Dict[str, Any] = {"items": [], "ts": 0.0}
 
 _KAP_MEMBER_FEED_TTL = 600
 
-_KAP_VALUATION_HISTORY_PRICE_CACHE: Dict[str, Any] = {}
-
 _KAP_VALUATION_HISTORY_PRICE_TTL = 24 * 60 * 60
 
 _KAP_VALUATION_HISTORY_PRICE_STALE_TTL = 7 * 24 * 60 * 60
+
+_KAP_VALUATION_HISTORY_PRICE_CACHE: BoundedMemoryCache = BoundedMemoryCache(
+    max_entries=128,
+    default_ttl=_KAP_VALUATION_HISTORY_PRICE_STALE_TTL,
+)
 
 from app.kap_api.flow_and_feeds import (  # noqa: E402
     _KapDisclosureTableParser,

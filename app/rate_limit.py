@@ -9,15 +9,16 @@ second, shared layer.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import os
 import secrets
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
-from typing import Deque, Dict, Tuple
+from typing import Deque, Tuple
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -40,9 +41,21 @@ class SlidingWindowRateLimiter:
     silently disabling the basic abuse protection.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_buckets: int = 10_000) -> None:
         self._lock = threading.Lock()
-        self._buckets: Dict[str, Deque[float]] = defaultdict(deque)
+        self._max_buckets = max(1, int(max_buckets))
+        self._buckets: OrderedDict[str, Deque[float]] = OrderedDict()
+        self._last_sweep = time.monotonic()
+        self._sweep_interval_seconds = 60.0
+
+    def _sweep_locked(self, cutoff: float) -> None:
+        expired_keys = [
+            k for k, bucket in self._buckets.items()
+            if not bucket or bucket[-1] <= cutoff
+        ]
+        for k in expired_keys:
+            self._buckets.pop(k, None)
+        self._last_sweep = time.monotonic()
 
     def consume(self, key: str, *, limit: int, window_seconds: float = 60.0) -> Tuple[bool, int]:
         if limit <= 0:
@@ -50,7 +63,18 @@ class SlidingWindowRateLimiter:
         now = time.monotonic()
         cutoff = now - window_seconds
         with self._lock:
-            bucket = self._buckets[key]
+            if now - self._last_sweep >= self._sweep_interval_seconds:
+                self._sweep_locked(now - max(window_seconds, 60.0))
+            bucket = self._buckets.get(key)
+            if bucket is None:
+                if len(self._buckets) >= self._max_buckets:
+                    self._sweep_locked(now - max(window_seconds, 60.0))
+                    while len(self._buckets) >= self._max_buckets:
+                        self._buckets.popitem(last=False)
+                bucket = deque()
+                self._buckets[key] = bucket
+            else:
+                self._buckets.move_to_end(key)
             while bucket and bucket[0] <= cutoff:
                 bucket.popleft()
             if len(bucket) >= limit:
@@ -71,6 +95,7 @@ class SlidingWindowRateLimiter:
             if not bucket:
                 self._buckets.pop(key, None)
                 return 0
+            self._buckets.move_to_end(key)
             return len(bucket)
 
     def clear(self, key: str) -> None:
@@ -129,6 +154,9 @@ return redis.call('ZCARD', KEYS[1])
 
             backend = get_cache()
             if getattr(backend, "name", "") != "redis":
+                return None, None
+            should_attempt = getattr(backend, "_should_attempt_redis", None)
+            if callable(should_attempt) and not should_attempt():
                 return None, None
             client = getattr(backend, "_client", None)
             prefix = getattr(backend, "_prefixed", None)
@@ -261,10 +289,11 @@ class RequestRateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         limit = _limit_for_request(request)
         request_key = f"client:{request.method}:{request.url.path}:{client_identity(request)}"
-        allowed, retry_after = _consume_limit(request_key, limit=limit)
+        allowed, retry_after = await asyncio.to_thread(_consume_limit, request_key, limit=limit)
         provider_limit = _shared_provider_limit_for_request(request)
         if allowed and provider_limit > 0:
-            allowed, retry_after = _consume_limit(
+            allowed, retry_after = await asyncio.to_thread(
+                _consume_limit,
                 f"provider:{request.method}:{request.url.path}",
                 limit=provider_limit,
             )

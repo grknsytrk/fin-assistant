@@ -620,6 +620,7 @@ def _process_kap_statement_symbol(
     *,
     mode: str,
     max_quarters: int,
+    defer_snapshot_upsert: bool = False,
 ) -> Dict[str, Any]:
     from app.financial_snapshot_store import (
         extract_financial_snapshot_from_kap_payload,
@@ -702,6 +703,7 @@ def _process_kap_statement_symbol(
     )
 
     snapshot_warning: Optional[str] = None
+    deferred_snapshot: Optional[Dict[str, Any]] = None
     should_upsert = changed or mode == "full" or not bool(raw.get("cache_hit"))
     if should_upsert:
         snapshot_mtime_ns: Optional[int] = None
@@ -715,26 +717,29 @@ def _process_kap_statement_symbol(
             source_mtime_ns=snapshot_mtime_ns,
         )
         if financial_snapshot:
-            last_upsert_exc: Optional[BaseException] = None
-            for attempt in range(2):
-                try:
-                    upsert_financial_snapshots(CONFIG.paths.processed_dir, [financial_snapshot])
-                    last_upsert_exc = None
-                    break
-                except Exception as exc:  # noqa: BLE001 - DB blip after KAP write must not abort batch as provider failure
-                    last_upsert_exc = exc
-                    if attempt == 0:
-                        time.sleep(1.0)
-            if last_upsert_exc is not None:
-                LOGGER.warning(
-                    "Financial snapshot DB upsert failed after KAP cache write for %s: %s",
-                    normalized,
-                    last_upsert_exc,
-                )
-                snapshot_warning = (
-                    "snapshot_upsert_failed: "
-                    f"{(str(last_upsert_exc or '')[:200] or last_upsert_exc.__class__.__name__)}"
-                )
+            if defer_snapshot_upsert:
+                deferred_snapshot = financial_snapshot
+            else:
+                last_upsert_exc: Optional[BaseException] = None
+                for attempt in range(2):
+                    try:
+                        upsert_financial_snapshots(CONFIG.paths.processed_dir, [financial_snapshot])
+                        last_upsert_exc = None
+                        break
+                    except Exception as exc:  # noqa: BLE001 - DB blip after KAP write must not abort batch as provider failure
+                        last_upsert_exc = exc
+                        if attempt == 0:
+                            time.sleep(1.0)
+                if last_upsert_exc is not None:
+                    LOGGER.warning(
+                        "Financial snapshot DB upsert failed after KAP cache write for %s: %s",
+                        normalized,
+                        last_upsert_exc,
+                    )
+                    snapshot_warning = (
+                        "snapshot_upsert_failed: "
+                        f"{(str(last_upsert_exc or '')[:200] or last_upsert_exc.__class__.__name__)}"
+                    )
     if changed:
         try:
             from app.kap_api_service import (
@@ -755,6 +760,8 @@ def _process_kap_statement_symbol(
         "quarter_count": _statement_cached_depth(raw),
         "schema_version": raw.get("schema_version") or KAP_CACHE_SCHEMA_VERSION,
     }
+    if deferred_snapshot is not None:
+        result["_financial_snapshot"] = deferred_snapshot
     if snapshot_warning:
         result["error"] = snapshot_warning
     return result
@@ -765,6 +772,7 @@ def _guarded_process_kap_statement_symbol(
     *,
     mode: str,
     max_quarters: int,
+    defer_snapshot_upsert: bool = False,
 ) -> Dict[str, Any]:
     from src.kap_fetcher import KapPacingDeadlineExceeded
 
@@ -773,6 +781,7 @@ def _guarded_process_kap_statement_symbol(
             symbol,
             mode=mode,
             max_quarters=max_quarters,
+            defer_snapshot_upsert=defer_snapshot_upsert,
         )
         return {**result, "blocked": False}
     except KapPacingDeadlineExceeded:
@@ -791,6 +800,30 @@ def _guarded_process_kap_statement_symbol(
         }
 
 
+def _flush_pending_financial_snapshots(pending_snapshots: List[Dict[str, Any]]) -> None:
+    if not pending_snapshots:
+        return
+    from app.financial_snapshot_store import upsert_financial_snapshots
+
+    last_exc: Optional[BaseException] = None
+    for attempt in range(2):
+        try:
+            upsert_financial_snapshots(CONFIG.paths.processed_dir, pending_snapshots)
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001 - DB blip after KAP write must not abort batch
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(1.0)
+    if last_exc is not None:
+        LOGGER.warning(
+            "Batch financial snapshot DB upsert failed for %d symbol(s): %s",
+            len(pending_snapshots),
+            last_exc,
+        )
+    pending_snapshots.clear()
+
+
 def _retry_blocked_kap_statement_symbols(
     symbols: List[str],
     *,
@@ -799,6 +832,7 @@ def _retry_blocked_kap_statement_symbols(
     mode: str,
     max_quarters: int,
     deadline: float,
+    pending_snapshots: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Give symbols that hit a transient KAP block one more chance.
 
@@ -824,7 +858,11 @@ def _retry_blocked_kap_statement_symbols(
             symbol,
             mode=mode,
             max_quarters=max_quarters,
+            defer_snapshot_upsert=pending_snapshots is not None,
         )
+        deferred_snap = result.pop("_financial_snapshot", None)
+        if deferred_snap is not None and pending_snapshots is not None:
+            pending_snapshots.append(deferred_snap)
         outcome = str(result.get("outcome") or "failed")
         if outcome == "budget_exhausted":
             LOGGER.info("KAP statement refresh retry pass hit the pacing deadline")
@@ -999,6 +1037,7 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
     owner_marker = {"job_id": job_id, "owner_token": owner_token}
     heartbeat_stop = threading.Event()
     job_lock = threading.Lock()
+    pending_snapshots: List[Dict[str, Any]] = []
 
     def _heartbeat_worker() -> None:
         interval = _KAP_STATEMENT_HEARTBEAT_INTERVAL_SECONDS
@@ -1059,10 +1098,15 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
                         symbol,
                         mode=mode,
                         max_quarters=max_quarters,
+                        defer_snapshot_upsert=True,
                     ),
                     window,
                 )
             )
+            for result in results:
+                deferred_snap = result.pop("_financial_snapshot", None)
+                if deferred_snap is not None:
+                    pending_snapshots.append(deferred_snap)
             if any(str(result.get("outcome") or "") == "budget_exhausted" for result in results):
                 stop_reason = "budget_exhausted"
                 break
@@ -1146,6 +1190,7 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
                 mode=mode,
                 max_quarters=max_quarters,
                 deadline=deadline,
+                pending_snapshots=pending_snapshots,
             )
     except Exception as exc:  # noqa: BLE001 - never leave the job stuck in "running"
         LOGGER.exception("KAP statement refresh job failed: %s", job_id)
@@ -1160,6 +1205,7 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
         heartbeat_thread.join(timeout=2.0)
         pool.shutdown(wait=True)
         set_kap_request_pacing(0.0)
+        _flush_pending_financial_snapshots(pending_snapshots)
 
     if superseded:
         status = "superseded"

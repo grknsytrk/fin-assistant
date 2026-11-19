@@ -852,18 +852,12 @@ def _derive_favok(
         return None
 
 
-def _extract_disclosure_metrics(
+def _parse_disclosure_body_rows(
     detail_payload: Dict[str, Any],
-    period: int,
-    *,
-    prefer_income_statement_ytd: bool = False,
-    comparison_mode: str = "current",
-    is_bank: bool = False,
-    is_insurance: bool = False,
-) -> Tuple[Dict[str, Optional[float]], Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     disclosure_body = detail_payload.get("disclosureBody", [])
     if not isinstance(disclosure_body, list):
-        return {}, {"raw": "", "multiplier": 1.0, "currency": "TL"}
+        return [], {"raw": "", "multiplier": 1.0, "currency": "TL"}
 
     all_rows: List[Dict[str, Any]] = []
     unit_info = {"raw": "", "multiplier": 1.0, "currency": "TL"}
@@ -882,6 +876,27 @@ def _extract_disclosure_metrics(
                 unit_multiplier=float(unit_info.get("multiplier", 1.0)),
             )
         )
+    return all_rows, unit_info
+
+
+def _extract_disclosure_metrics(
+    detail_payload: Dict[str, Any],
+    period: int,
+    *,
+    prefer_income_statement_ytd: bool = False,
+    comparison_mode: str = "current",
+    is_bank: bool = False,
+    is_insurance: bool = False,
+    parsed_rows: Optional[List[Dict[str, Any]]] = None,
+    parsed_unit_info: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Optional[float]], Dict[str, Any]]:
+    if parsed_rows is not None and parsed_unit_info is not None:
+        all_rows = parsed_rows
+        unit_info = parsed_unit_info
+    else:
+        if not isinstance(detail_payload.get("disclosureBody", []), list):
+            return {}, {"raw": "", "multiplier": 1.0, "currency": "TL"}
+        all_rows, unit_info = _parse_disclosure_body_rows(detail_payload)
 
     metrics: Dict[str, Optional[float]] = {
         "net_kar": _pick_metric_value(

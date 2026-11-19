@@ -127,6 +127,54 @@ def reset_db_metrics() -> None:
         _DB_DETAILED_METRICS.clear()
 
 
+def _exact_byte_metering_enabled() -> bool:
+    return str(os.getenv("RAGFIN_DB_EXACT_BYTE_METERING", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _estimate_row_bytes(row: Any) -> int:
+    if row is None:
+        return 0
+    if isinstance(row, dict):
+        total = 2
+        for key, value in row.items():
+            total += (len(key) if isinstance(key, str) else 8) + 4
+            if isinstance(value, (str, bytes, bytearray)):
+                total += len(value)
+            elif isinstance(value, (dict, list, tuple)):
+                total += max(16, len(value) * 64)
+            else:
+                total += 16
+        return total
+    if isinstance(row, (list, tuple)):
+        total = 2
+        for value in row:
+            if isinstance(value, (str, bytes, bytearray)):
+                total += len(value) + 2
+            elif isinstance(value, (dict, list, tuple)):
+                total += max(16, len(value) * 64)
+            else:
+                total += 16
+        return total
+    if isinstance(row, (str, bytes, bytearray)):
+        return len(row)
+    return 64
+
+
+def _estimate_rows_bytes(rows: list[Any]) -> int:
+    if not rows:
+        return 0
+    if len(rows) <= 16:
+        return sum(_estimate_row_bytes(r) for r in rows)
+    sample_count = 16
+    sample_bytes = sum(_estimate_row_bytes(r) for r in rows[:sample_count])
+    return int((sample_bytes / sample_count) * len(rows))
+
+
 class MeteredCursor:
     """Thin wrapper around psycopg cursor to measure row egress wire bytes."""
 
@@ -136,16 +184,26 @@ class MeteredCursor:
         self._operation = operation
         self._is_target = table in TARGET_TABLES
 
+    def _measure_row(self, row: Any) -> int:
+        if _exact_byte_metering_enabled():
+            return len(orjson_dumps(row))
+        return _estimate_row_bytes(row)
+
+    def _measure_rows(self, rows: list[Any]) -> int:
+        if _exact_byte_metering_enabled():
+            return len(orjson_dumps(rows))
+        return _estimate_rows_bytes(rows)
+
     def fetchone(self) -> Any:
         row = self._cursor.fetchone()
         if row is not None and self._is_target:
-            _record_db_bytes(self._table, self._operation, len(orjson_dumps(row)), 1)
+            _record_db_bytes(self._table, self._operation, self._measure_row(row), 1)
         return row
 
     def fetchall(self) -> list[Any]:
         rows = self._cursor.fetchall()
         if rows and self._is_target:
-            _record_db_bytes(self._table, self._operation, len(orjson_dumps(rows)), len(rows))
+            _record_db_bytes(self._table, self._operation, self._measure_rows(rows), len(rows))
         return rows
 
     def fetchmany(self, size: Optional[int] = None) -> list[Any]:
@@ -154,7 +212,7 @@ class MeteredCursor:
         else:
             rows = self._cursor.fetchmany(size)
         if rows and self._is_target:
-            _record_db_bytes(self._table, self._operation, len(orjson_dumps(rows)), len(rows))
+            _record_db_bytes(self._table, self._operation, self._measure_rows(rows), len(rows))
         return rows
 
     def __iter__(self) -> Any:
@@ -167,7 +225,7 @@ class MeteredCursor:
         if row is None:
             raise StopIteration
         if self._is_target:
-            _record_db_bytes(self._table, self._operation, len(orjson_dumps(row)), 1)
+            _record_db_bytes(self._table, self._operation, self._measure_row(row), 1)
         return row
 
     def __enter__(self) -> "MeteredCursor":
@@ -331,12 +389,15 @@ def _postgres_pool() -> Any:
             _POSTGRES_POOL.close()
         max_size = max(1, int(os.getenv("RAGFIN_DATABASE_POOL_MAX_SIZE", "4")))
         timeout = max(1.0, float(os.getenv("RAGFIN_DATABASE_POOL_TIMEOUT_SECONDS", "10")))
+        max_idle = max(30.0, float(os.getenv("RAGFIN_DATABASE_POOL_MAX_IDLE_SECONDS", "300")))
+        max_lifetime = max(60.0, float(os.getenv("RAGFIN_DATABASE_POOL_MAX_LIFETIME_SECONDS", "1800")))
         _POSTGRES_POOL = ConnectionPool(
             conninfo=url,
             min_size=1,
             max_size=max_size,
             timeout=timeout,
-            check=ConnectionPool.check_connection,
+            max_idle=max_idle,
+            max_lifetime=max_lifetime,
             kwargs={
                 "row_factory": _require_psycopg()[1],
                 # Safe for both Supavisor session mode and transaction mode.
@@ -394,6 +455,8 @@ def _cache_key(path: Path) -> str:
 def lock_down_postgres_tables(conn: Any, *table_names: str) -> None:
     """Enable RLS and revoke browser/API role grants on internal Postgres tables."""
 
+    if str(os.getenv("RAGFIN_AUTO_MIGRATE", "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return
     if not getattr(conn, "is_postgres", False):
         return
     for raw_name in table_names:
@@ -1104,6 +1167,7 @@ def write_json_cache(path: Path, payload: dict[str, Any]) -> None:
                 ON CONFLICT (cache_key) DO UPDATE SET
                     payload = EXCLUDED.payload,
                     updated_at = EXCLUDED.updated_at
+                WHERE ragfin_json_cache.payload IS DISTINCT FROM EXCLUDED.payload
                 RETURNING updated_at::text AS updated_at, COALESCE(version, 0) AS version
                 """,
                 (_cache_key(path), json.dumps(payload, ensure_ascii=False, default=str)),
@@ -1163,13 +1227,15 @@ def hydrate_json_cache(
         ]
         query_params: list[Any] = []
         if includes:
-            conditions.append("(" + " OR ".join("SUBSTR(cache_key, 1, ?) = ?" for _ in includes) + ")")
+            conditions.append("(" + " OR ".join("cache_key LIKE ? ESCAPE '\\'" for _ in includes) + ")")
             for prefix in includes:
-                query_params.extend((len(prefix), prefix))
+                escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                query_params.append(f"{escaped}%")
         if excludes:
             for prefix in excludes:
-                conditions.append("SUBSTR(cache_key, 1, ?) <> ?")
-                query_params.extend((len(prefix), prefix))
+                escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                conditions.append("cache_key NOT LIKE ? ESCAPE '\\'")
+                query_params.append(f"{escaped}%")
 
         where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 

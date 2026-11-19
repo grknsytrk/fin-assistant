@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import app.database as _database
 from app.database import read_json_cache, read_json_cache_conditional
+from app.etag import orjson_dumps
 
 _DEFAULT_READ_JSON_CACHE = read_json_cache
 
@@ -48,9 +49,9 @@ _JSON_CACHE_TELEMETRY_FIELDS = (
 _JSON_CACHE_TELEMETRY_PREFIXES = ("funds_cache", "kap_cache", "other")
 
 _JSON_CACHE_READ_STATE: Dict[str, Tuple[float, Optional[Tuple[int, int]]]] = {}
-_JSON_CACHE_REMOTE_STAMPS: Dict[
+_JSON_CACHE_REMOTE_STAMPS: OrderedDict[
     str, Tuple[Optional[Tuple[int, int]], Tuple[str, int]]
-] = {}
+] = OrderedDict()
 _JSON_CACHE_READ_STATE_LOCK = threading.RLock()
 
 
@@ -265,7 +266,10 @@ def _remember_json_cache_read_state(
             _JSON_CACHE_REMOTE_STAMPS.pop(evicted_key, None)
         _JSON_CACHE_READ_STATE[key] = state
         if remote_stamp is not None and remote_stamp[0]:
+            _JSON_CACHE_REMOTE_STAMPS.pop(key, None)
             _JSON_CACHE_REMOTE_STAMPS[key] = (signature, (str(remote_stamp[0]), int(remote_stamp[1])))
+            while len(_JSON_CACHE_REMOTE_STAMPS) > JSON_CACHE_READ_STATE_MAX_ENTRIES:
+                _JSON_CACHE_REMOTE_STAMPS.popitem(last=False)
     if evicted_key is not None:
         with _JSON_CACHE_PAYLOAD_CACHE_LOCK:
             _remove_json_cache_payload_locked(evicted_key)
@@ -281,7 +285,10 @@ def remember_json_cache_remote_stamp(
     key = str(path)
     signature = json_cache_file_signature(path)
     with _JSON_CACHE_READ_STATE_LOCK:
+        _JSON_CACHE_REMOTE_STAMPS.pop(key, None)
         _JSON_CACHE_REMOTE_STAMPS[key] = (signature, (str(stamp[0]), int(stamp[1])))
+        while len(_JSON_CACHE_REMOTE_STAMPS) > JSON_CACHE_READ_STATE_MAX_ENTRIES:
+            _JSON_CACHE_REMOTE_STAMPS.popitem(last=False)
 
 
 def get_json_cache_remote_stamp(
@@ -299,6 +306,7 @@ def get_json_cache_remote_stamp(
         if stored_signature != signature:
             _JSON_CACHE_REMOTE_STAMPS.pop(key, None)
             return None
+        _JSON_CACHE_REMOTE_STAMPS.move_to_end(key)
         return stamp
 
 
@@ -498,14 +506,17 @@ def read_json_cache_local_first(
 
     read_lock = _JSON_CACHE_REMOTE_READ_LOCKS[hash(key) % len(_JSON_CACHE_REMOTE_READ_LOCKS)]
     with read_lock:
-        signature = json_cache_file_signature(path)
-        payload_hit, cached_payload = _get_json_cache_payload(key, signature, ttl_seconds=ttl)
+        current_signature = json_cache_file_signature(path)
+        payload_hit, cached_payload = _get_json_cache_payload(key, current_signature, ttl_seconds=ttl)
         if payload_hit:
             record_json_cache_local_hit(coalesced=True, reader=metric_reader, prefix=key_prefix)
             return cached_payload
 
-        local_payload = read_local_json(path)
-        signature = json_cache_file_signature(path)
+        if current_signature != signature:
+            local_payload = read_local_json(path)
+            signature = json_cache_file_signature(path)
+        else:
+            signature = current_signature
         read_at = _json_cache_read_timestamp(key, signature, ttl)
         if read_at is not None:
             _remember_json_cache_payload(
@@ -575,11 +586,21 @@ def read_json_cache_local_first(
             return local_payload
 
         if remote_payload != local_payload:
+            write_succeeded = False
             try:
                 write_local_json(path, remote_payload)
+                write_succeeded = True
             except OSError:
                 LOGGER.debug("Could not mirror remote JSON cache locally: %s", path, exc_info=True)
-            if remote_stamp is not None:
+            if not write_succeeded:
+                read_at, state_signature = _remember_json_cache_read_state(
+                    path, remote_stamp=remote_stamp
+                )
+                if state_signature == signature:
+                    _remember_json_cache_payload(
+                        key, remote_payload, state_signature, read_at, ttl_seconds=ttl
+                    )
+            elif remote_stamp is not None:
                 remember_json_cache_remote_stamp(path, remote_stamp)
         else:
             read_at, state_signature = _remember_json_cache_read_state(
@@ -593,14 +614,7 @@ def read_json_cache_local_first(
         # Compact JSON length estimates payload size without exposing content.
         # It is not the exact Postgres wire size and is used only for telemetry.
         try:
-            approx_bytes = len(
-                json.dumps(
-                    remote_payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=str,
-                ).encode("utf-8")
-            )
+            approx_bytes = len(orjson_dumps(remote_payload))
         except (TypeError, ValueError):
             approx_bytes = 0
         record_json_cache_remote_result(

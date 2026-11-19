@@ -21,6 +21,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from app.cache import BoundedMemoryCache
 from app.database import read_json_cache, write_json_cache
 
 LOGGER = logging.getLogger(__name__)
@@ -30,8 +31,11 @@ from urllib.parse import unquote
 
 _STATE_LOCK = threading.RLock()
 _MODEL_PORTFOLIO_STATE_CACHE: Dict[str, Dict[str, Any]] = {}
-_MODEL_PORTFOLIO_PERF_MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
 _PERF_MEMORY_TTL_SECONDS = 15 * 60
+_MODEL_PORTFOLIO_PERF_MEMORY_CACHE: BoundedMemoryCache = BoundedMemoryCache(
+    max_entries=16,
+    default_ttl=_PERF_MEMORY_TTL_SECONDS,
+)
 
 _ADMIN_MAX_FAILED_ATTEMPTS = 5
 _ADMIN_LOCKOUT_WINDOW_SECONDS = 10 * 60
@@ -1107,7 +1111,8 @@ def build_model_portfolio_performance_payload(
     cache_key = f"api:model-portfolio:performance:v4:ver={version}:day={today_iso}"
     now_ts = time.time()
 
-    mem_entry = _MODEL_PORTFOLIO_PERF_MEMORY_CACHE.get(cache_key)
+    with _STATE_LOCK:
+        mem_entry = _MODEL_PORTFOLIO_PERF_MEMORY_CACHE.get(cache_key)
     base_series_data: Optional[Dict[str, Any]] = None
     cache_status = "miss"
 
@@ -1118,7 +1123,8 @@ def build_model_portfolio_performance_payload(
         shared_hit = shared_cache_get(cache_key)
         if isinstance(shared_hit, dict) and isinstance(shared_hit.get("sorted_dates"), list):
             base_series_data = shared_hit
-            _MODEL_PORTFOLIO_PERF_MEMORY_CACHE[cache_key] = {"_ts": now_ts, "data": shared_hit}
+            with _STATE_LOCK:
+                _MODEL_PORTFOLIO_PERF_MEMORY_CACHE[cache_key] = {"_ts": now_ts, "data": shared_hit}
             cache_status = "shared_hit"
 
     if base_series_data is None:
@@ -1167,7 +1173,8 @@ def build_model_portfolio_performance_payload(
             "series_by_symbol": series_by_symbol,
         }
         if sorted_dates:
-            _MODEL_PORTFOLIO_PERF_MEMORY_CACHE[cache_key] = {"_ts": now_ts, "data": base_series_data}
+            with _STATE_LOCK:
+                _MODEL_PORTFOLIO_PERF_MEMORY_CACHE[cache_key] = {"_ts": now_ts, "data": base_series_data}
             if shared_cache_set is not None:
                 shared_cache_set(cache_key, base_series_data, _PERF_MEMORY_TTL_SECONDS)
 

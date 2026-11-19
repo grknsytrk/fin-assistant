@@ -7,6 +7,7 @@ are registered on the same server.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 
@@ -14,7 +15,33 @@ import uvicorn
 
 os.environ.setdefault("RAGFIN_FUND_COLLECTOR_ENABLED", "0")
 
-from app.api import app as api_app, bootstrap_application_storage, configure_http_middleware
+from app.api import (
+    app as api_app,
+    bootstrap_application_storage,
+    close_postgres_pool,
+    close_shared_http_clients,
+    configure_http_middleware,
+)
+from app.cache import get_cache
+from app.etag import ORJSONResponse
+
+
+def _shutdown_runtime_resources() -> None:
+    for cleanup_fn in (close_postgres_pool, close_shared_http_clients):
+        try:
+            cleanup_fn()
+        except Exception:
+            pass
+    try:
+        cache_backend = get_cache()
+        close_fn = getattr(cache_backend, "close", None)
+        if callable(close_fn):
+            close_fn()
+    except Exception:
+        pass
+
+
+atexit.register(_shutdown_runtime_resources)
 
 try:
     import gradio as gr
@@ -29,7 +56,10 @@ if gr is not None and spaces is not None:
     # The API router is mounted into Gradio's FastAPI server on Spaces, so
     # middleware registered on app.api does not wrap these requests.
     configure_http_middleware(demo)
-    demo.include_router(api_app.router)
+    try:
+        demo.include_router(api_app.router, default_response_class=ORJSONResponse)
+    except TypeError:
+        demo.include_router(api_app.router)
 
     @spaces.GPU
     @demo.api(name="probe")

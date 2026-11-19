@@ -191,8 +191,9 @@ class MockRawConnection:
 class TestTier1Coverage:
     """Verifies each of the 18 egress optimization features in isolation against production app/."""
 
-    def test_f01_db_egress_cursor_wrapper(self) -> None:
+    def test_f01_db_egress_cursor_wrapper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """F1: PostgresConnection wraps cursors with MeteredCursor calculating exact wire bytes."""
+        monkeypatch.setenv("RAGFIN_DB_EXACT_BYTE_METERING", "1")
         reset_db_metrics()
         sample_snapshots = [
             {"fund_code": "TI1", "price": 10.5, "name": "İş Fonu"},

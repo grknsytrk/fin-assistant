@@ -163,6 +163,7 @@ def test_kap_overview_commentary_success(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("NVIDIA_API_KEY", "dummy-nvidia-key")
     monkeypatch.delenv("IFM_API_KEY", raising=False)
     monkeypatch.delenv("NVIDIA_AI_MODEL", raising=False)
+    monkeypatch.setenv("OVERVIEW_AI_EXPOSE_DEBUG_TRACE", "1")
     monkeypatch.setattr("src.nvidia_commentary._call_nvidia_chat", fake_call)
 
     client = TestClient(app)
@@ -209,6 +210,7 @@ def test_kap_overview_commentary_model_override(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setenv("NVIDIA_API_KEY", "dummy-nvidia-key")
     monkeypatch.delenv("IFM_API_KEY", raising=False)
+    monkeypatch.setenv("OVERVIEW_AI_EXPOSE_DEBUG_TRACE", "1")
     monkeypatch.setattr("src.nvidia_commentary._call_nvidia_chat", fake_call)
 
     payload = _overview_commentary_payload()
@@ -264,6 +266,7 @@ def test_kap_overview_commentary_does_not_truncate_model_text(
 
     monkeypatch.setenv("NVIDIA_API_KEY", "dummy-nvidia-key")
     monkeypatch.delenv("IFM_API_KEY", raising=False)
+    monkeypatch.setenv("OVERVIEW_AI_EXPOSE_DEBUG_TRACE", "1")
     monkeypatch.setattr("src.nvidia_commentary._call_nvidia_chat", fake_call)
 
     client = TestClient(app)
@@ -282,6 +285,8 @@ def test_kap_overview_commentary_does_not_truncate_model_text(
 def test_kap_overview_commentary_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
     monkeypatch.delenv("IFM_API_KEY", raising=False)
+    monkeypatch.delenv("EVREN_API_KEY", raising=False)
+    monkeypatch.setenv("OVERVIEW_AI_EXPOSE_DEBUG_TRACE", "1")
 
     client = TestClient(app)
     response = client.post("/kap/overview-commentary", json=_overview_commentary_payload())
@@ -309,6 +314,7 @@ def test_kap_overview_commentary_provider_error_includes_debug_trace(
 
     monkeypatch.setenv("NVIDIA_API_KEY", "dummy-nvidia-key")
     monkeypatch.delenv("IFM_API_KEY", raising=False)
+    monkeypatch.setenv("OVERVIEW_AI_EXPOSE_DEBUG_TRACE", "1")
     monkeypatch.setattr("src.nvidia_commentary._call_nvidia_chat", fake_call)
 
     client = TestClient(app)
@@ -342,6 +348,7 @@ def test_kap_overview_commentary_invalid_ai_adjustments_falls_back(
 
     monkeypatch.setenv("NVIDIA_API_KEY", "dummy-nvidia-key")
     monkeypatch.delenv("IFM_API_KEY", raising=False)
+    monkeypatch.setenv("OVERVIEW_AI_EXPOSE_DEBUG_TRACE", "1")
     monkeypatch.setattr("src.nvidia_commentary._call_nvidia_chat", fake_call)
 
     client = TestClient(app)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import json
 import os
@@ -20,6 +21,11 @@ if TYPE_CHECKING:
     from app.fund_service import FundSnapshotFetchResult
 
 _ORIGINAL_EXPORTS: Dict[str, Any] = {}
+_TEFASFON_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="tefasfon-worker",
+)
+atexit.register(_TEFASFON_EXECUTOR.shutdown, wait=False)
 
 
 def _fund_service() -> Any:
@@ -939,35 +945,27 @@ class TefasFonClient:
         if function is None:
             raise fs.TefasFormatError(f"tefasfon missing {function_name}")
         timeout_seconds = max(1.0, fs.TEFAS_TIMEOUT_SECONDS)
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"tefasfon-{function_name}")
-        future = executor.submit(function, **kwargs)
+        future = _TEFASFON_EXECUTOR.submit(function, **kwargs)
         try:
             frame = future.result(timeout=timeout_seconds)
         except concurrent.futures.TimeoutError as exc:
             future.cancel()
-            executor.shutdown(wait=False, cancel_futures=True)
             raise fs.TefasUpstreamError(f"{context} timed out after {timeout_seconds:g}s") from exc
         except Exception as exc:
-            executor.shutdown(wait=False, cancel_futures=True)
             raise fs.TefasUpstreamError(f"{context} failed: {exc}") from exc
-        executor.shutdown(wait=False)
         return _seam("_dataframe_records")(frame, context=context)
 
     def _call_records(self, callback: Callable[[], List[Dict[str, Any]]], *, context: str) -> List[Dict[str, Any]]:
         fs = _fund_service()
         timeout_seconds = max(1.0, fs.TEFAS_TIMEOUT_SECONDS)
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="tefasfon-direct")
-        future = executor.submit(callback)
+        future = _TEFASFON_EXECUTOR.submit(callback)
         try:
             records = future.result(timeout=timeout_seconds)
         except concurrent.futures.TimeoutError as exc:
             future.cancel()
-            executor.shutdown(wait=False, cancel_futures=True)
             raise fs.TefasUpstreamError(f"{context} timed out after {timeout_seconds:g}s") from exc
         except Exception as exc:
-            executor.shutdown(wait=False, cancel_futures=True)
             raise fs.TefasUpstreamError(f"{context} failed: {exc}") from exc
-        executor.shutdown(wait=False)
         return records
 
     def fetch_funds(
@@ -1230,176 +1228,183 @@ class TefasFonClient:
             endpoint = tefas_getter._API_ENDPOINT["general_information"]
             as_of_iso = as_of.strftime("%Y-%m-%d")
             session = tefas_getter._new_session(portal_url, as_of_iso, as_of_iso, fund_url_param)
-            base_payload: Dict[str, Any] = {
-                "fonTipi": fon_tipi,
-                "fonKodu": None,
-                "aramaMetni": None,
-                "fonTurKod": None,
-                "fonGrubu": None,
-                "sfonTurKod": None,
-                "basTarih": as_of.strftime("%Y%m%d"),
-                "bitTarih": as_of.strftime("%Y%m%d"),
-                "basSira": 1,
-                "bitSira": 1,
-                "fonTurAciklama": None,
-                "dil": "TR",
-                "kurucuKod": None,
-            }
-            post_headers = {
-                "Content-Type": "application/json",
-                "Referer": f"{portal_url}?startDate={as_of_iso}&endDate={as_of_iso}",
-                "Origin": "https://www.tefas.gov.tr",
-            }
-            page_size = int(getattr(tefas_getter, "_PAGE_SIZE", 1000))
-            page_delay = float(getattr(tefas_getter, "_PAGE_DELAY", 1.0))
-            retry_delay = float(getattr(tefas_getter, "_RETRY_DELAY", 5.0))
-            max_retries = int(getattr(tefas_getter, "_MAX_RETRIES", 3))
-            collected: List[Dict[str, Any]] = []
-            seen_codes: set[str] = set()
-            page_index = 0
-            total_pages: Optional[int] = None
-            reported_total: Optional[int] = None
-            empty_streak = 0
-            full_page_without_terminator = False
-
-            def post_with_retries(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-                last_err: Optional[Exception] = None
-                for attempt in range(max(1, max_retries)):
-                    try:
-                        response = session.post(endpoint, json=payload, headers=post_headers, timeout=30)
-                    except Exception as exc:  # network errors, dns, ssl, etc.
-                        last_err = exc
-                        response = None
-                    if response is not None and response.text and response.text.strip():
-                        try:
-                            return response.json()
-                        except Exception as exc:
-                            last_err = exc
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                if last_err is not None:
-                    raise last_err
-                return None
-
-            while True:
-                bas_sira = page_index * page_size + 1
-                payload = {
-                    **base_payload,
-                    "basSira": bas_sira,
-                    "bitSira": bas_sira + page_size - 1,
+            try:
+                base_payload: Dict[str, Any] = {
+                    "fonTipi": fon_tipi,
+                    "fonKodu": None,
+                    "aramaMetni": None,
+                    "fonTurKod": None,
+                    "fonGrubu": None,
+                    "sfonTurKod": None,
+                    "basTarih": as_of.strftime("%Y%m%d"),
+                    "bitTarih": as_of.strftime("%Y%m%d"),
+                    "basSira": 1,
+                    "bitSira": 1,
+                    "fonTurAciklama": None,
+                    "dil": "TR",
+                    "kurucuKod": None,
                 }
-                body = post_with_retries(payload)
-                if not body:
-                    if page_index > 0 and total_pages == 1:
-                        # A full first page can be followed by an empty page
-                        # when the endpoint's page count is unreliable.
-                        if reported_total is None and full_page_without_terminator:
+                post_headers = {
+                    "Content-Type": "application/json",
+                    "Referer": f"{portal_url}?startDate={as_of_iso}&endDate={as_of_iso}",
+                    "Origin": "https://www.tefas.gov.tr",
+                }
+                page_size = int(getattr(tefas_getter, "_PAGE_SIZE", 1000))
+                page_delay = float(getattr(tefas_getter, "_PAGE_DELAY", 1.0))
+                retry_delay = float(getattr(tefas_getter, "_RETRY_DELAY", 5.0))
+                max_retries = int(getattr(tefas_getter, "_MAX_RETRIES", 3))
+                collected: List[Dict[str, Any]] = []
+                seen_codes: set[str] = set()
+                page_index = 0
+                total_pages: Optional[int] = None
+                reported_total: Optional[int] = None
+                empty_streak = 0
+                full_page_without_terminator = False
+
+                def post_with_retries(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                    last_err: Optional[Exception] = None
+                    for attempt in range(max(1, max_retries)):
+                        try:
+                            response = session.post(endpoint, json=payload, headers=post_headers, timeout=30)
+                        except Exception as exc:  # network errors, dns, ssl, etc.
+                            last_err = exc
+                            response = None
+                        if response is not None and response.text and response.text.strip():
+                            try:
+                                return response.json()
+                            except Exception as exc:
+                                last_err = exc
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                    if last_err is not None:
+                        raise last_err
+                    return None
+
+                while True:
+                    bas_sira = page_index * page_size + 1
+                    payload = {
+                        **base_payload,
+                        "basSira": bas_sira,
+                        "bitSira": bas_sira + page_size - 1,
+                    }
+                    body = post_with_retries(payload)
+                    if not body:
+                        if page_index > 0 and total_pages == 1:
+                            # A full first page can be followed by an empty page
+                            # when the endpoint's page count is unreliable.
+                            if reported_total is None and full_page_without_terminator:
+                                raise fs.TefasUpstreamError(
+                                    f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} ended on a full page "
+                                    "without an authoritative total row count"
+                                )
+                            break
+                        raise fs.TefasUpstreamError(
+                            f"tefasfon snapshot page {page_index + 1} returned empty body for {fund_type_code} {as_of.isoformat()}"
+                        )
+                    error_message = body.get("errorMessage") or body.get("errorCode")
+                    if error_message:
+                        raise fs.TefasUpstreamError(
+                            f"tefasfon snapshot page {page_index + 1} for {fund_type_code} {as_of.isoformat()} failed: {error_message}"
+                        )
+                    if total_pages is None:
+                        candidate = body.get("toplamSayfa") or body.get("totalPages") or 1
+                        try:
+                            total_pages = max(1, int(candidate))
+                        except (TypeError, ValueError):
+                            total_pages = 1
+                    if reported_total is None:
+                        for key in (
+                            "toplamKayit",
+                            "toplamSayi",
+                            "totalCount",
+                            "totalRecords",
+                            "totalRows",
+                            "total_count",
+                            "count",
+                        ):
+                            value = body.get(key)
+                            if value in (None, ""):
+                                continue
+                            try:
+                                reported_total = max(0, int(float(value)))
+                            except (TypeError, ValueError):
+                                continue
+                            break
+                    rows: Optional[List[Any]] = None
+                    for key in ("resultList", "data", "Data", "result", "Result", "rows", "items"):
+                        value = body.get(key)
+                        if isinstance(value, list):
+                            rows = value
+                            break
+                    if rows is None:
+                        rows = body if isinstance(body, list) else []
+                    if not isinstance(rows, list):
+                        rows = []
+                    added = 0
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        fund_code = fs.normalize_fund_code(
+                            str(row.get("fonKodu") or row.get("fund_code") or "")
+                        )
+                        if fund_code:
+                            if fund_code in seen_codes:
+                                continue
+                            seen_codes.add(fund_code)
+                        collected.append(row)
+                        added += 1
+                    if added == 0:
+                        empty_streak += 1
+                    else:
+                        empty_streak = 0
+                    page_index += 1
+                    if reported_total is not None and len(collected) >= reported_total:
+                        break
+                    if len(rows) == page_size:
+                        full_page_without_terminator = True
+                    else:
+                        if not rows and reported_total is None and full_page_without_terminator:
                             raise fs.TefasUpstreamError(
                                 f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} ended on a full page "
                                 "without an authoritative total row count"
                             )
+                        full_page_without_terminator = False
+                    if total_pages is not None and page_index >= total_pages:
+                        # TEFAS has returned toplamSayfa=1 for a full page even
+                        # when more rows were available. Probe the next page in
+                        # that specific case; short pages remain terminal.
+                        if total_pages > 1 or len(rows) < page_size:
+                            break
+                    if added < page_size and len(rows) < page_size:
+                        # Server reported fewer pages than expected; trust the actual payload size.
                         break
-                    raise fs.TefasUpstreamError(
-                        f"tefasfon snapshot page {page_index + 1} returned empty body for {fund_type_code} {as_of.isoformat()}"
-                    )
-                error_message = body.get("errorMessage") or body.get("errorCode")
-                if error_message:
-                    raise fs.TefasUpstreamError(
-                        f"tefasfon snapshot page {page_index + 1} for {fund_type_code} {as_of.isoformat()} failed: {error_message}"
-                    )
-                if total_pages is None:
-                    candidate = body.get("toplamSayfa") or body.get("totalPages") or 1
-                    try:
-                        total_pages = max(1, int(candidate))
-                    except (TypeError, ValueError):
-                        total_pages = 1
-                if reported_total is None:
-                    for key in (
-                        "toplamKayit",
-                        "toplamSayi",
-                        "totalCount",
-                        "totalRecords",
-                        "totalRows",
-                        "total_count",
-                        "count",
-                    ):
-                        value = body.get(key)
-                        if value in (None, ""):
-                            continue
-                        try:
-                            reported_total = max(0, int(float(value)))
-                        except (TypeError, ValueError):
-                            continue
-                        break
-                rows: Optional[List[Any]] = None
-                for key in ("resultList", "data", "Data", "result", "Result", "rows", "items"):
-                    value = body.get(key)
-                    if isinstance(value, list):
-                        rows = value
-                        break
-                if rows is None:
-                    rows = body if isinstance(body, list) else []
-                if not isinstance(rows, list):
-                    rows = []
-                added = 0
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    fund_code = fs.normalize_fund_code(
-                        str(row.get("fonKodu") or row.get("fund_code") or "")
-                    )
-                    if fund_code:
-                        if fund_code in seen_codes:
-                            continue
-                        seen_codes.add(fund_code)
-                    collected.append(row)
-                    added += 1
-                if added == 0:
-                    empty_streak += 1
-                else:
-                    empty_streak = 0
-                page_index += 1
-                if reported_total is not None and len(collected) >= reported_total:
-                    break
-                if len(rows) == page_size:
-                    full_page_without_terminator = True
-                else:
-                    if not rows and reported_total is None and full_page_without_terminator:
+                    if empty_streak >= 2:
                         raise fs.TefasUpstreamError(
-                            f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} ended on a full page "
-                            "without an authoritative total row count"
+                            f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} stalled after page {page_index}"
                         )
-                    full_page_without_terminator = False
-                if total_pages is not None and page_index >= total_pages:
-                    # TEFAS has returned toplamSayfa=1 for a full page even
-                    # when more rows were available. Probe the next page in
-                    # that specific case; short pages remain terminal.
-                    if total_pages > 1 or len(rows) < page_size:
-                        break
-                if added < page_size and len(rows) < page_size:
-                    # Server reported fewer pages than expected; trust the actual payload size.
-                    break
-                if empty_streak >= 2:
+                    if page_delay > 0:
+                        time.sleep(page_delay)
+                if reported_total is not None and len(collected) < reported_total:
                     raise fs.TefasUpstreamError(
-                        f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} stalled after page {page_index}"
+                        f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} was incomplete "
+                        f"({len(collected)} rows vs reported {reported_total})"
                     )
-                if page_delay > 0:
-                    time.sleep(page_delay)
-            if reported_total is not None and len(collected) < reported_total:
-                raise fs.TefasUpstreamError(
-                    f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} was incomplete "
-                    f"({len(collected)} rows vs reported {reported_total})"
-                )
-            if total_pages and total_pages > 1 and page_index < total_pages:
-                raise fs.TefasUpstreamError(
-                    f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} aborted at page {page_index}/{total_pages}"
-                )
-            if reported_total is None and full_page_without_terminator:
-                raise fs.TefasUpstreamError(
-                    f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} ended on a full page "
-                    "without an authoritative total row count"
-                )
-            return collected
+                if total_pages and total_pages > 1 and page_index < total_pages:
+                    raise fs.TefasUpstreamError(
+                        f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} aborted at page {page_index}/{total_pages}"
+                    )
+                if reported_total is None and full_page_without_terminator:
+                    raise fs.TefasUpstreamError(
+                        f"tefasfon snapshot for {fund_type_code} {as_of.isoformat()} ended on a full page "
+                        "without an authoritative total row count"
+                    )
+                return collected
+            finally:
+                if hasattr(session, "close"):
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
 
         records = self._call_records(
             fetch_records,
@@ -1429,22 +1434,29 @@ class TefasFonClient:
             start_iso = start_date.strftime("%Y-%m-%d")
             end_iso = end_date.strftime("%Y-%m-%d")
             session = tefas_getter._new_session(portal_url, start_iso, end_iso, fund_url_param)
-            base_payload = {
-                "fonTipi": fon_tipi,
-                "fonKodu": fund_code,
-                "aramaMetni": fund_code,
-                "fonTurKod": None,
-                "fonGrubu": None,
-                "sfonTurKod": None,
-                "basTarih": start_date.strftime("%Y%m%d"),
-                "bitTarih": end_date.strftime("%Y%m%d"),
-                "basSira": 1,
-                "bitSira": 1000,
-                "fonTurAciklama": None,
-                "dil": "TR",
-                "kurucuKod": None,
-            }
-            records = tefas_getter._get_all_pages(session, endpoint, base_payload, portal_url, start_iso, end_iso)
+            try:
+                base_payload = {
+                    "fonTipi": fon_tipi,
+                    "fonKodu": fund_code,
+                    "aramaMetni": fund_code,
+                    "fonTurKod": None,
+                    "fonGrubu": None,
+                    "sfonTurKod": None,
+                    "basTarih": start_date.strftime("%Y%m%d"),
+                    "bitTarih": end_date.strftime("%Y%m%d"),
+                    "basSira": 1,
+                    "bitSira": 1000,
+                    "fonTurAciklama": None,
+                    "dil": "TR",
+                    "kurucuKod": None,
+                }
+                records = tefas_getter._get_all_pages(session, endpoint, base_payload, portal_url, start_iso, end_iso)
+            finally:
+                if hasattr(session, "close"):
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
         except Exception as exc:
             raise fs.TefasUpstreamError(f"tefasfon direct portfolio failed: {exc}") from exc
         rows = _seam("_tefasfon_rows")(records, source=fs.TEFASFON_PORTFOLIO_SOURCE, fund_type=fund_type_code)
@@ -1665,19 +1677,24 @@ class TefasFonClient:
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
         fs = _fund_service()
         warnings: List[str] = []
-        for offset in range(max(1, lookback_days)):
-            target_date = as_of - timedelta(days=offset)
-            try:
-                rows = self.fetch_portfolio(fund_code=fund_code, start_date=target_date, end_date=target_date)
-            except fs.TefasUpstreamError as exc:
-                warnings.append(f"tefasfon_portfolio failed for {target_date.isoformat()}: {exc}")
-                if _seam("_is_tefasfon_adapter_unavailable")(exc) or _seam("_is_tefas_rate_limit")(exc):
-                    break
-                continue
-            if rows:
-                return rows, warnings
-            warnings.append(f"tefasfon_portfolio returned no rows for {target_date.isoformat()}")
-        return [], warnings
+        start_date = as_of - timedelta(days=max(1, lookback_days))
+        try:
+            rows = self.fetch_portfolio(fund_code=fund_code, start_date=start_date, end_date=as_of)
+        except fs.TefasUpstreamError as exc:
+            warnings.append(f"tefasfon_portfolio failed for {start_date.isoformat()}..{as_of.isoformat()}: {exc}")
+            return [], warnings
+        if not rows:
+            warnings.append(f"tefasfon_portfolio returned no rows for {start_date.isoformat()}..{as_of.isoformat()}")
+            return [], warnings
+        dated_rows: List[Tuple[str, Dict[str, Any]]] = []
+        for row in rows:
+            row_date = fs._fund_date(row.get("tarih") or row.get("TARIH") or row.get("date"))
+            if row_date:
+                dated_rows.append((row_date, row))
+        if dated_rows:
+            latest_date = max(d for d, _ in dated_rows)
+            return [row for d, row in dated_rows if d == latest_date], warnings
+        return rows, warnings
 
     def fetch_yield_summary(
         self,

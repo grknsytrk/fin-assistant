@@ -122,9 +122,14 @@ class MarketStreamBroadcaster:
                 self._subscribers.discard(queue)
                 self._queue_indices.pop(queue, None)
                 self._queue_requests.pop(queue, None)
-                if len(self._subscribers) == 0 and self._task and not self._task.done():
-                    self._task.cancel()
-                    self._task = None
+                if len(self._subscribers) == 0:
+                    if self._task and not self._task.done():
+                        self._task.cancel()
+                        self._task = None
+                    self._last_rows.clear()
+                    self._prev_snapshots.clear()
+                    self._prev_benchmarks.clear()
+                    self._latest_event.clear()
 
     async def _broadcaster_loop(self) -> None:
         """Single background task fetching stock data and broadcasting deltas."""
@@ -135,20 +140,41 @@ class MarketStreamBroadcaster:
                 async with self._lock:
                     if len(self._subscribers) == 0:
                         break
-                    # Check disconnected clients per tick
-                    for q in list(self._subscribers):
-                        req = self._queue_requests.get(q)
-                        if req is not None:
+                    subscribers_to_check = [
+                        (q, self._queue_requests.get(q))
+                        for q in list(self._subscribers)
+                    ]
+
+                disconnected_queues: List[asyncio.Queue] = []
+                for q, req in subscribers_to_check:
+                    if req is not None:
+                        try:
+                            if await req.is_disconnected():
+                                disconnected_queues.append(q)
+                        except Exception:
+                            pass
+
+                if disconnected_queues:
+                    async with self._lock:
+                        for q in disconnected_queues:
+                            self._subscribers.discard(q)
+                            self._queue_indices.pop(q, None)
+                            self._queue_requests.pop(q, None)
+                            if q.full():
+                                try:
+                                    q.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    pass
                             try:
-                                if await req.is_disconnected():
-                                    self._subscribers.discard(q)
-                                    self._queue_indices.pop(q, None)
-                                    self._queue_requests.pop(q, None)
-                                    q.put_nowait(None)
-                            except Exception:
+                                q.put_nowait(None)
+                            except asyncio.QueueFull:
                                 pass
-                    if len(self._subscribers) == 0:
-                        break
+                        if len(self._subscribers) == 0:
+                            self._last_rows.clear()
+                            self._prev_snapshots.clear()
+                            self._prev_benchmarks.clear()
+                            self._latest_event.clear()
+                            break
 
                 market_stocks_payload_fn = _resolve_market_fn("_market_stocks_payload")
                 compute_delta_fn = _resolve_market_fn("_compute_market_stocks_delta")
@@ -243,6 +269,7 @@ class MarketStreamBroadcaster:
             self._queue_requests.clear()
             self._last_rows.clear()
             self._prev_snapshots.clear()
+            self._prev_benchmarks.clear()
             self._latest_event.clear()
 
 

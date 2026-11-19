@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from app import database as _default_database_module
 from app.market import _market_service
+
+_DEFAULT_DB_READ_JSON_CACHE = _default_database_module.read_json_cache
+_DEFAULT_DB_READ_JSON_CACHE_CONDITIONAL = _default_database_module.read_json_cache_conditional
 
 
 def _log_market_cache_event(
@@ -602,24 +606,78 @@ def _market_price_snapshot_memory_entry() -> Optional[Dict[str, Any]]:
     return entry
 
 
+_MARKET_PRICE_DB_WRITE_INTERVAL_WITH_REDIS_SECONDS = 900.0
+_LAST_MARKET_PRICE_DB_WRITE_AT = 0.0
+_MARKET_PRICE_DB_CONDITIONAL_STATE: Dict[str, Any] = {
+    "path": None,
+    "stamp": None,
+    "payload": None,
+}
+
+
 def _market_price_snapshot_database_read() -> Optional[Dict[str, Any]]:
     """Read the persisted snapshot once. Usability, not freshness, gates this."""
     _ms = _market_service()
     if not _ms._market_database.database_enabled():
         return None
+    cache_path = _ms._MARKET_PRICE_DATABASE_CACHE_PATH
+    path_key = str(cache_path)
+    direct_reader = getattr(_ms._market_database, "read_json_cache", None)
+    conditional_reader = getattr(_ms._market_database, "read_json_cache_conditional", None)
+    # Honor monkeypatches on database.read_json_cache unless read_json_cache_conditional
+    # was explicitly overridden too.
+    use_conditional = (
+        callable(conditional_reader)
+        and (
+            conditional_reader is not _DEFAULT_DB_READ_JSON_CACHE_CONDITIONAL
+            or direct_reader is _DEFAULT_DB_READ_JSON_CACHE
+        )
+    )
+    if use_conditional:
+        known_stamp = (
+            _MARKET_PRICE_DB_CONDITIONAL_STATE["stamp"]
+            if _MARKET_PRICE_DB_CONDITIONAL_STATE["path"] == path_key
+            else None
+        )
+        try:
+            status, payload, stamp = conditional_reader(cache_path, known_stamp=known_stamp)
+        except Exception:
+            return None
+        if status == "not_modified":
+            cached_payload = (
+                _MARKET_PRICE_DB_CONDITIONAL_STATE["payload"]
+                if _MARKET_PRICE_DB_CONDITIONAL_STATE["path"] == path_key
+                else None
+            )
+            return cached_payload if _ms._market_price_snapshot_is_usable(cached_payload) else None
+        if status == "hit" and isinstance(payload, dict):
+            _MARKET_PRICE_DB_CONDITIONAL_STATE["path"] = path_key
+            _MARKET_PRICE_DB_CONDITIONAL_STATE["stamp"] = stamp
+            _MARKET_PRICE_DB_CONDITIONAL_STATE["payload"] = payload
+            return payload if _ms._market_price_snapshot_is_usable(payload) else None
+        return None
     try:
-        payload = _ms._market_database.read_json_cache(_ms._MARKET_PRICE_DATABASE_CACHE_PATH)
+        payload = _ms._market_database.read_json_cache(cache_path)
     except Exception:
         return None
     return payload if _ms._market_price_snapshot_is_usable(payload) else None
 
 
 def _market_price_snapshot_database_write(payload: Dict[str, Any]) -> None:
+    global _LAST_MARKET_PRICE_DB_WRITE_AT
     _ms = _market_service()
     if not _ms._market_database.database_enabled():
         return
+    if _ms._market_price_redis_available():
+        now_mono = _ms.time.monotonic()
+        if (
+            _LAST_MARKET_PRICE_DB_WRITE_AT > 0.0
+            and (now_mono - _LAST_MARKET_PRICE_DB_WRITE_AT) < _MARKET_PRICE_DB_WRITE_INTERVAL_WITH_REDIS_SECONDS
+        ):
+            return
     try:
         _ms._market_database.write_json_cache(_ms._MARKET_PRICE_DATABASE_CACHE_PATH, payload)
+        _LAST_MARKET_PRICE_DB_WRITE_AT = _ms.time.monotonic()
     except Exception:
         _ms.LOGGER.warning("market price snapshot database write failed", exc_info=True)
 

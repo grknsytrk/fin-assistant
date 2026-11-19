@@ -282,12 +282,14 @@ from src.kap.metric_scoring import (
     _extract_disclosure_metrics,
     _is_cash_equivalent_label,
     _is_favok_label,
+    _parse_disclosure_body_rows,
     _pick_best_row,
     _pick_cash_like_financial_investment,
     _pick_income_row_value,
     _pick_metric_value,
     _score_metric_candidate,
 )
+_DEFAULT_EXTRACT_DISCLOSURE_METRICS = _extract_disclosure_metrics
 
 
 def _utc_now() -> datetime:
@@ -519,7 +521,8 @@ def _mark_live_disclosure_checked(
             "disclosure_index": latest_key[2],
         }
     try:
-        _write_cache(cache_path, payload)
+        # Persist metadata check timestamps locally only; quarter data has not changed.
+        write_local_json(cache_path, payload)
     except Exception:
         pass
 
@@ -528,7 +531,8 @@ def _mark_live_disclosure_check_failed(cache_path: Path, payload: Dict[str, Any]
     payload["live_disclosure_checked_at"] = _utc_now().isoformat()
     payload["live_disclosure_check_error"] = str(error)
     try:
-        _write_cache(cache_path, payload)
+        # Persist metadata check timestamps locally only; quarter data has not changed.
+        write_local_json(cache_path, payload)
     except Exception:
         pass
 
@@ -1488,6 +1492,11 @@ def fetch_kap_company_snapshot(
                 if isinstance(detail.get("disclosure"), dict)
                 else {}
             )
+            extract_extra_kwargs: Dict[str, Any] = {}
+            if _extract_disclosure_metrics is _DEFAULT_EXTRACT_DISCLOSURE_METRICS:
+                parsed_rows, parsed_unit_info = _parse_disclosure_body_rows(detail)
+                extract_extra_kwargs["parsed_rows"] = parsed_rows
+                extract_extra_kwargs["parsed_unit_info"] = parsed_unit_info
             metrics, unit_info = _extract_disclosure_metrics(
                 detail,
                 period=period,
@@ -1495,6 +1504,7 @@ def fetch_kap_company_snapshot(
                 comparison_mode="current",
                 is_bank=is_bank,
                 is_insurance=is_insurance,
+                **extract_extra_kwargs,
             )
             metrics_ytd, _ = _extract_disclosure_metrics(
                 detail,
@@ -1503,6 +1513,7 @@ def fetch_kap_company_snapshot(
                 comparison_mode="current",
                 is_bank=is_bank,
                 is_insurance=is_insurance,
+                **extract_extra_kwargs,
             )
             metrics_comparative, _ = _extract_disclosure_metrics(
                 detail,
@@ -1511,6 +1522,7 @@ def fetch_kap_company_snapshot(
                 comparison_mode="comparative",
                 is_bank=is_bank,
                 is_insurance=is_insurance,
+                **extract_extra_kwargs,
             )
             metrics_ytd_comparative, _ = _extract_disclosure_metrics(
                 detail,
@@ -1519,6 +1531,7 @@ def fetch_kap_company_snapshot(
                 comparison_mode="comparative",
                 is_bank=is_bank,
                 is_insurance=is_insurance,
+                **extract_extra_kwargs,
             )
             quarter_rows.append(
                 {
@@ -1590,6 +1603,7 @@ def fetch_kap_company_snapshot(
             member=member,
             force_refresh=force_refresh,
             strict=strict_errors,
+            persist=False,
         )
         _write_cache(cache_path, payload)
         return payload

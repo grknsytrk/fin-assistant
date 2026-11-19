@@ -325,7 +325,11 @@ def extract_financial_snapshot_from_kap_payload(
     from app.kap_financials import _build_ttm_from_reports, _quarter_sort_key
     from app.kap_service import normalize_snapshot_for_frontend
 
-    normalized = normalize_snapshot_for_frontend(payload, allow_network=False)
+    already_normalized = (
+        isinstance(payload.get("summary"), dict)
+        and "latest_quarter" in payload
+    )
+    normalized = payload if already_normalized else normalize_snapshot_for_frontend(payload, allow_network=False)
     quarters_raw = normalized.get("quarters")
     quarters = sorted(
         [quarter for quarter in quarters_raw if isinstance(quarter, dict)]
@@ -531,6 +535,25 @@ def _get_valid_memory_cached_map(processed_dir: Path) -> Optional[Dict[str, Dict
         return cached_map
 
 
+def _restore_memory_cache_after_upsert(
+    processed_dir: Path,
+    new_version: str,
+    merged_map: Dict[str, Dict[str, Any]],
+) -> None:
+    key = _cache_key(processed_dir)
+    max_updated_at = max(
+        (str(row.get("updated_at") or "") for row in merged_map.values()),
+        default="",
+    )
+    with _CACHE_LOCK:
+        _SNAPSHOT_MEMORY_CACHE[key] = (
+            time.monotonic() + _SNAPSHOT_MEMORY_CACHE_TTL_SECONDS,
+            new_version,
+            merged_map,
+        )
+        _SNAPSHOT_DB_STAMPS[key] = (max_updated_at, len(merged_map))
+
+
 def upsert_financial_snapshots(processed_dir: Path, records: Iterable[Dict[str, Any]]) -> int:
     """Batch upsert KAP-derived fields while leaving provider fields intact."""
 
@@ -579,22 +602,11 @@ def upsert_financial_snapshots(processed_dir: Path, records: Iterable[Dict[str, 
             conn.commit()
     new_version = _invalidate_memory_cache(processed_dir)
     if cached_map is not None:
-        key = _cache_key(processed_dir)
         merged_map = {sym: dict(row) for sym, row in cached_map.items()}
         for record in normalized_records:
             sym = record["symbol"]
             merged_map[sym] = _merge_kap_record_into_cached_row(record, merged_map.get(sym))
-        max_updated_at = max(
-            (str(row.get("updated_at") or "") for row in merged_map.values()),
-            default="",
-        )
-        with _CACHE_LOCK:
-            _SNAPSHOT_MEMORY_CACHE[key] = (
-                time.monotonic() + _SNAPSHOT_MEMORY_CACHE_TTL_SECONDS,
-                new_version,
-                merged_map,
-            )
-            _SNAPSHOT_DB_STAMPS[key] = (max_updated_at, len(merged_map))
+        _restore_memory_cache_after_upsert(processed_dir, new_version, merged_map)
     return len(normalized_records)
 
 
@@ -759,7 +771,7 @@ def get_financial_snapshots_map(
                         full_map = stale_same_version_map
             if full_map is None:
                 rows = conn.execute(
-                    "SELECT * FROM company_financial_snapshots ORDER BY symbol"
+                    f"SELECT {', '.join(_SNAPSHOT_COLUMNS)} FROM company_financial_snapshots ORDER BY symbol"
                 ).fetchall()
                 full_map = {
                     normalized["symbol"]: normalized
@@ -890,7 +902,48 @@ def upsert_provider_fundamentals_bulk(
             ],
         )
         conn.commit()
-    _invalidate_memory_cache(processed_dir)
+    new_version = _invalidate_memory_cache(processed_dir)
+    if cached_map is not None:
+        merged_map = {sym: dict(row) for sym, row in cached_map.items()}
+        for record in records:
+            sym = record["symbol"]
+            existing_row = merged_map.get(sym)
+            if isinstance(existing_row, dict):
+                merged_row = dict(existing_row)
+                if merged_row.get("share_source") not in {"odenmis_sermaye", "cikarilmis_sermaye"}:
+                    merged_row["shares_outstanding"] = record["shares_outstanding"]
+                    merged_row["share_source"] = record["share_source"]
+                merged_row["sector"] = record["sector"]
+                merged_row["free_float_pct"] = record["free_float_pct"]
+                merged_row["provider_fk"] = record["provider_fk"]
+                merged_row["provider_pd_dd"] = record["provider_pd_dd"]
+                merged_row["provider_fd_favok"] = record["provider_fd_favok"]
+                merged_row["provider_fd_satis"] = record["provider_fd_satis"]
+                merged_row["provider_period"] = record["provider_period"]
+                merged_row["updated_at"] = record["updated_at"]
+                merged_map[sym] = merged_row
+            else:
+                new_row = {col: None for col in _SNAPSHOT_COLUMNS}
+                new_row.update(
+                    {
+                        "symbol": sym,
+                        "company_kind": "generic",
+                        "quarter_count": 0,
+                        "has_kap_cache": False,
+                        "shares_outstanding": record["shares_outstanding"],
+                        "share_source": record["share_source"],
+                        "sector": record["sector"],
+                        "free_float_pct": record["free_float_pct"],
+                        "provider_fk": record["provider_fk"],
+                        "provider_pd_dd": record["provider_pd_dd"],
+                        "provider_fd_favok": record["provider_fd_favok"],
+                        "provider_fd_satis": record["provider_fd_satis"],
+                        "provider_period": record["provider_period"],
+                        "updated_at": record["updated_at"],
+                    }
+                )
+                merged_map[sym] = new_row
+        _restore_memory_cache_after_upsert(processed_dir, new_version, merged_map)
     return len(records)
 
 

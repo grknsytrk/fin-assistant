@@ -2024,7 +2024,7 @@ def collect_daily_fund_prices(
                 end_date=effective_as_of,
             )
         warnings.extend(tefas_warnings)
-        if not tefas_rows:
+        if not tefas_rows and not large_universe_daily_snapshots:
             snapshot_rows, snapshot_warnings = _seam("_fetch_tefasfon_daily_snapshots_for_codes")(
                 target_codes,
                 start_date=start_date,
@@ -2085,7 +2085,7 @@ def collect_daily_fund_prices(
     if snapshot_rows:
         daily_return_overrides = _fund_service()._daily_return_overrides_from_price_history(processed_dir, snapshot["rows"])
         if daily_return_overrides:
-            snapshot["rows"] = _fund_service()._apply_daily_return_overrides(processed_dir, snapshot["rows"])
+            snapshot["rows"] = _fund_service()._daily_return_override_values(snapshot["rows"], daily_return_overrides)
             _fund_service()._persist_daily_return_overrides(processed_dir, daily_return_overrides)
         backfilled = _fund_service()._backfill_daily_returns_from_local_prices(processed_dir, snapshot["rows"])
         if backfilled:

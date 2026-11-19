@@ -531,13 +531,37 @@ def _fund_allocations_history_cached(normalized: str, *, lookback_days: int) -> 
 
 def _require_known_fund_code(fund_code: str) -> str:
     """Reject arbitrary cache/job keys before an upstream refresh is queued."""
-    from app.fund_service import normalize_fund_code
+    from app.fund_service import _connect_fund_prices_db, _peek_all_snapshot_rows, normalize_fund_code
 
     normalized = normalize_fund_code(fund_code)
-    try:
-        _fund_detail_payload(normalized=normalized)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Fon bulunamadi: {normalized}") from exc
+    if not normalized:
+        raise HTTPException(status_code=404, detail=f"Fon bulunamadi: {normalized}")
+    peeked = _peek_all_snapshot_rows(CONFIG.paths.processed_dir)
+    if isinstance(peeked, dict) and isinstance(peeked.get("rows"), list):
+        if any(
+            normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or "")) == normalized
+            for row in peeked["rows"]
+            if isinstance(row, dict)
+        ):
+            return normalized
+        raise HTTPException(status_code=404, detail=f"Fon bulunamadi: {normalized}")
+    if database_enabled():
+        try:
+            with _connect_fund_prices_db(CONFIG.paths.processed_dir) as conn:
+                found = conn.execute(
+                    "SELECT 1 FROM fund_snapshots WHERE fund_code = ? LIMIT 1",
+                    (normalized,),
+                ).fetchone()
+            if found is not None:
+                return normalized
+            raise HTTPException(status_code=404, detail=f"Fon bulunamadi: {normalized}")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+    rows_by_code = _fund_snapshot_row_map()
+    if normalized not in rows_by_code:
+        raise HTTPException(status_code=404, detail=f"Fon bulunamadi: {normalized}")
     return normalized
 
 
@@ -558,6 +582,11 @@ def _finish_fund_cache_invalidation(outcomes: List[bool], *, scope: str) -> str:
 
 def _invalidate_fund_response_cache() -> str:
     """Drop cached fund responses and report whether shared invalidation completed."""
+    global _FUND_LISTING_CACHE_BYTES
+    with _FUND_LISTING_CACHE_LOCK:
+        _FUND_LISTING_CACHE.clear()
+        _FUND_LISTING_CACHE_BYTES = 0
+    _FUND_SNAPSHOT_ROW_MAP_CACHE.clear()
     with _FUNDS_CATEGORIES_L1_LOCK:
         _FUNDS_CATEGORIES_L1_CACHE.clear()
     _FUNDS_SEARCH_L1_CACHE.clear()

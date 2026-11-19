@@ -148,7 +148,7 @@ def test_instruments_lookup_uses_memory_cache_and_invalidates_on_upsert(tmp_path
     assert names["THYAO"] == "TÜRK HAVA YOLLARI"
     assert connect_calls == 1
 
-    # Updating an instrument must invalidate the in-memory cache cleanly.
+    # Updating an instrument must update the in-memory cache incrementally without a full reload.
     upsert_instrument(
         tmp_path,
         kind="stock",
@@ -159,7 +159,7 @@ def test_instruments_lookup_uses_memory_cache_and_invalidates_on_upsert(tmp_path
     )
     refreshed = get_instrument(tmp_path, "stock", "THYAO")
     assert refreshed is not None and refreshed["name"] == "THYAO UPDATED"
-    assert connect_calls == 3
+    assert connect_calls == 2
     ref_data.reset_reference_data_state_for_tests()
 
 
@@ -212,9 +212,9 @@ def test_postgres_instruments_stamp_skips_full_scan_and_noop_upsert(tmp_path, mo
             queries.append(normalized)
             if "AS instruments_stamp" in normalized:
                 return _FakeResult([{"instruments_stamp": "2026-11-14T10:00:00+00:00:1", "aliases_stamp": ":0"}])
-            if normalized.startswith("SELECT * FROM instruments WHERE kind ="):
+            if normalized.startswith(f"SELECT {ref_data._INSTRUMENT_SELECT_COLUMNS} FROM instruments WHERE kind ="):
                 return _FakeResult(instruments_rows)
-            if normalized.startswith("SELECT * FROM instruments"):
+            if normalized.startswith(f"SELECT {ref_data._INSTRUMENT_SELECT_COLUMNS} FROM instruments"):
                 return _FakeResult(instruments_rows)
             if normalized.startswith("SELECT alias, kind, symbol FROM instrument_aliases"):
                 return _FakeResult(alias_rows)
@@ -233,16 +233,17 @@ def test_postgres_instruments_stamp_skips_full_scan_and_noop_upsert(tmp_path, mo
 
     first = get_instrument(tmp_path, "stock", "THYAO")
     assert first is not None and first["name"] == "Türk Hava Yolları"
-    assert sum(1 for q in queries if q == "SELECT * FROM instruments") == 1
+    full_scan_sql = f"SELECT {ref_data._INSTRUMENT_SELECT_COLUMNS} FROM instruments"
+    assert sum(1 for q in queries if q == full_scan_sql) == 1
 
-    # Simulate TTL expiry: Postgres stamp matches, so full-table SELECT * FROM instruments must NOT rerun.
+    # Simulate TTL expiry: Postgres stamp matches, so full-table SELECT must NOT rerun.
     cache_key = ref_data._instruments_cache_key(tmp_path)
     old_exp, sym_map, alias_map = ref_data._INSTRUMENTS_CACHE[cache_key]
     ref_data._INSTRUMENTS_CACHE[cache_key] = (old_exp - 1000.0, sym_map, alias_map)
 
     second = get_instrument(tmp_path, "stock", "THYAO")
     assert second is not None and second["name"] == "Türk Hava Yolları"
-    assert sum(1 for q in queries if q == "SELECT * FROM instruments") == 1
+    assert sum(1 for q in queries if q == full_scan_sql) == 1
     assert sum(1 for q in queries if "AS instruments_stamp" in q) == 2
 
     # Unchanged upsert must skip INSERT ... ON CONFLICT DO UPDATE and keep cache intact.

@@ -19,6 +19,11 @@ from app import database as db
 from app.etag import orjson_dumps
 
 
+@pytest.fixture(autouse=True)
+def _enable_exact_byte_metering(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RAGFIN_DB_EXACT_BYTE_METERING", "1")
+
+
 class MockCursor:
     """Mock DB-API cursor supporting all fetch mechanisms and iteration."""
 

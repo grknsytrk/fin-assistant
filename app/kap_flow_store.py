@@ -155,8 +155,36 @@ def decode_cursor(value: Optional[str]) -> Optional[tuple[str, str]]:
     return published_at, event_key
 
 
+ALLOWED_FLOW_CATEGORIES = frozenset(
+    {
+        "finansal_rapor",
+        "kar_payi",
+        "geri_alim",
+        "genel_kurul",
+        "kredi_derecelendirme",
+        "surdurulebilirlik",
+        "faaliyet_raporu",
+        "ozel_durum",
+        "diger",
+        "bildirim",
+    }
+)
+
+
+def normalize_flow_category(category: Optional[str]) -> Optional[str]:
+    if category is None:
+        return None
+    cleaned = str(category).strip().lower()
+    if not cleaned or cleaned == "all":
+        return None
+    if cleaned not in ALLOWED_FLOW_CATEGORIES:
+        raise ValueError(f"Geçersiz akış kategorisi: {category}")
+    return cleaned
+
+
 def _head_key(limit: int, category: Optional[str]) -> str:
-    return f"{FLOW_HEAD_CACHE_PREFIX}{max(1, int(limit))}:{str(category or '').strip()}"
+    norm_category = normalize_flow_category(category)
+    return f"{FLOW_HEAD_CACHE_PREFIX}{max(1, int(limit))}:{norm_category or ''}"
 
 
 def _row_to_event(row: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -401,6 +429,7 @@ def read_flow_page(
 ) -> Optional[dict[str, Any]]:
     """Read a page from Postgres, falling back to the bounded Redis store."""
 
+    norm_category = normalize_flow_category(category)
     before_tuple = decode_cursor(before)
     after_tuple = decode_cursor(after)
     if before and before_tuple is None:
@@ -409,7 +438,7 @@ def read_flow_page(
         raise ValueError("after cursor geçersiz")
 
     backend = get_cache()
-    cache_key = _head_key(limit, category)
+    cache_key = _head_key(limit, norm_category)
     l1_key = (*_flow_l1_scope(backend), cache_key)
     if not before_tuple and not after_tuple:
         cached_l1 = _FLOW_PAGE_L1_CACHE.get(l1_key)
@@ -422,26 +451,29 @@ def read_flow_page(
 
     rows: list[dict[str, Any]] = []
     has_more = False
-    if database_enabled():
+    db_active = database_enabled()
+    db_failed = False
+    if db_active:
         try:
             db_rows, has_more = read_kap_flow_events(
                 limit=limit,
                 before=before_tuple,
                 after=after_tuple,
-                category=category,
+                category=norm_category,
             )
             rows = [row for row in (_row_to_event(item) for item in db_rows) if row]
         except Exception:
             # A Postgres blip must not hide the bounded Redis copy from users.
+            db_failed = True
             LOGGER.warning("durable KAP flow read failed; using Redis fallback", exc_info=True)
 
-    if not rows:
+    if not db_active or db_failed:
         rows, has_more = _page_from_events(
             _redis_events(),
             limit=limit,
             before=before_tuple,
             after=after_tuple,
-            category=category,
+            category=norm_category,
         )
 
     if not rows:
@@ -497,7 +529,7 @@ def _is_cached_flow_head(value: Any) -> bool:
 
 def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[str, Any]:
     del limit  # Head queries only inspect the newest cursor.
-    norm_category = str(category or "").strip() or None
+    norm_category = normalize_flow_category(category)
     backend = get_cache()
     cache_key = f"{FLOW_HEAD_CACHE_PREFIX}cursor:{norm_category or ''}"
     l1_key = (*_flow_l1_scope(backend), cache_key)
@@ -510,7 +542,9 @@ def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[st
         return dict(cached)
 
     head_row: Optional[dict[str, Any]] = None
-    if database_enabled():
+    db_active = database_enabled()
+    db_failed = False
+    if db_active:
         try:
             db_head = read_kap_flow_head(category=norm_category)
             if db_head:
@@ -521,9 +555,10 @@ def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[st
                         "published_at": normalized_dt,
                     }
         except Exception:
+            db_failed = True
             LOGGER.warning("durable KAP flow head read failed; using Redis fallback", exc_info=True)
 
-    if head_row is None:
+    if not db_active or db_failed:
         redis_rows, _has_more = _page_from_events(
             _redis_events(),
             limit=1,

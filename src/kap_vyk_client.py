@@ -28,7 +28,12 @@ if TYPE_CHECKING:  # pragma: no cover
     from src.config import KapConfig
 
 # region caches (process-local)
-_DETAIL_CACHE: Dict[str, Dict[str, Any]] = {}
+from app.cache import BoundedMemoryCache
+
+_DETAIL_CACHE: BoundedMemoryCache = BoundedMemoryCache(
+    max_entries=512,
+    default_ttl=6 * 3600,
+)
 _DETAIL_CACHE_TTL_SECONDS = 6 * 3600  # published disclosures are immutable in practice
 
 _MEMBERS_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}

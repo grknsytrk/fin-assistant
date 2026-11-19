@@ -144,23 +144,58 @@ def funds_search(q: str = Query("", min_length=0, max_length=80), limit: int = Q
 def funds_categories() -> Dict[str, Any]:
     return _funds_categories_payload()
 
-@router.get("/funds/{fund_code}/performance")
+@router.get("/funds/{fund_code}/performance", response_model=Dict[str, Any], responses={304: {"description": "Not Modified"}})
 def fund_performance(
+    request: Request,
     fund_code: str,
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None),
     fallback: bool = Query(False),
     refresh: bool = Query(False),
-) -> Dict[str, Any]:
+) -> Response:
     if start_date and end_date and start_date > end_date:
         raise HTTPException(status_code=400, detail="start_date end_date sonrasinda olamaz")
-    return _fund_performance_payload(
+    from app.fund_service import fund_listing_revision, normalize_fund_code
+
+    normalized = normalize_fund_code(fund_code)
+
+    def build_revision(price_gen: int) -> Dict[str, Any]:
+        return {
+            "representation": "fund-performance-v1",
+            "fund_code": normalized,
+            "start_date": start_date.isoformat() if start_date else None,
+            "end_date": end_date.isoformat() if end_date else None,
+            "fallback": bool(fallback),
+            "price_generation": price_gen,
+        }
+
+    if not refresh:
+        try:
+            price_gen = int(fund_listing_revision(CONFIG.paths.processed_dir).get("price_generation") or 0)
+        except Exception:
+            price_gen = 0
+        etag = weak_etag(build_revision(price_gen))
+        if if_none_match_matches(request.headers.get("if-none-match"), etag):
+            return Response(
+                status_code=304,
+                headers={"Cache-Control": "private, no-cache", "ETag": etag},
+            )
+
+    payload = _fund_performance_payload(
         fund_code=fund_code,
         start_iso=start_date.isoformat() if start_date else None,
         end_iso=end_date.isoformat() if end_date else None,
         fallback=fallback,
         refresh=refresh,
     )
+    if bool(payload.get("stale")) or str(payload.get("status") or "") == "pending":
+        return ORJSONResponse(content=payload, headers={"Cache-Control": "private, no-cache"})
+    try:
+        latest_price_gen = int(fund_listing_revision(CONFIG.paths.processed_dir).get("price_generation") or 0)
+    except Exception:
+        latest_price_gen = 0
+    etag = weak_etag(build_revision(latest_price_gen))
+    return ORJSONResponse(content=payload, headers={"Cache-Control": "private, no-cache", "ETag": etag})
 
 @router.get("/funds/{fund_code}/performance/status")
 def fund_performance_status(

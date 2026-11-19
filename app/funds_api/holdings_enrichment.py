@@ -159,17 +159,6 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
             "row_count": cached.get("row_count", 0),
             "as_of": cached.get("as_of"),
         }
-    if (
-        cached
-        and stat is None
-        and cached.get("mtime") is None
-        and float(cached.get("expires_at") or 0.0) > now_mono
-    ):
-        return dict(cached.get("rows") or {}), {
-            "cache_hit": True,
-            "row_count": cached.get("row_count", 0),
-            "as_of": cached.get("as_of"),
-        }
     if stat is not None:
         stat_version = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
         version_token: Optional[str] = f"mtime={stat_version}"
@@ -181,6 +170,18 @@ def _fund_snapshot_row_map_with_meta() -> tuple[Dict[str, Dict[str, Any]], Dict[
             version_token = None
     if cached and stat is None and version_token and cached.get("version_token") == version_token:
         cached["expires_at"] = now_mono + 600.0
+        return dict(cached.get("rows") or {}), {
+            "cache_hit": True,
+            "row_count": cached.get("row_count", 0),
+            "as_of": cached.get("as_of"),
+        }
+    if (
+        cached
+        and stat is None
+        and cached.get("mtime") is None
+        and version_token is None
+        and float(cached.get("expires_at") or 0.0) > now_mono
+    ):
         return dict(cached.get("rows") or {}), {
             "cache_hit": True,
             "row_count": cached.get("row_count", 0),

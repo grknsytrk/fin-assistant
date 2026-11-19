@@ -1077,8 +1077,31 @@ def _warm_stock_hist_multiples_sync(
     if not price_map:
         return {"requested": len(kap_symbols), "populated": 0}
 
-    snapshots_by_sym: Dict[str, Dict[str, Any]] = {}
-    capital_changed_syms: List[str] = []
+    fin_map = financial_snapshot_map or {}
+    bs_map = basic_summary_map or {}
+    computed: Dict[str, Dict[str, Any]] = {}
+    missing_split_fallback_syms: List[str] = []
+
+    def _compute_for_symbol(
+        sym: str,
+        raw_kap: Dict[str, Any],
+        sym_splits: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        pts = price_map.get(sym) or []
+        provider_shares = _ms._as_finite_float((bs_map.get(sym) or {}).get("shares_outstanding"))
+        meta_shares = _ms._as_finite_float((fin_map.get(sym) or {}).get("shares_outstanding"))
+        cur_shares = provider_shares if (provider_shares and provider_shares > 0) else meta_shares
+        summary = _ms._compute_kap_historical_averages_for_snapshot(
+            raw_kap,
+            pts,
+            current_shares=cur_shares,
+            split_events=sym_splits,
+            on_missing_split_fallback=lambda s=sym: missing_split_fallback_syms.append(s),
+        )
+        if summary:
+            computed[sym] = summary
+
+    capital_changed_snapshots: Dict[str, Dict[str, Any]] = {}
     for sym in kap_symbols:
         if not price_map.get(sym):
             continue
@@ -1089,13 +1112,16 @@ def _warm_stock_hist_multiples_sync(
             continue
         if not isinstance(raw_kap, dict):
             continue
-        snapshots_by_sym[sym] = raw_kap
         if _ms._snapshot_has_capital_changes(raw_kap):
-            capital_changed_syms.append(sym)
+            capital_changed_snapshots[sym] = raw_kap
+        else:
+            # Constant-capital snapshots pass [] directly (zero HTTP calls) and release immediately.
+            _compute_for_symbol(sym, raw_kap, [])
 
     today = _ms.date.today()
     splits_start = today - _ms.timedelta(days=6 * 366)
     splits_by_sym: Dict[str, Optional[List[Dict[str, Any]]]] = {}
+    capital_changed_syms = list(capital_changed_snapshots.keys())
     if capital_changed_syms:
         try:
             with ThreadPoolExecutor(max_workers=min(4, len(capital_changed_syms))) as pool:
@@ -1111,27 +1137,11 @@ def _warm_stock_hist_multiples_sync(
                     sym, start_date=splits_start, end_date=today
                 )
 
-    fin_map = financial_snapshot_map or {}
-    bs_map = basic_summary_map or {}
-    computed: Dict[str, Dict[str, Any]] = {}
-    missing_split_fallback_syms: List[str] = []
-    for sym, raw_kap in snapshots_by_sym.items():
-        pts = price_map.get(sym) or []
-        provider_shares = _ms._as_finite_float((bs_map.get(sym) or {}).get("shares_outstanding"))
-        meta_shares = _ms._as_finite_float((fin_map.get(sym) or {}).get("shares_outstanding"))
-        cur_shares = provider_shares if (provider_shares and provider_shares > 0) else meta_shares
-        # Constant-capital snapshots pass [] directly (zero HTTP calls); changed-capital
-        # snapshots pass fetched split events, or None to fall back safely if Yahoo failed.
-        sym_splits = splits_by_sym.get(sym, []) if sym in splits_by_sym else []
-        summary = _ms._compute_kap_historical_averages_for_snapshot(
-            raw_kap,
-            pts,
-            current_shares=cur_shares,
-            split_events=sym_splits,
-            on_missing_split_fallback=lambda s=sym: missing_split_fallback_syms.append(s),
-        )
-        if summary:
-            computed[sym] = summary
+    for sym, raw_kap in capital_changed_snapshots.items():
+        # Changed-capital snapshots pass fetched split events, or None to fall back safely if Yahoo failed.
+        sym_splits = splits_by_sym.get(sym) if sym in splits_by_sym else []
+        _compute_for_symbol(sym, raw_kap, sym_splits)
+    capital_changed_snapshots.clear()
 
     if missing_split_fallback_syms:
         _ms.LOGGER.warning(

@@ -62,6 +62,11 @@ _INSTRUMENTS_CACHE: Dict[
     tuple[float, Dict[tuple[str, str], Dict[str, Any]], Dict[tuple[str, str], str]],
 ] = {}
 _INSTRUMENTS_STAMP_CACHE: Dict[str, tuple[str, str]] = {}
+_INSTRUMENT_SELECT_COLUMNS = (
+    "kind, symbol, name, short_name, source, source_id, "
+    "logo_url, logo_source, active, as_of, metadata_json, "
+    "created_at, updated_at"
+)
 
 
 def _instruments_cache_key(processed_dir: Path) -> str:
@@ -132,7 +137,7 @@ def _ensure_instruments_cache(
                             cached[2],
                         )
                     return cached[1], cached[2]
-            rows = conn.execute("SELECT * FROM instruments").fetchall()
+            rows = conn.execute(f"SELECT {_INSTRUMENT_SELECT_COLUMNS} FROM instruments").fetchall()
             alias_rows = conn.execute("SELECT alias, kind, symbol FROM instrument_aliases").fetchall()
         for row in rows:
             instrument = _row_to_dict(row)
@@ -368,6 +373,38 @@ def _merge_normalized_records(existing: Dict[str, Any], incoming: Dict[str, Any]
     return merged
 
 
+def _update_instruments_cache_incremental(
+    processed_dir: Path,
+    upserted_instruments: List[Dict[str, Any]],
+    upserted_aliases: List[tuple[str, str, str]],
+) -> None:
+    if not upserted_instruments and not upserted_aliases:
+        return
+    cache_key = _instruments_cache_key(processed_dir)
+    with _INSTRUMENTS_CACHE_LOCK:
+        cached = _INSTRUMENTS_CACHE.get(cache_key)
+        if cached is None:
+            return
+        _, by_kind_symbol, aliases_by_kind_alias = cached
+        for inst in upserted_instruments:
+            norm_kind = normalize_instrument_kind(inst.get("kind"))
+            norm_symbol = normalize_instrument_symbol(inst.get("symbol"))
+            if norm_kind and norm_symbol:
+                by_kind_symbol[(norm_kind, norm_symbol)] = _copy_instrument_dict(inst)
+        for alias, kind, symbol in upserted_aliases:
+            norm_kind = normalize_instrument_kind(kind)
+            norm_alias = normalize_instrument_symbol(alias)
+            norm_symbol = normalize_instrument_symbol(symbol)
+            if norm_kind and norm_alias and norm_symbol:
+                aliases_by_kind_alias[(norm_kind, norm_alias)] = norm_symbol
+        if _INSTRUMENTS_CACHE_TTL_SECONDS > 0:
+            _INSTRUMENTS_CACHE[cache_key] = (
+                time.monotonic() + _INSTRUMENTS_CACHE_TTL_SECONDS,
+                by_kind_symbol,
+                aliases_by_kind_alias,
+            )
+
+
 def _instrument_row_matches_existing(
     existing: Any,
     row: Dict[str, Any],
@@ -431,19 +468,21 @@ def upsert_instruments(
                     chunk = unique_symbols[offset : offset + 500]
                     placeholders = ",".join("?" for _ in chunk)
                     rows = conn.execute(
-                        f"SELECT * FROM instruments WHERE kind = ? AND symbol IN ({placeholders})",
+                        f"SELECT {_INSTRUMENT_SELECT_COLUMNS} FROM instruments WHERE kind = ? AND symbol IN ({placeholders})",
                         (kind, *chunk),
                     ).fetchall()
                     for existing in rows:
                         existing_by_key[(str(existing["kind"]), str(existing["symbol"]))] = existing
 
             instrument_rows: List[tuple[Any, ...]] = []
+            upserted_dicts: List[Dict[str, Any]] = []
             alias_by_key: Dict[str, tuple[Any, ...]] = {}
             for incoming in normalized_records:
                 existing = existing_by_key.get((incoming["kind"], incoming["symbol"]))
                 row = _merge_record(existing, incoming)
                 created_at = existing["created_at"] if existing else now
-                metadata_json = _stable_json(row.get("metadata") or {})
+                metadata_dict = dict(row.get("metadata") or {})
+                metadata_json = _stable_json(metadata_dict)
                 if not _instrument_row_matches_existing(existing, row, metadata_json):
                     instrument_rows.append(
                         (
@@ -461,6 +500,23 @@ def upsert_instruments(
                             created_at,
                             now,
                         )
+                    )
+                    upserted_dicts.append(
+                        {
+                            "kind": row["kind"],
+                            "symbol": row["symbol"],
+                            "name": row.get("name"),
+                            "short_name": row.get("short_name"),
+                            "source": row.get("source"),
+                            "source_id": row.get("source_id"),
+                            "logo_url": row.get("logo_url"),
+                            "logo_source": row.get("logo_source"),
+                            "active": bool(row.get("active", 1)),
+                            "as_of": row.get("as_of"),
+                            "metadata": metadata_dict,
+                            "created_at": created_at,
+                            "updated_at": now,
+                        }
                     )
                 for alias in row.get("aliases") or []:
                     alias_by_key[str(alias)] = (alias, row["kind"], row["symbol"], row.get("source"), now)
@@ -533,7 +589,11 @@ def upsert_instruments(
                     )
             if instrument_rows or alias_rows:
                 conn.commit()
-                clear_instruments_cache(processed_dir)
+                _update_instruments_cache_incremental(
+                    processed_dir,
+                    upserted_dicts,
+                    [(str(a[0]), str(a[1]), str(a[2])) for a in alias_rows],
+                )
             return {
                 "db_path": str(reference_data_db_path(processed_dir)),
                 "upserted_count": len(instrument_rows),
@@ -542,13 +602,16 @@ def upsert_instruments(
 
         upserted = 0
         alias_count = 0
+        sqlite_upserted_dicts: List[Dict[str, Any]] = []
+        sqlite_upserted_aliases: List[tuple[str, str, str]] = []
         for incoming in normalized_records:
             existing = conn.execute(
-                "SELECT * FROM instruments WHERE kind = ? AND symbol = ?",
+                f"SELECT {_INSTRUMENT_SELECT_COLUMNS} FROM instruments WHERE kind = ? AND symbol = ?",
                 (incoming["kind"], incoming["symbol"]),
             ).fetchone()
             row = _merge_record(existing, incoming)
             created_at = existing["created_at"] if existing else now
+            metadata_dict = dict(row.get("metadata") or {})
             conn.execute(
                 """
                 INSERT INTO instruments (
@@ -580,10 +643,27 @@ def upsert_instruments(
                     row.get("logo_source"),
                     int(row.get("active", 1)),
                     row.get("as_of"),
-                    _stable_json(row.get("metadata") or {}),
+                    _stable_json(metadata_dict),
                     created_at,
                     now,
                 ),
+            )
+            sqlite_upserted_dicts.append(
+                {
+                    "kind": row["kind"],
+                    "symbol": row["symbol"],
+                    "name": row.get("name"),
+                    "short_name": row.get("short_name"),
+                    "source": row.get("source"),
+                    "source_id": row.get("source_id"),
+                    "logo_url": row.get("logo_url"),
+                    "logo_source": row.get("logo_source"),
+                    "active": bool(row.get("active", 1)),
+                    "as_of": row.get("as_of"),
+                    "metadata": metadata_dict,
+                    "created_at": created_at,
+                    "updated_at": now,
+                }
             )
             for alias in row.get("aliases") or []:
                 conn.execute(
@@ -598,10 +678,11 @@ def upsert_instruments(
                     """,
                     (alias, row["kind"], row["symbol"], row.get("source"), now),
                 )
+                sqlite_upserted_aliases.append((str(alias), str(row["kind"]), str(row["symbol"])))
                 alias_count += 1
             upserted += 1
         conn.commit()
-    clear_instruments_cache(processed_dir)
+    _update_instruments_cache_incremental(processed_dir, sqlite_upserted_dicts, sqlite_upserted_aliases)
     return {
         "db_path": str(reference_data_db_path(processed_dir)),
         "upserted_count": upserted,

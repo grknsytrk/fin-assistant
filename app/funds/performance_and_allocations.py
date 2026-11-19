@@ -637,7 +637,11 @@ def get_funds_payload(
 
 
 def get_fund_categories_payload(processed_dir: Path) -> Dict[str, Any]:
-    snapshot = _fund_service().load_funds_snapshot(processed_dir, include_rows=False)
+    snapshot = _fund_service().load_funds_snapshot(
+        processed_dir,
+        include_rows=False,
+        include_price_metadata=False,
+    )
     meta = dict(snapshot.get("source_metadata") or {})
     meta["list_min_aum"] = _fund_service().FUNDS_LIST_MIN_AUM
     row_store_active = meta.get("catalog_storage") == "fund_snapshots"
@@ -2872,18 +2876,28 @@ def get_fund_allocations_payload(processed_dir: Path, fund_code: str) -> Dict[st
     path = _fund_service()._allocations_path(processed_dir, normalized)
     payload = _fund_service()._read_json(path)
 
-    # The history endpoint may already have a newer, valid TEFAS report even
-    # when the legacy single-snapshot file is stale. Reuse that same latest
-    # day so the overview and history screens cannot disagree.
-    history_payload = _seam("get_fund_allocations_history_payload")(
-        processed_dir,
-        normalized,
-        lookback_days=30,
-        auto_refresh=False,
-    )
-    promoted = _seam("_promote_latest_allocation_history")(processed_dir, normalized, history_payload)
-    if promoted is not None:
-        payload = promoted
+    payload_stale = True
+    if payload and _fund_service()._public_price_source(str(payload.get("source") or "")) != "legacy_cache":
+        payload_age = _fund_service()._cache_age_seconds(
+            payload.get("source_metadata", {}).get("fetched_at") or payload.get("fetched_at")
+        )
+        payload_stale = (
+            payload_age if payload_age is not None else (_fund_service().FUNDS_ALLOCATION_TTL_SECONDS + 1)
+        ) > _fund_service().FUNDS_ALLOCATION_TTL_SECONDS
+
+    if payload_stale:
+        # The history endpoint may already have a newer, valid TEFAS report even
+        # when the legacy single-snapshot file is stale. Reuse that same latest
+        # day so the overview and history screens cannot disagree.
+        history_payload = _seam("get_fund_allocations_history_payload")(
+            processed_dir,
+            normalized,
+            lookback_days=30,
+            auto_refresh=False,
+        )
+        promoted = _seam("_promote_latest_allocation_history")(processed_dir, normalized, history_payload)
+        if promoted is not None:
+            payload = promoted
 
     if not payload or _fund_service()._public_price_source(str(payload.get("source") or "")) == "legacy_cache":
         return {

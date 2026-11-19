@@ -1156,6 +1156,7 @@ def read_latest_fund_price_points(
             if isinstance(superset_points.get(code), dict)
         }
 
+    is_postgres = _fund_service().database_enabled()
     source_placeholders = ", ".join("?" for _ in _fund_service()._DAILY_PRICE_SOURCES)
     code_placeholders = ", ".join("?" for _ in normalized_codes)
     inner_conditions = [
@@ -1168,27 +1169,48 @@ def read_latest_fund_price_points(
         inner_conditions.append("date <= ?")
         inner_params.append(end_date.isoformat())
     metadata_column = ", fp.metadata_json" if include_metadata else ""
-    query = f"""
-        -- raw_json and created_at are intentionally omitted; the public point
-        -- mapper does not use them, and raw_json can dominate these result rows.
-        SELECT fp.fund_code, fp.date, fp.source, fp.price, fp.daily_return,
-               fp.aum, fp.investor_count, fp.share_count,
-               fp.fetched_at, fp.updated_at{metadata_column}
-        FROM fund_prices fp
-        INNER JOIN (
-            SELECT fund_code, MAX(date) AS latest_date
-            FROM fund_prices
+    if is_postgres:
+        priority_items = list(_fund_service()._FUND_PRICE_SOURCE_PRIORITY.items())
+        priority_cases = " ".join(f"WHEN ? THEN {int(priority)}" for _source, priority in priority_items)
+        priority_params = [source for source, _priority in priority_items]
+        source_priority_sql = f"CASE fp.source {priority_cases} ELSE 0 END" if priority_cases else "0"
+        query = f"""
+            -- raw_json and created_at are intentionally omitted; the public point
+            -- mapper does not use them, and raw_json can dominate these result rows.
+            SELECT DISTINCT ON (fp.fund_code)
+                   fp.fund_code, fp.date, fp.source, fp.price, fp.daily_return,
+                   fp.aum, fp.investor_count, fp.share_count,
+                   fp.fetched_at, fp.updated_at{metadata_column}
+            FROM fund_prices fp
             WHERE {' AND '.join(inner_conditions)}
-            GROUP BY fund_code
-        ) latest
-          ON latest.fund_code = fp.fund_code
-         AND latest.latest_date = fp.date
-        WHERE fp.fund_code IN ({code_placeholders})
-          AND fp.price > 0
-          AND fp.source IN ({source_placeholders})
-        ORDER BY fp.fund_code, fp.updated_at DESC
-    """
-    params = [*inner_params, *normalized_codes, *_fund_service()._DAILY_PRICE_SOURCES]
+            ORDER BY fp.fund_code,
+                     fp.date DESC,
+                     {source_priority_sql} DESC,
+                     fp.updated_at DESC
+        """
+        params = [*inner_params, *priority_params]
+    else:
+        query = f"""
+            -- raw_json and created_at are intentionally omitted; the public point
+            -- mapper does not use them, and raw_json can dominate these result rows.
+            SELECT fp.fund_code, fp.date, fp.source, fp.price, fp.daily_return,
+                   fp.aum, fp.investor_count, fp.share_count,
+                   fp.fetched_at, fp.updated_at{metadata_column}
+            FROM fund_prices fp
+            INNER JOIN (
+                SELECT fund_code, MAX(date) AS latest_date
+                FROM fund_prices
+                WHERE {' AND '.join(inner_conditions)}
+                GROUP BY fund_code
+            ) latest
+              ON latest.fund_code = fp.fund_code
+             AND latest.latest_date = fp.date
+            WHERE fp.fund_code IN ({code_placeholders})
+              AND fp.price > 0
+              AND fp.source IN ({source_placeholders})
+            ORDER BY fp.fund_code, fp.updated_at DESC
+        """
+        params = [*inner_params, *normalized_codes, *_fund_service()._DAILY_PRICE_SOURCES]
 
     selected: Dict[str, Any] = {}
     try:
@@ -1367,13 +1389,33 @@ def _daily_return_overrides_from_price_history(
     normalized_sources = tuple(_fund_service()._DAILY_PRICE_SOURCES)
     placeholders = ", ".join("?" for _ in candidates)
     source_placeholders = ", ".join("?" for _ in normalized_sources)
-    query = (
-        "SELECT fund_code, date, source, price, updated_at FROM fund_prices "
-        f"WHERE fund_code IN ({placeholders}) "
-        f"AND date >= ? AND date <= ? AND source IN ({source_placeholders}) AND price > 0 "
-        "ORDER BY fund_code, date ASC, updated_at DESC"
-    )
-    params: List[Any] = [*candidates.keys(), start_date.isoformat(), end_date.isoformat(), *normalized_sources]
+    is_postgres = _fund_service().database_enabled()
+    if is_postgres:
+        priority_items = list(_fund_service()._FUND_PRICE_SOURCE_PRIORITY.items())
+        priority_cases = " ".join(f"WHEN ? THEN {int(priority)}" for _source, priority in priority_items)
+        priority_params = [source for source, _priority in priority_items]
+        source_priority_sql = f"CASE source {priority_cases} ELSE 0 END" if priority_cases else "0"
+        query = (
+            "SELECT DISTINCT ON (fund_code, date) fund_code, date, source, price, updated_at FROM fund_prices "
+            f"WHERE fund_code IN ({placeholders}) "
+            f"AND date >= ? AND date <= ? AND source IN ({source_placeholders}) AND price > 0 "
+            f"ORDER BY fund_code, date ASC, {source_priority_sql} DESC, updated_at DESC"
+        )
+        params: List[Any] = [
+            *candidates.keys(),
+            start_date.isoformat(),
+            end_date.isoformat(),
+            *normalized_sources,
+            *priority_params,
+        ]
+    else:
+        query = (
+            "SELECT fund_code, date, source, price, updated_at FROM fund_prices "
+            f"WHERE fund_code IN ({placeholders}) "
+            f"AND date >= ? AND date <= ? AND source IN ({source_placeholders}) AND price > 0 "
+            "ORDER BY fund_code, date ASC, updated_at DESC"
+        )
+        params = [*candidates.keys(), start_date.isoformat(), end_date.isoformat(), *normalized_sources]
 
     selected: Dict[Tuple[str, str], sqlite3.Row] = {}
     with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
@@ -1600,12 +1642,16 @@ def _persist_daily_return_overrides(
         f"AND source IN ({source_placeholders})"
     )
     now = _fund_service()._utc_now_iso()
+    params_seq = [
+        (value, now, code, point_date, *_fund_service()._DAILY_PRICE_SOURCES)
+        for (code, point_date), value in overrides.items()
+    ]
     with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
-        for (code, point_date), value in overrides.items():
-            conn.execute(
-                query,
-                [value, now, code, point_date, *_fund_service()._DAILY_PRICE_SOURCES],
-            )
+        if hasattr(conn, "executemany"):
+            conn.executemany(query, params_seq)
+        else:
+            for row_params in params_seq:
+                conn.execute(query, row_params)
         _fund_service()._bump_fund_listing_price_revision(conn)
         conn.commit()
     _fund_service()._invalidate_fund_price_memory_caches()
@@ -1660,78 +1706,146 @@ def _read_preferred_fund_price_points(
     date.
     """
 
-    fintables_points = _seam("_read_fintables_udf_price_points")(
-        processed_dir,
-        fund_code,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    daily_points = _seam("_read_daily_fund_price_points")(
-        processed_dir,
-        fund_code,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    if not fintables_points:
-        return daily_points
+    normalized = _fund_service().normalize_fund_code(fund_code)
+    if not normalized:
+        return []
+    daily_sources = tuple(_fund_service()._DAILY_PRICE_SOURCES)
+    fintables_sources = set(_fund_service()._FINTABLES_DAILY_PRICE_SOURCES)
 
-    daily_by_date = {
-        str(point.get("date")): point
-        for point in daily_points
-        if isinstance(point, dict) and point.get("date")
-    }
-    metadata_fields = (
-        "aum",
-        "investor_count",
-        "share_count",
-        "name",
-        "fund_type",
-        "founder_company",
-        "manager_company",
-        "tefas_open",
-        "risk_value",
-        "currency",
-    )
-    def enrich(point: Dict[str, Any]) -> Dict[str, Any]:
-        merged = dict(point)
-        supplemental = daily_by_date.get(str(point.get("date"))) or {}
-        for _fund_service().field in metadata_fields:
-            if merged.get(_fund_service().field) is None and supplemental.get(_fund_service().field) is not None:
-                merged[_fund_service().field] = supplemental[_fund_service().field]
-        return merged
-
-    fintables_is_complete = bool(
-        start_date
-        and end_date
-        and _fund_service()._history_is_usable_daily_range(
-            fintables_points,
-            start_date=start_date,
-            end_date=end_date,
+    def load_preferred() -> List[Dict[str, Any]]:
+        conditions = ["fund_code = ?", "price > 0"]
+        params: List[Any] = [normalized]
+        if daily_sources:
+            placeholders = ", ".join("?" for _ in daily_sources)
+            conditions.append(f"source IN ({placeholders})")
+            params.extend(daily_sources)
+        if start_date:
+            conditions.append("date >= ?")
+            params.append(start_date.isoformat())
+        if end_date:
+            conditions.append("date <= ?")
+            params.append(end_date.isoformat())
+        query = (
+            "SELECT fund_code, date, source, price, daily_return, aum, investor_count, "
+            "share_count, metadata_json, fetched_at, updated_at FROM fund_prices WHERE "
+            + " AND ".join(conditions)
+            + " ORDER BY date ASC, updated_at DESC"
         )
-    )
-    if fintables_is_complete:
-        preferred_by_date = {
-            str(point.get("date")): enrich(point)
-            for point in fintables_points
-            if point.get("date")
+        with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
+            rows = list(conn.execute(query, params))
+
+        fintables_rows_by_date: Dict[str, Any] = {}
+        daily_rows_by_date: Dict[str, Any] = {}
+        for row in rows:
+            point_date = str(row["date"])
+            row_source = _seam("_normalize_price_source")(str(row["source"] or ""))
+            row_rank = (
+                _fund_service()._FUND_PRICE_SOURCE_PRIORITY.get(str(row["source"] or ""), 0),
+                str(row["updated_at"] or ""),
+            )
+            if row_source in fintables_sources:
+                existing_f = fintables_rows_by_date.get(point_date)
+                if existing_f is None:
+                    fintables_rows_by_date[point_date] = row
+                else:
+                    existing_f_rank = (
+                        _fund_service()._FUND_PRICE_SOURCE_PRIORITY.get(str(existing_f["source"] or ""), 0),
+                        str(existing_f["updated_at"] or ""),
+                    )
+                    if row_rank > existing_f_rank:
+                        fintables_rows_by_date[point_date] = row
+            existing_d = daily_rows_by_date.get(point_date)
+            if existing_d is None:
+                daily_rows_by_date[point_date] = row
+            else:
+                existing_d_rank = (
+                    _fund_service()._FUND_PRICE_SOURCE_PRIORITY.get(str(existing_d["source"] or ""), 0),
+                    str(existing_d["updated_at"] or ""),
+                )
+                if row_rank > existing_d_rank:
+                    daily_rows_by_date[point_date] = row
+
+        fintables_points = [
+            _seam("_fund_price_storage_row_to_point")(fintables_rows_by_date[d])
+            for d in sorted(fintables_rows_by_date)
+        ]
+        daily_points = [
+            _seam("_fund_price_storage_row_to_point")(daily_rows_by_date[d])
+            for d in sorted(daily_rows_by_date)
+        ]
+        if not fintables_points:
+            return daily_points
+
+        daily_by_date = {
+            str(point.get("date")): point
+            for point in daily_points
+            if isinstance(point, dict) and point.get("date")
         }
-        latest_fintables_date = max(preferred_by_date, default="")
-        # The daily collector can publish a confirmed TEFAS close before the
-        # Fintables UDF catches up. Keep Fintables authoritative on overlaps,
-        # but do not hide a newer, non-overlapping TEFAS tail.
-        for point in daily_points:
-            point_date = str(point.get("date") or "")
-            if latest_fintables_date < point_date <= end_date.isoformat():
-                preferred_by_date[point_date] = point
+        metadata_fields = (
+            "aum",
+            "investor_count",
+            "share_count",
+            "name",
+            "fund_type",
+            "founder_company",
+            "manager_company",
+            "tefas_open",
+            "risk_value",
+            "currency",
+        )
+
+        def enrich(point: Dict[str, Any]) -> Dict[str, Any]:
+            merged = dict(point)
+            supplemental = daily_by_date.get(str(point.get("date"))) or {}
+            for field in metadata_fields:
+                if merged.get(field) is None and supplemental.get(field) is not None:
+                    merged[field] = supplemental[field]
+            return merged
+
+        fintables_is_complete = bool(
+            start_date
+            and end_date
+            and _fund_service()._history_is_usable_daily_range(
+                fintables_points,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        )
+        if fintables_is_complete:
+            preferred_by_date = {
+                str(point.get("date")): enrich(point)
+                for point in fintables_points
+                if point.get("date")
+            }
+            latest_fintables_date = max(preferred_by_date, default="")
+            # The daily collector can publish a confirmed TEFAS close before the
+            # Fintables UDF catches up. Keep Fintables authoritative on overlaps,
+            # but do not hide a newer, non-overlapping TEFAS tail.
+            for point in daily_points:
+                point_date = str(point.get("date") or "")
+                if latest_fintables_date < point_date <= end_date.isoformat():
+                    preferred_by_date[point_date] = point
+            return [preferred_by_date[point_date] for point_date in sorted(preferred_by_date)]
+
+        # A partial Fintables response is preferred only on dates it actually
+        # covers. Keep all other locally cached dates, including older TEFAS
+        # inception/history points, and then let Fintables win on overlaps.
+        preferred_by_date = dict(daily_by_date)
+        for point in fintables_points:
+            preferred_by_date[str(point.get("date"))] = enrich(point)
         return [preferred_by_date[point_date] for point_date in sorted(preferred_by_date)]
 
-    # A partial Fintables response is preferred only on dates it actually
-    # covers. Keep all other locally cached dates, including older TEFAS
-    # inception/history points, and then let Fintables win on overlaps.
-    preferred_by_date = dict(daily_by_date)
-    for point in fintables_points:
-        preferred_by_date[str(point.get("date"))] = enrich(point)
-    return [preferred_by_date[point_date] for point_date in sorted(preferred_by_date)]
+    cache_key = (
+        *_seam("_fund_price_points_cache_key")(
+            processed_dir,
+            normalized,
+            start_date,
+            end_date,
+            tuple(sorted(daily_sources)),
+        ),
+        "preferred",
+    )
+    return _seam("_read_fund_price_points_cached")(cache_key, load_preferred)
 
 
 def _backfill_daily_returns_from_local_prices(
