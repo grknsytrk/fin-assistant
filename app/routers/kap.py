@@ -127,7 +127,7 @@ def admin_refresh_kap_statements(
     mode: Literal["incremental", "full"] = Query("incremental"),
     universe: Literal["all", "bist30", "bist100", "symbols"] = Query("all"),
     symbols: Optional[str] = Query(None),
-    max_quarters: int = Query(5, ge=1, le=20),
+    max_quarters: int = Query(5, ge=1, le=44),
     budget_seconds: int = Query(5400, ge=30, le=21600),
     concurrency: int = Query(1, ge=1, le=2),
 ) -> Dict[str, Any]:
@@ -169,6 +169,24 @@ def kap_statement_refresh_status(
     if job is None:
         raise HTTPException(status_code=404, detail="Bilanço yenileme işi bulunamadı veya süresi doldu.")
     return {"refresh_job": _public_kap_statement_job(job)}
+
+
+@router.post("/admin/kap/warm-historical-multiples")
+def admin_warm_historical_multiples(
+    request: Request,
+    universe: Literal["all", "bist30", "bist100", "symbols"] = Query("all"),
+    symbols: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Compute and persist historical valuation multiples (F/K, PD/DD, FD/FAVOK averages)."""
+
+    _require_admin_refresh_access(request)
+    from app.kap_statement_refresh import _resolve_kap_statement_symbols
+    from app.market_service import _warm_stock_hist_multiples_sync
+
+    parsed_symbols = _parse_kap_statement_symbols(symbols)
+    target_symbols = _resolve_kap_statement_symbols(universe, parsed_symbols)
+    summary = _warm_stock_hist_multiples_sync(symbols=target_symbols)
+    return {"ok": True, "universe": universe, "historical_multiples": summary}
 
 @router.get("/kap/companies")
 def kap_companies() -> Dict[str, Any]:

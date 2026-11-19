@@ -43,6 +43,7 @@ EXPECTED_METHOD_PATHS = {
     ("POST", "/admin/kap/refresh"),
     ("POST", "/admin/kap/refresh-statements"),
     ("GET", "/admin/kap/refresh-statements/status"),
+    ("POST", "/admin/kap/warm-historical-multiples"),
     ("GET", "/kap/overview-models"),
     ("GET", "/kap/companies"),
     ("GET", "/kap/snapshot"),

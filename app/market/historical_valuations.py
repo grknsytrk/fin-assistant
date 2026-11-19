@@ -1044,20 +1044,36 @@ def _warm_stock_hist_multiples_sync(
     financial_snapshot_map: Optional[Dict[str, Dict[str, Any]]] = None,
     basic_summary_map: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, int]:
-    """Compute historical valuation averages from local kap_cache JSONs + batched 5Y weekly spark."""
+    """Compute historical valuation averages from kap_cache JSONs (local + Supabase) + batched 5Y weekly spark."""
     _ms = _market_service()
     from concurrent.futures import ThreadPoolExecutor
 
     kap_cache_dir = _ms.CONFIG.paths.processed_dir / "kap_cache"
-    if not kap_cache_dir.exists():
-        return {"requested": 0, "populated": 0}
+    kap_cache_dir.mkdir(parents=True, exist_ok=True)
 
     target_symbols = (
         [str(s or "").strip().upper() for s in symbols if str(s or "").strip()]
         if symbols is not None
         else _ms._market_stock_symbols_for_index("XUTUM")
     )
-    kap_symbols = [sym for sym in target_symbols if (kap_cache_dir / f"{sym}.json").exists()]
+    local_kap_set = {sym for sym in target_symbols if (kap_cache_dir / f"{sym}.json").exists()}
+    remote_kap_set: Set[str] = set()
+    if _ms._market_database.database_enabled():
+        try:
+            remote_meta = _ms._market_database.read_json_cache_kap_metadata()
+            if isinstance(remote_meta, dict):
+                for key in remote_meta.keys():
+                    # keys look like "kap_cache/THYAO.json"
+                    name = str(key).rsplit("/", 1)[-1]
+                    if name.lower().endswith(".json"):
+                        sym_name = name[:-5].strip().upper()
+                        if sym_name:
+                            remote_kap_set.add(sym_name)
+        except Exception:
+            _ms.LOGGER.debug("read_json_cache_kap_metadata failed during historical multiples warmup", exc_info=True)
+
+    available_kap_set = local_kap_set | remote_kap_set
+    kap_symbols = [sym for sym in target_symbols if sym in available_kap_set]
     if not kap_symbols:
         return {"requested": 0, "populated": 0}
 
@@ -1076,6 +1092,17 @@ def _warm_stock_hist_multiples_sync(
 
     if not price_map:
         return {"requested": len(kap_symbols), "populated": 0}
+
+    if financial_snapshot_map is None:
+        try:
+            financial_snapshot_map = _ms.get_financial_snapshots_map(_ms.CONFIG.paths.processed_dir)
+        except Exception:
+            financial_snapshot_map = {}
+    if basic_summary_map is None:
+        try:
+            basic_summary_map = _ms._fetch_isyatirim_basic_summary_map()
+        except Exception:
+            basic_summary_map = {}
 
     fin_map = financial_snapshot_map or {}
     bs_map = basic_summary_map or {}
@@ -1101,15 +1128,24 @@ def _warm_stock_hist_multiples_sync(
         if summary:
             computed[sym] = summary
 
+    from app.json_cache import read_json_cache_local_first
+
     capital_changed_snapshots: Dict[str, Dict[str, Any]] = {}
     for sym in kap_symbols:
         if not price_map.get(sym):
             continue
         cache_path = kap_cache_dir / f"{sym}.json"
-        try:
-            raw_kap = _ms.json.loads(cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        raw_kap = None
+        if cache_path.exists():
+            try:
+                raw_kap = _ms.json.loads(cache_path.read_text(encoding="utf-8"))
+            except Exception:
+                raw_kap = None
+        if raw_kap is None and sym in remote_kap_set:
+            try:
+                raw_kap = read_json_cache_local_first(cache_path)
+            except Exception:
+                raw_kap = None
         if not isinstance(raw_kap, dict):
             continue
         if _ms._snapshot_has_capital_changes(raw_kap):

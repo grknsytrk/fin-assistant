@@ -504,7 +504,10 @@ def _merge_live_and_cached_quarters(
             continue
 
     merged = sorted(by_period.values(), key=_quarter_sort_tuple, reverse=True)
-    return merged[: max(1, int(max_quarters))]
+    # Never truncate valid historical quarters already present in cache when a
+    # shallower refresh (e.g. max_quarters=5) runs.
+    keep_limit = max(1, int(max_quarters), len(cached_quarters))
+    return merged[:keep_limit]
 
 
 def _mark_live_disclosure_checked(

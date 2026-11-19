@@ -162,9 +162,9 @@ _KAP_STATEMENT_MAX_BUDGET_SECONDS = _kap_statement_env_int(
     "RAGFIN_KAP_STATEMENT_MAX_BUDGET_SECONDS", 21600, minimum=60
 )
 
-_KAP_STATEMENT_MAX_QUARTERS = 20
+_KAP_STATEMENT_MAX_QUARTERS = 44
 
-_KAP_STATEMENT_DEPTH_CEILING = 20
+_KAP_STATEMENT_DEPTH_CEILING = 44
 
 _KAP_STATEMENT_MAX_CONCURRENCY = 2
 
@@ -1252,6 +1252,14 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
                 backend.delete(f"api:market:stocks:{idx_name}:v4")
         except Exception:  # noqa: BLE001 - cache invalidation must not fail the job
             LOGGER.warning("Market fundamental cache invalidation failed", exc_info=True)
+    if (int(job.get("updated") or 0) > 0 or mode == "full") and not os.getenv("PYTEST_CURRENT_TEST"):
+        try:
+            from app.market_service import _warm_stock_hist_multiples_sync
+
+            hist_summary = _warm_stock_hist_multiples_sync(symbols=symbols)
+            job["historical_multiples"] = hist_summary
+        except Exception:  # noqa: BLE001 - historical multiples warm-up must not fail the statement job
+            LOGGER.warning("Historical valuation multiples warm-up after statement refresh failed", exc_info=True)
     try:
         job["coverage"] = _statement_coverage(symbols, max_quarters)
     except Exception:  # noqa: BLE001 - coverage must not fail the job
