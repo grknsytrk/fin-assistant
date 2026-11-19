@@ -764,51 +764,168 @@ def _clear_market_price_snapshot_failure() -> None:
         _ms._MARKET_PRICE_SNAPSHOT_STATE["last_failure_at"] = 0.0
 
 
+def _isyatirim_all_stocks_price_url() -> str:
+    return "https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/default.aspx"
+
+
+def _extract_isyatirim_all_stocks_price_snapshot(html_text: str) -> Dict[str, Dict[str, Any]]:
+    _ms = _market_service()
+    if not html_text:
+        return {}
+    table_flags = _ms.re.IGNORECASE | _ms.re.DOTALL
+    table_match = _ms.re.search(
+        r'<table\b(?=[^>]*\bdata-csvname\s*=\s*["\']tumhisse["\'])[^>]*>(.*?)</table>',
+        html_text,
+        flags=table_flags,
+    )
+    table_html = table_match.group(1) if table_match else None
+    if table_html is None:
+        for candidate in _ms.re.finditer(r"<table\b[^>]*>(.*?)</table>", html_text, flags=table_flags):
+            snippet = candidate.group(1)
+            if "Son Fiyat" in snippet and "Hacim" in snippet:
+                table_html = snippet
+                break
+    if not table_html:
+        return {}
+
+    rows = _ms.re.findall(r"<tr\b[^>]*>(.*?)</tr>", table_html, flags=table_flags)
+    if not rows:
+        return {}
+
+    def _clean_cell(raw: str) -> str:
+        text = _ms.html.unescape(_ms.re.sub(r"<[^>]+>", " ", str(raw or ""), flags=_ms.re.IGNORECASE))
+        text = text.replace("\u200b", "").replace("\xa0", " ")
+        return " ".join(text.split())
+
+    header_idx: Dict[str, int] = {}
+    fetched_at = _ms.datetime.now(_ms.timezone.utc).isoformat()
+    items: Dict[str, Dict[str, Any]] = {}
+
+    for row_html in rows:
+        headers = [_clean_cell(cell) for cell in _ms.re.findall(r"<th\b[^>]*>(.*?)</th>", row_html, flags=table_flags)]
+        if headers and not header_idx:
+            for idx, header in enumerate(headers):
+                norm = _ms._norm_text(header)
+                if norm == "HISSE":
+                    header_idx["symbol"] = idx
+                elif "SON FIYAT" in norm:
+                    header_idx["price"] = idx
+                elif "DEGISIM" in norm and "%" in norm:
+                    header_idx["change_pct"] = idx
+                elif "DEGISIM" in norm and "TL" in norm:
+                    header_idx["change"] = idx
+                elif "HACIM" in norm and "TL" in norm:
+                    header_idx["volume"] = idx
+                elif "HACIM" in norm and "ADET" in norm:
+                    header_idx["volume_lot"] = idx
+            continue
+
+        cells = [_clean_cell(cell) for cell in _ms.re.findall(r"<td\b[^>]*>(.*?)</td>", row_html, flags=table_flags)]
+        if not cells:
+            continue
+        sym_i = header_idx.get("symbol", 0)
+        if sym_i >= len(cells):
+            continue
+        symbol = _ms.re.sub(r"[^A-Z0-9]", "", cells[sym_i].upper())
+        if not symbol:
+            continue
+
+        price_i = header_idx.get("price", 1)
+        pct_i = header_idx.get("change_pct", 2)
+        chg_i = header_idx.get("change", 3)
+        vol_i = header_idx.get("volume", 4)
+        lot_i = header_idx.get("volume_lot", 5)
+
+        price = _ms._parse_tr_decimal(cells[price_i]) if price_i < len(cells) else None
+        if price is None or price <= 0:
+            continue
+        change_pct = _ms._parse_tr_decimal(cells[pct_i]) if pct_i < len(cells) else None
+        change = _ms._parse_tr_decimal(cells[chg_i]) if chg_i < len(cells) else None
+        volume = _ms._parse_tr_decimal(cells[vol_i]) if vol_i < len(cells) else None
+        volume_lot = _ms._parse_tr_decimal(cells[lot_i]) if lot_i < len(cells) else None
+
+        items[symbol] = {
+            "price": price,
+            "currency": "TRY",
+            "change": change,
+            "change_pct": change_pct,
+            "volume": volume,
+            "volume_lot": volume_lot,
+            "market_state": "",
+            "as_of": fetched_at,
+        }
+    return items
+
+
+def _fetch_isyatirim_all_stocks_price_snapshot(timeout: int = 12) -> Optional[Dict[str, Dict[str, Any]]]:
+    _ms = _market_service()
+    html_text = _ms._fetch_infoyatirim_html(
+        _ms._isyatirim_all_stocks_price_url(),
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+        },
+        timeout=timeout,
+    )
+    if not html_text:
+        return None
+    try:
+        items = _ms._extract_isyatirim_all_stocks_price_snapshot(html_text)
+    except Exception:
+        return None
+    return items or None
+
+
 def _build_market_price_snapshot(
     normalized_symbols: List[str],
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     _ms = _market_service()
     url = _ms._market_price_source_url(_ms._MARKET_QUOTE_SOURCE_INDEX)
     html_text = _ms._fetch_infoyatirim_html(url, timeout=10)
-    if html_text is None:
-        return None
 
     items: Dict[str, Dict[str, Any]] = {}
-    try:
-        row_pattern = _ms.re.compile(
-            r'<tr[^>]+data-symbol="(?P<symbol>[A-Z0-9]+)"[^>]*>(?P<body>.*?)</tr>',
-            flags=_ms.re.IGNORECASE | _ms.re.DOTALL,
-        )
-        price_pattern = _ms.re.compile(r'<td[^>]+class="price"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
-        change_pattern = _ms.re.compile(r'<td[^>]+class="change"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
-        percent_pattern = _ms.re.compile(r'<td[^>]+class="percent"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
-        fetched_at = _ms.datetime.now(_ms.timezone.utc).isoformat()
-        for match in row_pattern.finditer(html_text):
-            symbol = str(match.group("symbol") or "").strip().upper()
-            if not symbol:
-                continue
-            body = match.group("body") or ""
-            price_match = price_pattern.search(body)
-            change_match = change_pattern.search(body)
-            percent_match = percent_pattern.search(body)
+    if html_text is not None:
+        try:
+            row_pattern = _ms.re.compile(
+                r'<tr[^>]+data-symbol="(?P<symbol>[A-Z0-9]+)"[^>]*>(?P<body>.*?)</tr>',
+                flags=_ms.re.IGNORECASE | _ms.re.DOTALL,
+            )
+            price_pattern = _ms.re.compile(r'<td[^>]+class="price"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
+            change_pattern = _ms.re.compile(r'<td[^>]+class="change"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
+            percent_pattern = _ms.re.compile(r'<td[^>]+class="percent"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
+            fetched_at = _ms.datetime.now(_ms.timezone.utc).isoformat()
+            for match in row_pattern.finditer(html_text):
+                symbol = str(match.group("symbol") or "").strip().upper()
+                if not symbol:
+                    continue
+                body = match.group("body") or ""
+                price_match = price_pattern.search(body)
+                change_match = change_pattern.search(body)
+                percent_match = percent_pattern.search(body)
 
-            volume = None
-            cells = _ms.re.findall(r"<td\b[^>]*>(.*?)</td>", body, flags=_ms.re.IGNORECASE | _ms.re.DOTALL)
-            if len(cells) > 4:
-                volume_raw = _ms.html.unescape(_ms.re.sub(r"<[^>]+>", " ", cells[4], flags=_ms.re.IGNORECASE))
-                volume = _ms._parse_tr_decimal(volume_raw)
+                volume = None
+                cells = _ms.re.findall(r"<td\b[^>]*>(.*?)</td>", body, flags=_ms.re.IGNORECASE | _ms.re.DOTALL)
+                if len(cells) > 4:
+                    volume_raw = _ms.html.unescape(_ms.re.sub(r"<[^>]+>", " ", cells[4], flags=_ms.re.IGNORECASE))
+                    volume = _ms._parse_tr_decimal(volume_raw)
 
-            items[symbol] = {
-                "price": _ms._parse_tr_decimal(price_match.group("value") if price_match else None),
-                "currency": "TRY",
-                "change": _ms._parse_tr_decimal(change_match.group("value") if change_match else None),
-                "change_pct": _ms._parse_tr_decimal(percent_match.group("value") if percent_match else None),
-                "volume": volume,
-                "market_state": "",
-                "as_of": fetched_at,
-            }
-    except Exception:
-        return None
+                items[symbol] = {
+                    "price": _ms._parse_tr_decimal(price_match.group("value") if price_match else None),
+                    "currency": "TRY",
+                    "change": _ms._parse_tr_decimal(change_match.group("value") if change_match else None),
+                    "change_pct": _ms._parse_tr_decimal(percent_match.group("value") if percent_match else None),
+                    "volume": volume,
+                    "market_state": "",
+                    "as_of": fetched_at,
+                }
+        except Exception:
+            items = {}
+
+    if not items:
+        fallback_items = _ms._fetch_isyatirim_all_stocks_price_snapshot(timeout=12)
+        if not fallback_items:
+            return None
+        return fallback_items
 
     missing_symbols = [
         symbol
@@ -942,7 +1059,7 @@ def _fetch_market_price_map(
 
     try:
         items = _ms._build_market_price_snapshot(normalized_symbols)
-        if items is None:
+        if not items:
             _ms._mark_market_price_snapshot_failure()
             if stale_snapshot is not None:
                 _ms.LOGGER.warning("Serving stale market snapshot after a failed rebuild")

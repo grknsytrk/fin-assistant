@@ -723,6 +723,68 @@ def test_fetch_market_price_map_uses_stock_page_fallback_for_missing_symbols(
     assert "TSPOR" not in payload
 
 
+def test_fetch_market_price_map_falls_back_to_isyatirim_tumhisse_when_infoyatirim_has_no_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(database_module, "database_enabled", lambda: False)
+    isyatirim_html = """
+    <table class="dataTable" data-csvname="tumhisse">
+      <thead>
+        <tr>
+          <th>Hisse</th>
+          <th>Son Fiyat (TL)</th>
+          <th>Değişim (%)</th>
+          <th>Değişim (TL)</th>
+          <th>Hacim (TL)</th>
+          <th>Hacim (Adet)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>BIMAS\u200b</td>
+          <td>384,00</td>
+          <td>-1,48</td>
+          <td>-5,75</td>
+          <td>2.523.812.632</td>
+          <td>6.540.263</td>
+        </tr>
+        <tr>
+          <td>YKBNK</td>
+          <td>36,76</td>
+          <td>0,66</td>
+          <td>0,24</td>
+          <td>3.722.670.049</td>
+          <td>101.058.532</td>
+        </tr>
+      </tbody>
+    </table>
+    """
+
+    requested_urls: List[str] = []
+
+    def fake_fetch_html(url: str, **_kwargs: Any) -> Optional[str]:
+        requested_urls.append(url)
+        if "infoyatirim.com" in url:
+            return "<html><body>Homepage redirect without quote rows</body></html>"
+        if "isyatirim.com.tr" in url:
+            return isyatirim_html
+        return None
+
+    monkeypatch.setattr(api_module, "_fetch_infoyatirim_html", fake_fetch_html)
+
+    payload = api_module._fetch_market_price_map(["BIMAS", "YKBNK"])
+
+    assert any("infoyatirim.com" in url for url in requested_urls)
+    assert any("isyatirim.com.tr" in url for url in requested_urls)
+    assert payload["BIMAS"]["price"] == 384.0
+    assert payload["BIMAS"]["change"] == -5.75
+    assert payload["BIMAS"]["change_pct"] == -1.48
+    assert payload["BIMAS"]["volume"] == 2_523_812_632.0
+    assert payload["BIMAS"]["volume_lot"] == 6_540_263.0
+    assert payload["YKBNK"]["price"] == 36.76
+    assert payload["YKBNK"]["change_pct"] == 0.66
+
+
 def test_extract_isyatirim_basic_summary_map_parses_market_caps() -> None:
     html = """
     <table class="dataTable" data-csvname="temelozet">

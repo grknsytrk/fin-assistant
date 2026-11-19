@@ -707,7 +707,10 @@ def _resolve_market_card_valuation(symbol: str, *, market_cap: Any) -> Dict[str,
         provider_payload = _ms._fetch_isyatirim_multiples(ticker)
         provider_ratios = _ms._resolve_market_card_multiples(ticker, provider_payload)
 
-    cache_ratios = _stock_card_financial_ratios_from_cached_snapshot(snapshot)
+    if _ms._stock_card_financial_ratios_from_cache is not _stock_card_financial_ratios_from_cache:
+        cache_ratios = _ms._stock_card_financial_ratios_from_cache(ticker)
+    else:
+        cache_ratios = _stock_card_financial_ratios_from_cached_snapshot(snapshot)
     cached_payload = {
         "_ts": now,
         "financial_snapshot": snapshot,
@@ -759,7 +762,7 @@ def _market_stock_cards_quick_payload(
             "change": quote.get("change"),
             "change_pct": quote.get("change_pct"),
             "volume": volume,
-            "volume_lot": None,
+            "volume_lot": quote.get("volume_lot"),
             "volume_tl": volume,
             "market_cap": quote.get("market_cap"),
             "high": None,
@@ -872,7 +875,7 @@ def _market_stock_cards_payload(
         price = _ms._first_not_none(quote.get("price"), intraday.get("price"))
         currency = quote.get("currency") or intraday.get("currency") or "TRY"
         volume_tl = quote.get("volume")
-        volume_lot = _ms._first_not_none(intraday.get("volume_lot"), intraday.get("volume"))
+        volume_lot = _ms._first_not_none(intraday.get("volume_lot"), intraday.get("volume"), quote.get("volume_lot"))
         current_for_returns = price if price is not None else return_bases.get("latest_close")
         session_status = intraday.get("session_status") or "unknown"
         # Price, change and volume all come from the canonical live quote;
