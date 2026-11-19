@@ -184,6 +184,51 @@ function historicalMultipleSecondary(
     return diff == null ? `Ort: ${formattedAvg}` : `Ort: ${formattedAvg} (${formatPct(diff)})`;
 }
 
+type ComparisonRankMode = 'higher' | 'lower' | 'positive_lower';
+
+function rankComparisonClasses(
+    values: Array<number | null | undefined>,
+    mode: ComparisonRankMode,
+    fallbackClass?: (value: number | null) => string | undefined,
+): Array<string | undefined> {
+    const nums = values.map((value) => finiteNumber(value));
+    const valid = nums.filter((value): value is number => value != null);
+    if (valid.length < 2) {
+        return nums.map((value) => fallbackClass?.(value));
+    }
+
+    if (mode === 'positive_lower') {
+        const positives = valid.filter((value) => value > 0);
+        if (positives.length === 0) {
+            return nums.map((value) => fallbackClass?.(value));
+        }
+        const best = Math.min(...positives);
+        const hasNonPositive = valid.some((value) => value <= 0);
+        const worst = Math.max(...positives);
+        if (!hasNonPositive && best === worst) {
+            return nums.map((value) => fallbackClass?.(value));
+        }
+        return nums.map((value) => {
+            if (value == null) return undefined;
+            if (value > 0 && value === best) return 'funds-up';
+            if ((hasNonPositive && value <= 0) || (!hasNonPositive && value === worst)) return 'funds-down';
+            return undefined;
+        });
+    }
+
+    const best = mode === 'higher' ? Math.max(...valid) : Math.min(...valid);
+    const worst = mode === 'higher' ? Math.min(...valid) : Math.max(...valid);
+    if (best === worst) {
+        return nums.map((value) => fallbackClass?.(value));
+    }
+    return nums.map((value) => {
+        if (value == null) return undefined;
+        if (value === best) return 'funds-up';
+        if (value === worst) return 'funds-down';
+        return undefined;
+    });
+}
+
 function StockCompareLineChart({
     selectedStocks,
     historyByTicker,
@@ -752,6 +797,10 @@ export function StockComparisonSection({
     const tableEndIso = selectedStocks.find((stock) => stock.price_as_of)?.price_as_of?.slice(0, 10)
         || new Date().toISOString().slice(0, 10);
 
+    const changeClasses = rankComparisonClasses(selectedStocks.map((s) => s.change_pct), 'higher', pctClass);
+    const marketCapClasses = rankComparisonClasses(selectedStocks.map((s) => s.market_cap), 'higher');
+    const volumeClasses = rankComparisonClasses(selectedStocks.map((s) => s.volume), 'higher');
+
     const basicRows: FundCompareTableRow[] = [
         {
             label: 'Fiyat',
@@ -762,10 +811,11 @@ export function StockComparisonSection({
         },
         {
             label: 'Günlük Değişim',
-            values: selectedStocks.map((stock) => {
-                const value = finiteNumber(stock.change_pct);
-                return comparisonCell(formatPct(value), undefined, pctClass(value));
-            }),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatPct(finiteNumber(stock.change_pct)),
+                undefined,
+                changeClasses[index],
+            )),
         },
         {
             label: 'Sektör',
@@ -773,11 +823,19 @@ export function StockComparisonSection({
         },
         {
             label: 'Piyasa Değeri',
-            values: selectedStocks.map((stock) => comparisonCell(formatCompactCurrency(stock.market_cap))),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatCompactCurrency(stock.market_cap),
+                undefined,
+                marketCapClasses[index],
+            )),
         },
         {
             label: 'İşlem Hacmi',
-            values: selectedStocks.map((stock) => comparisonCell(formatCompactCurrency(stock.volume))),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatCompactCurrency(stock.volume),
+                undefined,
+                volumeClasses[index],
+            )),
         },
         {
             label: 'Fiili Dolaşım',
@@ -789,83 +847,137 @@ export function StockComparisonSection({
         },
     ];
 
+    const fkClasses = rankComparisonClasses(selectedStocks.map((s) => s.fk), 'positive_lower');
+    const pdddClasses = rankComparisonClasses(selectedStocks.map((s) => s.pd_dd), 'positive_lower');
+    const fdfavokClasses = rankComparisonClasses(selectedStocks.map((s) => s.fd_favok), 'positive_lower');
+    const fdsatisClasses = rankComparisonClasses(selectedStocks.map((s) => s.fd_satis), 'positive_lower');
+    const netBorcFavokClasses = rankComparisonClasses(selectedStocks.map((s) => s.net_borc_favok), 'lower');
+
     const valuationRows: FundCompareTableRow[] = [
         {
             label: 'F/K',
-            values: selectedStocks.map((stock) => comparisonCell(
+            values: selectedStocks.map((stock, index) => comparisonCell(
                 formatMultiple(stock.fk),
                 historicalMultipleSecondary(stock.hist_fk_avg, stock.fk_hist_diff_pct),
+                fkClasses[index],
             )),
         },
         {
             label: 'PD/DD',
-            values: selectedStocks.map((stock) => comparisonCell(
+            values: selectedStocks.map((stock, index) => comparisonCell(
                 formatMultiple(stock.pd_dd),
                 historicalMultipleSecondary(stock.hist_pd_dd_avg, stock.pd_dd_hist_diff_pct),
+                pdddClasses[index],
             )),
         },
         {
             label: 'FD/FAVÖK',
-            values: selectedStocks.map((stock) => comparisonCell(
+            values: selectedStocks.map((stock, index) => comparisonCell(
                 formatMultiple(stock.fd_favok),
                 historicalMultipleSecondary(stock.hist_fd_favok_avg, stock.fd_favok_hist_diff_pct),
+                fdfavokClasses[index],
             )),
         },
         {
             label: 'FD/Satış',
-            values: selectedStocks.map((stock) => comparisonCell(formatMultiple(stock.fd_satis))),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatMultiple(stock.fd_satis),
+                undefined,
+                fdsatisClasses[index],
+            )),
         },
         {
             label: 'Net Borç / FAVÖK',
-            values: selectedStocks.map((stock) => comparisonCell(formatMultiple(stock.net_borc_favok))),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatMultiple(stock.net_borc_favok),
+                undefined,
+                netBorcFavokClasses[index],
+            )),
         },
     ];
+
+    const roeClasses = rankComparisonClasses(selectedStocks.map((s) => s.roe_pct), 'higher', pctClass);
+    const favokMarginClasses = rankComparisonClasses(selectedStocks.map((s) => s.favok_margin_pct), 'higher', pctClass);
+    const netMarginClasses = rankComparisonClasses(selectedStocks.map((s) => s.net_margin_pct), 'higher', pctClass);
+    const ttmSalesClasses = rankComparisonClasses(selectedStocks.map((s) => s.ttm_satis_gelirleri), 'higher');
+    const ttmFavokClasses = rankComparisonClasses(selectedStocks.map((s) => s.ttm_favok), 'higher');
+    const ttmNetKarClasses = rankComparisonClasses(selectedStocks.map((s) => s.ttm_net_kar), 'higher');
+    const ttmFcfClasses = rankComparisonClasses(selectedStocks.map((s) => s.ttm_fcf), 'higher');
+    const equityClasses = rankComparisonClasses(selectedStocks.map((s) => s.ozkaynaklar), 'higher');
+    const netDebtClasses = rankComparisonClasses(selectedStocks.map((s) => s.net_borc), 'lower');
 
     const profitabilityAndFinancialsRows: FundCompareTableRow[] = [
         {
             label: 'Özsermaye Karlılığı (ROE)',
-            values: selectedStocks.map((stock) => {
-                const value = finiteNumber(stock.roe_pct);
-                return comparisonCell(formatPlainPct(value), undefined, pctClass(value));
-            }),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatPlainPct(finiteNumber(stock.roe_pct)),
+                undefined,
+                roeClasses[index],
+            )),
         },
         {
             label: 'FAVÖK Marjı',
-            values: selectedStocks.map((stock) => {
-                const value = finiteNumber(stock.favok_margin_pct);
-                return comparisonCell(formatPlainPct(value), undefined, pctClass(value));
-            }),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatPlainPct(finiteNumber(stock.favok_margin_pct)),
+                undefined,
+                favokMarginClasses[index],
+            )),
         },
         {
             label: 'Net Kar Marjı',
-            values: selectedStocks.map((stock) => {
-                const value = finiteNumber(stock.net_margin_pct);
-                return comparisonCell(formatPlainPct(value), undefined, pctClass(value));
-            }),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatPlainPct(finiteNumber(stock.net_margin_pct)),
+                undefined,
+                netMarginClasses[index],
+            )),
         },
         {
             label: 'Satışlar (TTM)',
-            values: selectedStocks.map((stock) => comparisonCell(formatCompactCurrency(stock.ttm_satis_gelirleri))),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatCompactCurrency(stock.ttm_satis_gelirleri),
+                undefined,
+                ttmSalesClasses[index],
+            )),
         },
         {
             label: 'FAVÖK (TTM)',
-            values: selectedStocks.map((stock) => comparisonCell(formatCompactCurrency(stock.ttm_favok))),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatCompactCurrency(stock.ttm_favok),
+                undefined,
+                ttmFavokClasses[index],
+            )),
         },
         {
             label: 'Net Kar (TTM)',
-            values: selectedStocks.map((stock) => comparisonCell(formatCompactCurrency(stock.ttm_net_kar))),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatCompactCurrency(stock.ttm_net_kar),
+                undefined,
+                ttmNetKarClasses[index],
+            )),
         },
         {
             label: 'Serbest Nakit Akışı (TTM)',
-            values: selectedStocks.map((stock) => comparisonCell(formatCompactCurrency(stock.ttm_fcf))),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatCompactCurrency(stock.ttm_fcf),
+                undefined,
+                ttmFcfClasses[index],
+            )),
         },
         {
             label: 'Özkaynaklar',
-            values: selectedStocks.map((stock) => comparisonCell(formatCompactCurrency(stock.ozkaynaklar))),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatCompactCurrency(stock.ozkaynaklar),
+                undefined,
+                equityClasses[index],
+            )),
         },
         {
             label: 'Net Borç',
-            values: selectedStocks.map((stock) => comparisonCell(formatCompactCurrency(stock.net_borc))),
+            values: selectedStocks.map((stock, index) => comparisonCell(
+                formatCompactCurrency(stock.net_borc),
+                undefined,
+                netDebtClasses[index],
+            )),
         },
     ];
 
@@ -878,34 +990,42 @@ export function StockComparisonSection({
         ['1 Yıl', '1y'],
         ['3 Yıl', '3y'],
         ['5 Yıl', '5y'],
-    ].map(([label, key]) => ({
-        label,
-        values: selectedStocks.map((stock) => {
+    ].map(([label, key]) => {
+        const values = selectedStocks.map((stock) => {
             const summaryValue = summaryReturnForStockRange(stock, key as FundCompareRange);
             const points = history5y[stock.company] || historyAll[stock.company] || [];
             const calculated = returnForStockRange(points, key as FundCompareRange, tableEndIso);
-            const value = summaryValue ?? calculated;
-            return comparisonCell(formatPct(value), undefined, pctClass(value));
-        }),
-    }));
+            return summaryValue ?? calculated;
+        });
+        const classes = rankComparisonClasses(values, 'higher', pctClass);
+        return {
+            label,
+            values: values.map((value, index) => comparisonCell(formatPct(value), undefined, classes[index])),
+        };
+    });
+    const cagr3Values = selectedStocks.map((stock) => {
+        const points = history5y[stock.company] || historyAll[stock.company] || [];
+        return cagrForStockRange(points, 3, tableEndIso);
+    });
+    const cagr3Classes = rankComparisonClasses(cagr3Values, 'higher', pctClass);
+    const cagr5Values = selectedStocks.map((stock) => {
+        const points = history5y[stock.company] || historyAll[stock.company] || [];
+        return cagrForStockRange(points, 5, tableEndIso);
+    });
+    const cagr5Classes = rankComparisonClasses(cagr5Values, 'higher', pctClass);
     returnRows.push(
         {
             label: 'CAGR (3 Yıl)',
-            values: selectedStocks.map((stock) => {
-                const points = history5y[stock.company] || historyAll[stock.company] || [];
-                const value = cagrForStockRange(points, 3, tableEndIso);
-                return comparisonCell(formatPct(value), undefined, pctClass(value));
-            }),
+            values: cagr3Values.map((value, index) => comparisonCell(formatPct(value), undefined, cagr3Classes[index])),
         },
         {
             label: 'CAGR (5 Yıl)',
-            values: selectedStocks.map((stock) => {
-                const points = history5y[stock.company] || historyAll[stock.company] || [];
-                const value = cagrForStockRange(points, 5, tableEndIso);
-                return comparisonCell(formatPct(value), undefined, pctClass(value));
-            }),
+            values: cagr5Values.map((value, index) => comparisonCell(formatPct(value), undefined, cagr5Classes[index])),
         },
     );
+
+    const sma50Classes = rankComparisonClasses(selectedStocks.map((s) => s.sma_50_diff_pct), 'higher', pctClass);
+    const sma200Classes = rankComparisonClasses(selectedStocks.map((s) => s.sma_200_diff_pct), 'higher', pctClass);
 
     const technicalRows: FundCompareTableRow[] = [
         {
@@ -924,18 +1044,18 @@ export function StockComparisonSection({
         },
         {
             label: 'SMA 50',
-            values: selectedStocks.map((stock) => comparisonCell(
+            values: selectedStocks.map((stock, index) => comparisonCell(
                 formatStockMoney(stock.sma_50, stock.price_currency),
                 stock.sma_50_diff_pct != null ? formatPct(stock.sma_50_diff_pct) : undefined,
-                pctClass(stock.sma_50_diff_pct),
+                sma50Classes[index],
             )),
         },
         {
             label: 'SMA 200',
-            values: selectedStocks.map((stock) => comparisonCell(
+            values: selectedStocks.map((stock, index) => comparisonCell(
                 formatStockMoney(stock.sma_200, stock.price_currency),
                 stock.sma_200_diff_pct != null ? formatPct(stock.sma_200_diff_pct) : undefined,
-                pctClass(stock.sma_200_diff_pct),
+                sma200Classes[index],
             )),
         },
     ];
