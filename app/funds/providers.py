@@ -453,8 +453,12 @@ class FintablesClient:
     def _get_json(self, endpoint: str, *, params: Dict[str, Any], fund_code: str, context: str) -> Dict[str, Any]:
         fs = _fund_service()
         try:
-            with fs.httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
-                response = client.get(endpoint, params=params, headers=self._headers(fund_code))
+            client = fs._get_fintables_client(self.timeout_seconds)
+            headers = self._headers(fund_code)
+            try:
+                response = client.get(endpoint, params=params, headers=headers, timeout=self.timeout_seconds)
+            except fs.httpx.RemoteProtocolError:
+                response = client.get(endpoint, params=params, headers=headers, timeout=self.timeout_seconds)
             return _seam("_decode_fintables_json_response")(
                 response.status_code,
                 dict(response.headers),
@@ -1873,7 +1877,15 @@ class TefasClient:
 
     def _post_fund_list(self, *, body: Dict[str, Any], context: str) -> Dict[str, Any]:
         fs = _fund_service()
-        with fs.httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
+        client = fs._get_tefas_client(self.timeout_seconds)
+        try:
+            return self._post_json(
+                client,
+                endpoint=self.funds_list_endpoint,
+                body=body,
+                context=context,
+            )
+        except fs.httpx.RemoteProtocolError:
             return self._post_json(
                 client,
                 endpoint=self.funds_list_endpoint,

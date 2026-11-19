@@ -32,6 +32,8 @@ _ORIGINAL_HTTPX_CLIENT = httpx.Client
 _CLIENT_LOCK = threading.Lock()
 _KAP_CLIENT: Optional[httpx.Client] = None
 _FINTABLES_PROXY_CLIENT: Optional[httpx.Client] = None
+_FINTABLES_CLIENT: Optional[httpx.Client] = None
+_TEFAS_CLIENT: Optional[httpx.Client] = None
 
 from app import json_cache as json_cache_store
 from app.cache import BoundedMemoryCache
@@ -335,25 +337,65 @@ def _get_fintables_proxy_client(timeout_seconds: Optional[float] = None) -> http
         return _FINTABLES_PROXY_CLIENT
 
 
+def _get_fintables_client(timeout_seconds: Optional[float] = None) -> httpx.Client:
+    """Return a shared persistent HTTP client for Fintables requests, or a fresh mock in tests."""
+    effective_timeout = timeout_seconds if timeout_seconds is not None else FINTABLES_TIMEOUT_SECONDS
+    if httpx.Client is not _ORIGINAL_HTTPX_CLIENT:
+        return httpx.Client(timeout=effective_timeout, follow_redirects=True)
+    global _FINTABLES_CLIENT
+    with _CLIENT_LOCK:
+        if _FINTABLES_CLIENT is None or _FINTABLES_CLIENT.is_closed:
+            _FINTABLES_CLIENT = httpx.Client(
+                timeout=effective_timeout,
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0),
+            )
+        return _FINTABLES_CLIENT
+
+
+def _get_tefas_client(timeout_seconds: Optional[float] = None) -> httpx.Client:
+    """Return a shared persistent HTTP client for TEFAS requests, or a fresh mock in tests."""
+    effective_timeout = timeout_seconds if timeout_seconds is not None else TEFAS_TIMEOUT_SECONDS
+    if httpx.Client is not _ORIGINAL_HTTPX_CLIENT:
+        return httpx.Client(timeout=effective_timeout, follow_redirects=True)
+    global _TEFAS_CLIENT
+    with _CLIENT_LOCK:
+        if _TEFAS_CLIENT is None or _TEFAS_CLIENT.is_closed:
+            _TEFAS_CLIENT = httpx.Client(
+                timeout=effective_timeout,
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0),
+            )
+        return _TEFAS_CLIENT
+
+
 def close_shared_http_clients() -> None:
     """Close any shared HTTP connection pools cleanly."""
-    global _KAP_CLIENT, _FINTABLES_PROXY_CLIENT
+    global _KAP_CLIENT, _FINTABLES_PROXY_CLIENT, _FINTABLES_CLIENT, _TEFAS_CLIENT
     with _CLIENT_LOCK:
-        client_kap = _KAP_CLIENT
+        clients_to_close = [
+            ("KAP", _KAP_CLIENT),
+            ("Fintables proxy", _FINTABLES_PROXY_CLIENT),
+            ("Fintables", _FINTABLES_CLIENT),
+            ("TEFAS", _TEFAS_CLIENT),
+        ]
         _KAP_CLIENT = None
-        client_proxy = _FINTABLES_PROXY_CLIENT
         _FINTABLES_PROXY_CLIENT = None
+        _FINTABLES_CLIENT = None
+        _TEFAS_CLIENT = None
 
-    if client_kap is not None:
-        try:
-            client_kap.close()
-        except Exception:
-            LOGGER.debug("error closing KAP HTTP client", exc_info=True)
-    if client_proxy is not None:
-        try:
-            client_proxy.close()
-        except Exception:
-            LOGGER.debug("error closing Fintables proxy HTTP client", exc_info=True)
+    for label, client in clients_to_close:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                LOGGER.debug("error closing %s HTTP client", label, exc_info=True)
+    try:
+        from app.market.universe_and_quotes import close_market_http_client
+
+        close_market_http_client()
+    except Exception:
+        LOGGER.debug("error closing market HTTP client", exc_info=True)
 
 
 atexit.register(close_shared_http_clients)

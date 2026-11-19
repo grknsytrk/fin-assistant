@@ -798,6 +798,8 @@ from app.market.historical_valuations import (
 )
 
 from app.market.universe_and_quotes import (
+    _get_market_http_client,
+    close_market_http_client,
     _log_market_cache_event,
     _load_cached_kap_market_metadata,
     _stock_reference_record_from_kap_payload,

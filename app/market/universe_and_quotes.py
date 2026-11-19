@@ -1,12 +1,58 @@
 from __future__ import annotations
 
+import atexit
+import os
+import threading
+import urllib.request as _default_urllib_request
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+import httpx
 
 from app import database as _default_database_module
 from app.market import _market_service
 
 _DEFAULT_DB_READ_JSON_CACHE = _default_database_module.read_json_cache
 _DEFAULT_DB_READ_JSON_CACHE_CONDITIONAL = _default_database_module.read_json_cache_conditional
+_ORIGINAL_URLOPEN = _default_urllib_request.urlopen
+_ORIGINAL_HTTPX_CLIENT = httpx.Client
+
+_MARKET_HTTP_CLIENT_LOCK = threading.Lock()
+_MARKET_HTTP_CLIENT: Optional[httpx.Client] = None
+
+_INFOYATIRIM_EMPTY_COOLDOWN_SECONDS = float(os.getenv("RAGFIN_INFOYATIRIM_COOLDOWN_SECONDS", "3600"))
+_INFOYATIRIM_COOLDOWN_LOCK = threading.Lock()
+_INFOYATIRIM_COOLDOWN_UNTIL = 0.0
+
+
+def _get_market_http_client() -> httpx.Client:
+    """Return a shared persistent HTTP client for market upstream requests (Yahoo, İş Yatırım, InfoYatırım)."""
+    if httpx.Client is not _ORIGINAL_HTTPX_CLIENT:
+        return httpx.Client(timeout=12.0, follow_redirects=True)
+    global _MARKET_HTTP_CLIENT
+    with _MARKET_HTTP_CLIENT_LOCK:
+        if _MARKET_HTTP_CLIENT is None or _MARKET_HTTP_CLIENT.is_closed:
+            _MARKET_HTTP_CLIENT = httpx.Client(
+                timeout=12.0,
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=40, keepalive_expiry=30.0),
+            )
+        return _MARKET_HTTP_CLIENT
+
+
+def close_market_http_client() -> None:
+    """Close the shared market HTTP connection pool cleanly."""
+    global _MARKET_HTTP_CLIENT
+    with _MARKET_HTTP_CLIENT_LOCK:
+        client = _MARKET_HTTP_CLIENT
+        _MARKET_HTTP_CLIENT = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+atexit.register(close_market_http_client)
 
 
 def _log_market_cache_event(
@@ -425,22 +471,28 @@ def _fetch_infoyatirim_html(
     import urllib.request
 
     req_headers = headers or {"User-Agent": "Mozilla/5.0"}
-    request = urllib.request.Request(url, headers=req_headers)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.read().decode("utf-8", errors="ignore")
-    except (urllib.error.URLError, Exception) as exc:
-        # Windows system trust store may lack InfoYatirim's intermediate CA; fall back to httpx/certifi.
-        if "CERTIFICATE_VERIFY_FAILED" in str(exc) or "SSL" in type(exc).__name__.upper():
-            try:
-                import httpx
+    if urllib.request.urlopen is not _ORIGINAL_URLOPEN:
+        request = urllib.request.Request(url, headers=req_headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read().decode("utf-8", errors="ignore")
+        except (urllib.error.URLError, Exception):
+            return None
 
-                resp = httpx.get(url, headers=req_headers, follow_redirects=True, timeout=timeout)
-                if resp.status_code == 200 and resp.text:
-                    return resp.text
-            except Exception:
-                return None
-        return None
+    client = _get_market_http_client()
+    for attempt in range(2):
+        try:
+            resp = client.get(url, headers=req_headers, timeout=timeout)
+            if resp.status_code == 200 and resp.text:
+                return resp.text
+            return None
+        except httpx.RemoteProtocolError:
+            if attempt == 0:
+                continue
+            return None
+        except Exception:
+            return None
+    return None
 
 
 def _fetch_infoyatirim_stock_page_quote(symbol: str) -> Dict[str, Any]:
@@ -879,52 +931,70 @@ def _fetch_isyatirim_all_stocks_price_snapshot(timeout: int = 12) -> Optional[Di
 def _build_market_price_snapshot(
     normalized_symbols: List[str],
 ) -> Optional[Dict[str, Dict[str, Any]]]:
+    global _INFOYATIRIM_COOLDOWN_UNTIL
     _ms = _market_service()
-    url = _ms._market_price_source_url(_ms._MARKET_QUOTE_SOURCE_INDEX)
-    html_text = _ms._fetch_infoyatirim_html(url, timeout=10)
+    import urllib.request
+
+    # Respect monkeypatches in tests; only apply cooldown on real production requests.
+    use_infoyatirim_cooldown = (
+        _ms._fetch_infoyatirim_html is _fetch_infoyatirim_html
+        and urllib.request.urlopen is _ORIGINAL_URLOPEN
+        and _INFOYATIRIM_EMPTY_COOLDOWN_SECONDS > 0
+    )
+    now_mono = _ms.time.monotonic()
+    skip_infoyatirim = False
+    if use_infoyatirim_cooldown:
+        with _INFOYATIRIM_COOLDOWN_LOCK:
+            skip_infoyatirim = _INFOYATIRIM_COOLDOWN_UNTIL > now_mono
 
     items: Dict[str, Dict[str, Any]] = {}
-    if html_text is not None:
-        try:
-            row_pattern = _ms.re.compile(
-                r'<tr[^>]+data-symbol="(?P<symbol>[A-Z0-9]+)"[^>]*>(?P<body>.*?)</tr>',
-                flags=_ms.re.IGNORECASE | _ms.re.DOTALL,
-            )
-            price_pattern = _ms.re.compile(r'<td[^>]+class="price"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
-            change_pattern = _ms.re.compile(r'<td[^>]+class="change"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
-            percent_pattern = _ms.re.compile(r'<td[^>]+class="percent"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
-            fetched_at = _ms.datetime.now(_ms.timezone.utc).isoformat()
-            for match in row_pattern.finditer(html_text):
-                symbol = str(match.group("symbol") or "").strip().upper()
-                if not symbol:
-                    continue
-                body = match.group("body") or ""
-                price_match = price_pattern.search(body)
-                change_match = change_pattern.search(body)
-                percent_match = percent_pattern.search(body)
+    if not skip_infoyatirim:
+        url = _ms._market_price_source_url(_ms._MARKET_QUOTE_SOURCE_INDEX)
+        html_text = _ms._fetch_infoyatirim_html(url, timeout=10)
+        if html_text is not None:
+            try:
+                row_pattern = _ms.re.compile(
+                    r'<tr[^>]+data-symbol="(?P<symbol>[A-Z0-9]+)"[^>]*>(?P<body>.*?)</tr>',
+                    flags=_ms.re.IGNORECASE | _ms.re.DOTALL,
+                )
+                price_pattern = _ms.re.compile(r'<td[^>]+class="price"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
+                change_pattern = _ms.re.compile(r'<td[^>]+class="change"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
+                percent_pattern = _ms.re.compile(r'<td[^>]+class="percent"[^>]+data-val="(?P<value>[^"]+)"', _ms.re.IGNORECASE)
+                fetched_at = _ms.datetime.now(_ms.timezone.utc).isoformat()
+                for match in row_pattern.finditer(html_text):
+                    symbol = str(match.group("symbol") or "").strip().upper()
+                    if not symbol:
+                        continue
+                    body = match.group("body") or ""
+                    price_match = price_pattern.search(body)
+                    change_match = change_pattern.search(body)
+                    percent_match = percent_pattern.search(body)
 
-                volume = None
-                cells = _ms.re.findall(r"<td\b[^>]*>(.*?)</td>", body, flags=_ms.re.IGNORECASE | _ms.re.DOTALL)
-                if len(cells) > 4:
-                    volume_raw = _ms.html.unescape(_ms.re.sub(r"<[^>]+>", " ", cells[4], flags=_ms.re.IGNORECASE))
-                    volume = _ms._parse_tr_decimal(volume_raw)
+                    volume = None
+                    cells = _ms.re.findall(r"<td\b[^>]*>(.*?)</td>", body, flags=_ms.re.IGNORECASE | _ms.re.DOTALL)
+                    if len(cells) > 4:
+                        volume_raw = _ms.html.unescape(_ms.re.sub(r"<[^>]+>", " ", cells[4], flags=_ms.re.IGNORECASE))
+                        volume = _ms._parse_tr_decimal(volume_raw)
 
-                items[symbol] = {
-                    "price": _ms._parse_tr_decimal(price_match.group("value") if price_match else None),
-                    "currency": "TRY",
-                    "change": _ms._parse_tr_decimal(change_match.group("value") if change_match else None),
-                    "change_pct": _ms._parse_tr_decimal(percent_match.group("value") if percent_match else None),
-                    "volume": volume,
-                    "market_state": "",
-                    "as_of": fetched_at,
-                }
-        except Exception:
-            items = {}
+                    items[symbol] = {
+                        "price": _ms._parse_tr_decimal(price_match.group("value") if price_match else None),
+                        "currency": "TRY",
+                        "change": _ms._parse_tr_decimal(change_match.group("value") if change_match else None),
+                        "change_pct": _ms._parse_tr_decimal(percent_match.group("value") if percent_match else None),
+                        "volume": volume,
+                        "market_state": "",
+                        "as_of": fetched_at,
+                    }
+            except Exception:
+                items = {}
 
     if not items:
         fallback_items = _ms._fetch_isyatirim_all_stocks_price_snapshot(timeout=12)
         if not fallback_items:
             return None
+        if use_infoyatirim_cooldown and not skip_infoyatirim:
+            with _INFOYATIRIM_COOLDOWN_LOCK:
+                _INFOYATIRIM_COOLDOWN_UNTIL = _ms.time.monotonic() + _INFOYATIRIM_EMPTY_COOLDOWN_SECONDS
         return fallback_items
 
     missing_symbols = [
@@ -1256,9 +1326,18 @@ def _fetch_yahoo_quote(yahoo_symbol: str) -> Dict[str, Any]:
         f"?interval=1d&range=1d"
     )
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = _ms.json.loads(resp.read().decode("utf-8"))
+        if urllib.request.urlopen is not _ORIGINAL_URLOPEN:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = _ms.json.loads(resp.read().decode("utf-8"))
+        else:
+            client = _get_market_http_client()
+            try:
+                resp = client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+            except httpx.RemoteProtocolError:
+                resp = client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+            resp.raise_for_status()
+            data = _ms.json.loads(resp.text)
     except (urllib.error.URLError, Exception) as exc:
         return {"ok": False, "error": f"yahoo_error: {exc}"}
 
@@ -1391,9 +1470,18 @@ def _fetch_yahoo_chart_url(url: str, yahoo_symbol: str) -> Dict[str, Any]:
     import urllib.request
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = _ms.json.loads(resp.read().decode("utf-8"))
+        if urllib.request.urlopen is not _ORIGINAL_URLOPEN:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = _ms.json.loads(resp.read().decode("utf-8"))
+        else:
+            client = _get_market_http_client()
+            try:
+                resp = client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+            except httpx.RemoteProtocolError:
+                resp = client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+            resp.raise_for_status()
+            data = _ms.json.loads(resp.text)
     except (urllib.error.URLError, Exception) as exc:
         return {"ok": False, "error": f"yahoo_error: {exc}", "yahoo_symbol": yahoo_symbol}
 
