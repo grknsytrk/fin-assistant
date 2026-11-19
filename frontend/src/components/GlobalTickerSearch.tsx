@@ -498,35 +498,6 @@ export default function GlobalTickerSearch({
       setFundCatalogStatus('ready');
     });
 
-    // Warm searchable catalogues and XUTUM stock quotes on mount so prices
-    // and instant filtering work identically across MarketPage, navigation,
-    // and recent searches without duplicate API calls.
-    loadStockSearchCatalog()
-      .then((rows) => {
-        if (!active) return;
-        setStockCatalogRows(rows);
-        setStockCatalogStatus('ready');
-      })
-      .catch(() => {
-        if (active && !hasStockSearchRows()) setStockCatalogStatus('error');
-      });
-
-    loadStockQuoteRows()
-      .then((rows) => {
-        if (active && rows.length > 0) setStockQuoteRows(rows);
-      })
-      .catch(() => {});
-
-    loadFundSearchCatalog()
-      .then((rows) => {
-        if (!active) return;
-        setFundCatalogRows(rows);
-        setFundCatalogStatus('ready');
-      })
-      .catch(() => {
-        if (active && !hasFundSearchRows()) setFundCatalogStatus('error');
-      });
-
     return () => {
       active = false;
       unsubscribeStocks?.();

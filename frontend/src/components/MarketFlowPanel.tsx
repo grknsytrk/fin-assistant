@@ -25,11 +25,12 @@ const FLOW_PAGE_SIZE = 50;
 const FLOW_INITIAL_LOAD_SIZE = FLOW_PAGE_SIZE;
 const FLOW_CATEGORY_LOAD_SIZE = 100;
 const FLOW_BACKFILL_PAGE_SIZE = 500;
+const FLOW_MAX_AUTO_BACKFILL_PAGES = 2;
 const FLOW_MAX_ITEMS = 2_500;
 const FLOW_FAVORITES_LOAD_SIZE = 500;
 const FLOW_NEW_ITEM_HIGHLIGHT_MS = 5_000;
-export const FLOW_HEAD_POLL_OPEN_MS = 5_000;
-export const FLOW_HEAD_POLL_CLOSED_MS = 60_000;
+export const FLOW_HEAD_POLL_OPEN_MS = 15_000;
+export const FLOW_HEAD_POLL_CLOSED_MS = 300_000;
 export const FLOW_HEAD_POLL_MS = FLOW_HEAD_POLL_OPEN_MS;
 
 export function getFlowHeadPollInterval(now: Date = new Date()): number {
@@ -187,8 +188,24 @@ export default function MarketFlowPanel({
     }, [filter]);
 
     const lastHeadPollAtRef = useRef<number>(0);
+    const loadControllerRef = useRef<AbortController | null>(null);
+    const loadGenerationRef = useRef(0);
+    const autoBackfillPagesRef = useRef(0);
+
+    useEffect(() => () => {
+        loadControllerRef.current?.abort();
+        loadGenerationRef.current += 1;
+    }, []);
 
     const load = useCallback((requestedLimit?: number, requestedCategory?: string) => {
+        loadControllerRef.current?.abort();
+        const controller = new AbortController();
+        loadControllerRef.current = controller;
+        loadGenerationRef.current += 1;
+        autoBackfillPagesRef.current = 0;
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+
         const expectedFilter = filterRef.current;
         const serverCategory = requestedCategory ?? getServerFlowCategory(expectedFilter);
         const requestLimit = requestedLimit
@@ -205,7 +222,7 @@ export default function MarketFlowPanel({
         apiClient
             .marketFlow(requestLimit, serverCategory)
             .then((payload) => {
-                if (filterRef.current !== expectedFilter) return;
+                if (controller.signal.aborted || filterRef.current !== expectedFilter) return;
                 const nextItems = payload.items || [];
                 observedFlowIdsRef.current = new Set(nextItems.map((item) => item.id));
                 nextCursorRef.current = payload.next_cursor || null;
@@ -218,9 +235,14 @@ export default function MarketFlowPanel({
                     : nextItems.length >= requestLimit && requestLimit < FLOW_MAX_ITEMS);
             })
             .catch((requestError: unknown) => {
+                if (controller.signal.aborted || filterRef.current !== expectedFilter) return;
                 setError(requestError instanceof Error ? requestError.message : 'Akış verisi alınamadı.');
             })
-            .finally(() => setLoading(false));
+            .finally(() => {
+                if (!controller.signal.aborted && filterRef.current === expectedFilter) {
+                    setLoading(false);
+                }
+            });
     }, []);
 
     const filteredItems = useMemo(
@@ -241,6 +263,8 @@ export default function MarketFlowPanel({
         }
         if (!hasMore) return;
 
+        const expectedFilter = filterRef.current;
+        const generation = loadGenerationRef.current;
         const nextCursor = nextCursorRef.current;
         const currentLimit = requestLimitRef.current;
         const pageSize = Math.min(Math.max(requestedPageSize, FLOW_PAGE_SIZE), FLOW_BACKFILL_PAGE_SIZE);
@@ -259,6 +283,7 @@ export default function MarketFlowPanel({
                 nextCursor ? { before: nextCursor } : undefined,
             )
             .then((payload) => {
+                if (loadGenerationRef.current !== generation || filterRef.current !== expectedFilter) return;
                 const olderItems = payload.items || [];
                 requestLimitRef.current = nextCursor ? currentLimit + olderItems.length : nextLimit;
                 nextCursorRef.current = payload.next_cursor || null;
@@ -280,11 +305,14 @@ export default function MarketFlowPanel({
                 setVisibleLimit(nextVisibleLimit);
             })
             .catch((requestError: unknown) => {
+                if (loadGenerationRef.current !== generation || filterRef.current !== expectedFilter) return;
                 setError(requestError instanceof Error ? requestError.message : 'Daha fazla akış verisi alınamadı.');
             })
             .finally(() => {
-                loadingMoreRef.current = false;
-                setLoadingMore(false);
+                if (loadGenerationRef.current === generation) {
+                    loadingMoreRef.current = false;
+                    setLoadingMore(false);
+                }
             });
     }, [filteredItems.length, hasMore]);
 
@@ -292,10 +320,12 @@ export default function MarketFlowPanel({
         const needsBackfill = filter === 'watchlist' || filter === 'model_portfolio' || filter === 'diger';
         if (!needsBackfill || loading || loadingMore || !items || !hasMore) return;
         if (filteredItems.length >= FLOW_PAGE_SIZE) return;
+        if (autoBackfillPagesRef.current >= FLOW_MAX_AUTO_BACKFILL_PAGES) return;
 
         // A filtered view should not depend on the user reaching an empty
-        // scrollbar to discover older matches. Fetch one bounded 500-row page
-        // at a time until we have 50 matches or the durable feed ends.
+        // scrollbar to discover older matches. Fetch up to two bounded
+        // 500-row pages so sparse filters do not chain through the full feed.
+        autoBackfillPagesRef.current += 1;
         loadMore(FLOW_BACKFILL_PAGE_SIZE, false);
     }, [filter, filteredItems.length, hasMore, items, loading, loadingMore, loadMore]);
 

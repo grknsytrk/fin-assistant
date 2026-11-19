@@ -73,7 +73,10 @@ const fundCategoriesInFlight = new Map<string, Promise<FundCategoriesResponse>>(
 const fundDetailMemoryCache = new BoundedMemoryCache<string, { payload: FundDetail; fetchedAt: number }>(64);
 const fundDetailInFlight = new Map<string, Promise<FundDetail>>();
 const fundYieldSummaryMemoryCache = new BoundedMemoryCache<string, { payload: FundYieldSummaryResponse; fetchedAt: number }>(64);
+const fundYieldSummaryInFlight = new Map<string, Promise<FundYieldSummaryResponse>>();
 const fundPerformanceMemoryCache = new BoundedMemoryCache<string, { payload: FundPerformanceResponse; fetchedAt: number }>(64);
+const fundPerformanceInFlight = new Map<string, Promise<FundPerformanceResponse>>();
+let kapCompaniesInFlight: Promise<KapCompaniesResponse> | null = null;
 const fundAllocationsMemoryCache = new BoundedMemoryCache<string, { payload: FundAllocationsResponse; fetchedAt: number }>(64);
 const fundAllocationsInFlight = new Map<string, Promise<FundAllocationsResponse>>();
 const fundAllocationsHistoryMemoryCache = new BoundedMemoryCache<string, { payload: FundAllocationsHistoryResponse; fetchedAt: number }>(64);
@@ -238,13 +241,14 @@ function applyMarketStocksDeltaInternal(
             const conditionalUpdates: Array<[string, { etag: string; payload: unknown; fetchedAt: number }]> = [];
             for (const [url, conditionalEntry] of conditionalGetMemoryCache) {
                 try {
-                    const parsedUrl = new URL(url);
+                    const baseOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
+                    const parsedUrl = new URL(url, baseOrigin);
                     const cachedIndex = parsedUrl.searchParams.get('index') || 'XUTUM';
-                    if (parsedUrl.pathname === '/market/stocks' && cachedIndex === targetIndex) {
+                    if (parsedUrl.pathname.endsWith('/market/stocks') && cachedIndex === targetIndex) {
                         conditionalUpdates.push([url, { ...conditionalEntry, payload: nextPayload, fetchedAt: now }]);
                     }
                 } catch {
-                    // Ignore malformed cache keys; normal API URLs are absolute.
+                    // Ignore malformed cache keys.
                 }
             }
             for (const [url, entry] of conditionalUpdates) storeConditionalGetEntry(url, entry);
@@ -1200,16 +1204,30 @@ export const apiClient = {
         if (cached && Date.now() - cached.fetchedAt < FUND_DETAIL_MEMORY_CACHE_TTL_MS && !options?.signal?.aborted) {
             return Promise.resolve(cached.payload);
         }
-        return fetchFundResponse<FundYieldSummaryResponse>(`/funds/${encodeURIComponent(normalizedCode)}/yield-summary`, {
+        if (!options?.signal) {
+            const existingRequest = fundYieldSummaryInFlight.get(normalizedCode);
+            if (existingRequest) return existingRequest;
+        }
+        const request = fetchFundResponse<FundYieldSummaryResponse>(`/funds/${encodeURIComponent(normalizedCode)}/yield-summary`, {
             signal: options?.signal,
             timeoutMs: 30000,
             exposeErrorDetail: true,
-        }).then((payload) => {
-            if (payload.status !== 'pending' && payload.status !== 'unavailable') {
-                fundYieldSummaryMemoryCache.set(normalizedCode, { payload, fetchedAt: Date.now() });
-            }
-            return payload;
-        });
+        })
+            .then((payload) => {
+                if (payload.status !== 'pending' && payload.status !== 'unavailable') {
+                    fundYieldSummaryMemoryCache.set(normalizedCode, { payload, fetchedAt: Date.now() });
+                }
+                return payload;
+            })
+            .finally(() => {
+                if (!options?.signal && fundYieldSummaryInFlight.get(normalizedCode) === request) {
+                    fundYieldSummaryInFlight.delete(normalizedCode);
+                }
+            });
+        if (!options?.signal) {
+            fundYieldSummaryInFlight.set(normalizedCode, request);
+        }
+        return request;
     },
     fundPerformance: (fundCode: string, options?: { startDate?: string; endDate?: string; refresh?: boolean; signal?: AbortSignal }) => {
         const normalizedCode = fundCode.trim().toUpperCase();
@@ -1225,15 +1243,30 @@ export const apiClient = {
                 return Promise.resolve(cached.payload);
             }
         }
-        return fetchApi<FundPerformanceResponse>(
+        const canDedupe = !options?.refresh && !options?.signal;
+        if (canDedupe) {
+            const existingRequest = fundPerformanceInFlight.get(cacheKey);
+            if (existingRequest) return existingRequest;
+        }
+        const request = fetchApi<FundPerformanceResponse>(
             `/funds/${encodeURIComponent(normalizedCode)}/performance${query ? `?${query}` : ''}`,
             { signal: options?.signal },
-        ).then((payload) => {
-            if (!payload.stale && payload.status !== 'pending' && payload.status !== 'unavailable') {
-                fundPerformanceMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
-            }
-            return payload;
-        });
+        )
+            .then((payload) => {
+                if (!payload.stale && payload.status !== 'pending' && payload.status !== 'unavailable') {
+                    fundPerformanceMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
+                }
+                return payload;
+            })
+            .finally(() => {
+                if (canDedupe && fundPerformanceInFlight.get(cacheKey) === request) {
+                    fundPerformanceInFlight.delete(cacheKey);
+                }
+            });
+        if (canDedupe) {
+            fundPerformanceInFlight.set(cacheKey, request);
+        }
+        return request;
     },
     fundPerformanceStatus: (fundCode: string, options?: { startDate?: string; endDate?: string }) => {
         const params = new URLSearchParams();
@@ -1302,7 +1335,15 @@ export const apiClient = {
         return request;
     },
 
-    kapCompanies: () => fetchApi<KapCompaniesResponse>('/kap/companies', { credentials: 'omit' }),
+    kapCompanies: () => {
+        if (kapCompaniesInFlight) return kapCompaniesInFlight;
+        const request = fetchApi<KapCompaniesResponse>('/kap/companies', { credentials: 'omit' })
+            .finally(() => {
+                if (kapCompaniesInFlight === request) kapCompaniesInFlight = null;
+            });
+        kapCompaniesInFlight = request;
+        return request;
+    },
 
     kapSnapshot: async (company: string, refresh = false, maxQuarters = 10, signal?: AbortSignal) => {
         const params = new URLSearchParams({ company, max_quarters: String(maxQuarters) });

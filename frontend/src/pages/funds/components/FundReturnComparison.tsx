@@ -102,7 +102,7 @@ export function useFundComparisonState({
     }, [selectedFundCode]);
 
     useEffect(() => {
-        if (!selectedFundCode) return;
+        if (!selectedFundCode || !searchOpen) return;
         let alive = true;
         setIndicesLoading(true);
         setFxLoading(true);
@@ -121,7 +121,7 @@ export function useFundComparisonState({
         return () => {
             alive = false;
         };
-    }, [selectedFundCode]);
+    }, [searchOpen, selectedFundCode]);
 
     const openSearch = useCallback((surface: FundComparisonControlSurface = 'returns') => {
         setSearchSurface(surface);

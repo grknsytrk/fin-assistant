@@ -143,8 +143,8 @@ describe('request wait budget', () => {
         }));
         vi.stubGlobal('fetch', fetch);
         const result = expect(apiClient.health()).rejects.toThrow('suresi');
-        await vi.advanceTimersByTimeAsync(15001); await result;
-        expect(fetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(32000); await result;
+        expect(fetch).toHaveBeenCalledTimes(2);
     });
     it('cancels snapshot retries when leaving the page', async () => {
         vi.useFakeTimers();

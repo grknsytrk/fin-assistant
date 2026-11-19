@@ -118,6 +118,7 @@ export default function HistoricalMultiplesChart({
     }, [history, onHistoryChange]);
 
     useEffect(() => {
+        const MAX_ATTEMPTS = 5;
         const controller = new AbortController();
         let timer: number | undefined;
         let attempts = 0;
@@ -149,19 +150,30 @@ export default function HistoricalMultiplesChart({
                 setHistory(response);
                 setRequestError(response.error || 'Tarihsel çarpanlar alınamadı.');
                 attempts += 1;
+                if (attempts >= MAX_ATTEMPTS || document.visibilityState !== 'visible') {
+                    setLoading(false);
+                    return;
+                }
                 setLoading(Boolean(response.pending));
                 const delay = response.pending ? Math.min(15000, 1500 + attempts * 1500) : 60000;
                 timer = window.setTimeout(() => {
-                    if (controller.signal.aborted) return;
+                    if (controller.signal.aborted || document.visibilityState !== 'visible') return;
                     setLoading(true);
                     void loadHistory();
                 }, delay);
             } catch (error) {
                 if (controller.signal.aborted) return;
                 setRequestError(error instanceof Error ? error.message : 'Tarihsel çarpanlar alınamadı.');
-                setLoading(true);
                 attempts += 1;
-                timer = window.setTimeout(loadHistory, Math.min(15000, 1500 + attempts * 1500));
+                if (attempts >= MAX_ATTEMPTS || document.visibilityState !== 'visible') {
+                    setLoading(false);
+                    return;
+                }
+                setLoading(true);
+                timer = window.setTimeout(() => {
+                    if (controller.signal.aborted || document.visibilityState !== 'visible') return;
+                    void loadHistory();
+                }, Math.min(15000, 1500 + attempts * 1500));
             }
         };
 

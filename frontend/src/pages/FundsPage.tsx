@@ -496,6 +496,10 @@ export default function FundsPage({
         let continuePolling = true;
 
         const schedule = () => {
+            if (timer !== null) {
+                window.clearTimeout(timer);
+                timer = null;
+            }
             if (alive && continuePolling) timer = window.setTimeout(poll, 5000);
         };
         const poll = async () => {
@@ -710,6 +714,10 @@ export default function FundsPage({
         let timer: number | null = null;
         let alive = true;
         const schedule = (delay: number) => {
+            if (timer !== null) {
+                window.clearTimeout(timer);
+                timer = null;
+            }
             if (alive) timer = window.setTimeout(refreshVisibleHoldings, delay);
         };
         const refreshVisibleHoldings = async () => {

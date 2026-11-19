@@ -140,7 +140,7 @@ async function refreshKapFlow(controller: ScheduledController, env: Env): Promis
     const refreshPath = resolveScheduledRefreshPath(controller.cron, controller.scheduledTime);
     if (!refreshPath) {
         console.log(JSON.stringify({
-            message: "Skipping 1-minute fast refresh on 5-minute boundary to yield to deep refresh",
+            message: "Skipping scheduled KAP refresh",
             cron: controller.cron,
             scheduledTime: controller.scheduledTime,
         }));

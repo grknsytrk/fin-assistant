@@ -45,6 +45,7 @@ const STOCK_DETAIL_TABS: Array<{ key: StockTab; label: string; icon: typeof Info
 ];
 const FIVE_YEAR_KAP_QUARTER_COUNT = 20;
 const FULL_KAP_QUARTER_COUNT = 44;
+const MAX_SNAPSHOT_POLL_ATTEMPTS = 10;
 
 function formatAsOf(value?: string | null): string {
     if (!value) return 'Veri güncelleniyor';
@@ -708,11 +709,15 @@ export default function StockDetailPage({
         const controller = new AbortController();
         let timer: number | undefined;
         const cached = cachedKapSnapshot(ticker);
+        const cachedHasPendingRefresh = Boolean(cached?.pending || cached?.refresh_pending);
+        const cachedHasFullDepth = Boolean(
+            cached?.ok && cached.quarters.length >= FULL_KAP_QUARTER_COUNT && !cachedHasPendingRefresh,
+        );
         setSnapshot(cached);
         setQuarters(cached ? prepareOrderedQuarters(cached) : []);
         setError(null);
         setLoading(!cached);
-        setHistoryLoading(Boolean(cached && cached.quarters.length < FULL_KAP_QUARTER_COUNT));
+        setHistoryLoading(Boolean(cached && !cachedHasFullDepth && cached.quarters.length < FULL_KAP_QUARTER_COUNT));
         const started = performance.now();
         let displayed = Boolean(cached);
         let displayedQuarterCount = cached?.quarters.length || 0;
@@ -762,7 +767,7 @@ export default function StockDetailPage({
                     attempts = 0;
                     setHistoryLoading(true);
                     timer = window.setTimeout(() => void load(FULL_KAP_QUARTER_COUNT), 300);
-                } else if (refreshPending || (depth >= FIVE_YEAR_KAP_QUARTER_COUNT && !hasRequestedDepth)) {
+                } else if (refreshPending && attempts < MAX_SNAPSHOT_POLL_ATTEMPTS) {
                     attempts += 1;
                     setHistoryLoading(displayed);
                     timer = window.setTimeout(() => void load(depth), Math.min(30000, 1000 + attempts * 1000));
@@ -771,7 +776,10 @@ export default function StockDetailPage({
                     setHistoryLoading(false);
                     if (!displayed) {
                         setError(data.error || 'Finansal verilere şu an ulaşılamıyor. Bağlantı otomatik kontrol ediliyor.');
-                        timer = window.setTimeout(() => void load(depth), 15000);
+                        if (attempts < MAX_SNAPSHOT_POLL_ATTEMPTS) {
+                            attempts += 1;
+                            timer = window.setTimeout(() => void load(depth), 15000);
+                        }
                     }
                 }
             } catch (err) {
@@ -779,10 +787,18 @@ export default function StockDetailPage({
                 setLoading(false);
                 setHistoryLoading(false);
                 setError(err instanceof Error ? err.message : 'Veri alınamadı');
-                timer = window.setTimeout(() => void load(depth), 15000);
+                if (attempts < MAX_SNAPSHOT_POLL_ATTEMPTS) {
+                    attempts += 1;
+                    timer = window.setTimeout(() => void load(depth), 15000);
+                }
             }
         };
-        void load(5);
+        if (!cachedHasFullDepth) {
+            const initialDepth = cached?.ok && !cachedHasPendingRefresh && cached.quarters.length >= FIVE_YEAR_KAP_QUARTER_COUNT
+                ? FULL_KAP_QUARTER_COUNT
+                : 5;
+            void load(initialDepth);
+        }
         return () => { controller.abort(); window.clearTimeout(timer); };
     }, [ticker]);
 

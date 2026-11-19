@@ -22,8 +22,16 @@ describe('Worker edge cache routing', () => {
             .toBe('market-stocks');
         expect(getCacheableListRoute(new URL('https://fin-rag.example/api/funds?sort=name')))
             .toBe('funds');
+        expect(getCacheableListRoute(new URL('https://fin-rag.example/api/funds/categories')))
+            .toBe('funds-categories');
+        expect(getCacheableListRoute(new URL('https://fin-rag.example/api/market/flow?limit=50')))
+            .toBe('market-flow');
         expect(getCacheableListRoute(new URL('https://fin-rag.example/api/market/flow/head')))
             .toBe('market-flow-head');
+        expect(getCacheableListRoute(new URL('https://fin-rag.example/api/market/indices')))
+            .toBe('market-indices');
+        expect(getCacheableListRoute(new URL('https://fin-rag.example/api/market/watch/unified')))
+            .toBe('market-watch-unified');
         expect(getCacheableListRoute(new URL('https://fin-rag.example/api/kap/companies')))
             .toBe('kap-companies');
         expect(getCacheableListRoute(new URL('https://fin-rag.example/api/funds/search?q=bank')))
@@ -93,8 +101,16 @@ describe('Worker edge cache policies', () => {
 
         expect(cacheControlForListRequest(makeRequest('/api/funds?sort=name')))
             .toBe('public, max-age=300, stale-while-revalidate=3600, stale-if-error=0');
+        expect(cacheControlForListRequest(makeRequest('/api/funds/categories')))
+            .toBe('public, max-age=3600, stale-while-revalidate=86400, stale-if-error=0');
+        expect(cacheControlForListRequest(makeRequest('/api/market/flow?limit=50')))
+            .toBe('public, max-age=20, stale-while-revalidate=30, stale-if-error=0');
         expect(cacheControlForListRequest(makeRequest('/api/market/flow/head')))
-            .toBe('public, max-age=10, stale-while-revalidate=10, stale-if-error=0');
+            .toBe('public, max-age=30, stale-while-revalidate=30, stale-if-error=0');
+        expect(cacheControlForListRequest(makeRequest('/api/market/indices')))
+            .toBe('public, max-age=20, stale-while-revalidate=30, stale-if-error=0');
+        expect(cacheControlForListRequest(makeRequest('/api/market/watch/unified')))
+            .toBe('public, max-age=20, stale-while-revalidate=30, stale-if-error=0');
         expect(cacheControlForListRequest(makeRequest('/api/kap/companies')))
             .toBe('public, max-age=3600, stale-while-revalidate=86400, stale-if-error=0');
     });
@@ -190,7 +206,7 @@ describe('Worker edge cache policies', () => {
             'market-flow-head',
         );
         expect(flowResponse.headers.get('Cloudflare-CDN-Cache-Control'))
-            .toBe('public, max-age=10, stale-while-revalidate=10, stale-if-error=0');
+            .toBe('public, max-age=30, stale-while-revalidate=30, stale-if-error=0');
         expect(flowResponse.headers.get('Cache-Tag')).toBe('market-flow-head');
 
         const kapRequest = makeRequest('/api/kap/companies');
@@ -273,7 +289,7 @@ describe('Worker edge cache policies', () => {
                 'market-flow-head',
             );
             expect(response.headers.get('Cloudflare-CDN-Cache-Control'))
-                .toBe('public, max-age=10, stale-while-revalidate=10, stale-if-error=0');
+                .toBe('public, max-age=30, stale-while-revalidate=30, stale-if-error=0');
             expect(response.headers.get('Cache-Tag')).toBe('market-flow-head');
         }
     });

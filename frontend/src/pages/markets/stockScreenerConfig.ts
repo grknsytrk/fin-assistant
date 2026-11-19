@@ -237,11 +237,11 @@ export const MAX_STOCK_CARDS = 12;
 export const STOCK_CARD_INITIAL_BATCH_SIZE = 3;
 export const STOCK_CARD_BACKGROUND_BATCH_SIZE = 3;
 export const STOCK_CARD_BACKGROUND_DELAY_MS = 120;
-export const MARKET_QUOTE_REFRESH_MS = 3000;
+export const MARKET_QUOTE_REFRESH_MS = 10_000;
 export const MARKET_LIST_REFRESH_DESKTOP_MS = MARKET_QUOTE_REFRESH_MS;
 export const MARKET_LIST_REFRESH_MOBILE_MS = MARKET_QUOTE_REFRESH_MS;
-export const MARKET_DETAIL_REFRESH_DESKTOP_MS = 15000;
-export const MARKET_DETAIL_REFRESH_MOBILE_MS = 30000;
+export const MARKET_DETAIL_REFRESH_DESKTOP_MS = 60_000;
+export const MARKET_DETAIL_REFRESH_MOBILE_MS = 60_000;
 
 export const STOCK_CARD_CHART_RANGES: Array<{ id: MarketStockCardChartRange; label: string; title: string }> = [
     { id: '1d', label: 'G', title: 'Gün içi' },

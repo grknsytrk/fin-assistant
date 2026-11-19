@@ -432,12 +432,12 @@ export default function MarketsView({
         if (activeSection !== 'markets') return;
         loadStats();
         const intervalId = window.setInterval(() => {
-            if (document.visibilityState === 'visible') {
+            if (document.visibilityState === 'visible' && isBistTradingHours()) {
                 loadStats(true);
             }
         }, 5 * 60 * 1000);
         const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible') loadStats(true);
+            if (document.visibilityState === 'visible' && isBistTradingHours()) loadStats(true);
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
@@ -521,7 +521,7 @@ export default function MarketsView({
                 ? [initialBatch, ...splitStockCardBatches(symbols.slice(STOCK_CARD_INITIAL_BATCH_SIZE), STOCK_CARD_BACKGROUND_BATCH_SIZE)]
                 : [];
         };
-        const loadBatches = async (symbols: string[], includeFull = true) => {
+        const loadBatches = async (symbols: string[], includeFull = true, includeQuick = true) => {
             if (includeFull ? detailBatchesLoading : quoteBatchesLoading) return;
             const batches = includeFull
                 ? buildBatches(symbols)
@@ -538,7 +538,9 @@ export default function MarketsView({
                         });
                         if (controller.signal.aborted) return;
                     }
-                    await loadStockCards(includeFull && (index > 0 || Boolean(cached)), false, batch, controller.signal, 'quick');
+                    if (includeQuick) {
+                        await loadStockCards(includeFull && (index > 0 || Boolean(cached)), false, batch, controller.signal, 'quick');
+                    }
                     if (includeFull) {
                         await loadStockCards(true, false, batch, controller.signal, 'full');
                     }
@@ -554,11 +556,11 @@ export default function MarketsView({
         void loadBatches(initialSymbols);
         const intervalId = window.setInterval(() => {
             if (document.visibilityState !== 'visible' || !isBistTradingHours()) return;
-            void loadBatches(stockCardSymbols, true);
+            void loadBatches(stockCardSymbols, true, false);
         }, marketDetailRefreshMs);
         const quoteIntervalId = window.setInterval(() => {
             if (document.visibilityState !== 'visible' || !isBistTradingHours()) return;
-            void loadBatches(stockCardSymbols, false);
+            void loadBatches(stockCardSymbols, false, true);
         }, MARKET_QUOTE_REFRESH_MS);
         const onVisibilityChange = () => {
             if (document.visibilityState === 'visible' && isBistTradingHours()) {

@@ -1,12 +1,13 @@
 import type { FundSummary } from '../api/types';
 import { apiClient } from '../api/client';
+import { BoundedMemoryCache } from './lruCache';
 
 const WATCHLIST_FUND_CACHE_TTL_MS = 60_000;
 const WATCHLIST_FUND_SEARCH_CACHE_TTL_MS = 5 * 60_000;
 
-const watchlistFundCache = new Map<string, { data: FundSummary; fetchedAt: number }>();
+const watchlistFundCache = new BoundedMemoryCache<string, { data: FundSummary; fetchedAt: number }>({ maxEntries: 64 });
 const watchlistFundInFlight = new Map<string, Promise<FundSummary>>();
-const watchlistFundSearchCache = new Map<string, { data: FundSummary[]; fetchedAt: number }>();
+const watchlistFundSearchCache = new BoundedMemoryCache<string, { data: FundSummary[]; fetchedAt: number }>({ maxEntries: 64 });
 const watchlistFundSearchInFlight = new Map<string, Promise<FundSummary[]>>();
 
 export function getCachedWatchlistFund(code: string): FundSummary | null {

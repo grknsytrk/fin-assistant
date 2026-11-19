@@ -3,12 +3,24 @@ import { isBistTradingHours } from "../frontend/src/utils/marketHours";
 export const API_PREFIX = "/api";
 export const MARKET_STOCKS_PATH = `${API_PREFIX}/market/stocks`;
 export const FUNDS_LIST_PATH = `${API_PREFIX}/funds`;
+export const FUNDS_CATEGORIES_PATH = `${API_PREFIX}/funds/categories`;
+export const MARKET_FLOW_PATH = `${API_PREFIX}/market/flow`;
 export const MARKET_FLOW_HEAD_PATH = `${API_PREFIX}/market/flow/head`;
+export const MARKET_INDICES_PATH = `${API_PREFIX}/market/indices`;
+export const MARKET_WATCH_UNIFIED_PATH = `${API_PREFIX}/market/watch/unified`;
 export const KAP_COMPANIES_PATH = `${API_PREFIX}/kap/companies`;
 const EDGE_HOST_QUERY_PARAM = "__finrag_edge_host";
-const MAX_MARKET_CACHE_AGE_SECONDS = 300;
+const MAX_MARKET_CACHE_AGE_SECONDS = 3600;
 
-export type CacheableListRoute = "market-stocks" | "funds" | "market-flow-head" | "kap-companies";
+export type CacheableListRoute =
+    | "market-stocks"
+    | "funds"
+    | "funds-categories"
+    | "market-flow"
+    | "market-flow-head"
+    | "market-indices"
+    | "market-watch-unified"
+    | "kap-companies";
 
 interface IstanbulDateParts {
     year: number;
@@ -116,7 +128,11 @@ function secondsUntilNextBistSession(now: Date): number {
 export function getCacheableListRoute(url: URL): CacheableListRoute | null {
     if (url.pathname === MARKET_STOCKS_PATH) return "market-stocks";
     if (url.pathname === FUNDS_LIST_PATH) return "funds";
+    if (url.pathname === FUNDS_CATEGORIES_PATH) return "funds-categories";
+    if (url.pathname === MARKET_FLOW_PATH) return "market-flow";
     if (url.pathname === MARKET_FLOW_HEAD_PATH) return "market-flow-head";
+    if (url.pathname === MARKET_INDICES_PATH) return "market-indices";
+    if (url.pathname === MARKET_WATCH_UNIFIED_PATH) return "market-watch-unified";
     if (url.pathname === KAP_COMPANIES_PATH) return "kap-companies";
     return null;
 }
@@ -129,7 +145,8 @@ export function isMarketRefreshRequest(url: URL): boolean {
 export function shouldUseCachedList(request: Request): boolean {
     const url = new URL(request.url);
     const route = getCacheableListRoute(url);
-    if (request.method !== "GET" || !route || isMarketRefreshRequest(url)) return false;
+    const hasRefreshParam = url.searchParams.getAll("refresh").some((value) => value.trim().toLowerCase() === "true");
+    if (request.method !== "GET" || !route || hasRefreshParam) return false;
     if (request.headers.has("Authorization") || request.headers.has("Cookie")) return false;
 
     const requestOrigin = request.headers.get("Origin");
@@ -158,7 +175,11 @@ export function marketStocksCacheTag(requestUrl: URL): string {
 
 export function cacheTagsForList(route: CacheableListRoute, requestUrl: URL): string[] {
     if (route === "funds") return ["funds-list"];
+    if (route === "funds-categories") return ["funds-categories"];
+    if (route === "market-flow") return ["market-flow"];
     if (route === "market-flow-head") return ["market-flow-head"];
+    if (route === "market-indices") return ["market-indices"];
+    if (route === "market-watch-unified") return ["market-watch-unified"];
     if (route === "kap-companies") return ["kap-companies"];
     return ["market-stocks", marketStocksCacheTag(requestUrl)];
 }
@@ -202,11 +223,23 @@ export function cacheControlForListRequest(request: Request, now: Date = new Dat
     if (route === "funds") {
         return "public, max-age=300, stale-while-revalidate=3600, stale-if-error=0";
     }
+    if (route === "funds-categories") {
+        return "public, max-age=3600, stale-while-revalidate=86400, stale-if-error=0";
+    }
+    if (route === "market-flow") {
+        return "public, max-age=20, stale-while-revalidate=30, stale-if-error=0";
+    }
     if (route === "market-flow-head") {
         // The KAP flow is refreshed by cron once per minute, and the panel
-        // polls every 5s. A 10s edge TTL is the smallest value that can serve
-        // at least every other poll for a single client.
-        return "public, max-age=10, stale-while-revalidate=10, stale-if-error=0";
+        // polls every 15s during market hours. A 30s edge TTL absorbs bursty
+        // head checks across clients.
+        return "public, max-age=30, stale-while-revalidate=30, stale-if-error=0";
+    }
+    if (route === "market-indices") {
+        return "public, max-age=20, stale-while-revalidate=30, stale-if-error=0";
+    }
+    if (route === "market-watch-unified") {
+        return "public, max-age=20, stale-while-revalidate=30, stale-if-error=0";
     }
     if (route === "kap-companies") {
         return "public, max-age=3600, stale-while-revalidate=86400, stale-if-error=0";
@@ -247,13 +280,21 @@ export async function isCacheableListResponse(
     if (payload.pending === true || payload.degraded === true || payload.stale === true) {
         return false;
     }
-    if (route === "funds" && status && status !== "ok") return false;
+    if ((route === "funds" || route === "funds-categories") && status && status !== "ok") return false;
+    if (route === "market-flow" && !Array.isArray(payload.items)) return false;
     if (route === "market-flow-head") {
         const refreshStatus = String(payload.refresh_status || "").trim().toLowerCase();
         if (["empty", "error", "failed", "unavailable"].includes(refreshStatus)) return false;
         if (!payload.latest_cursor) return false;
     }
     if (route === "market-stocks" && Array.isArray(payload.rows) && payload.rows.length === 0) return false;
+    if (route === "market-indices" && Array.isArray(payload.rows) && payload.rows.length === 0) return false;
+    if (route === "market-watch-unified") {
+        const total = (Array.isArray(payload.indices) ? payload.indices.length : 0)
+            + (Array.isArray(payload.fx) ? payload.fx.length : 0)
+            + (Array.isArray(payload.commodities) ? payload.commodities.length : 0);
+        if (total === 0) return false;
+    }
     if (route === "kap-companies" && (!Array.isArray(payload.companies) || payload.companies.length === 0)) return false;
     return true;
 }
