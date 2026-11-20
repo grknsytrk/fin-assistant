@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import atexit
 import concurrent.futures
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -167,15 +169,26 @@ def _fintables_curl_cffi_payload(
     except Exception as exc:
         raise fs.FintablesUpstreamError(f"{context}: curl_cffi fallback is unavailable") from exc
 
+    use_direct_get = not getattr(curl_requests.get, "__module__", "").startswith("curl_cffi")
     try:
-        response = curl_requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=timeout_seconds,
-            allow_redirects=True,
-            impersonate="chrome131",
-        )
+        if use_direct_get:
+            response = curl_requests.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=timeout_seconds,
+                allow_redirects=True,
+                impersonate="chrome131",
+            )
+        else:
+            session = fs._get_fintables_curl_cffi_session()
+            response = session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=timeout_seconds,
+                allow_redirects=True,
+            )
     except Exception as exc:
         raise fs.FintablesUpstreamError(f"{context}: curl_cffi fallback failed: {exc}") from exc
     return _seam("_decode_fintables_json_response")(
@@ -452,54 +465,110 @@ class FintablesClient:
 
     def _get_json(self, endpoint: str, *, params: Dict[str, Any], fund_code: str, context: str) -> Dict[str, Any]:
         fs = _fund_service()
-        try:
+        proxy_configured = bool(fs.FINTABLES_PROXY_BASE_URL and fs.FINTABLES_PROXY_TOKEN)
+
+        def _run_direct() -> Dict[str, Any]:
             client = fs._get_fintables_client(self.timeout_seconds)
             headers = self._headers(fund_code)
             try:
-                response = client.get(endpoint, params=params, headers=headers, timeout=self.timeout_seconds)
-            except fs.httpx.RemoteProtocolError:
-                response = client.get(endpoint, params=params, headers=headers, timeout=self.timeout_seconds)
+                try:
+                    response = client.get(endpoint, params=params, headers=headers, timeout=self.timeout_seconds)
+                except fs.httpx.RemoteProtocolError:
+                    response = client.get(endpoint, params=params, headers=headers, timeout=self.timeout_seconds)
+            except (fs.httpx.TimeoutException, fs.httpx.ConnectError) as exc:
+                if fs.FINTABLES_CURL_FALLBACK_ENABLED:
+                    raise fs.FintablesUpstreamError(
+                        f"{context}: {fs.FINTABLES_GATE_BLOCKED_MESSAGE} ({exc})"
+                    ) from exc
+                raise
+            finally:
+                if client is not fs._FINTABLES_CLIENT:
+                    _close_ephemeral_client(client)
             return _seam("_decode_fintables_json_response")(
                 response.status_code,
                 dict(response.headers),
                 response.content,
                 context=context,
             )
+
+        def _run_curl(curl_headers: Dict[str, str]) -> Dict[str, Any]:
+            return _seam("_fintables_curl_payload")(
+                endpoint,
+                params=params,
+                headers=curl_headers,
+                timeout_seconds=self.timeout_seconds,
+                context=context,
+            )
+
+        def _run_curl_cffi(curl_headers: Dict[str, str]) -> Dict[str, Any]:
+            return _seam("_fintables_curl_cffi_payload")(
+                endpoint,
+                params=params,
+                headers=curl_headers,
+                timeout_seconds=self.timeout_seconds,
+                context=context,
+            )
+
+        def _run_proxy() -> Dict[str, Any]:
+            return _seam("_fintables_proxy_payload")(
+                endpoint,
+                params=params,
+                timeout_seconds=self.timeout_seconds,
+                context=context,
+            )
+
+        tried: set[str] = set()
+        prior_errors: Dict[str, Exception] = {}
+
+        if fs.FINTABLES_CURL_FALLBACK_ENABLED:
+            sticky = fs._get_fintables_sticky_transport()
+            if sticky == "proxy" and proxy_configured:
+                try:
+                    return _run_proxy()
+                except fs.FintablesUpstreamError as exc:
+                    fs._clear_fintables_sticky_transport()
+                    tried.add("proxy")
+                    prior_errors["proxy"] = exc
+            elif sticky == "curl_cffi":
+                try:
+                    return _run_curl_cffi(self._curl_headers(fund_code))
+                except fs.FintablesUpstreamError as exc:
+                    fs._clear_fintables_sticky_transport()
+                    tried.add("curl_cffi")
+                    prior_errors["curl_cffi"] = exc
+            elif sticky == "curl":
+                try:
+                    return _run_curl(self._curl_headers(fund_code))
+                except fs.FintablesUpstreamError as exc:
+                    fs._clear_fintables_sticky_transport()
+                    tried.add("curl")
+                    prior_errors["curl"] = exc
+
+        try:
+            return _run_direct()
         except fs.FintablesUpstreamError as exc:
             if not fs.FINTABLES_CURL_FALLBACK_ENABLED or fs.FINTABLES_GATE_BLOCKED_MESSAGE not in str(exc):
                 raise
             curl_headers = self._curl_headers(fund_code)
-            try:
-                return _seam("_fintables_curl_payload")(
-                    endpoint,
-                    params=params,
-                    headers=curl_headers,
-                    timeout_seconds=self.timeout_seconds,
-                    context=context,
-                )
-            except fs.FintablesUpstreamError as curl_exc:
+            candidates: List[Tuple[str, Callable[[], Dict[str, Any]]]] = [
+                ("curl", lambda: _run_curl(curl_headers)),
+                ("curl_cffi", lambda: _run_curl_cffi(curl_headers)),
+            ]
+            if proxy_configured:
+                candidates.append(("proxy", _run_proxy))
+            errors: List[Exception] = []
+            for transport_name, runner in candidates:
+                if transport_name in tried:
+                    errors.append(prior_errors[transport_name])
+                    continue
                 try:
-                    return _seam("_fintables_curl_cffi_payload")(
-                        endpoint,
-                        params=params,
-                        headers=curl_headers,
-                        timeout_seconds=self.timeout_seconds,
-                        context=context,
-                    )
-                except fs.FintablesUpstreamError as cffi_exc:
-                    if fs.FINTABLES_PROXY_BASE_URL and fs.FINTABLES_PROXY_TOKEN:
-                        try:
-                            return _seam("_fintables_proxy_payload")(
-                                endpoint,
-                                params=params,
-                                timeout_seconds=self.timeout_seconds,
-                                context=context,
-                            )
-                        except fs.FintablesUpstreamError as proxy_exc:
-                            raise fs.FintablesUpstreamError(
-                                f"{curl_exc}; {cffi_exc}; {proxy_exc}"
-                            ) from proxy_exc
-                    raise fs.FintablesUpstreamError(f"{curl_exc}; {cffi_exc}") from cffi_exc
+                    payload = runner()
+                except fs.FintablesUpstreamError as fb_exc:
+                    errors.append(fb_exc)
+                    continue
+                fs._set_fintables_sticky_transport(transport_name)
+                return payload
+            raise fs.FintablesUpstreamError("; ".join(str(err) for err in errors)) from errors[-1]
 
     def fetch_udf_history(self, fund_code: str, start_date: date, end_date: date) -> List[Dict[str, Any]]:
         fs = _fund_service()
@@ -1772,6 +1841,111 @@ class TefasFonClient:
         }
 
 
+def _close_ephemeral_client(client: Any) -> None:
+    close_fn = getattr(client, "close", None)
+    if callable(close_fn):
+        try:
+            close_fn()
+        except Exception:
+            pass
+
+
+class _TefasPacer:
+    """Bounded concurrency semaphore + adaptive inter-request gate for TEFAS upstream requests."""
+
+    def __init__(
+        self,
+        *,
+        max_concurrency: int = 3,
+        min_interval_seconds: float = 0.25,
+        max_interval_seconds: float = 2.0,
+    ) -> None:
+        capacity = max(1, int(max_concurrency))
+        base = max(0.0, float(min_interval_seconds))
+        ceiling = max(base, float(max_interval_seconds))
+        self._max_concurrency = capacity
+        self._base_interval = base
+        self._max_interval = ceiling
+        self._current_interval = base
+        self._semaphore = threading.BoundedSemaphore(capacity)
+        self._state_lock = threading.Lock()
+        self._next_allowed_at = 0.0
+        self._rate_limit_hits = 0
+        self._success_count = 0
+        self._active_slots = 0
+        self._peak_concurrency = 0
+
+    def acquire_pace_delay(self, *, bypass: bool = False) -> float:
+        if bypass:
+            return 0.0
+        with self._state_lock:
+            interval = self._current_interval
+            if interval <= 0:
+                return 0.0
+            now = time.monotonic()
+            wait = max(0.0, self._next_allowed_at - now)
+            self._next_allowed_at = max(now, self._next_allowed_at) + interval
+        if wait > 0:
+            time.sleep(wait)
+        return wait
+
+    @contextlib.contextmanager
+    def slot(self, *, bypass_delay: bool = False):
+        self._semaphore.acquire()
+        with self._state_lock:
+            self._active_slots += 1
+            if self._active_slots > self._peak_concurrency:
+                self._peak_concurrency = self._active_slots
+        try:
+            self.acquire_pace_delay(bypass=bypass_delay)
+            yield
+        finally:
+            with self._state_lock:
+                self._active_slots = max(0, self._active_slots - 1)
+            self._semaphore.release()
+
+    def record_rate_limit(self, retry_after_seconds: Optional[float] = None) -> None:
+        fs = _fund_service()
+        cap = max(0.0, float(getattr(fs, "TEFAS_HTTP_RETRY_AFTER_MAX_SECONDS", 300.0)))
+        with self._state_lock:
+            self._rate_limit_hits += 1
+            self._current_interval = min(
+                self._max_interval,
+                max(self._base_interval, self._current_interval, 0.05) * 2.0,
+            )
+            pushback = self._current_interval
+            if retry_after_seconds is not None and retry_after_seconds > 0:
+                pushback = max(pushback, min(float(retry_after_seconds), cap))
+            self._next_allowed_at = max(self._next_allowed_at, time.monotonic() + pushback)
+
+    def record_success(self) -> None:
+        with self._state_lock:
+            self._success_count += 1
+            if self._current_interval > self._base_interval:
+                self._current_interval = max(self._base_interval, self._current_interval * 0.85)
+
+    def reset(self) -> None:
+        with self._state_lock:
+            self._current_interval = self._base_interval
+            self._next_allowed_at = 0.0
+            self._rate_limit_hits = 0
+            self._success_count = 0
+            self._peak_concurrency = 0
+
+    def stats(self) -> Dict[str, Any]:
+        with self._state_lock:
+            return {
+                "max_concurrency": self._max_concurrency,
+                "base_interval": self._base_interval,
+                "max_interval": self._max_interval,
+                "current_interval": self._current_interval,
+                "rate_limit_hits": self._rate_limit_hits,
+                "success_count": self._success_count,
+                "active_slots": self._active_slots,
+                "peak_concurrency": self._peak_concurrency,
+            }
+
+
 class TefasClient:
     def __init__(
         self,
@@ -1811,34 +1985,66 @@ class TefasClient:
         attempts = max(1, fs.TEFAS_HTTP_RETRY_ATTEMPTS)
         retry_delay = _seam("_tefas_retry_delay_seconds")
         decode_response = _seam("_decode_tefas_json_response")
-        for attempt in range(1, attempts + 1):
+        pacer = getattr(fs, "_TEFAS_PACER", None)
+        keepalive_retried = False
+        attempt = 1
+        while attempt <= attempts:
+            bypass_delay = float(getattr(fs, "TEFAS_DIRECT_CHUNK_DELAY_SECONDS", 0.0)) <= 0.0
             try:
-                response = client.post(
-                    endpoint,
-                    json=body,
-                    headers=self._headers(referer=referer),
-                )
+                if pacer is not None:
+                    with pacer.slot(bypass_delay=bypass_delay):
+                        response = client.post(
+                            endpoint,
+                            json=body,
+                            headers=self._headers(referer=referer),
+                            timeout=self.timeout_seconds,
+                        )
+                else:
+                    response = client.post(
+                        endpoint,
+                        json=body,
+                        headers=self._headers(referer=referer),
+                        timeout=self.timeout_seconds,
+                    )
+            except fs.httpx.RemoteProtocolError as exc:
+                if not keepalive_retried:
+                    keepalive_retried = True
+                    continue
+                if attempt >= attempts:
+                    raise fs.TefasUpstreamError(f"{context} request failed: {exc}") from exc
+                delay = retry_delay(attempt)
+                attempt += 1
+                if delay > 0:
+                    time.sleep(delay)
+                continue
             except fs.httpx.HTTPError as exc:
                 if attempt >= attempts:
                     raise fs.TefasUpstreamError(f"{context} request failed: {exc}") from exc
                 delay = retry_delay(attempt)
+                attempt += 1
                 if delay > 0:
                     time.sleep(delay)
                 continue
             try:
-                return decode_response(
+                decoded = decode_response(
                     response.status_code,
                     dict(response.headers),
                     response.content,
                     context=context,
                 )
             except fs.TefasRateLimitError as exc:
+                if pacer is not None:
+                    pacer.record_rate_limit(exc.retry_after_seconds)
                 if attempt >= attempts:
                     raise
                 delay = retry_delay(attempt, exc.retry_after_seconds)
+                attempt += 1
                 if delay > 0:
                     time.sleep(delay)
                 continue
+            if pacer is not None:
+                pacer.record_success()
+            return decoded
         raise fs.TefasUpstreamError(f"{context} request failed")
 
     def _fund_list_body(
@@ -1885,13 +2091,9 @@ class TefasClient:
                 body=body,
                 context=context,
             )
-        except fs.httpx.RemoteProtocolError:
-            return self._post_json(
-                client,
-                endpoint=self.funds_list_endpoint,
-                body=body,
-                context=context,
-            )
+        finally:
+            if client is not fs._TEFAS_CLIENT:
+                _close_ephemeral_client(client)
 
     @staticmethod
     def _direct_fund_config(fund_type: str) -> Tuple[str, str, Optional[str]]:
@@ -1991,8 +2193,12 @@ class TefasClient:
         fund_url_param: Optional[str],
         start_date: Optional[date],
         end_date: Optional[date],
-    ) -> None:
+        force: bool = False,
+    ) -> bool:
         fs = _fund_service()
+        key = fs._tefas_direct_prime_key(client, portal_url, fund_url_param)
+        if not force and fs._is_tefas_direct_primed(key):
+            return False
         params: Dict[str, str] = {}
         if fund_url_param:
             params["fundType"] = fund_url_param
@@ -2000,20 +2206,93 @@ class TefasClient:
             params["startDate"] = start_date.isoformat()
         if end_date:
             params["endDate"] = end_date.isoformat()
+        headers = {
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "User-Agent": fs.FINTABLES_USER_AGENT,
+        }
+        with fs._get_tefas_direct_prime_key_lock(key):
+            if not force and fs._is_tefas_direct_primed(key):
+                return False
+            try:
+                try:
+                    response = client.get(
+                        portal_url,
+                        params=params,
+                        headers=headers,
+                        timeout=self.timeout_seconds,
+                    )
+                except fs.httpx.RemoteProtocolError:
+                    response = client.get(
+                        portal_url,
+                        params=params,
+                        headers=headers,
+                        timeout=self.timeout_seconds,
+                    )
+            except fs.httpx.HTTPError:
+                # The portal GET is only used to establish the normal TEFAS session.
+                # The JSON endpoint can still be usable when the HTML page is slow.
+                return True
+            if getattr(response, "status_code", 200) < 400:
+                fs._mark_tefas_direct_primed(key)
+            return True
+
+    def _fetch_direct_pages_with_reprime(
+        self,
+        client: httpx.Client,
+        *,
+        portal_url: str,
+        fund_url_param: Optional[str],
+        start_date: Optional[date],
+        end_date: Optional[date],
+        endpoint: str,
+        base_payload: Dict[str, Any],
+        referer: str,
+        context: str,
+        reject_unverified_full_page: bool = False,
+    ) -> List[Dict[str, Any]]:
+        fs = _fund_service()
+        primed_now = self._prime_direct_session(
+            client,
+            portal_url=portal_url,
+            fund_url_param=fund_url_param,
+            start_date=start_date,
+            end_date=end_date,
+        )
         try:
-            client.get(
-                portal_url,
-                params=params,
-                headers={
-                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-                    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-                    "User-Agent": fs.FINTABLES_USER_AGENT,
-                },
+            return self._fetch_direct_pages(
+                client,
+                endpoint=endpoint,
+                base_payload=base_payload,
+                referer=referer,
+                context=context,
+                reject_unverified_full_page=reject_unverified_full_page,
             )
-        except fs.httpx.HTTPError:
-            # The portal GET is only used to establish the normal TEFAS session.
-            # The JSON endpoint can still be usable when the HTML page is slow.
-            return
+        except fs.TefasUpstreamError as exc:
+            message_lower = str(exc).lower()
+            if primed_now or ("http 403" not in message_lower and "html/waf" not in message_lower):
+                raise
+            fs._invalidate_tefas_direct_prime(
+                client,
+                portal_url=portal_url,
+                fund_url_param=fund_url_param,
+            )
+            self._prime_direct_session(
+                client,
+                portal_url=portal_url,
+                fund_url_param=fund_url_param,
+                start_date=start_date,
+                end_date=end_date,
+                force=True,
+            )
+            return self._fetch_direct_pages(
+                client,
+                endpoint=endpoint,
+                base_payload=base_payload,
+                referer=referer,
+                context=context,
+                reject_unverified_full_page=reject_unverified_full_page,
+            )
 
     def _fetch_direct_pages(
         self,
@@ -2064,8 +2343,6 @@ class TefasClient:
                 full_page_without_terminator = False
                 break
             start_row += page_size
-            if fs.TEFAS_DIRECT_PAGE_DELAY_SECONDS > 0:
-                time.sleep(fs.TEFAS_DIRECT_PAGE_DELAY_SECONDS)
         if reported_total is not None and len(all_rows) < reported_total:
             raise fs.TefasUpstreamError(
                 f"{context} was incomplete ({len(all_rows)} rows vs reported {reported_total})"
@@ -2141,15 +2418,10 @@ class TefasClient:
         endpoint = self.funds_list_endpoint
         rows: List[Dict[str, Any]] = []
         chunks = self._direct_monthly_chunks(start_date, end_date)
-        with fs.httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
-            for chunk_index, (chunk_start, chunk_end) in enumerate(chunks):
-                self._prime_direct_session(
-                    client,
-                    portal_url=portal_url,
-                    fund_url_param=fund_url_param,
-                    start_date=chunk_start,
-                    end_date=chunk_end,
-                )
+        client = fs._get_tefas_direct_client(self.timeout_seconds)
+        is_shared = fs._is_shared_tefas_direct_client(client)
+        try:
+            for chunk_start, chunk_end in chunks:
                 code = codes[0] if len(codes) == 1 else None
                 base_payload = self._fund_list_body(
                     fund_type=fund_type_code,
@@ -2160,8 +2432,12 @@ class TefasClient:
                 )
                 referer = f"{portal_url}?startDate={chunk_start.isoformat()}&endDate={chunk_end.isoformat()}"
                 rows.extend(
-                    self._fetch_direct_pages(
+                    self._fetch_direct_pages_with_reprime(
                         client,
+                        portal_url=portal_url,
+                        fund_url_param=fund_url_param,
+                        start_date=chunk_start,
+                        end_date=chunk_end,
                         endpoint=endpoint,
                         base_payload=base_payload,
                         referer=referer,
@@ -2169,8 +2445,10 @@ class TefasClient:
                         reject_unverified_full_page=True,
                     )
                 )
-                if chunk_index < len(chunks) - 1 and fs.TEFAS_DIRECT_CHUNK_DELAY_SECONDS > 0:
-                    time.sleep(fs.TEFAS_DIRECT_CHUNK_DELAY_SECONDS)
+        finally:
+            if not is_shared:
+                fs._evict_tefas_direct_prime_entries(client)
+                _close_ephemeral_client(client)
         filtered = self._filter_direct_codes(rows, codes)
         return self._tag_direct_rows(
             filtered,
@@ -2218,17 +2496,12 @@ class TefasClient:
             ]
 
         rows: List[Dict[str, Any]] = []
-        with fs.httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
-            for chunk_index, (chunk_start, chunk_end) in enumerate(chunks):
+        client = fs._get_tefas_direct_client(self.timeout_seconds)
+        is_shared = fs._is_shared_tefas_direct_client(client)
+        try:
+            for chunk_start, chunk_end in chunks:
                 prime_start = chunk_start or fs.date.today()
                 prime_end = chunk_end or prime_start
-                self._prime_direct_session(
-                    client,
-                    portal_url=portal_url,
-                    fund_url_param=fund_url_param,
-                    start_date=prime_start,
-                    end_date=prime_end,
-                )
                 if normalized_basis == "RB":
                     if chunk_start is None:
                         base_payload: Dict[str, Any] = {
@@ -2283,16 +2556,22 @@ class TefasClient:
                     )
                 referer = f"{portal_url}?startDate={prime_start.isoformat()}&endDate={prime_end.isoformat()}"
                 rows.extend(
-                    self._fetch_direct_pages(
+                    self._fetch_direct_pages_with_reprime(
                         client,
+                        portal_url=portal_url,
+                        fund_url_param=fund_url_param,
+                        start_date=prime_start,
+                        end_date=prime_end,
                         endpoint=endpoint,
                         base_payload=base_payload,
                         referer=referer,
                         context=f"direct TEFAS returns {normalized_basis} {fund_type_code}",
                     )
                 )
-                if chunk_index < len(chunks) - 1 and fs.TEFAS_DIRECT_CHUNK_DELAY_SECONDS > 0:
-                    time.sleep(fs.TEFAS_DIRECT_CHUNK_DELAY_SECONDS)
+        finally:
+            if not is_shared:
+                fs._evict_tefas_direct_prime_entries(client)
+                _close_ephemeral_client(client)
         filtered = self._filter_direct_codes(rows, codes)
         return self._tag_direct_rows(
             filtered,
@@ -2337,15 +2616,10 @@ class TefasClient:
         endpoint = fs.TEFAS_PORTFOLIO_ENDPOINT
         rows: List[Dict[str, Any]] = []
         chunks = self._direct_monthly_chunks(start_date, end_date)
-        with fs.httpx.Client(timeout=self.timeout_seconds, follow_redirects=True) as client:
-            for chunk_index, (chunk_start, chunk_end) in enumerate(chunks):
-                self._prime_direct_session(
-                    client,
-                    portal_url=portal_url,
-                    fund_url_param=fund_url_param,
-                    start_date=chunk_start,
-                    end_date=chunk_end,
-                )
+        client = fs._get_tefas_direct_client(self.timeout_seconds)
+        is_shared = fs._is_shared_tefas_direct_client(client)
+        try:
+            for chunk_start, chunk_end in chunks:
                 base_payload = self._fund_list_body(
                     fund_type=fund_type_code,
                     start_date=chunk_start,
@@ -2355,16 +2629,22 @@ class TefasClient:
                 )
                 referer = f"{portal_url}?startDate={chunk_start.isoformat()}&endDate={chunk_end.isoformat()}"
                 rows.extend(
-                    self._fetch_direct_pages(
+                    self._fetch_direct_pages_with_reprime(
                         client,
+                        portal_url=portal_url,
+                        fund_url_param=fund_url_param,
+                        start_date=chunk_start,
+                        end_date=chunk_end,
                         endpoint=endpoint,
                         base_payload=base_payload,
                         referer=referer,
                         context=f"direct TEFAS portfolio {normalized_code}",
                     )
                 )
-                if chunk_index < len(chunks) - 1 and fs.TEFAS_DIRECT_CHUNK_DELAY_SECONDS > 0:
-                    time.sleep(fs.TEFAS_DIRECT_CHUNK_DELAY_SECONDS)
+        finally:
+            if not is_shared:
+                fs._evict_tefas_direct_prime_entries(client)
+                _close_ephemeral_client(client)
         filtered = self._filter_direct_codes(rows, [normalized_code])
         return self._tag_direct_rows(
             filtered,
@@ -2445,7 +2725,7 @@ class TefasClient:
                 )
                 chunks.append((current, chunk_end))
                 current = chunk_end + timedelta(days=1)
-            for chunk_index, (chunk_start, chunk_end) in enumerate(chunks):
+            for chunk_start, chunk_end in chunks:
                 try:
                     chunk_rows.extend(
                         self.fetch_fund_range(
@@ -2461,8 +2741,6 @@ class TefasClient:
                     # valid months around it. If every chunk fails, surface the
                     # last upstream error to the caller for its normal fallback.
                     chunk_errors.append(exc)
-                if chunk_index < len(chunks) - 1 and fs.TEFAS_DIRECT_CHUNK_DELAY_SECONDS > 0:
-                    time.sleep(fs.TEFAS_DIRECT_CHUNK_DELAY_SECONDS)
 
             if chunk_rows:
                 by_date: Dict[str, Dict[str, Any]] = {}
@@ -2597,6 +2875,7 @@ __all__ = [
     "_yield_periods_from_return_row",
     "_is_tefasfon_adapter_unavailable",
     "_generate_date_chunks",
+    "_TefasPacer",
     "TefasFonClient",
     "TefasClient",
 ]

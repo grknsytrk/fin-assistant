@@ -162,3 +162,54 @@ def test_fund_api_service_uses_bulk_redis_keys_for_foreign_quotes_and_identities
     assert "api:funds:foreign-identity:US5949181045:v1" in bulk_identities
     assert backend.get("api:funds:foreign-identity:US5949181045:v1") is None
     cache_module.reset_cache_for_tests()
+
+
+def test_openfigi_client_is_pooled_reusable_and_closed_on_teardown(monkeypatch) -> None:
+    foreign_instruments.close_openfigi_client()
+    try:
+        client1, ephemeral1 = foreign_instruments._get_openfigi_client(headers={"Content-Type": "application/json"})
+        client2, ephemeral2 = foreign_instruments._get_openfigi_client(headers={"Content-Type": "application/json"})
+        assert client1 is client2
+        assert ephemeral1 is False
+        assert ephemeral2 is False
+        assert isinstance(client1, httpx.Client)
+        assert not client1.is_closed
+
+        # close_shared_http_clients delegates teardown to OpenFIGI pool cleanly.
+        fund_service.close_shared_http_clients()
+        assert client1.is_closed
+        assert foreign_instruments._OPENFIGI_CLIENT is None
+
+        # Monkeypatched httpx.Client always creates fresh ephemeral instances.
+        _mock_client(monkeypatch, lambda _req: httpx.Response(200, json=[]))
+        mock1, mock_ephem1 = foreign_instruments._get_openfigi_client(headers={"Content-Type": "application/json"})
+        mock2, mock_ephem2 = foreign_instruments._get_openfigi_client(headers={"Content-Type": "application/json"})
+        assert mock1 is not mock2
+        assert mock_ephem1 is True
+        assert mock_ephem2 is True
+        assert foreign_instruments._OPENFIGI_CLIENT is None
+        mock1.close()
+        mock2.close()
+    finally:
+        foreign_instruments.close_openfigi_client()
+
+
+def test_openfigi_retries_once_on_remote_protocol_error(monkeypatch) -> None:
+    attempts = 0
+
+    def handler(request):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.RemoteProtocolError("stale keepalive socket")
+        return httpx.Response(200, json=[{"data": [_mapping("MSFT", "MICROSOFT CORP")]}])
+
+    _mock_client(monkeypatch, handler)
+    resolved = foreign_instruments.resolve_foreign_holdings(
+        [_row("US5949181045")],
+        cache_get=lambda _key: None,
+        cache_set=lambda *args, **kwargs: None,
+    )
+    assert attempts == 2
+    assert resolved[0]["provider_symbol"] == "MSFT"
+    assert resolved[0]["asset_name"] == "MICROSOFT CORP"

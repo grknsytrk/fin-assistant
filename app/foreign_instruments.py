@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import re
-from typing import Any, Callable
+import threading
+from typing import Any, Callable, Optional
 
 import httpx
 
 LOGGER = logging.getLogger(__name__)
+_ORIGINAL_HTTPX_CLIENT = httpx.Client
+_OPENFIGI_CLIENT_LOCK = threading.Lock()
+_OPENFIGI_CLIENT: Optional[httpx.Client] = None
+OPENFIGI_TIMEOUT_SECONDS = float(os.getenv("RAGFIN_OPENFIGI_TIMEOUT_SECONDS", "6"))
 _ISIN_PATTERN = re.compile(r"[A-Z]{2}[A-Z0-9]{9}[0-9]")
 _EXCHANGE_SUFFIXES = {"US": "", "CN": ".TO", "SW": ".SW", "LN": ".L", "FP": ".PA", "GY": ".DE", "NA": ".AS"}
 _ISIN_HOME_EXCHANGES = {"US": "US", "CA": "CN", "CH": "SW", "GB": "LN", "FR": "FP", "DE": "GY", "NL": "NA"}
@@ -48,6 +54,41 @@ def _identity_from_mapping(mapping: dict[str, Any], isin: str) -> dict[str, Any]
         }
     # Ambiguous listings must not silently attach another security's quotes.
     return next(iter(identities.values())) if len(identities) == 1 else {}
+
+
+def _get_openfigi_client(
+    *,
+    timeout: Optional[float] = None,
+    headers: Optional[dict[str, str]] = None,
+) -> tuple[httpx.Client, bool]:
+    """Return a pooled persistent OpenFIGI client, or a fresh ephemeral mock in tests."""
+    effective_timeout = OPENFIGI_TIMEOUT_SECONDS if timeout is None else timeout
+    if httpx.Client is not _ORIGINAL_HTTPX_CLIENT:
+        return httpx.Client(timeout=effective_timeout, headers=dict(headers or {})), True
+    global _OPENFIGI_CLIENT
+    with _OPENFIGI_CLIENT_LOCK:
+        if _OPENFIGI_CLIENT is None or _OPENFIGI_CLIENT.is_closed:
+            _OPENFIGI_CLIENT = httpx.Client(
+                timeout=effective_timeout,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10, keepalive_expiry=30.0),
+            )
+        return _OPENFIGI_CLIENT, False
+
+
+def close_openfigi_client() -> None:
+    """Close the shared OpenFIGI HTTP connection pool cleanly."""
+    global _OPENFIGI_CLIENT
+    with _OPENFIGI_CLIENT_LOCK:
+        client = _OPENFIGI_CLIENT
+        _OPENFIGI_CLIENT = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            LOGGER.debug("error closing OpenFIGI HTTP client", exc_info=True)
+
+
+atexit.register(close_openfigi_client)
 
 
 def resolve_foreign_holdings(
@@ -89,15 +130,27 @@ def resolve_foreign_holdings(
         api_key = os.getenv("RAGFIN_OPENFIGI_API_KEY", "").strip()
         if api_key:
             headers["X-OPENFIGI-APIKEY"] = api_key
-        with httpx.Client(timeout=6, headers=headers) as client:
+        client, is_ephemeral = _get_openfigi_client(timeout=OPENFIGI_TIMEOUT_SECONDS, headers=headers)
+        try:
             # Five jobs also fit older unauthenticated Mapping API limits.
             for start in range(0, len(missing), 5):
                 batch = missing[start:start + 5]
+                payload = [{"idType": "ID_ISIN", "idValue": isin, "marketSecDes": "Equity"} for isin in batch]
                 try:
-                    response = client.post(
-                        "https://api.openfigi.com/v3/mapping",
-                        json=[{"idType": "ID_ISIN", "idValue": isin, "marketSecDes": "Equity"} for isin in batch],
-                    )
+                    try:
+                        response = client.post(
+                            "https://api.openfigi.com/v3/mapping",
+                            json=payload,
+                            headers=headers,
+                            timeout=OPENFIGI_TIMEOUT_SECONDS,
+                        )
+                    except httpx.RemoteProtocolError:
+                        response = client.post(
+                            "https://api.openfigi.com/v3/mapping",
+                            json=payload,
+                            headers=headers,
+                            timeout=OPENFIGI_TIMEOUT_SECONDS,
+                        )
                     response.raise_for_status()
                     mappings = response.json()
                     if not isinstance(mappings, list) or len(mappings) != len(batch):
@@ -114,6 +167,9 @@ def resolve_foreign_holdings(
                     for isin in missing[start:]:
                         cache_set(f"api:funds:foreign-identity:{isin}:v1", {}, ttl_seconds=60)
                     break
+        finally:
+            if is_ephemeral and hasattr(client, "close"):
+                client.close()
 
     for isin, targets in pending.items():
         identity = identities.get(isin) or {}

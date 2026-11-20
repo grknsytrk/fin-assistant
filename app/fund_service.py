@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 import unicodedata
+import weakref
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass, field
@@ -34,6 +35,13 @@ _KAP_CLIENT: Optional[httpx.Client] = None
 _FINTABLES_PROXY_CLIENT: Optional[httpx.Client] = None
 _FINTABLES_CLIENT: Optional[httpx.Client] = None
 _TEFAS_CLIENT: Optional[httpx.Client] = None
+_TEFAS_DIRECT_CLIENT: Optional[httpx.Client] = None
+_FINTABLES_CURL_CFFI_SESSION: Any = None
+_TEFAS_DIRECT_PRIME_LOCK = threading.Lock()
+_TEFAS_DIRECT_PRIMED_AT: Dict[Tuple[int, str, str], float] = {}
+_TEFAS_DIRECT_PRIME_KEY_LOCKS: Dict[Tuple[int, str, str], threading.Lock] = {}
+_FINTABLES_STICKY_TRANSPORT_LOCK = threading.Lock()
+_FINTABLES_STICKY_TRANSPORT: Optional[Dict[str, Any]] = None
 
 from app import json_cache as json_cache_store
 from app.cache import BoundedMemoryCache
@@ -96,6 +104,10 @@ FINTABLES_CURL_FALLBACK_ENABLED = os.getenv("RAGFIN_FINTABLES_CURL_FALLBACK_ENAB
     "no",
     "off",
 }
+FINTABLES_STICKY_TRANSPORT_TTL_SECONDS = max(
+    0.0,
+    float(os.getenv("RAGFIN_FINTABLES_STICKY_TRANSPORT_TTL_SECONDS", "900")),
+)
 TEFAS_BASE_URL = os.getenv("RAGFIN_TEFAS_BASE_URL", "https://www.tefas.gov.tr").rstrip("/")
 TEFAS_FUNDS_LIST_ENDPOINT = os.getenv(
     "RAGFIN_TEFAS_FUNDS_LIST_ENDPOINT",
@@ -128,6 +140,22 @@ TEFAS_HISTORY_CHUNK_MAX_DAYS = int(os.getenv("RAGFIN_TEFAS_HISTORY_CHUNK_MAX_DAY
 TEFAS_DIRECT_PAGE_SIZE = int(os.getenv("RAGFIN_TEFAS_DIRECT_PAGE_SIZE", "1000"))
 TEFAS_DIRECT_PAGE_DELAY_SECONDS = float(os.getenv("RAGFIN_TEFAS_DIRECT_PAGE_DELAY_SECONDS", "1"))
 TEFAS_DIRECT_CHUNK_DELAY_SECONDS = float(os.getenv("RAGFIN_TEFAS_DIRECT_CHUNK_DELAY_SECONDS", "2"))
+TEFAS_DIRECT_PRIME_TTL_SECONDS = max(
+    0.0,
+    float(os.getenv("RAGFIN_TEFAS_DIRECT_PRIME_TTL_SECONDS", "600")),
+)
+TEFAS_PACER_MAX_CONCURRENCY = max(
+    1,
+    int(os.getenv("RAGFIN_TEFAS_PACER_MAX_CONCURRENCY", "3")),
+)
+TEFAS_PACER_MIN_INTERVAL_SECONDS = max(
+    0.0,
+    float(os.getenv("RAGFIN_TEFAS_PACER_MIN_INTERVAL_SECONDS", "0.25")),
+)
+TEFAS_PACER_MAX_INTERVAL_SECONDS = max(
+    TEFAS_PACER_MIN_INTERVAL_SECONDS,
+    float(os.getenv("RAGFIN_TEFAS_PACER_MAX_INTERVAL_SECONDS", "2.0")),
+)
 TEFASFON_SOURCE_URL = os.getenv("RAGFIN_TEFASFON_SOURCE_URL", "https://pypi.org/project/tefasfon/")
 TEFASFON_FUNDS_SOURCE = "tefasfon_funds"
 TEFASFON_RETURNS_SOURCE = "tefasfon_returns"
@@ -369,20 +397,178 @@ def _get_tefas_client(timeout_seconds: Optional[float] = None) -> httpx.Client:
         return _TEFAS_CLIENT
 
 
+def _get_tefas_direct_client(timeout_seconds: Optional[float] = None) -> httpx.Client:
+    """Return a shared cookie-bearing HTTP client for direct TEFAS requests, or a fresh mock in tests."""
+    effective_timeout = timeout_seconds if timeout_seconds is not None else TEFAS_TIMEOUT_SECONDS
+    if httpx.Client is not _ORIGINAL_HTTPX_CLIENT:
+        return httpx.Client(timeout=effective_timeout, follow_redirects=True)
+    global _TEFAS_DIRECT_CLIENT
+    with _CLIENT_LOCK:
+        if _TEFAS_DIRECT_CLIENT is None or _TEFAS_DIRECT_CLIENT.is_closed:
+            _TEFAS_DIRECT_CLIENT = httpx.Client(
+                timeout=TEFAS_TIMEOUT_SECONDS,
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20, keepalive_expiry=30.0),
+            )
+        return _TEFAS_DIRECT_CLIENT
+
+
+def _is_shared_tefas_direct_client(client: Any) -> bool:
+    return client is not None and client is _TEFAS_DIRECT_CLIENT
+
+
+def _get_fintables_curl_cffi_session() -> Any:
+    """Return a shared persistent curl_cffi Session with browser TLS impersonation."""
+    global _FINTABLES_CURL_CFFI_SESSION
+    with _CLIENT_LOCK:
+        if _FINTABLES_CURL_CFFI_SESSION is None:
+            from curl_cffi import requests as curl_requests  # type: ignore
+
+            _FINTABLES_CURL_CFFI_SESSION = curl_requests.Session(impersonate="chrome131")
+        return _FINTABLES_CURL_CFFI_SESSION
+
+
+def _tefas_direct_prime_key(
+    client: Any,
+    portal_url: str,
+    fund_url_param: Optional[str],
+) -> Tuple[int, str, str]:
+    return (id(client), str(portal_url), str(fund_url_param or ""))
+
+
+def _get_tefas_direct_prime_key_lock(key: Tuple[int, str, str]) -> threading.Lock:
+    with _TEFAS_DIRECT_PRIME_LOCK:
+        lock = _TEFAS_DIRECT_PRIME_KEY_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _TEFAS_DIRECT_PRIME_KEY_LOCKS[key] = lock
+        return lock
+
+
+def _is_tefas_direct_primed(key: Tuple[int, str, str]) -> bool:
+    if TEFAS_DIRECT_PRIME_TTL_SECONDS <= 0:
+        return False
+    with _TEFAS_DIRECT_PRIME_LOCK:
+        primed_at = _TEFAS_DIRECT_PRIMED_AT.get(key)
+        if primed_at is None:
+            return False
+        if time.monotonic() - primed_at <= TEFAS_DIRECT_PRIME_TTL_SECONDS:
+            return True
+        _TEFAS_DIRECT_PRIMED_AT.pop(key, None)
+        return False
+
+
+def _mark_tefas_direct_primed(key: Tuple[int, str, str]) -> None:
+    if TEFAS_DIRECT_PRIME_TTL_SECONDS <= 0:
+        return
+    with _TEFAS_DIRECT_PRIME_LOCK:
+        _TEFAS_DIRECT_PRIMED_AT[key] = time.monotonic()
+
+
+def _invalidate_tefas_direct_prime(
+    client: Any,
+    *,
+    portal_url: str,
+    fund_url_param: Optional[str],
+) -> None:
+    key = _tefas_direct_prime_key(client, portal_url, fund_url_param)
+    with _TEFAS_DIRECT_PRIME_LOCK:
+        _TEFAS_DIRECT_PRIMED_AT.pop(key, None)
+
+
+def _evict_tefas_direct_prime_entries(client: Any) -> None:
+    client_id = id(client)
+    with _TEFAS_DIRECT_PRIME_LOCK:
+        for key in [item for item in _TEFAS_DIRECT_PRIMED_AT if item[0] == client_id]:
+            _TEFAS_DIRECT_PRIMED_AT.pop(key, None)
+        for key in [item for item in _TEFAS_DIRECT_PRIME_KEY_LOCKS if item[0] == client_id]:
+            _TEFAS_DIRECT_PRIME_KEY_LOCKS.pop(key, None)
+
+
+def _safe_weakref(obj: Any) -> Callable[[], Any]:
+    try:
+        return weakref.ref(obj)
+    except TypeError:
+        return lambda: obj
+
+
+def _fintables_sticky_scope_key() -> Dict[str, Any]:
+    return {
+        "client_ref": _safe_weakref(httpx.Client),
+        "curl_ref": _safe_weakref(globals().get("_fintables_curl_payload")),
+        "cffi_ref": _safe_weakref(globals().get("_fintables_curl_cffi_payload")),
+        "proxy_ref": _safe_weakref(globals().get("_fintables_proxy_payload")),
+        "proxy_base_url": FINTABLES_PROXY_BASE_URL,
+        "proxy_has_token": bool(FINTABLES_PROXY_TOKEN),
+    }
+
+
+def _fintables_sticky_scope_matches(saved_scope: Dict[str, Any]) -> bool:
+    return (
+        saved_scope.get("client_ref", lambda: None)() is httpx.Client
+        and saved_scope.get("curl_ref", lambda: None)() is globals().get("_fintables_curl_payload")
+        and saved_scope.get("cffi_ref", lambda: None)() is globals().get("_fintables_curl_cffi_payload")
+        and saved_scope.get("proxy_ref", lambda: None)() is globals().get("_fintables_proxy_payload")
+        and saved_scope.get("proxy_base_url") == FINTABLES_PROXY_BASE_URL
+        and saved_scope.get("proxy_has_token") == bool(FINTABLES_PROXY_TOKEN)
+    )
+
+
+def _get_fintables_sticky_transport() -> Optional[str]:
+    if FINTABLES_STICKY_TRANSPORT_TTL_SECONDS <= 0:
+        return None
+    global _FINTABLES_STICKY_TRANSPORT
+    with _FINTABLES_STICKY_TRANSPORT_LOCK:
+        entry = _FINTABLES_STICKY_TRANSPORT
+        if not entry:
+            return None
+        if not _fintables_sticky_scope_matches(entry["scope"]) or time.monotonic() >= float(entry["expires_at"]):
+            _FINTABLES_STICKY_TRANSPORT = None
+            return None
+        return str(entry["transport"])
+
+
+def _set_fintables_sticky_transport(transport: str) -> None:
+    if FINTABLES_STICKY_TRANSPORT_TTL_SECONDS <= 0:
+        return
+    global _FINTABLES_STICKY_TRANSPORT
+    with _FINTABLES_STICKY_TRANSPORT_LOCK:
+        _FINTABLES_STICKY_TRANSPORT = {
+            "transport": str(transport),
+            "expires_at": time.monotonic() + FINTABLES_STICKY_TRANSPORT_TTL_SECONDS,
+            "scope": _fintables_sticky_scope_key(),
+        }
+
+
+def _clear_fintables_sticky_transport() -> None:
+    global _FINTABLES_STICKY_TRANSPORT
+    with _FINTABLES_STICKY_TRANSPORT_LOCK:
+        _FINTABLES_STICKY_TRANSPORT = None
+
+
 def close_shared_http_clients() -> None:
     """Close any shared HTTP connection pools cleanly."""
-    global _KAP_CLIENT, _FINTABLES_PROXY_CLIENT, _FINTABLES_CLIENT, _TEFAS_CLIENT
+    global _KAP_CLIENT, _FINTABLES_PROXY_CLIENT, _FINTABLES_CLIENT, _TEFAS_CLIENT, _TEFAS_DIRECT_CLIENT, _FINTABLES_CURL_CFFI_SESSION
     with _CLIENT_LOCK:
         clients_to_close = [
             ("KAP", _KAP_CLIENT),
             ("Fintables proxy", _FINTABLES_PROXY_CLIENT),
             ("Fintables", _FINTABLES_CLIENT),
             ("TEFAS", _TEFAS_CLIENT),
+            ("TEFAS direct", _TEFAS_DIRECT_CLIENT),
+            ("Fintables curl_cffi", _FINTABLES_CURL_CFFI_SESSION),
         ]
         _KAP_CLIENT = None
         _FINTABLES_PROXY_CLIENT = None
         _FINTABLES_CLIENT = None
         _TEFAS_CLIENT = None
+        _TEFAS_DIRECT_CLIENT = None
+        _FINTABLES_CURL_CFFI_SESSION = None
+
+    with _TEFAS_DIRECT_PRIME_LOCK:
+        _TEFAS_DIRECT_PRIMED_AT.clear()
+        _TEFAS_DIRECT_PRIME_KEY_LOCKS.clear()
+    _clear_fintables_sticky_transport()
 
     for label, client in clients_to_close:
         if client is not None:
@@ -396,6 +582,12 @@ def close_shared_http_clients() -> None:
         close_market_http_client()
     except Exception:
         LOGGER.debug("error closing market HTTP client", exc_info=True)
+    try:
+        from app.foreign_instruments import close_openfigi_client
+
+        close_openfigi_client()
+    except Exception:
+        LOGGER.debug("error closing OpenFIGI HTTP client", exc_info=True)
 
 
 atexit.register(close_shared_http_clients)
@@ -564,6 +756,13 @@ def reset_fund_caches_for_tests() -> None:
     with _AUTO_FETCH_LOCK:
         _AUTO_FETCH_IN_FLIGHT.clear()
         _AUTO_FETCH_NEGATIVE_CACHE.clear()
+    with _TEFAS_DIRECT_PRIME_LOCK:
+        _TEFAS_DIRECT_PRIMED_AT.clear()
+        _TEFAS_DIRECT_PRIME_KEY_LOCKS.clear()
+    _clear_fintables_sticky_transport()
+    pacer = globals().get("_TEFAS_PACER")
+    if pacer is not None:
+        pacer.reset()
 
 
 def _empty_fund_listing_revision() -> Dict[str, int]:
@@ -1364,8 +1563,15 @@ from app.funds.providers import (
     _yield_periods_from_return_row,
     _is_tefasfon_adapter_unavailable,
     _generate_date_chunks,
+    _TefasPacer,
     TefasFonClient,
     TefasClient,
+)
+
+_TEFAS_PACER = _TefasPacer(
+    max_concurrency=TEFAS_PACER_MAX_CONCURRENCY,
+    min_interval_seconds=TEFAS_PACER_MIN_INTERVAL_SECONDS,
+    max_interval_seconds=TEFAS_PACER_MAX_INTERVAL_SECONDS,
 )
 
 # Re-export price store symbols from app.funds.price_store
