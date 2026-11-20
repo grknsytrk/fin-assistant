@@ -22,15 +22,18 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.cache import BoundedMemoryCache
-from app.database import read_json_cache, write_json_cache
+from app.database import read_json_cache, read_json_cache_conditional, write_json_cache
 
 LOGGER = logging.getLogger(__name__)
 
 import re
 from urllib.parse import unquote
 
+_DEFAULT_READ_JSON_CACHE = read_json_cache
+_DEFAULT_READ_JSON_CACHE_CONDITIONAL = read_json_cache_conditional
 _STATE_LOCK = threading.RLock()
 _MODEL_PORTFOLIO_STATE_CACHE: Dict[str, Dict[str, Any]] = {}
+_MODEL_PORTFOLIO_REMOTE_STAMPS: Dict[str, Tuple[str, int]] = {}
 _PERF_MEMORY_TTL_SECONDS = 15 * 60
 _MODEL_PORTFOLIO_PERF_MEMORY_CACHE: BoundedMemoryCache = BoundedMemoryCache(
     max_entries=16,
@@ -248,7 +251,58 @@ def load_model_portfolio_state(processed_dir: Path, *, force_reload: bool = Fals
             except Exception:
                 LOGGER.warning("Failed to read local model portfolio state from %s", path, exc_info=True)
 
-        remote_raw = read_json_cache(path) if (force_reload or local_state is None) else None
+        remote_raw: Optional[Dict[str, Any]] = None
+        if force_reload or local_state is None:
+            use_conditional = (
+                callable(read_json_cache_conditional)
+                and (
+                    read_json_cache_conditional is not _DEFAULT_READ_JSON_CACHE_CONDITIONAL
+                    or read_json_cache is _DEFAULT_READ_JSON_CACHE
+                )
+            )
+            if use_conditional:
+                known_stamp: Optional[Tuple[str, int]] = None
+                if local_state is not None:
+                    known_stamp = _MODEL_PORTFOLIO_REMOTE_STAMPS.get(scope)
+                    if known_stamp is None:
+                        try:
+                            from app.json_cache import (
+                                get_json_cache_remote_stamp,
+                                json_cache_file_signature,
+                            )
+
+                            known_stamp = get_json_cache_remote_stamp(
+                                path,
+                                json_cache_file_signature(path),
+                            )
+                        except Exception:
+                            known_stamp = None
+                try:
+                    status, remote_payload, remote_stamp = read_json_cache_conditional(
+                        path,
+                        known_stamp=known_stamp,
+                    )
+                except Exception:
+                    status, remote_payload, remote_stamp = ("miss", None, None)
+                if status == "not_modified":
+                    effective_stamp = remote_stamp or known_stamp
+                    if effective_stamp is not None and effective_stamp[0]:
+                        _MODEL_PORTFOLIO_REMOTE_STAMPS[scope] = (
+                            str(effective_stamp[0]),
+                            int(effective_stamp[1]),
+                        )
+                    remote_raw = None
+                elif status == "hit" and isinstance(remote_payload, dict):
+                    remote_raw = remote_payload
+                    if remote_stamp is not None and remote_stamp[0]:
+                        _MODEL_PORTFOLIO_REMOTE_STAMPS[scope] = (
+                            str(remote_stamp[0]),
+                            int(remote_stamp[1]),
+                        )
+                else:
+                    remote_raw = None
+            else:
+                remote_raw = read_json_cache(path)
         remote_state = _normalize_state(remote_raw) if isinstance(remote_raw, dict) else None
 
         state: Optional[Dict[str, Any]] = local_state
@@ -299,7 +353,9 @@ def _save_model_portfolio_state(processed_dir: Path, state: Dict[str, Any]) -> D
     tmp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_path.replace(path)
 
-    _MODEL_PORTFOLIO_STATE_CACHE[scope] = normalized
+    with _STATE_LOCK:
+        _MODEL_PORTFOLIO_STATE_CACHE[scope] = normalized
+        _MODEL_PORTFOLIO_REMOTE_STAMPS.pop(scope, None)
     threading.Thread(
         target=write_json_cache,
         args=(path, dict(normalized)),
@@ -317,6 +373,7 @@ def _save_model_portfolio_state(processed_dir: Path, state: Dict[str, Any]) -> D
 def reset_model_portfolio_cache_for_tests() -> None:
     with _STATE_LOCK:
         _MODEL_PORTFOLIO_STATE_CACHE.clear()
+        _MODEL_PORTFOLIO_REMOTE_STAMPS.clear()
         _MODEL_PORTFOLIO_PERF_MEMORY_CACHE.clear()
     reset_admin_rate_limit_for_tests()
 

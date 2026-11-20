@@ -566,3 +566,87 @@ def test_hydrate_stock_hist_multiples_tolerates_v1_as_stale_and_empty_split_shor
     )
     assert splits == []
     assert recorded_ttls == [3600]
+
+
+def test_warm_stock_hist_multiples_only_missing_and_remote_stem_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+    from types import SimpleNamespace
+    from app import market_service
+
+    monkeypatch.setattr(
+        market_service,
+        "CONFIG",
+        SimpleNamespace(paths=SimpleNamespace(processed_dir=tmp_path)),
+    )
+    market_service._STOCK_HIST_MULTIPLES_STATE.update(
+        {
+            "_ts": 9999999999.0,
+            "items": {"AAA": {"hist_fk_avg": 7.5, "hist_quarters": 8}},
+        }
+    )
+
+    monkeypatch.setattr(
+        market_service._market_database,
+        "read_json_cache_kap_metadata",
+        lambda: pytest.fail("only_missing must not read remote KAP metadata when all targets exist"),
+    )
+    monkeypatch.setattr(
+        market_service,
+        "_fetch_stock_weekly_5y_spark_batch",
+        lambda _syms: pytest.fail("only_missing must not call Yahoo when all targets exist"),
+    )
+
+    skipped = market_service._warm_stock_hist_multiples_sync(symbols=["AAA"], only_missing=True)
+    assert skipped == {"requested": 0, "populated": 0, "skipped_existing": 1}
+
+    # Verify stem keys returned by read_json_cache_kap_metadata (without '.json') are resolved.
+    monkeypatch.setattr(market_service._market_database, "database_enabled", lambda: True)
+    monkeypatch.setattr(
+        market_service._market_database,
+        "read_json_cache_kap_metadata",
+        lambda: {"CCC": {"ok": True}},
+    )
+    monkeypatch.setattr(
+        market_service,
+        "_fetch_stock_weekly_5y_spark_batch",
+        lambda syms: {s: [("2025-03-03", 10.0), ("2026-03-02", 20.0)] for s in syms},
+    )
+    import app.json_cache as _jc
+
+    monkeypatch.setattr(
+        _jc,
+        "read_json_cache_local_first",
+        lambda _path: {
+            "ok": True,
+            "stock_code": "CCC",
+            "company_kind": "generic",
+            "quarters": [
+                {
+                    "year": 2024,
+                    "period": 4,
+                    "publish_date": "2025-03-03T18:00:00+03:00",
+                    "metrics": {"net_kar": 100.0, "ozkaynaklar": 500.0, "favok": 120.0, "net_borc": 0.0, "odenmis_sermaye": 50.0},
+                },
+                {
+                    "year": 2025,
+                    "period": 4,
+                    "publish_date": "2026-03-02T18:00:00+03:00",
+                    "metrics": {"net_kar": 200.0, "ozkaynaklar": 1000.0, "favok": 240.0, "net_borc": 0.0, "odenmis_sermaye": 50.0},
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        market_service,
+        "get_financial_snapshots_map",
+        lambda _p: {"CCC": {"shares_outstanding": 50.0}},
+    )
+    monkeypatch.setattr(market_service, "_fetch_isyatirim_basic_summary_map", lambda: {})
+    monkeypatch.setattr(market_service, "_refresh_cached_xutum_stocks_payload", lambda: None)
+
+    pop = market_service._warm_stock_hist_multiples_sync(symbols=["AAA", "CCC"], only_missing=True)
+    assert pop == {"requested": 1, "populated": 1, "skipped_existing": 1}
+    assert "CCC" in market_service._STOCK_HIST_MULTIPLES_STATE["items"]

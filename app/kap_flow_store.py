@@ -21,6 +21,9 @@ from app.database import (
     upsert_kap_flow_events,
 )
 
+_ORIGINAL_READ_KAP_FLOW_EVENTS = read_kap_flow_events
+_ORIGINAL_READ_KAP_FLOW_HEAD = read_kap_flow_head
+
 LOGGER = logging.getLogger(__name__)
 
 _PERSISTED_FLOW_HASH_LOCK = threading.Lock()
@@ -29,17 +32,22 @@ _PERSISTED_FLOW_HASH_MAX = 5000
 _LOCAL_REDIS_EVENTS_BY_SCOPE: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
 
 FLOW_HEAD_CACHE_PREFIX = "api:kap:flow:head:v1:"
+FLOW_CURSOR_CACHE_PREFIX = "api:kap:flow:cursor:v1:"
 FLOW_STATUS_CACHE_KEY = "api:kap:flow:status:v1"
 FLOW_REDIS_STORE_KEY = "api:kap:flow:events:v1"
 # New disclosures explicitly invalidate FLOW_HEAD_CACHE_PREFIX, so unchanged
 # windows can safely stay in Redis longer without polling Postgres every minute.
-FLOW_HEAD_CACHE_TTL_SECONDS = int(os.getenv("RAGFIN_KAP_FLOW_HEAD_CACHE_TTL_SECONDS", "300"))
+FLOW_HEAD_CACHE_TTL_SECONDS = int(os.getenv("RAGFIN_KAP_FLOW_HEAD_CACHE_TTL_SECONDS", "900"))
+FLOW_CURSOR_CACHE_TTL_SECONDS = max(1, int(os.getenv("RAGFIN_KAP_FLOW_CURSOR_CACHE_TTL_SECONDS", "600")))
 FLOW_HEAD_L1_TTL_SECONDS = max(1, int(os.getenv("RAGFIN_KAP_FLOW_HEAD_L1_TTL_SECONDS", "10")))
 FLOW_PAGE_L1_TTL_SECONDS = max(1, int(os.getenv("RAGFIN_KAP_FLOW_PAGE_L1_TTL_SECONDS", "30")))
+FLOW_CURSOR_L1_TTL_SECONDS = max(1, int(os.getenv("RAGFIN_KAP_FLOW_CURSOR_L1_TTL_SECONDS", "300")))
+FLOW_AFTER_CACHE_TTL_SECONDS = max(1, min(60, FLOW_HEAD_CACHE_TTL_SECONDS))
 FLOW_STATUS_L1_TTL_SECONDS = max(1, int(os.getenv("RAGFIN_KAP_FLOW_STATUS_L1_TTL_SECONDS", "10")))
 
 _FLOW_HEAD_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=32, default_ttl=FLOW_HEAD_L1_TTL_SECONDS)
 _FLOW_PAGE_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=64, default_ttl=FLOW_PAGE_L1_TTL_SECONDS)
+_FLOW_CURSOR_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=128, default_ttl=FLOW_CURSOR_L1_TTL_SECONDS)
 _FLOW_STATUS_L1_CACHE: BoundedMemoryCache = BoundedMemoryCache(max_entries=8, default_ttl=FLOW_STATUS_L1_TTL_SECONDS)
 # Keep the Redis fallback slightly wider than the 2,000-row public window when no
 # database is configured; when Postgres is active, keep a compact fallback tail.
@@ -187,6 +195,14 @@ def _head_key(limit: int, category: Optional[str]) -> str:
     return f"{FLOW_HEAD_CACHE_PREFIX}{max(1, int(limit))}:{norm_category or ''}"
 
 
+def _cursor_cache_key(direction: str, limit: int, category: Optional[str], cursor_raw: str) -> str:
+    digest = hashlib.sha1(cursor_raw.encode("utf-8")).hexdigest()[:16]
+    norm_limit = max(1, int(limit))
+    if direction == "after":
+        return f"{FLOW_HEAD_CACHE_PREFIX}after:{category or ''}:{norm_limit}:{digest}"
+    return f"{FLOW_CURSOR_CACHE_PREFIX}before:{category or ''}:{norm_limit}:{digest}"
+
+
 def _row_to_event(row: dict[str, Any]) -> Optional[dict[str, Any]]:
     payload = row.get("payload")
     if not isinstance(payload, dict):
@@ -305,6 +321,7 @@ def clear_persisted_flow_hashes() -> None:
         _LOCAL_REDIS_EVENTS_BY_SCOPE.clear()
     _FLOW_HEAD_L1_CACHE.clear()
     _FLOW_PAGE_L1_CACHE.clear()
+    _FLOW_CURSOR_L1_CACHE.clear()
     _FLOW_STATUS_L1_CACHE.clear()
 
 
@@ -438,22 +455,103 @@ def read_flow_page(
         raise ValueError("after cursor geçersiz")
 
     backend = get_cache()
-    cache_key = _head_key(limit, norm_category)
-    l1_key = (*_flow_l1_scope(backend), cache_key)
-    if not before_tuple and not after_tuple:
-        cached_l1 = _FLOW_PAGE_L1_CACHE.get(l1_key)
+    l1_scope = _flow_l1_scope(backend)
+    is_head = not before_tuple and not after_tuple
+    is_before_only = bool(before_tuple and not after_tuple)
+    is_after_only = bool(after_tuple and not before_tuple)
+    head_cache_key = _head_key(limit, norm_category)
+    head_l1_key = (*l1_scope, head_cache_key)
+    before_cache_key = (
+        _cursor_cache_key("before", limit, norm_category, f"{before_tuple[0]}|{before_tuple[1]}")
+        if is_before_only and before_tuple is not None
+        else ""
+    )
+    before_l1_key = (*l1_scope, before_cache_key) if before_cache_key else None
+    after_cache_key = (
+        _cursor_cache_key("after", limit, norm_category, f"{after_tuple[0]}|{after_tuple[1]}")
+        if is_after_only and after_tuple is not None
+        else ""
+    )
+    after_l1_key = (*l1_scope, after_cache_key) if after_cache_key else None
+
+    if is_head:
+        cached_l1 = _FLOW_PAGE_L1_CACHE.get(head_l1_key)
         if isinstance(cached_l1, dict) and isinstance(cached_l1.get("items"), list):
             return dict(cached_l1)
-        cached_head = backend.get(cache_key)
+        cached_head = backend.get(head_cache_key)
         if isinstance(cached_head, dict) and isinstance(cached_head.get("items"), list):
-            _FLOW_PAGE_L1_CACHE[l1_key] = dict(cached_head)
+            _FLOW_PAGE_L1_CACHE[head_l1_key] = dict(cached_head)
             return dict(cached_head)
+    elif is_before_only and before_l1_key is not None:
+        cached_l1 = _FLOW_CURSOR_L1_CACHE.get(before_l1_key)
+        if isinstance(cached_l1, dict) and isinstance(cached_l1.get("items"), list):
+            return dict(cached_l1)
+        cached_cursor = backend.get(before_cache_key)
+        if isinstance(cached_cursor, dict) and isinstance(cached_cursor.get("items"), list):
+            _FLOW_CURSOR_L1_CACHE[before_l1_key] = dict(cached_cursor)
+            return dict(cached_cursor)
+    elif is_after_only and after_l1_key is not None:
+        cached_l1 = _FLOW_PAGE_L1_CACHE.get(after_l1_key)
+        if isinstance(cached_l1, dict) and isinstance(cached_l1.get("items"), list):
+            return dict(cached_l1)
+        cached_after = backend.get(after_cache_key)
+        if isinstance(cached_after, dict) and isinstance(cached_after.get("items"), list):
+            _FLOW_PAGE_L1_CACHE[after_l1_key] = dict(cached_after)
+            return dict(cached_after)
 
     rows: list[dict[str, Any]] = []
     has_more = False
     db_active = database_enabled()
     db_failed = False
-    if db_active:
+    served_from_local_tail = False
+    if (
+        db_active
+        and (is_head or is_before_only)
+        and read_kap_flow_events is _ORIGINAL_READ_KAP_FLOW_EVENTS
+    ):
+        with _PERSISTED_FLOW_HASH_LOCK:
+            cached_tail = _LOCAL_REDIS_EVENTS_BY_SCOPE.get(_flow_hash_scope())
+            local_events = list(cached_tail) if isinstance(cached_tail, list) else []
+        if local_events:
+            if is_head:
+                if norm_category is None and limit <= len(local_events):
+                    rows, local_has_more = _page_from_events(
+                        local_events,
+                        limit=limit,
+                        before=None,
+                        after=None,
+                        category=None,
+                    )
+                    has_more = local_has_more or len(local_events) >= _retained_redis_limit()
+                    served_from_local_tail = True
+                elif norm_category is not None:
+                    cat_rows, cat_has_more = _page_from_events(
+                        local_events,
+                        limit=limit,
+                        before=None,
+                        after=None,
+                        category=norm_category,
+                    )
+                    if len(cat_rows) >= limit:
+                        rows = cat_rows
+                        has_more = cat_has_more or len(local_events) >= _retained_redis_limit()
+                        served_from_local_tail = True
+            elif is_before_only and before_tuple is not None:
+                oldest_local = min((_sort_key(row) for row in local_events), default=None)
+                if oldest_local is not None and before_tuple > oldest_local:
+                    cand_rows, cand_has_more = _page_from_events(
+                        local_events,
+                        limit=limit,
+                        before=before_tuple,
+                        after=None,
+                        category=norm_category,
+                    )
+                    if len(cand_rows) >= limit:
+                        rows = cand_rows
+                        has_more = cand_has_more or len(local_events) >= _retained_redis_limit()
+                        served_from_local_tail = True
+
+    if db_active and not served_from_local_tail:
         try:
             db_rows, has_more = read_kap_flow_events(
                 limit=limit,
@@ -467,7 +565,7 @@ def read_flow_page(
             db_failed = True
             LOGGER.warning("durable KAP flow read failed; using Redis fallback", exc_info=True)
 
-    if not db_active or db_failed:
+    if (not db_active or db_failed) and not served_from_local_tail:
         rows, has_more = _page_from_events(
             _redis_events(),
             limit=limit,
@@ -478,13 +576,36 @@ def read_flow_page(
 
     if not rows:
         if before_tuple or after_tuple:
-            return _build_page([], has_more=False, status=get_flow_status())
+            empty_page = _build_page([], has_more=False, status=get_flow_status())
+            if not db_failed:
+                if is_before_only and before_l1_key is not None:
+                    backend.set(
+                        before_cache_key,
+                        empty_page,
+                        ttl_seconds=min(60, FLOW_CURSOR_CACHE_TTL_SECONDS),
+                    )
+                    _FLOW_CURSOR_L1_CACHE[before_l1_key] = dict(empty_page)
+                elif is_after_only and after_l1_key is not None:
+                    backend.set(
+                        after_cache_key,
+                        empty_page,
+                        ttl_seconds=FLOW_AFTER_CACHE_TTL_SECONDS,
+                    )
+                    _FLOW_PAGE_L1_CACHE[after_l1_key] = dict(empty_page)
+            return empty_page
         return None
 
     page = _build_page(rows, has_more=has_more, status=get_flow_status())
-    if not before_tuple and not after_tuple:
-        backend.set(cache_key, page, ttl_seconds=max(1, FLOW_HEAD_CACHE_TTL_SECONDS))
-        _FLOW_PAGE_L1_CACHE[l1_key] = dict(page)
+    if is_head:
+        backend.set(head_cache_key, page, ttl_seconds=max(1, FLOW_HEAD_CACHE_TTL_SECONDS))
+        _FLOW_PAGE_L1_CACHE[head_l1_key] = dict(page)
+    elif not db_failed:
+        if is_before_only and before_l1_key is not None:
+            backend.set(before_cache_key, page, ttl_seconds=FLOW_CURSOR_CACHE_TTL_SECONDS)
+            _FLOW_CURSOR_L1_CACHE[before_l1_key] = dict(page)
+        elif is_after_only and after_l1_key is not None:
+            backend.set(after_cache_key, page, ttl_seconds=FLOW_AFTER_CACHE_TTL_SECONDS)
+            _FLOW_PAGE_L1_CACHE[after_l1_key] = dict(page)
     return page
 
 
@@ -544,7 +665,24 @@ def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[st
     head_row: Optional[dict[str, Any]] = None
     db_active = database_enabled()
     db_failed = False
-    if db_active:
+    if db_active and read_kap_flow_head is _ORIGINAL_READ_KAP_FLOW_HEAD:
+        with _PERSISTED_FLOW_HASH_LOCK:
+            cached_tail = _LOCAL_REDIS_EVENTS_BY_SCOPE.get(_flow_hash_scope())
+            local_events = list(cached_tail) if isinstance(cached_tail, list) else []
+        if local_events:
+            head_candidates, _ = _page_from_events(
+                local_events,
+                limit=1,
+                before=None,
+                after=None,
+                category=norm_category,
+            )
+            if head_candidates:
+                head_row = {
+                    "event_key": head_candidates[0]["event_key"],
+                    "published_at": head_candidates[0]["published_at"],
+                }
+    if db_active and head_row is None:
         try:
             db_head = read_kap_flow_head(category=norm_category)
             if db_head:
@@ -558,7 +696,7 @@ def read_flow_head(*, limit: int = 1, category: Optional[str] = None) -> dict[st
             db_failed = True
             LOGGER.warning("durable KAP flow head read failed; using Redis fallback", exc_info=True)
 
-    if not db_active or db_failed:
+    if (not db_active or db_failed) and head_row is None:
         redis_rows, _has_more = _page_from_events(
             _redis_events(),
             limit=1,

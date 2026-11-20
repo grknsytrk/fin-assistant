@@ -1043,6 +1043,7 @@ def _warm_stock_hist_multiples_sync(
     *,
     financial_snapshot_map: Optional[Dict[str, Dict[str, Any]]] = None,
     basic_summary_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    only_missing: bool = False,
 ) -> Dict[str, int]:
     """Compute historical valuation averages from kap_cache JSONs (local + Supabase) + batched 5Y weekly spark."""
     _ms = _market_service()
@@ -1056,26 +1057,37 @@ def _warm_stock_hist_multiples_sync(
         if symbols is not None
         else _ms._market_stock_symbols_for_index("XUTUM")
     )
+    skipped_existing = 0
+    if only_missing:
+        existing_hist = _ms._cached_stock_hist_multiples_map()
+        skipped_existing = sum(1 for sym in target_symbols if sym in existing_hist)
+        target_symbols = [sym for sym in target_symbols if sym not in existing_hist]
+        if not target_symbols:
+            return {"requested": 0, "populated": 0, "skipped_existing": skipped_existing}
     local_kap_set = {sym for sym in target_symbols if (kap_cache_dir / f"{sym}.json").exists()}
+    missing_local_symbols = [sym for sym in target_symbols if sym not in local_kap_set]
     remote_kap_set: Set[str] = set()
-    if _ms._market_database.database_enabled():
+    if missing_local_symbols and _ms._market_database.database_enabled():
         try:
             remote_meta = _ms._market_database.read_json_cache_kap_metadata()
             if isinstance(remote_meta, dict):
                 for key in remote_meta.keys():
-                    # keys look like "kap_cache/THYAO.json"
-                    name = str(key).rsplit("/", 1)[-1]
-                    if name.lower().endswith(".json"):
-                        sym_name = name[:-5].strip().upper()
-                        if sym_name:
-                            remote_kap_set.add(sym_name)
+                    # read_json_cache_kap_metadata() returns ticker stems (e.g. "THYAO"),
+                    # though paths like "kap_cache/THYAO.json" are also accepted safely.
+                    name = str(key).rsplit("/", 1)[-1].strip()
+                    sym_name = name[:-5].strip().upper() if name.lower().endswith(".json") else name.upper()
+                    if sym_name:
+                        remote_kap_set.add(sym_name)
         except Exception:
             _ms.LOGGER.debug("read_json_cache_kap_metadata failed during historical multiples warmup", exc_info=True)
 
     available_kap_set = local_kap_set | remote_kap_set
     kap_symbols = [sym for sym in target_symbols if sym in available_kap_set]
     if not kap_symbols:
-        return {"requested": 0, "populated": 0}
+        out: Dict[str, int] = {"requested": 0, "populated": 0}
+        if only_missing:
+            out["skipped_existing"] = skipped_existing
+        return out
 
     batches = [
         kap_symbols[i : i + _ms._STOCK_RETURN_BASE_SPARK_BATCH_SIZE]
@@ -1091,7 +1103,10 @@ def _warm_stock_hist_multiples_sync(
             price_map.update(_ms._fetch_stock_weekly_5y_spark_batch(batch))
 
     if not price_map:
-        return {"requested": len(kap_symbols), "populated": 0}
+        out = {"requested": len(kap_symbols), "populated": 0}
+        if only_missing:
+            out["skipped_existing"] = skipped_existing
+        return out
 
     if financial_snapshot_map is None:
         try:
@@ -1196,7 +1211,10 @@ def _warm_stock_hist_multiples_sync(
         if not _ms.os.getenv("PYTEST_CURRENT_TEST"):
             _ms._persist_stock_hist_multiples_disk(merged, now_ts=now)
         _ms._refresh_cached_xutum_stocks_payload()
-    return {"requested": len(kap_symbols), "populated": len(computed)}
+    out = {"requested": len(kap_symbols), "populated": len(computed)}
+    if only_missing:
+        out["skipped_existing"] = skipped_existing
+    return out
 
 
 def _schedule_stock_hist_multiples_warmup_if_needed(

@@ -829,3 +829,89 @@ def test_statement_cache_state_uses_remote_kap_metadata_when_local_files_absent(
     assert meta_calls == 1
     statement_module.clear_remote_statement_meta_cache()
 
+
+def test_incremental_remote_metadata_precheck_skips_jsonb_download_when_unchanged(
+    statement_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src import kap_fetcher as kap_fetcher_mod
+    from src.kap_fetcher import KAP_CACHE_SCHEMA_VERSION
+
+    statement_module.clear_remote_statement_meta_cache()
+    monkeypatch.setattr(statement_module, "database_enabled", lambda: True)
+    monkeypatch.setattr(
+        "app.database.read_json_cache_kap_metadata",
+        lambda: {
+            "THYAO": {
+                "ok": True,
+                "company": "THYAO",
+                "stock_code": "THYAO",
+                "company_title": "TÜRK HAVA YOLLARI A.O.",
+                "member_oid": "mkk-thyao",
+                "schema_version": KAP_CACHE_SCHEMA_VERSION,
+                "live_period_count": 2,
+                "quarters": [
+                    {"year": 2026, "period": 3, "disclosure_index": 200, "stock_code": "THYAO"},
+                    {"year": 2026, "period": 2, "disclosure_index": 150, "stock_code": "THYAO"},
+                ],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "app.database.read_json_cache",
+        lambda *_args, **_kwargs: pytest.fail("unchanged incremental check must not download full JSONB"),
+    )
+    monkeypatch.setattr(
+        kap_fetcher_mod,
+        "read_json_cache",
+        lambda *_args, **_kwargs: pytest.fail("unchanged incremental check must not download full JSONB"),
+    )
+
+    live_key = [2026, 3, 200]
+    monkeypatch.setattr(
+        kap_fetcher_mod,
+        "_list_company_disclosures",
+        lambda **_kwargs: [
+            {"year": live_key[0], "period": live_key[1], "disclosure_index": live_key[2]}
+        ],
+    )
+
+    res_unchanged = statement_module._process_kap_statement_symbol(
+        "THYAO",
+        mode="incremental",
+        max_quarters=2,
+    )
+    assert res_unchanged["outcome"] == "unchanged"
+    assert res_unchanged["quarter_count"] == 2
+
+    # When KAP publishes a newer disclosure, fall back to full cache fetch/merge.
+    live_key[:] = [2026, 4, 250]
+    monkeypatch.setattr(
+        kap_fetcher_mod,
+        "_fetch_attachment_detail",
+        lambda *_args, **_kwargs: {"disclosure": {"disclosureBasic": {"publishDate": "2026-11-20", "stockCode": "THYAO"}}, "html": ""},
+    )
+    monkeypatch.setattr(
+        kap_fetcher_mod,
+        "_extract_disclosure_metrics",
+        lambda *_args, **_kwargs: ({"net_kar": 100.0}, {"raw": "TL", "currency": "TL"}),
+    )
+    downloaded_keys: list[str] = []
+
+    def fake_read_json(path):
+        downloaded_keys.append(str(path))
+        return None
+
+    monkeypatch.setattr("app.database.read_json_cache", fake_read_json)
+    monkeypatch.setattr(kap_fetcher_mod, "read_json_cache", fake_read_json)
+    monkeypatch.setattr("app.database.write_json_cache", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(kap_fetcher_mod, "write_json_cache", lambda *_args, **_kwargs: None)
+
+    res_updated = statement_module._process_kap_statement_symbol(
+        "THYAO",
+        mode="incremental",
+        max_quarters=2,
+    )
+    assert res_updated["outcome"] == "updated"
+    assert len(downloaded_keys) >= 1
+    statement_module.clear_remote_statement_meta_cache()
+

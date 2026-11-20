@@ -494,3 +494,53 @@ def test_performance_series_supports_a_portfolio_with_only_closed_positions(
     assert payload["points"][-1]["portfolio_return_pct"] == 10.0
 
 
+def test_load_model_portfolio_state_uses_conditional_cache_and_honors_read_monkeypatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import model_portfolio_service as mps
+
+    reset_model_portfolio_cache_for_tests()
+    calls: list[Any] = []
+    remote_payload = {
+        "version": 7,
+        "updated_at": "2026-11-20T10:00:00+00:00",
+        "positions": [
+            {
+                "id": "pos-1",
+                "symbol": "THYAO",
+                "status": "active",
+                "weight_pct": 100.0,
+                "entry_date": "2026-11-01",
+                "entry_price": 300.0,
+            }
+        ],
+        "changelog": [],
+    }
+    remote_stamp = ("2026-11-20T10:00:00+00:00", 7)
+
+    def fake_conditional(_path: Path, *, known_stamp=None):
+        calls.append(known_stamp)
+        if known_stamp == remote_stamp:
+            return ("not_modified", None, remote_stamp)
+        return ("hit", dict(remote_payload), remote_stamp)
+
+    monkeypatch.setattr(mps, "read_json_cache_conditional", fake_conditional)
+
+    first = mps.load_model_portfolio_state(tmp_path)
+    assert first["version"] == 7
+    assert first["positions"][0]["symbol"] == "THYAO"
+    assert calls == [None]
+
+    reloaded = mps.load_model_portfolio_state(tmp_path, force_reload=True)
+    assert reloaded["version"] == 7
+    assert calls == [None, remote_stamp]
+
+    direct_calls: list[Path] = []
+    monkeypatch.setattr(mps, "read_json_cache_conditional", mps._DEFAULT_READ_JSON_CACHE_CONDITIONAL)
+    monkeypatch.setattr(mps, "read_json_cache", lambda path: direct_calls.append(path) or None)
+    mps.load_model_portfolio_state(tmp_path, force_reload=True)
+    assert len(direct_calls) == 1
+    assert len(calls) == 2
+    reset_model_portfolio_cache_for_tests()
+
+

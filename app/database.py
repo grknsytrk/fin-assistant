@@ -1160,6 +1160,7 @@ def write_json_cache(path: Path, payload: dict[str, Any]) -> None:
     try:
         ensure_json_cache_schema()
         with connect_postgres() as conn:
+            key = _cache_key(path)
             cursor = conn.execute(
                 """
                 INSERT INTO ragfin_json_cache (cache_key, payload, updated_at)
@@ -1170,9 +1171,19 @@ def write_json_cache(path: Path, payload: dict[str, Any]) -> None:
                 WHERE ragfin_json_cache.payload IS DISTINCT FROM EXCLUDED.payload
                 RETURNING updated_at::text AS updated_at, COALESCE(version, 0) AS version
                 """,
-                (_cache_key(path), json.dumps(payload, ensure_ascii=False, default=str)),
+                (key, json.dumps(payload, ensure_ascii=False, default=str)),
             )
             row = cursor.fetchone() if hasattr(cursor, "fetchone") else None
+            if not isinstance(row, dict):
+                existing_cur = conn.execute(
+                    """
+                    SELECT updated_at::text AS updated_at, COALESCE(version, 0) AS version
+                    FROM ragfin_json_cache
+                    WHERE cache_key = ?
+                    """,
+                    (key,),
+                )
+                row = existing_cur.fetchone() if hasattr(existing_cur, "fetchone") else None
             conn.commit()
         if isinstance(row, dict):
             updated_at = str(row.get("updated_at") or "").strip()

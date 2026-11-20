@@ -270,6 +270,9 @@ def _remember_json_cache_read_state(
             _JSON_CACHE_REMOTE_STAMPS[key] = (signature, (str(remote_stamp[0]), int(remote_stamp[1])))
             while len(_JSON_CACHE_REMOTE_STAMPS) > JSON_CACHE_READ_STATE_MAX_ENTRIES:
                 _JSON_CACHE_REMOTE_STAMPS.popitem(last=False)
+        elif key in _JSON_CACHE_REMOTE_STAMPS and signature is not None:
+            _, existing_stamp = _JSON_CACHE_REMOTE_STAMPS.pop(key)
+            _JSON_CACHE_REMOTE_STAMPS[key] = (signature, existing_stamp)
     if evicted_key is not None:
         with _JSON_CACHE_PAYLOAD_CACHE_LOCK:
             _remove_json_cache_payload_locked(evicted_key)

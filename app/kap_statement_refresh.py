@@ -137,6 +137,8 @@ from app.api_runtime import (
     uuid,
 )
 from app.kap_financials import _quarter_sort_key
+from app.kap_service import get_kap_snapshot as _ORIGINAL_GET_KAP_SNAPSHOT
+from src.kap_fetcher import fetch_kap_company_snapshot as _ORIGINAL_FETCH_KAP_COMPANY_SNAPSHOT
 
 
 def _kap_statement_env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -259,6 +261,7 @@ _STATEMENT_JOB_PUBLIC_FIELDS = (
     "current_symbol",
     "last_symbol",
     "coverage",
+    "historical_multiples",
     "stop_reason",
     "errors",
     "error",
@@ -440,7 +443,7 @@ def _statement_cache_path(symbol: str) -> Path:
 
 _REMOTE_STATEMENT_META_LOCK = threading.Lock()
 _REMOTE_STATEMENT_META_CACHE: Dict[str, Any] = {"scope": "", "loaded_at": 0.0, "by_symbol": {}}
-_REMOTE_STATEMENT_META_TTL_SECONDS = 120.0
+_REMOTE_STATEMENT_META_TTL_SECONDS = 7200.0
 
 
 def clear_remote_statement_meta_cache() -> None:
@@ -448,6 +451,42 @@ def clear_remote_statement_meta_cache() -> None:
 
     with _REMOTE_STATEMENT_META_LOCK:
         _REMOTE_STATEMENT_META_CACHE.update({"scope": "", "loaded_at": 0.0, "by_symbol": {}})
+
+
+def _update_remote_statement_meta_cache_entry(symbol: str, payload: Dict[str, Any]) -> None:
+    """Keep the in-process remote KAP header cache synchronized after an update."""
+
+    if not isinstance(payload, dict) or not database_enabled():
+        return
+    scope = os.getenv("RAGFIN_DATABASE_URL", "") or os.getenv("DATABASE_URL", "")
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return
+    quarters = [
+        {
+            "year": q.get("year"),
+            "period": q.get("period"),
+            "disclosure_index": q.get("disclosure_index"),
+            "stock_code": q.get("stock_code"),
+        }
+        for q in (payload.get("quarters") or [])
+        if isinstance(q, dict)
+    ]
+    entry = {
+        "ok": bool(payload.get("ok", True)),
+        "company": payload.get("company") or normalized,
+        "stock_code": payload.get("stock_code") or normalized,
+        "company_title": payload.get("company_title"),
+        "member_oid": payload.get("member_oid"),
+        "source_url": payload.get("source_url"),
+        "schema_version": int(payload.get("schema_version") or 0),
+        "live_period_count": int(payload.get("live_period_count") or 0),
+        "quarters": quarters,
+    }
+    with _REMOTE_STATEMENT_META_LOCK:
+        by_symbol = _REMOTE_STATEMENT_META_CACHE.get("by_symbol")
+        if _REMOTE_STATEMENT_META_CACHE.get("scope") == scope and isinstance(by_symbol, dict):
+            by_symbol[normalized] = entry
 
 
 def _load_remote_statement_cache_metadata() -> Dict[str, Dict[str, Any]]:
@@ -626,7 +665,8 @@ def _process_kap_statement_symbol(
         extract_financial_snapshot_from_kap_payload,
         upsert_financial_snapshots,
     )
-    from app.kap_service import get_kap_snapshot, normalize_kap_symbol
+    from app.kap_service import classify_kap_company_kind, get_kap_snapshot, normalize_kap_symbol
+    from src import kap_fetcher as _kap_fetcher_mod
     from src.kap_fetcher import KAP_CACHE_SCHEMA_VERSION
 
     normalized = normalize_kap_symbol(symbol)
@@ -650,6 +690,37 @@ def _process_kap_statement_symbol(
         if previous_is_current_schema
         else 0
     )
+    if (
+        mode == "incremental"
+        and previous_is_current_schema
+        and get_kap_snapshot is _ORIGINAL_GET_KAP_SNAPSHOT
+        and _kap_fetcher_mod.fetch_kap_company_snapshot is _ORIGINAL_FETCH_KAP_COMPANY_SNAPSHOT
+    ):
+        member_oid = str((previous or {}).get("member_oid") or "").strip()
+        cached_latest_key = _latest_statement_key(previous)
+        company_title = str((previous or {}).get("company_title") or "").strip()
+        if (
+            member_oid
+            and cached_latest_key is not None
+            and classify_kap_company_kind(normalized, company_title) != "insurance"
+        ):
+            latest_disclosures = _kap_fetcher_mod._list_company_disclosures(
+                member_oid=member_oid,
+                cfg=CONFIG.kap,
+                max_periods=1,
+                allow_criteria_fallback=False,
+                strict_provider_errors=True,
+            )
+            live_latest_key = _kap_fetcher_mod._latest_disclosure_key_from_list(latest_disclosures)
+            if not live_latest_key:
+                raise RuntimeError("KAP finansal bildirim listesi bos dondu.")
+            if live_latest_key <= cached_latest_key:
+                return {
+                    "symbol": normalized,
+                    "outcome": "unchanged",
+                    "quarter_count": cached_depth,
+                    "schema_version": KAP_CACHE_SCHEMA_VERSION,
+                }
     fetch_depth = min(
         _KAP_STATEMENT_DEPTH_CEILING,
         max(int(max_quarters), cached_depth),
@@ -701,6 +772,8 @@ def _process_kap_statement_symbol(
         or _statement_cached_depth(previous) != _statement_cached_depth(raw)
         or prev_schema != new_schema
     )
+    if changed or mode == "full":
+        _update_remote_statement_meta_cache_entry(normalized, raw)
 
     snapshot_warning: Optional[str] = None
     deferred_snapshot: Optional[Dict[str, Any]] = None
@@ -833,6 +906,7 @@ def _retry_blocked_kap_statement_symbols(
     max_quarters: int,
     deadline: float,
     pending_snapshots: Optional[List[Dict[str, Any]]] = None,
+    updated_symbols: Optional[List[str]] = None,
 ) -> None:
     """Give symbols that hit a transient KAP block one more chance.
 
@@ -877,6 +951,8 @@ def _retry_blocked_kap_statement_symbols(
                     job[skip_field] = int(job.get(skip_field) or 0) + 1
                 else:
                     job[outcome] = int(job.get(outcome) or 0) + 1
+                    if outcome == "updated" and updated_symbols is not None and symbol not in updated_symbols:
+                        updated_symbols.append(symbol)
                 job["errors"] = [
                     entry
                     for entry in job.get("errors") or []
@@ -1038,6 +1114,7 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
     heartbeat_stop = threading.Event()
     job_lock = threading.Lock()
     pending_snapshots: List[Dict[str, Any]] = []
+    updated_symbols: List[str] = []
 
     def _heartbeat_worker() -> None:
         interval = _KAP_STATEMENT_HEARTBEAT_INTERVAL_SECONDS
@@ -1122,6 +1199,9 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
                     elif outcome == "updated":
                         job["updated"] = int(job.get("updated") or 0) + 1
                         job["fetched"] = int(job.get("fetched") or 0) + 1
+                        updated_sym = str(result.get("symbol") or "").strip().upper()
+                        if updated_sym and updated_sym not in updated_symbols:
+                            updated_symbols.append(updated_sym)
                     elif outcome == "unchanged":
                         job["unchanged"] = int(job.get("unchanged") or 0) + 1
                         job["fetched"] = int(job.get("fetched") or 0) + 1
@@ -1191,6 +1271,7 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
                 max_quarters=max_quarters,
                 deadline=deadline,
                 pending_snapshots=pending_snapshots,
+                updated_symbols=updated_symbols,
             )
     except Exception as exc:  # noqa: BLE001 - never leave the job stuck in "running"
         LOGGER.exception("KAP statement refresh job failed: %s", job_id)
@@ -1252,12 +1333,25 @@ def _run_kap_statement_refresh_job_inner(job_id: str) -> None:
                 backend.delete(f"api:market:stocks:{idx_name}:v4")
         except Exception:  # noqa: BLE001 - cache invalidation must not fail the job
             LOGGER.warning("Market fundamental cache invalidation failed", exc_info=True)
-    if (int(job.get("updated") or 0) > 0 or mode == "full") and not os.getenv("PYTEST_CURRENT_TEST"):
+    if not os.getenv("PYTEST_CURRENT_TEST"):
         try:
-            from app.market_service import _warm_stock_hist_multiples_sync
+            from app.market_service import (
+                _cached_stock_hist_multiples_map,
+                _warm_stock_hist_multiples_sync,
+            )
 
-            hist_summary = _warm_stock_hist_multiples_sync(symbols=symbols)
-            job["historical_multiples"] = hist_summary
+            existing_hist = _cached_stock_hist_multiples_map()
+            missing_hist = [s for s in symbols if s not in existing_hist]
+            hist_targets = list(dict.fromkeys([*updated_symbols, *missing_hist]))
+            if hist_targets:
+                hist_summary = _warm_stock_hist_multiples_sync(symbols=hist_targets)
+                job["historical_multiples"] = hist_summary
+            else:
+                job["historical_multiples"] = {
+                    "requested": 0,
+                    "populated": 0,
+                    "skipped_existing": len(symbols),
+                }
         except Exception:  # noqa: BLE001 - historical multiples warm-up must not fail the statement job
             LOGGER.warning("Historical valuation multiples warm-up after statement refresh failed", exc_info=True)
     try:

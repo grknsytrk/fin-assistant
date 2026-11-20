@@ -62,6 +62,7 @@ _INSTRUMENTS_CACHE: Dict[
     tuple[float, Dict[tuple[str, str], Dict[str, Any]], Dict[tuple[str, str], str]],
 ] = {}
 _INSTRUMENTS_STAMP_CACHE: Dict[str, tuple[str, str]] = {}
+_INSTRUMENTS_ALIAS_ROWS_CACHE: Dict[str, Dict[str, tuple[str, str, str, Optional[str]]]] = {}
 _INSTRUMENT_SELECT_COLUMNS = (
     "kind, symbol, name, short_name, source, source_id, "
     "logo_url, logo_source, active, as_of, metadata_json, "
@@ -82,10 +83,12 @@ def clear_instruments_cache(processed_dir: Optional[Path] = None) -> None:
         if processed_dir is None:
             _INSTRUMENTS_CACHE.clear()
             _INSTRUMENTS_STAMP_CACHE.clear()
+            _INSTRUMENTS_ALIAS_ROWS_CACHE.clear()
         else:
             cache_key = _instruments_cache_key(processed_dir)
             _INSTRUMENTS_CACHE.pop(cache_key, None)
             _INSTRUMENTS_STAMP_CACHE.pop(cache_key, None)
+            _INSTRUMENTS_ALIAS_ROWS_CACHE.pop(cache_key, None)
 
 
 def _read_instruments_stamp(conn: Any) -> Optional[tuple[str, str]]:
@@ -121,6 +124,7 @@ def _ensure_instruments_cache(
 
         by_kind_symbol: Dict[tuple[str, str], Dict[str, Any]] = {}
         aliases_by_kind_alias: Dict[tuple[str, str], str] = {}
+        alias_rows_by_alias: Dict[str, tuple[str, str, str, Optional[str]]] = {}
         stamp: Optional[tuple[str, str]] = None
         with _connect(processed_dir) as conn:
             if getattr(conn, "is_postgres", False):
@@ -138,7 +142,7 @@ def _ensure_instruments_cache(
                         )
                     return cached[1], cached[2]
             rows = conn.execute(f"SELECT {_INSTRUMENT_SELECT_COLUMNS} FROM instruments").fetchall()
-            alias_rows = conn.execute("SELECT alias, kind, symbol FROM instrument_aliases").fetchall()
+            alias_rows = conn.execute("SELECT alias, kind, symbol, source FROM instrument_aliases").fetchall()
         for row in rows:
             instrument = _row_to_dict(row)
             norm_kind = normalize_instrument_kind(instrument.get("kind"))
@@ -149,8 +153,20 @@ def _ensure_instruments_cache(
             norm_kind = normalize_instrument_kind(row["kind"])
             norm_alias = normalize_instrument_symbol(row["alias"])
             norm_symbol = normalize_instrument_symbol(row["symbol"])
+            if isinstance(row, dict):
+                alias_source = row.get("source")
+            else:
+                alias_source = row["source"] if "source" in row.keys() else None
             if norm_kind and norm_alias and norm_symbol:
                 aliases_by_kind_alias[(norm_kind, norm_alias)] = norm_symbol
+            raw_alias = str(row["alias"] or "")
+            if raw_alias:
+                alias_rows_by_alias[raw_alias] = (
+                    raw_alias,
+                    str(row["kind"] or ""),
+                    str(row["symbol"] or ""),
+                    alias_source,
+                )
 
         if _INSTRUMENTS_CACHE_TTL_SECONDS > 0:
             _INSTRUMENTS_CACHE[cache_key] = (
@@ -158,6 +174,7 @@ def _ensure_instruments_cache(
                 by_kind_symbol,
                 aliases_by_kind_alias,
             )
+            _INSTRUMENTS_ALIAS_ROWS_CACHE[cache_key] = alias_rows_by_alias
             if stamp is not None:
                 _INSTRUMENTS_STAMP_CACHE[cache_key] = stamp
         return by_kind_symbol, aliases_by_kind_alias
@@ -373,12 +390,32 @@ def _merge_normalized_records(existing: Dict[str, Any], incoming: Dict[str, Any]
     return merged
 
 
+def _cached_instrument_as_db_row(inst: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "kind": inst.get("kind"),
+        "symbol": inst.get("symbol"),
+        "name": inst.get("name"),
+        "short_name": inst.get("short_name"),
+        "source": inst.get("source"),
+        "source_id": inst.get("source_id"),
+        "logo_url": inst.get("logo_url"),
+        "logo_source": inst.get("logo_source"),
+        "active": 1 if inst.get("active", True) else 0,
+        "as_of": inst.get("as_of"),
+        "metadata_json": _stable_json(inst.get("metadata") or {}),
+        "created_at": inst.get("created_at"),
+        "updated_at": inst.get("updated_at"),
+    }
+
+
 def _update_instruments_cache_incremental(
     processed_dir: Path,
     upserted_instruments: List[Dict[str, Any]],
     upserted_aliases: List[tuple[str, str, str]],
+    *,
+    alias_source_rows: Optional[List[tuple[str, str, str, Optional[str]]]] = None,
 ) -> None:
-    if not upserted_instruments and not upserted_aliases:
+    if not upserted_instruments and not upserted_aliases and not alias_source_rows:
         return
     cache_key = _instruments_cache_key(processed_dir)
     with _INSTRUMENTS_CACHE_LOCK:
@@ -397,6 +434,11 @@ def _update_instruments_cache_incremental(
             norm_symbol = normalize_instrument_symbol(symbol)
             if norm_kind and norm_alias and norm_symbol:
                 aliases_by_kind_alias[(norm_kind, norm_alias)] = norm_symbol
+        cached_alias_rows = _INSTRUMENTS_ALIAS_ROWS_CACHE.get(cache_key)
+        if cached_alias_rows is not None and alias_source_rows:
+            for raw_alias, raw_kind, raw_symbol, raw_source in alias_source_rows:
+                if raw_alias:
+                    cached_alias_rows[raw_alias] = (raw_alias, raw_kind, raw_symbol, raw_source)
         if _INSTRUMENTS_CACHE_TTL_SECONDS > 0:
             _INSTRUMENTS_CACHE[cache_key] = (
                 time.monotonic() + _INSTRUMENTS_CACHE_TTL_SECONDS,
@@ -458,21 +500,42 @@ def upsert_instruments(
         # This keeps the same conflict/metadata semantics without making the
         # user-facing refresh job wait on thousands of network round-trips.
         if getattr(conn, "is_postgres", False):
+            cache_key = _instruments_cache_key(processed_dir)
+            with _INSTRUMENTS_CACHE_LOCK:
+                cached_entry = _INSTRUMENTS_CACHE.get(cache_key)
+                cached_stamp = _INSTRUMENTS_STAMP_CACHE.get(cache_key)
+                cached_alias_rows = _INSTRUMENTS_ALIAS_ROWS_CACHE.get(cache_key)
+            stamp_matched = False
+            if cached_entry is not None and cached_stamp is not None:
+                try:
+                    current_stamp = _read_instruments_stamp(conn)
+                except Exception:
+                    current_stamp = None
+                stamp_matched = current_stamp is not None and current_stamp == cached_stamp
+
             existing_by_key: Dict[tuple[str, str], Any] = {}
-            symbols_by_kind: Dict[str, List[str]] = {}
-            for incoming in normalized_records:
-                symbols_by_kind.setdefault(str(incoming["kind"]), []).append(str(incoming["symbol"]))
-            for kind, symbols in symbols_by_kind.items():
-                unique_symbols = list(dict.fromkeys(symbols))
-                for offset in range(0, len(unique_symbols), 500):
-                    chunk = unique_symbols[offset : offset + 500]
-                    placeholders = ",".join("?" for _ in chunk)
-                    rows = conn.execute(
-                        f"SELECT {_INSTRUMENT_SELECT_COLUMNS} FROM instruments WHERE kind = ? AND symbol IN ({placeholders})",
-                        (kind, *chunk),
-                    ).fetchall()
-                    for existing in rows:
-                        existing_by_key[(str(existing["kind"]), str(existing["symbol"]))] = existing
+            if stamp_matched and cached_entry is not None:
+                by_kind_symbol_cached = cached_entry[1]
+                for incoming in normalized_records:
+                    key = (str(incoming["kind"]), str(incoming["symbol"]))
+                    cached_inst = by_kind_symbol_cached.get(key)
+                    if cached_inst is not None:
+                        existing_by_key[key] = _cached_instrument_as_db_row(cached_inst)
+            else:
+                symbols_by_kind: Dict[str, List[str]] = {}
+                for incoming in normalized_records:
+                    symbols_by_kind.setdefault(str(incoming["kind"]), []).append(str(incoming["symbol"]))
+                for kind, symbols in symbols_by_kind.items():
+                    unique_symbols = list(dict.fromkeys(symbols))
+                    for offset in range(0, len(unique_symbols), 500):
+                        chunk = unique_symbols[offset : offset + 500]
+                        placeholders = ",".join("?" for _ in chunk)
+                        rows = conn.execute(
+                            f"SELECT {_INSTRUMENT_SELECT_COLUMNS} FROM instruments WHERE kind = ? AND symbol IN ({placeholders})",
+                            (kind, *chunk),
+                        ).fetchall()
+                        for existing in rows:
+                            existing_by_key[(str(existing["kind"]), str(existing["symbol"]))] = existing
 
             instrument_rows: List[tuple[Any, ...]] = []
             upserted_dicts: List[Dict[str, Any]] = []
@@ -524,20 +587,26 @@ def upsert_instruments(
             alias_rows: List[tuple[Any, ...]] = []
             if alias_by_key:
                 existing_aliases: Dict[str, tuple[Any, ...]] = {}
-                alias_keys = list(alias_by_key.keys())
-                for offset in range(0, len(alias_keys), 500):
-                    chunk = alias_keys[offset : offset + 500]
-                    placeholders = ",".join("?" for _ in chunk)
-                    for existing_alias in conn.execute(
-                        f"SELECT alias, kind, symbol, source FROM instrument_aliases WHERE alias IN ({placeholders})",
-                        tuple(chunk),
-                    ).fetchall():
-                        existing_aliases[str(existing_alias["alias"])] = (
-                            str(existing_alias["alias"]),
-                            str(existing_alias["kind"]),
-                            str(existing_alias["symbol"]),
-                            existing_alias["source"],
-                        )
+                if stamp_matched and cached_alias_rows is not None:
+                    for alias in alias_by_key:
+                        cached_alias = cached_alias_rows.get(alias)
+                        if cached_alias is not None:
+                            existing_aliases[alias] = cached_alias
+                else:
+                    alias_keys = list(alias_by_key.keys())
+                    for offset in range(0, len(alias_keys), 500):
+                        chunk = alias_keys[offset : offset + 500]
+                        placeholders = ",".join("?" for _ in chunk)
+                        for existing_alias in conn.execute(
+                            f"SELECT alias, kind, symbol, source FROM instrument_aliases WHERE alias IN ({placeholders})",
+                            tuple(chunk),
+                        ).fetchall():
+                            existing_aliases[str(existing_alias["alias"])] = (
+                                str(existing_alias["alias"]),
+                                str(existing_alias["kind"]),
+                                str(existing_alias["symbol"]),
+                                existing_alias["source"],
+                            )
                 alias_rows = [
                     candidate
                     for alias, candidate in alias_by_key.items()
@@ -589,11 +658,26 @@ def upsert_instruments(
                     )
             if instrument_rows or alias_rows:
                 conn.commit()
-                _update_instruments_cache_incremental(
-                    processed_dir,
-                    upserted_dicts,
-                    [(str(a[0]), str(a[1]), str(a[2])) for a in alias_rows],
-                )
+                if stamp_matched:
+                    _update_instruments_cache_incremental(
+                        processed_dir,
+                        upserted_dicts,
+                        [(str(a[0]), str(a[1]), str(a[2])) for a in alias_rows],
+                        alias_source_rows=[(str(a[0]), str(a[1]), str(a[2]), a[3]) for a in alias_rows],
+                    )
+                    try:
+                        new_stamp = _read_instruments_stamp(conn)
+                    except Exception:
+                        new_stamp = None
+                    with _INSTRUMENTS_CACHE_LOCK:
+                        if cache_key in _INSTRUMENTS_CACHE and new_stamp is not None:
+                            _INSTRUMENTS_STAMP_CACHE[cache_key] = new_stamp
+                        else:
+                            _INSTRUMENTS_STAMP_CACHE.pop(cache_key, None)
+                else:
+                    # External writes caused stamp divergence (or cache was warm without match);
+                    # clear stale cache so the next read loads the full consistent state.
+                    clear_instruments_cache(processed_dir)
             return {
                 "db_path": str(reference_data_db_path(processed_dir)),
                 "upserted_count": len(instrument_rows),

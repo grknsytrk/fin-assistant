@@ -246,7 +246,7 @@ def test_postgres_instruments_stamp_skips_full_scan_and_noop_upsert(tmp_path, mo
     assert sum(1 for q in queries if q == full_scan_sql) == 1
     assert sum(1 for q in queries if "AS instruments_stamp" in q) == 2
 
-    # Unchanged upsert must skip INSERT ... ON CONFLICT DO UPDATE and keep cache intact.
+    # Unchanged upsert must skip BOTH pre-read SELECT ... WHERE IN queries and INSERT ... ON CONFLICT DO UPDATE.
     noop = ref_data.upsert_instruments(
         tmp_path,
         [
@@ -266,5 +266,111 @@ def test_postgres_instruments_stamp_skips_full_scan_and_noop_upsert(tmp_path, mo
     )
     assert noop["upserted_count"] == 0
     assert not any(q.startswith("INSERT INTO instruments") for q in queries)
+    assert not any(q.startswith(f"SELECT {ref_data._INSTRUMENT_SELECT_COLUMNS} FROM instruments WHERE kind =") for q in queries)
+    assert not any(q.startswith("SELECT alias, kind, symbol, source FROM instrument_aliases WHERE alias IN") for q in queries)
     assert cache_key in ref_data._INSTRUMENTS_CACHE
+    ref_data.reset_reference_data_state_for_tests()
+
+
+def test_postgres_mutating_upsert_refreshes_stamp_and_avoids_subsequent_full_scan(tmp_path, monkeypatch) -> None:
+    from app import reference_data as ref_data
+
+    ref_data.reset_reference_data_state_for_tests()
+    queries: list[str] = []
+    stamp_seq = 1
+    instruments_rows = [
+        {
+            "kind": "fund",
+            "symbol": "TLY",
+            "name": "Tera Birinci",
+            "short_name": "TLY",
+            "source": "tefasfon_funds",
+            "source_id": None,
+            "logo_url": None,
+            "logo_source": None,
+            "active": 1,
+            "as_of": "2026-11-14",
+            "metadata_json": "{}",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-11-14T10:00:00+00:00",
+        }
+    ]
+    alias_rows: list[dict] = []
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return list(self._rows)
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+    class _FakePgConn:
+        is_postgres = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql: str, params=()):
+            nonlocal stamp_seq
+            del params
+            normalized = " ".join(sql.split())
+            queries.append(normalized)
+            if "AS instruments_stamp" in normalized:
+                return _FakeResult([{"instruments_stamp": f"stamp-{stamp_seq}:1", "aliases_stamp": f"astamp-{stamp_seq}:{len(alias_rows)}"}])
+            if normalized.startswith(f"SELECT {ref_data._INSTRUMENT_SELECT_COLUMNS} FROM instruments"):
+                return _FakeResult(instruments_rows)
+            if normalized.startswith("SELECT alias, kind, symbol, source FROM instrument_aliases"):
+                return _FakeResult(alias_rows)
+            if normalized.startswith("INSERT INTO instruments") or normalized.startswith("INSERT INTO instrument_aliases"):
+                stamp_seq += 1
+            return _FakeResult([])
+
+        def commit(self):
+            return None
+
+    monkeypatch.setattr(ref_data, "database_enabled", lambda: True)
+    monkeypatch.setattr(ref_data, "ensure_reference_data_schema", lambda _p: None)
+    monkeypatch.setattr(ref_data, "_connect", lambda _p: _FakePgConn())
+    monkeypatch.setattr(ref_data, "_INSTRUMENTS_CACHE_TTL_SECONDS", 60.0)
+    monkeypatch.setattr(ref_data, "_MANUAL_INSTRUMENTS", [])
+
+    assert get_instrument(tmp_path, "fund", "TLY")["name"] == "Tera Birinci"
+
+    updated = ref_data.upsert_instruments(
+        tmp_path,
+        [
+            {
+                "kind": "fund",
+                "symbol": "TLY",
+                "name": "Tera Birinci Guncel",
+                "short_name": "TLY",
+                "source": "tefasfon_funds",
+                "aliases": ["TLY_ALIAS"],
+                "active": 1,
+                "as_of": "2026-11-15",
+                "metadata": {},
+            }
+        ],
+        seed_manual=False,
+    )
+    assert updated["upserted_count"] == 1
+    assert updated["alias_count"] == 1
+    assert not any("WHERE kind =" in q for q in queries)
+    assert not any("WHERE alias IN" in q for q in queries)
+
+    # Expire TTL; refreshed stamp must match DB stamp and still skip full-table SELECT.
+    cache_key = ref_data._instruments_cache_key(tmp_path)
+    old_exp, sym_map, alias_map = ref_data._INSTRUMENTS_CACHE[cache_key]
+    ref_data._INSTRUMENTS_CACHE[cache_key] = (old_exp - 1000.0, sym_map, alias_map)
+
+    resolved = get_instrument(tmp_path, "fund", "TLY_ALIAS")
+    assert resolved is not None and resolved["name"] == "Tera Birinci Guncel"
+    full_scan_sql = f"SELECT {ref_data._INSTRUMENT_SELECT_COLUMNS} FROM instruments"
+    assert sum(1 for q in queries if q == full_scan_sql) == 1
     ref_data.reset_reference_data_state_for_tests()

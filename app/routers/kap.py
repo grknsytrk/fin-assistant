@@ -176,6 +176,7 @@ def admin_warm_historical_multiples(
     request: Request,
     universe: Literal["all", "bist30", "bist100", "symbols"] = Query("all"),
     symbols: Optional[str] = Query(None),
+    only_missing: bool = Query(True),
 ) -> Dict[str, Any]:
     """Compute and persist historical valuation multiples (F/K, PD/DD, FD/FAVOK averages)."""
 
@@ -185,7 +186,7 @@ def admin_warm_historical_multiples(
 
     parsed_symbols = _parse_kap_statement_symbols(symbols)
     target_symbols = _resolve_kap_statement_symbols(universe, parsed_symbols)
-    summary = _warm_stock_hist_multiples_sync(symbols=target_symbols)
+    summary = _warm_stock_hist_multiples_sync(symbols=target_symbols, only_missing=only_missing)
     return {"ok": True, "universe": universe, "historical_multiples": summary}
 
 @router.get("/kap/companies")

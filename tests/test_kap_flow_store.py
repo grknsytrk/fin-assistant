@@ -309,3 +309,111 @@ def test_persist_flow_items_retries_failed_db_upsert_and_caches_empty_head(monke
     assert second["database_written"] is True
     assert attempts == 2
     store.clear_persisted_flow_hashes()
+
+
+def test_read_flow_page_and_head_serve_from_warm_ram_tail_without_postgres_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.clear_persisted_flow_hashes()
+    monkeypatch.setattr(store, "database_enabled", lambda: True)
+    monkeypatch.setattr(store, "upsert_kap_flow_events", lambda rows: len(rows))
+    monkeypatch.setattr(
+        "app.database.connect_postgres",
+        lambda: pytest.fail("warm RAM flow tail must avoid Postgres SELECT reads after cron ingest"),
+    )
+
+    status = store.persist_flow_items(
+        [_item(10, 10), _item(11, 20), _item(12, 30)],
+        source="kap_public_website",
+        as_of="2026-09-09T10:30:00+00:00",
+    )
+    assert status["changed_count"] == 3
+
+    page = store.read_flow_page(limit=2)
+    assert page is not None
+    assert [row["id"] for row in page["items"]] == ["kap-12", "kap-11"]
+    assert page["has_more"] is True
+
+    head = store.read_flow_head()
+    assert head["latest_cursor"] is not None
+    assert head["latest_cursor"] == page["latest_cursor"]
+    store.clear_persisted_flow_hashes()
+
+
+def test_read_flow_page_caches_before_and_after_cursors_and_uses_ram_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.clear_persisted_flow_hashes()
+    monkeypatch.setattr(store, "database_enabled", lambda: True)
+    monkeypatch.setattr(store, "upsert_kap_flow_events", lambda rows: len(rows))
+
+    db_calls: list[tuple[Any, Any]] = []
+
+    def fake_db_events(*, limit, before=None, after=None, category=None):
+        del limit, category
+        db_calls.append((before, after))
+        if before is not None:
+            row = store.normalize_flow_item(_item(2, 2))
+            return [
+                {
+                    "event_key": row["event_key"],
+                    "published_at": row["published_at"],
+                    "payload": row["payload"],
+                }
+            ], True
+        if after is not None:
+            row = store.normalize_flow_item(_item(5, 5))
+            return [
+                {
+                    "event_key": row["event_key"],
+                    "published_at": row["published_at"],
+                    "payload": row["payload"],
+                }
+            ], False
+        return [], False
+
+    monkeypatch.setattr(store, "read_kap_flow_events", fake_db_events)
+
+    before_cursor = store.encode_cursor("2026-09-09T10:03:00+00:00", "kap:3")
+    after_cursor = store.encode_cursor("2026-09-09T10:04:00+00:00", "kap:4")
+
+    b1 = store.read_flow_page(limit=1, before=before_cursor)
+    b2 = store.read_flow_page(limit=1, before=before_cursor)
+    assert b1 is not None and b2 is not None
+    assert [row["id"] for row in b1["items"]] == ["kap-2"]
+    assert len(db_calls) == 1
+
+    a1 = store.read_flow_page(limit=1, after=after_cursor)
+    a2 = store.read_flow_page(limit=1, after=after_cursor)
+    assert a1 is not None and a2 is not None
+    assert [row["id"] for row in a1["items"]] == ["kap-5"]
+    assert len(db_calls) == 2
+
+    # Publishing a new live disclosure invalidates head + after caches, NOT immutable before cursor pages.
+    store.persist_flow_items([_item(9, 9)], source="kap_public_website", as_of="2026-09-09T10:09:00+00:00")
+    store._FLOW_CURSOR_L1_CACHE.clear()
+    b3 = store.read_flow_page(limit=1, before=before_cursor)
+    assert b3 is not None and [row["id"] for row in b3["items"]] == ["kap-2"]
+    assert len(db_calls) == 2
+
+    store.read_flow_page(limit=1, after=after_cursor)
+    assert len(db_calls) == 3
+
+    # Verify before-cursor paging also serves directly from RAM tail without DB access.
+    store.clear_persisted_flow_hashes()
+    monkeypatch.setattr(store, "read_kap_flow_events", store._ORIGINAL_READ_KAP_FLOW_EVENTS)
+    monkeypatch.setattr(
+        "app.database.connect_postgres",
+        lambda: pytest.fail("RAM tail before-cursor read must avoid Postgres SELECT"),
+    )
+    store.persist_flow_items(
+        [_item(10, 10), _item(11, 11), _item(12, 12), _item(13, 13)],
+        source="kap_public_website",
+        as_of="2026-09-09T10:13:00+00:00",
+    )
+    ram_before_cursor = store.encode_cursor("2026-09-09T10:13:00+00:00", "kap:13")
+    ram_page = store.read_flow_page(limit=2, before=ram_before_cursor)
+    assert ram_page is not None
+    assert [row["id"] for row in ram_page["items"]] == ["kap-12", "kap-11"]
+    assert ram_page["has_more"] is True
+    store.clear_persisted_flow_hashes()
