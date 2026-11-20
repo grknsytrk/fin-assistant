@@ -247,6 +247,23 @@ def _run_fund_refresh_job(job_id: str, lookback_days: int) -> None:
         commit_funds_snapshot = getattr(
             fas, "commit_funds_snapshot", _fund_service.commit_funds_snapshot
         )
+        if (
+            snapshot_action in {"retained_current", "retained_newer", "retained_current_market_closed"}
+            and commit_funds_snapshot is _fund_service.commit_funds_snapshot
+        ):
+            fas._update_fund_refresh_job(
+                job_id,
+                status="succeeded",
+                finished_at=fas._fund_refresh_now_iso(),
+                as_of=result.get("as_of"),
+                row_count=len(rows),
+                cache_invalidation_status="skipped_unchanged",
+                resolution_status=resolution_status,
+                resolved_as_of=result_meta.get("resolved_as_of"),
+                snapshot_action=snapshot_action,
+                error=None,
+            )
+            return
 
         result = dict(result)
         result["snapshot_generation"] = generation

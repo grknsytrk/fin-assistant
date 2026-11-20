@@ -646,36 +646,61 @@ def get_fund_categories_payload(processed_dir: Path) -> Dict[str, Any]:
     meta["list_min_aum"] = _fund_service().FUNDS_LIST_MIN_AUM
     row_store_active = meta.get("catalog_storage") == "fund_snapshots"
     if row_store_active:
-        conditions: List[str] = []
-        params: List[Any] = []
-        if _fund_service().TEFAS_OPEN_ONLY:
-            conditions.append("(tefas_open IS NULL OR tefas_open = 1)")
-        if _fund_service().FUNDS_LIST_MIN_AUM > 0:
-            conditions.append("aum >= ?")
-            params.append(_fund_service().FUNDS_LIST_MIN_AUM)
-        where_sql = " WHERE " + " AND ".join(conditions) if conditions else ""
-        with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
-            records = conn.execute(
-                "SELECT DISTINCT fund_type, founder_company, manager_company, risk_value_json "
-                f"FROM fund_snapshots{where_sql}",
-                tuple(params),
-            ).fetchall()
-        unique_values: Dict[str, set[str]] = {
-            "fund_type": set(),
-            "founder_company": set(),
-            "manager_company": set(),
-        }
-        risk_set: set[int] = set()
-        for record in records:
-            for key in unique_values:
-                value = record[key]
-                if value:
-                    unique_values[key].add(str(value).strip())
-            risk_value = _fund_service()._safe_json_loads(record["risk_value_json"], None)
-            if isinstance(risk_value, int):
-                risk_set.add(risk_value)
-        risk_values = sorted(risk_set)
-        category_values = {key: sorted(values) for key, values in unique_values.items()}
+        cached_all = _fund_service()._peek_all_snapshot_rows(
+            processed_dir,
+            snapshot.get("snapshot_generation"),
+        )
+        if cached_all is not None:
+            rows = [
+                row
+                for row in list(cached_all.get("rows") or [])
+                if isinstance(row, dict)
+                and _fund_service()._is_tefas_open_row(row)
+                and _fund_service()._meets_min_aum(row, _fund_service().FUNDS_LIST_MIN_AUM)
+            ]
+            category_values = {
+                key: sorted({str(row.get(key)).strip() for row in rows if row.get(key)})
+                for key in ("fund_type", "founder_company", "manager_company")
+            }
+            risk_values = sorted(
+                {
+                    int(row["risk_value"])
+                    for row in rows
+                    if isinstance(row.get("risk_value"), int)
+                    and not isinstance(row.get("risk_value"), bool)
+                }
+            )
+        else:
+            conditions: List[str] = []
+            params: List[Any] = []
+            if _fund_service().TEFAS_OPEN_ONLY:
+                conditions.append("(tefas_open IS NULL OR tefas_open = 1)")
+            if _fund_service().FUNDS_LIST_MIN_AUM > 0:
+                conditions.append("aum >= ?")
+                params.append(_fund_service().FUNDS_LIST_MIN_AUM)
+            where_sql = " WHERE " + " AND ".join(conditions) if conditions else ""
+            with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
+                records = conn.execute(
+                    "SELECT DISTINCT fund_type, founder_company, manager_company, risk_value_json "
+                    f"FROM fund_snapshots{where_sql}",
+                    tuple(params),
+                ).fetchall()
+            unique_values: Dict[str, set[str]] = {
+                "fund_type": set(),
+                "founder_company": set(),
+                "manager_company": set(),
+            }
+            risk_set: set[int] = set()
+            for record in records:
+                for key in unique_values:
+                    value = record[key]
+                    if value:
+                        unique_values[key].add(str(value).strip())
+                risk_value = _fund_service()._safe_json_loads(record["risk_value_json"], None)
+                if isinstance(risk_value, int) and not isinstance(risk_value, bool):
+                    risk_set.add(risk_value)
+            risk_values = sorted(risk_set)
+            category_values = {key: sorted(values) for key, values in unique_values.items()}
     else:
         rows = [
             row
@@ -2407,15 +2432,6 @@ def get_fund_performance_payload(
     query_end = end_date or effective_end
     auto_warnings: List[str] = []
     auto_fetch_attempted = False
-    full_history_cache_hit = (
-        not full_history_requested
-        or _seam("_history_cache_covers_requested_span")(
-            processed_dir,
-            normalized,
-            start_date=effective_start,
-            end_date=effective_end,
-        )
-    )
 
     points = _fund_service()._read_preferred_fund_price_points(
         processed_dir,
@@ -2423,11 +2439,27 @@ def get_fund_performance_payload(
         start_date=query_start,
         end_date=query_end,
     )
-    has_requested_coverage = full_history_cache_hit if full_history_requested else _seam("_has_requested_price_coverage")(
-        points,
-        start_date=query_start,
-        end_date=effective_end,
-    )
+    if auto_refresh:
+        full_history_cache_hit = (
+            not full_history_requested
+            or _seam("_history_cache_covers_requested_span")(
+                processed_dir,
+                normalized,
+                start_date=effective_start,
+                end_date=effective_end,
+            )
+        )
+        has_requested_coverage = (
+            full_history_cache_hit
+            if full_history_requested
+            else _seam("_has_requested_price_coverage")(
+                points,
+                start_date=query_start,
+                end_date=effective_end,
+            )
+        )
+    else:
+        has_requested_coverage = True
     if auto_refresh and not has_requested_coverage:
         auto_fetch_attempted = True
         auto_warnings = _seam("_auto_refresh_fund_performance")(

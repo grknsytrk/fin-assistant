@@ -1426,3 +1426,140 @@ def test_get_fund_detail_payload_includes_category_rankings(tmp_path) -> None:
     assert monthly["rank"] == 4
     assert monthly["total"] == 5
     assert monthly["top_percentile"] == 40
+
+
+def test_refresh_funds_snapshot_retains_current_and_skips_price_upsert_when_unchanged(
+    monkeypatch, tmp_path
+) -> None:
+    target = date(2026, 8, 21)
+    monkeypatch.setattr(fund_service, "_latest_fund_snapshot_target_date", lambda *_args: target)
+    monkeypatch.setattr(fund_service, "_turkey_market_today", lambda: target)
+    assert fund_service.commit_funds_snapshot(
+        tmp_path,
+        {
+            "status": "ok",
+            "as_of": target.isoformat(),
+            "fetched_at": fund_service._utc_now_iso(),
+            "stale": False,
+            "degraded": False,
+            "warnings": [],
+            "rows": [
+                {
+                    "fund_code": "TLY",
+                    "name": "TERA PORTFOY TEST FONU",
+                    "price": 9.1,
+                    "daily_return": 0.45,
+                    "daily_return_source": fund_service.DAILY_RETURN_LOCAL_PRICE_SOURCE,
+                    "aum": 1_000_000.0,
+                    "investor_count": 120,
+                    "share_count": 109_890.0,
+                    "as_of": target.isoformat(),
+                    "tefas_open": True,
+                    "source": "tefasfon_funds",
+                }
+            ],
+            "source_metadata": {"source": "tefasfon_funds"},
+        },
+        job_id="seed",
+        owner_token="seed",
+        generation=1,
+    )
+
+    class FakeTefasFonClient:
+        def fetch_latest_fund_list_snapshot_result(self, *, as_of, lookback_days, enrich=False):
+            return fund_service.FundSnapshotFetchResult(
+                rows=[
+                    {
+                        "fund_code": "TLY",
+                        "fonUnvan": "TERA PORTFOY TEST FONU",
+                        "date": target.isoformat(),
+                        "fiyat": 9.1,
+                        "portfoyBuyukluk": 1_000_000.0,
+                        "kisiSayisi": 120,
+                        "tedPaySayisi": 109_890.0,
+                        "tefasDurum": True,
+                        "source": "tefasfon_funds",
+                    }
+                ],
+                resolution_status="available",
+                requested_as_of=as_of.isoformat(),
+                resolved_as_of=target.isoformat(),
+                attempted_dates=[target.isoformat()],
+                source="tefasfon_funds",
+            )
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    monkeypatch.setattr(
+        fund_service,
+        "upsert_fund_price_points",
+        lambda *_args, **_kwargs: pytest.fail("unchanged same-day snapshot must skip price upsert"),
+    )
+
+    refreshed = fund_service.refresh_funds_snapshot(
+        tmp_path,
+        lookback_days=1,
+        persist_reference_data=False,
+        backfill_daily_returns=False,
+        persist_snapshot=False,
+    )
+
+    assert refreshed["snapshot_action"] == "retained_current"
+    assert refreshed["rows"][0]["fund_code"] == "TLY"
+    assert refreshed["rows"][0]["price"] == pytest.approx(9.1)
+
+
+def test_get_fund_categories_payload_reuses_snapshot_all_rows_cache_without_db_query(tmp_path, monkeypatch) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    monkeypatch.setattr(fund_service, "database_enabled", lambda: True)
+    monkeypatch.setattr(
+        fund_service,
+        "load_funds_snapshot",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "snapshot_generation": 9,
+            "source_metadata": {"catalog_storage": "fund_snapshots"},
+        },
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "fund_listing_revision",
+        lambda _p: {"catalog_generation": 9, "price_generation": 1},
+    )
+    cache_key = f"fund-snapshot-all-rows:{fund_service._fund_prices_db_path(tmp_path)}:9"
+    fund_service._SNAPSHOT_ALL_ROWS_CACHE[cache_key] = {
+        "cached_at": 9e18,
+        "rows": [
+            {
+                "fund_code": "AAA",
+                "fund_type": "Hisse Senedi",
+                "founder_company": "Alpha PY",
+                "manager_company": "Alpha PY",
+                "risk_value": 5,
+                "tefas_open": True,
+                "aum": 100.0,
+            },
+            {
+                "fund_code": "CLOSED",
+                "fund_type": "Serbest Fon",
+                "founder_company": "Closed PY",
+                "manager_company": "Closed PY",
+                "risk_value": True,
+                "tefas_open": False,
+                "aum": 100.0,
+            },
+        ],
+        "catalog_dates": {"AAA": "2026-10-20"},
+    }
+    monkeypatch.setattr(
+        fund_service,
+        "_connect_fund_prices_db",
+        lambda *_args, **_kwargs: pytest.fail("get_fund_categories_payload must reuse _SNAPSHOT_ALL_ROWS_CACHE"),
+    )
+
+    payload = fund_service.get_fund_categories_payload(tmp_path)
+
+    assert payload["fund_types"] == ["Hisse Senedi"]
+    assert payload["founder_companies"] == ["Alpha PY"]
+    assert payload["manager_companies"] == ["Alpha PY"]
+    assert payload["risk_values"] == [5]
+    fund_service.reset_fund_caches_for_tests()

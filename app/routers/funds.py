@@ -324,7 +324,8 @@ def fund_detail(fund_code: str) -> Dict[str, Any]:
 @router.post("/admin/funds/refresh-snapshot")
 def admin_refresh_funds_snapshot(
     request: Request,
-    lookback_days: int = Query(_FUND_REFRESH_MAX_LOOKBACK_DAYS, ge=1, le=_FUND_REFRESH_MAX_LOOKBACK_DAYS)
+    lookback_days: int = Query(_FUND_REFRESH_MAX_LOOKBACK_DAYS, ge=1, le=_FUND_REFRESH_MAX_LOOKBACK_DAYS),
+    include_rows: bool = Query(True),
 ) -> Dict[str, Any]:
     from app.fund_service import get_funds_payload
 
@@ -332,6 +333,8 @@ def admin_refresh_funds_snapshot(
     # Start the upstream work outside the request path. The current snapshot
     # is returned immediately so a slow TEFAS/WAF response cannot freeze the UI.
     job = _start_fund_refresh_job(lookback_days)
+    if not include_rows:
+        return {"status": "ok", "refresh_job": job}
     payload = get_funds_payload(
         CONFIG.paths.processed_dir,
         sort="fund_code",

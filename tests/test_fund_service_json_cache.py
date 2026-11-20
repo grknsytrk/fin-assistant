@@ -112,7 +112,7 @@ def test_read_json_skips_disk_parse_on_payload_lru_hit(tmp_path, monkeypatch) ->
     assert first == payload
     assert second == payload
     assert third is second
-    assert local_reads == [path, path]
+    assert local_reads == [path]
     assert len(remote.calls) == 1
 
 

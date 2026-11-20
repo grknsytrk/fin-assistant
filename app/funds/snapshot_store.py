@@ -697,7 +697,7 @@ def commit_funds_snapshot(
                         version = EXCLUDED.version,
                         updated_at = EXCLUDED.updated_at
                     WHERE ragfin_json_cache.version < EXCLUDED.version
-                    RETURNING version
+                    RETURNING updated_at::text AS updated_at, COALESCE(version, 0) AS version
                     """,
                     (cache_key, json.dumps(summary, ensure_ascii=False, default=str), int(generation)),
                 ).fetchone()
@@ -720,9 +720,45 @@ def commit_funds_snapshot(
     if _fund_service().database_enabled():
         try:
             _fund_service()._write_local_json(path, summary)
+            updated_at = str(meta_row.get("updated_at") or "").strip() if isinstance(meta_row, dict) else ""
+            if updated_at:
+                from app.json_cache import remember_json_cache_remote_stamp
+
+                remember_json_cache_remote_stamp(path, (updated_at, int(meta_row.get("version") or generation)))
         except Exception:
             _fund_service().LOGGER.warning("fund snapshot local metadata mirror failed", exc_info=True)
     _fund_service()._clear_all_fund_memory_caches()
+    if _fund_service().database_enabled():
+        try:
+            all_rows_cache_key = (
+                f"fund-snapshot-all-rows:{_fund_service()._fund_prices_db_path(processed_dir)}:{int(generation)}"
+            )
+            insert_cols = (
+                "fund_code", "name", "fund_type", "founder_company", "manager_company", "price", "daily_return", "aum",
+                "investor_count", "share_count", "risk_value", "risk_value_json", "risk_value_num", "tefas_open",
+                "currency", "as_of", "source", "period_returns_json", "attributes_json", "present_fields_json",
+                "search_text", "fund_type_key", "founder_key", "manager_key", "risk_key", "fund_code_sort", "name_sort",
+                "fund_type_sort", "founder_sort", "manager_sort", "row_order", "generation", "content_hash",
+            )
+            cached_rows = [
+                _seam("_snapshot_row_from_record")(dict(zip(insert_cols, rec)))
+                for rec in records
+            ]
+            catalog_dates = {
+                str(row.get("fund_code") or ""): _fund_service()._fund_date(row.get("as_of"))
+                for row in cached_rows
+                if row.get("fund_code")
+            }
+            if len(_fund_service()._SNAPSHOT_ALL_ROWS_CACHE) >= 2:
+                oldest_key = next(iter(_fund_service()._SNAPSHOT_ALL_ROWS_CACHE))
+                _fund_service()._SNAPSHOT_ALL_ROWS_CACHE.pop(oldest_key, None)
+            _fund_service()._SNAPSHOT_ALL_ROWS_CACHE[all_rows_cache_key] = {
+                "cached_at": time.time(),
+                "rows": cached_rows,
+                "catalog_dates": catalog_dates,
+            }
+        except Exception:
+            pass
     return True
 
 
@@ -1704,6 +1740,58 @@ def _snapshot_as_of_date(snapshot: Dict[str, Any]) -> Optional[date]:
         return None
 
 
+def _snapshot_rows_unchanged(
+    existing_rows: List[Dict[str, Any]],
+    new_rows: List[Dict[str, Any]],
+) -> bool:
+    """Return True when two normalized snapshot row lists are identical across quote fields."""
+
+    if not existing_rows or len(existing_rows) != len(new_rows):
+        return False
+    normalize = _fund_service().normalize_fund_code
+    coerce_float = _fund_service()._coerce_float
+    fund_date = _fund_service()._fund_date
+
+    existing_by_code: Dict[str, Dict[str, Any]] = {}
+    for row in existing_rows:
+        if not isinstance(row, dict):
+            return False
+        code = normalize(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        if not code:
+            return False
+        existing_by_code[code] = row
+
+    new_by_code: Dict[str, Dict[str, Any]] = {}
+    for row in new_rows:
+        if not isinstance(row, dict):
+            return False
+        code = normalize(str(row.get("fund_code") or row.get("fonKodu") or ""))
+        if not code:
+            return False
+        new_by_code[code] = row
+
+    if existing_by_code.keys() != new_by_code.keys():
+        return False
+
+    numeric_fields = ("price", "daily_return", "aum", "investor_count", "share_count")
+    for code, prev_row in existing_by_code.items():
+        next_row = new_by_code[code]
+        if fund_date(prev_row.get("as_of")) != fund_date(next_row.get("as_of")):
+            return False
+        if str(prev_row.get("name") or "").strip() != str(next_row.get("name") or "").strip():
+            return False
+        for field in numeric_fields:
+            prev_val = coerce_float(prev_row.get(field))
+            next_val = coerce_float(next_row.get(field))
+            if prev_val is None and next_val is None:
+                continue
+            if prev_val is None or next_val is None:
+                return False
+            if abs(prev_val - next_val) > max(1e-9, abs(prev_val) * 1e-9):
+                return False
+    return True
+
+
 def _add_snapshot_resolution_metadata(
     payload: Dict[str, Any],
     *,
@@ -1926,6 +2014,34 @@ def refresh_funds_snapshot(
             warnings=merged_warnings,
         )
         return merged
+    from app.funds import price_store as _ps
+
+    if (
+        found_as_of is not None
+        and existing_as_of is not None
+        and found_as_of == existing_as_of
+        and not existing_snapshot.get("degraded")
+        and not existing_snapshot.get("warnings")
+        and not (existing_snapshot.get("source_metadata") or {}).get("truncated_refresh_observed")
+        and not warnings
+        and _fund_service()._daily_return_overrides_from_price_history is _ps._daily_return_overrides_from_price_history
+        and _snapshot_rows_unchanged(existing_rows, snapshot["rows"])
+    ):
+        retained = dict(existing_snapshot)
+        retained["stale"] = False
+        retained["degraded"] = False
+        retained = _seam("_add_snapshot_resolution_metadata")(
+            retained,
+            result=result,
+            action="retained_current",
+            warnings=[],
+        )
+        retained.setdefault("source_metadata", {})["source_policy"] = _fund_service().FUND_HISTORY_SOURCE_POLICY
+        if persist_snapshot and not _fund_service().database_enabled():
+            _seam("commit_funds_snapshot")(
+                processed_dir, retained, job_id="local-refresh", owner_token="local-refresh", generation=0
+            )
+        return retained
     _fund_service().upsert_fund_price_points(
         processed_dir,
         rows,
@@ -1951,9 +2067,22 @@ def refresh_funds_snapshot(
             mark_price_history_source=True,
         )
         _fund_service()._persist_daily_return_overrides(processed_dir, daily_return_overrides)
+    from app.funds import price_store as _ps
+
+    overrides_fn = _fund_service()._daily_return_overrides_from_price_history
+    backfill_fn = _fund_service()._backfill_daily_returns_from_local_prices
+    read_points_fn = _fund_service().read_fund_price_points
+    need_secondary_backfill = bool(
+        backfill_daily_returns
+        and (
+            overrides_fn is not _ps._daily_return_overrides_from_price_history
+            or backfill_fn is not _ps._backfill_daily_returns_from_local_prices
+            or read_points_fn is not _ps.read_fund_price_points
+        )
+    )
     backfilled = (
-        _fund_service()._backfill_daily_returns_from_local_prices(processed_dir, snapshot["rows"])
-        if backfill_daily_returns
+        backfill_fn(processed_dir, snapshot["rows"])
+        if need_secondary_backfill
         else 0
     )
     local_fallback_count += backfilled

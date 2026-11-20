@@ -794,6 +794,26 @@ def upsert_fund_price_points(
     }
 
 
+def _effective_fund_price_points_cache_ttl_seconds() -> int:
+    ttl = int(_fund_service().FUND_PRICE_POINTS_CACHE_TTL_SECONDS)
+    if ttl <= 0:
+        return 0
+    if _fund_service().database_enabled() and ttl >= 600:
+        # Generation-fenced keys invalidate via fund_listing_revision when new prices land,
+        # so warm Postgres workers can safely hold historical series for 6 hours.
+        return max(21600, ttl)
+    return ttl
+
+
+def _price_source_priority_sql(column: str = "source") -> Tuple[str, List[Any]]:
+    priority_items = list(_fund_service()._FUND_PRICE_SOURCE_PRIORITY.items())
+    if not priority_items:
+        return "0", []
+    priority_cases = " ".join(f"WHEN ? THEN {int(priority)}" for _source, priority in priority_items)
+    priority_params: List[Any] = [source for source, _priority in priority_items]
+    return f"CASE {column} {priority_cases} ELSE 0 END", priority_params
+
+
 def _fund_price_points_cache_key(
     processed_dir: Path,
     normalized: str,
@@ -801,7 +821,14 @@ def _fund_price_points_cache_key(
     end_date: Optional[date],
     normalized_sources: Tuple[str, ...],
 ) -> Tuple[Any, ...]:
-    scope: Any = "postgres" if _fund_service().database_enabled() else str(_fund_service()._fund_prices_db_path(processed_dir))
+    if _fund_service().database_enabled():
+        try:
+            price_gen = int(_fund_service().fund_listing_revision(processed_dir).get("price_generation") or 0)
+        except Exception:
+            price_gen = 0
+        scope: Any = f"postgres:gen={price_gen}"
+    else:
+        scope = str(_fund_service()._fund_prices_db_path(processed_dir))
     return (
         scope,
         normalized,
@@ -838,7 +865,7 @@ def _store_fund_price_points_cache_locked(
     _fund_service()._FUND_PRICE_POINTS_CACHE[key] = _fund_service()._FundPricePointsCacheEntry(
         payload=payload,
         approx_bytes=max(0, int(approx_bytes)),
-        expires_at=now + _fund_service().FUND_PRICE_POINTS_CACHE_TTL_SECONDS,
+        expires_at=now + _effective_fund_price_points_cache_ttl_seconds(),
     )
     _fund_service()._FUND_PRICE_POINTS_CACHE_BYTES += max(0, int(approx_bytes))
     while (
@@ -923,7 +950,7 @@ def _read_fund_price_points_cached(
     key: Tuple[Any, ...],
     loader: Callable[[], List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
-    ttl_seconds = _fund_service().FUND_PRICE_POINTS_CACHE_TTL_SECONDS
+    ttl_seconds = _effective_fund_price_points_cache_ttl_seconds()
     if ttl_seconds <= 0:
         return loader()
 
@@ -1018,6 +1045,7 @@ def _read_fund_price_points_uncached(
     end_date: Optional[date],
     normalized_sources: Tuple[str, ...],
 ) -> List[Dict[str, Any]]:
+    is_postgres = _fund_service().database_enabled()
     conditions = ["fund_code = ?", "price > 0"]
     params: List[Any] = [normalized]
     if normalized_sources:
@@ -1030,18 +1058,29 @@ def _read_fund_price_points_uncached(
     if end_date:
         conditions.append("date <= ?")
         params.append(end_date.isoformat())
-    query = (
-        # Keep raw_json in storage for provenance, but do not transfer it to
-        # this reader: chart/API points only use the normalized columns below.
-        "SELECT fund_code, date, source, price, daily_return, aum, investor_count, "
-        "share_count, metadata_json, fetched_at, updated_at FROM fund_prices WHERE "
-        + " AND ".join(conditions)
-        + " ORDER BY date ASC, updated_at DESC"
-    )
+    where_clause = " AND ".join(conditions)
+    if is_postgres:
+        source_priority_sql, priority_params = _price_source_priority_sql("source")
+        query = (
+            # Keep raw_json in storage for provenance, but do not transfer it to
+            # this reader: chart/API points only use the normalized columns below.
+            "SELECT DISTINCT ON (date) "
+            "fund_code, date, source, price, daily_return, aum, investor_count, "
+            f"share_count, metadata_json, fetched_at, updated_at FROM fund_prices WHERE {where_clause} "
+            f"ORDER BY date ASC, {source_priority_sql} DESC, updated_at DESC"
+        )
+        query_params: List[Any] = [*params, *priority_params]
+    else:
+        query = (
+            "SELECT fund_code, date, source, price, daily_return, aum, investor_count, "
+            f"share_count, metadata_json, fetched_at, updated_at FROM fund_prices WHERE {where_clause} "
+            "ORDER BY date ASC, updated_at DESC"
+        )
+        query_params = params
     with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
-        rows = list(conn.execute(query, params))
+        rows = list(conn.execute(query, query_params))
 
-    by_date: Dict[str, sqlite3.Row] = {}
+    by_date: Dict[str, Any] = {}
     for row in rows:
         existing = by_date.get(str(row["date"]))
         if existing is None:
@@ -1058,7 +1097,10 @@ def _read_fund_price_points_uncached(
         if row_rank > existing_rank:
             by_date[str(row["date"])] = row
 
-    return [_seam("_fund_price_storage_row_to_point")(by_date[point_date]) for point_date in sorted(by_date)]
+    return [
+        _seam("_fund_price_storage_row_to_point")(by_date[point_date])
+        for point_date in sorted(by_date)
+    ]
 
 
 def read_fund_price_points(
@@ -1275,31 +1317,48 @@ def read_fund_price_points_range(
     """
 
     normalized = _fund_service().normalize_fund_code(fund_code)
-    if not normalized or start_date > end_date:
+    daily_sources = tuple(_fund_service()._DAILY_PRICE_SOURCES)
+    if not normalized or start_date > end_date or not daily_sources:
         return []
 
-    source_placeholders = ", ".join("?" for _ in _fund_service()._DAILY_PRICE_SOURCES)
-    query = f"""
-        -- Same projection as the latest-point reader: raw_json and created_at
-        -- are unused by the public point mapper and dominate the row size.
-        SELECT fund_code, date, source, price, daily_return, aum,
-               investor_count, share_count, metadata_json, fetched_at, updated_at
-        FROM fund_prices
-        WHERE fund_code = ?
-          AND date BETWEEN ? AND ?
-          AND price > 0
-          AND source IN ({source_placeholders})
-        ORDER BY date, updated_at DESC
-    """
-    params: List[Any] = [
-        normalized,
-        start_date.isoformat(),
-        end_date.isoformat(),
-        *_fund_service()._DAILY_PRICE_SOURCES,
-    ]
+    def load_range() -> List[Dict[str, Any]]:
+        is_postgres = _fund_service().database_enabled()
+        source_placeholders = ", ".join("?" for _ in daily_sources)
+        where_sql = (
+            "WHERE fund_code = ? "
+            "AND date BETWEEN ? AND ? "
+            "AND price > 0 "
+            f"AND source IN ({source_placeholders})"
+        )
+        base_params: List[Any] = [
+            normalized,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            *daily_sources,
+        ]
+        if is_postgres:
+            source_priority_sql, priority_params = _price_source_priority_sql("source")
+            query = f"""
+                -- metadata_json, raw_json and created_at are omitted; range readers only use price/overview columns.
+                SELECT DISTINCT ON (date)
+                       fund_code, date, source, price, daily_return, aum,
+                       investor_count, share_count, fetched_at, updated_at
+                FROM fund_prices
+                {where_sql}
+                ORDER BY date ASC, {source_priority_sql} DESC, updated_at DESC
+            """
+            params = [*base_params, *priority_params]
+        else:
+            query = f"""
+                SELECT fund_code, date, source, price, daily_return, aum,
+                       investor_count, share_count, fetched_at, updated_at
+                FROM fund_prices
+                {where_sql}
+                ORDER BY date, updated_at DESC
+            """
+            params = base_params
 
-    by_date: Dict[str, Any] = {}
-    try:
+        by_date: Dict[str, Any] = {}
         with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
             for row in conn.execute(query, params):
                 row_date = str(row["date"])
@@ -1312,15 +1371,29 @@ def read_fund_price_points_range(
                     str(existing["updated_at"] or ""),
                 ):
                     by_date[row_date] = row
+
+        return [
+            _seam("_fund_price_storage_row_to_point")(by_date[day], include_metadata=False)
+            for day in sorted(by_date)
+        ]
+
+    cache_key = (
+        *_seam("_fund_price_points_cache_key")(
+            processed_dir,
+            normalized,
+            start_date,
+            end_date,
+            tuple(sorted(daily_sources)),
+        ),
+        "range",
+    )
+    try:
+        return _seam("_read_fund_price_points_cached")(cache_key, load_range)
     except Exception:
         # The row store is an optional optimization; callers fall back to the
-        # daily snapshot documents when it is unavailable.
+        # daily snapshot documents when it is unavailable. Keep exceptions
+        # outside _read_fund_price_points_cached so transient failures are never cached.
         return []
-
-    return [
-        _seam("_fund_price_storage_row_to_point")(by_date[day])
-        for day in sorted(by_date)
-    ]
 
 
 def _daily_return_reconciliation_candidates(
@@ -1509,10 +1582,20 @@ def _carry_forward_resolved_daily_returns(
             continue
         if str(previous.get("daily_return_source") or "") != _fund_service().DAILY_RETURN_LOCAL_PRICE_SOURCE:
             continue
-        if _fund_service()._fund_date(previous.get("as_of")) != _fund_service()._fund_date(row.get("as_of")):
+        prev_date = _fund_service()._fund_date(
+            _fund_service()._first_present(previous, "as_of", "TARIH", "TARIHSTR", "date", "tarih")
+        )
+        curr_date = _fund_service()._fund_date(
+            _fund_service()._first_present(row, "as_of", "TARIH", "TARIHSTR", "date", "tarih")
+        )
+        if prev_date != curr_date:
             continue
-        previous_price = _fund_service()._coerce_float(previous.get("price"))
-        current_price = _fund_service()._coerce_float(row.get("price"))
+        previous_price = _fund_service()._coerce_float(
+            _fund_service()._first_present(previous, "price", "FIYAT", "FONFIYAT", "fiyat", "sonFiyat")
+        )
+        current_price = _fund_service()._coerce_float(
+            _fund_service()._first_present(row, "price", "FIYAT", "FONFIYAT", "fiyat", "sonFiyat")
+        )
         if previous_price is None or current_price is None:
             continue
         if abs(previous_price - current_price) > max(1e-9, abs(previous_price) * 1e-9):
@@ -1521,7 +1604,11 @@ def _carry_forward_resolved_daily_returns(
         if resolved is None:
             continue
         row["daily_return"] = resolved
+        if "gunlukGetiri" in row and row.get("gunlukGetiri") is None:
+            row["gunlukGetiri"] = resolved
         row["daily_return_source"] = _fund_service().DAILY_RETURN_LOCAL_PRICE_SOURCE
+        if previous.get("daily_return_basis_date"):
+            row["daily_return_basis_date"] = previous["daily_return_basis_date"]
         carried += 1
     return carried
 
@@ -1596,7 +1683,12 @@ def _apply_daily_return_overrides(
             f"{price_gen}:{int(include_missing)}:{candidates_hash}"
         )
         cached = _fund_service()._MEMORY_CACHE.get(cache_key)
-        memo_ttl = max(15.0, min(60.0, float(_fund_service()._FUND_LISTING_STATE_MEMO_TTL_SECONDS or 30.0)))
+        overlay_ttl = _fund_service().FUNDS_LATEST_HISTORY_OVERLAY_TTL_SECONDS
+        memo_ttl = float(
+            max(21600, overlay_ttl)
+            if overlay_ttl >= 900
+            else max(1, overlay_ttl)
+        )
         if (
             isinstance(cached, dict)
             and isinstance(cached.get("cached_at"), (int, float))
@@ -1639,23 +1731,31 @@ def _persist_daily_return_overrides(
     query = (
         "UPDATE fund_prices SET daily_return = ?, updated_at = ? "
         "WHERE fund_code = ? AND date = ? "
-        f"AND source IN ({source_placeholders})"
+        f"AND source IN ({source_placeholders}) "
+        "AND (daily_return IS NULL OR ABS(daily_return - ?) > 1e-9)"
     )
     now = _fund_service()._utc_now_iso()
     params_seq = [
-        (value, now, code, point_date, *_fund_service()._DAILY_PRICE_SOURCES)
+        (value, now, code, point_date, *_fund_service()._DAILY_PRICE_SOURCES, value)
         for (code, point_date), value in overrides.items()
     ]
+    changed_count = 0
     with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
         if hasattr(conn, "executemany"):
-            conn.executemany(query, params_seq)
+            cur = conn.executemany(query, params_seq)
+            rc = getattr(cur, "rowcount", None)
+            changed_count = rc if isinstance(rc, int) and rc >= 0 else len(params_seq)
         else:
             for row_params in params_seq:
-                conn.execute(query, row_params)
-        _fund_service()._bump_fund_listing_price_revision(conn)
+                cur = conn.execute(query, row_params)
+                rc = getattr(cur, "rowcount", None)
+                changed_count += rc if isinstance(rc, int) and rc >= 0 else 1
+        if changed_count:
+            _fund_service()._bump_fund_listing_price_revision(conn)
         conn.commit()
-    _fund_service()._invalidate_fund_price_memory_caches()
-    _seam("invalidate_fund_price_points_cache")()
+    if changed_count:
+        _fund_service()._invalidate_fund_price_memory_caches()
+        _seam("invalidate_fund_price_points_cache")()
 
 
 def _read_fintables_udf_price_points(
@@ -1713,6 +1813,7 @@ def _read_preferred_fund_price_points(
     fintables_sources = set(_fund_service()._FINTABLES_DAILY_PRICE_SOURCES)
 
     def load_preferred() -> List[Dict[str, Any]]:
+        is_postgres = _fund_service().database_enabled()
         conditions = ["fund_code = ?", "price > 0"]
         params: List[Any] = [normalized]
         if daily_sources:
@@ -1725,14 +1826,42 @@ def _read_preferred_fund_price_points(
         if end_date:
             conditions.append("date <= ?")
             params.append(end_date.isoformat())
-        query = (
-            "SELECT fund_code, date, source, price, daily_return, aum, investor_count, "
-            "share_count, metadata_json, fetched_at, updated_at FROM fund_prices WHERE "
-            + " AND ".join(conditions)
-            + " ORDER BY date ASC, updated_at DESC"
-        )
+        where_clause = " AND ".join(conditions)
+        if is_postgres:
+            source_priority_sql, priority_params = _price_source_priority_sql("source")
+            if fintables_sources:
+                fintables_list = sorted(fintables_sources)
+                fintables_placeholders = ", ".join("?" for _ in fintables_list)
+                bucket_expr = f"CASE WHEN source IN ({fintables_placeholders}) THEN 1 ELSE 0 END"
+                query = (
+                    f"SELECT DISTINCT ON (date, {bucket_expr}) "
+                    "fund_code, date, source, price, daily_return, aum, investor_count, "
+                    f"share_count, fetched_at, updated_at FROM fund_prices WHERE {where_clause} "
+                    f"ORDER BY date ASC, {bucket_expr} DESC, {source_priority_sql} DESC, updated_at DESC"
+                )
+                query_params: List[Any] = [
+                    *fintables_list,
+                    *params,
+                    *fintables_list,
+                    *priority_params,
+                ]
+            else:
+                query = (
+                    "SELECT DISTINCT ON (date) "
+                    "fund_code, date, source, price, daily_return, aum, investor_count, "
+                    f"share_count, fetched_at, updated_at FROM fund_prices WHERE {where_clause} "
+                    f"ORDER BY date ASC, {source_priority_sql} DESC, updated_at DESC"
+                )
+                query_params = [*params, *priority_params]
+        else:
+            query = (
+                "SELECT fund_code, date, source, price, daily_return, aum, investor_count, "
+                f"share_count, fetched_at, updated_at FROM fund_prices WHERE {where_clause} "
+                "ORDER BY date ASC, updated_at DESC"
+            )
+            query_params = list(params)
         with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
-            rows = list(conn.execute(query, params))
+            rows = list(conn.execute(query, query_params))
 
         fintables_rows_by_date: Dict[str, Any] = {}
         daily_rows_by_date: Dict[str, Any] = {}
@@ -1766,11 +1895,11 @@ def _read_preferred_fund_price_points(
                     daily_rows_by_date[point_date] = row
 
         fintables_points = [
-            _seam("_fund_price_storage_row_to_point")(fintables_rows_by_date[d])
+            _seam("_fund_price_storage_row_to_point")(fintables_rows_by_date[d], include_metadata=False)
             for d in sorted(fintables_rows_by_date)
         ]
         daily_points = [
-            _seam("_fund_price_storage_row_to_point")(daily_rows_by_date[d])
+            _seam("_fund_price_storage_row_to_point")(daily_rows_by_date[d], include_metadata=False)
             for d in sorted(daily_rows_by_date)
         ]
         if not fintables_points:
@@ -1867,7 +1996,8 @@ def _backfill_daily_returns_from_local_prices(
         max_gap_days = _fund_service()._DAILY_RETURN_LOCAL_FALLBACK_MAX_GAP_DAYS
     if not rows or max_gap_days <= 0:
         return 0
-    filled = 0
+    read_points_fn = _seam("read_fund_price_points")
+    pending: List[Tuple[Dict[str, Any], str, date]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -1876,7 +2006,6 @@ def _backfill_daily_returns_from_local_prices(
             existing_daily = row.get("gunlukGetiri")
         if _fund_service()._coerce_float(existing_daily) is not None:
             continue
-
         code = _fund_service().normalize_fund_code(str(row.get("fund_code") or row.get("fonKodu") or ""))
         if not code:
             continue
@@ -1888,14 +2017,95 @@ def _backfill_daily_returns_from_local_prices(
             as_of = date.fromisoformat(as_of_iso)
         except ValueError:
             continue
+        pending.append((row, code, as_of))
 
-        points = _seam("read_fund_price_points")(
-            processed_dir,
-            code,
-            start_date=as_of - timedelta(days=max(1, max_gap_days)),
-            end_date=as_of,
-            sources=_fund_service()._DAILY_PRICE_SOURCES,
-        )
+    if not pending:
+        return 0
+
+    points_by_code: Optional[Dict[str, List[Dict[str, Any]]]] = None
+    if len(pending) > 1 and read_points_fn is read_fund_price_points:
+        codes = sorted({code for _r, code, _d in pending})
+        min_date = min(as_of for _r, _c, as_of in pending) - timedelta(days=max(1, max_gap_days))
+        max_date = max(as_of for _r, _c, as_of in pending)
+        normalized_sources = tuple(_fund_service()._DAILY_PRICE_SOURCES)
+        placeholders = ", ".join("?" for _ in codes)
+        source_placeholders = ", ".join("?" for _ in normalized_sources)
+        if _fund_service().database_enabled():
+            priority_items = list(_fund_service()._FUND_PRICE_SOURCE_PRIORITY.items())
+            priority_cases = " ".join(f"WHEN ? THEN {int(priority)}" for _source, priority in priority_items)
+            priority_params = [source for source, _priority in priority_items]
+            source_priority_sql = f"CASE source {priority_cases} ELSE 0 END" if priority_cases else "0"
+            query = (
+                "SELECT DISTINCT ON (fund_code, date) fund_code, date, price FROM fund_prices "
+                f"WHERE fund_code IN ({placeholders}) "
+                f"AND date >= ? AND date <= ? AND source IN ({source_placeholders}) AND price > 0 "
+                f"ORDER BY fund_code, date ASC, {source_priority_sql} DESC, updated_at DESC"
+            )
+            params: List[Any] = [
+                *codes,
+                min_date.isoformat(),
+                max_date.isoformat(),
+                *normalized_sources,
+                *priority_params,
+            ]
+            selected_points: Dict[str, List[Dict[str, Any]]] = {}
+            with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
+                for db_row in conn.execute(query, params):
+                    selected_points.setdefault(str(db_row["fund_code"]), []).append(
+                        {"date": str(db_row["date"]), "price": db_row["price"]}
+                    )
+            points_by_code = selected_points
+        else:
+            query = (
+                "SELECT fund_code, date, source, price, updated_at FROM fund_prices "
+                f"WHERE fund_code IN ({placeholders}) "
+                f"AND date >= ? AND date <= ? AND source IN ({source_placeholders}) AND price > 0 "
+                "ORDER BY fund_code, date ASC, updated_at DESC"
+            )
+            params = [*codes, min_date.isoformat(), max_date.isoformat(), *normalized_sources]
+            selected_by_key: Dict[Tuple[str, str], Any] = {}
+            with _fund_service()._connect_fund_prices_db(processed_dir) as conn:
+                for db_row in conn.execute(query, params):
+                    key = (str(db_row["fund_code"]), str(db_row["date"]))
+                    existing = selected_by_key.get(key)
+                    if existing is None:
+                        selected_by_key[key] = db_row
+                        continue
+                    row_rank = (
+                        _fund_service()._FUND_PRICE_SOURCE_PRIORITY.get(str(db_row["source"] or ""), 0),
+                        str(db_row["updated_at"] or ""),
+                    )
+                    existing_rank = (
+                        _fund_service()._FUND_PRICE_SOURCE_PRIORITY.get(str(existing["source"] or ""), 0),
+                        str(existing["updated_at"] or ""),
+                    )
+                    if row_rank > existing_rank:
+                        selected_by_key[key] = db_row
+            selected_points = {}
+            for (c_code, c_date), db_row in sorted(selected_by_key.items()):
+                selected_points.setdefault(c_code, []).append(
+                    {"date": c_date, "price": db_row["price"]}
+                )
+            points_by_code = selected_points
+
+    filled = 0
+    for row, code, as_of in pending:
+        if points_by_code is not None:
+            lower_iso = (as_of - timedelta(days=max(1, max_gap_days))).isoformat()
+            upper_iso = as_of.isoformat()
+            points = [
+                pt
+                for pt in (points_by_code.get(code) or [])
+                if lower_iso <= str(pt.get("date") or "") <= upper_iso
+            ]
+        else:
+            points = read_points_fn(
+                processed_dir,
+                code,
+                start_date=as_of - timedelta(days=max(1, max_gap_days)),
+                end_date=as_of,
+                sources=_fund_service()._DAILY_PRICE_SOURCES,
+            )
         if len(points) < 2:
             continue
         latest = points[-1]

@@ -321,6 +321,77 @@ def test_snapshot_refresh_still_returns_the_current_payload_and_job(monkeypatch:
     assert response.json()["refresh_job"]["job_id"] == "refresh-job"
 
 
+def test_snapshot_refresh_include_rows_false_skips_catalogue_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "_start_fund_refresh_job",
+        lambda _lookback_days: {"job_id": "refresh-job-lite", "status": "queued"},
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "get_funds_payload",
+        lambda *_args, **_kwargs: pytest.fail("include_rows=false must skip get_funds_payload"),
+    )
+
+    response = TestClient(app).post(
+        "/admin/funds/refresh-snapshot",
+        params={"lookback_days": 5, "include_rows": "false"},
+        headers={"Authorization": "Bearer test-admin-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "refresh_job": {"job_id": "refresh-job-lite", "status": "queued"},
+    }
+
+
+def test_run_fund_refresh_job_skips_commit_and_invalidation_when_retained_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = cache_module.get_cache()
+    backend.set("api:funds:keep", {"ok": True}, ttl_seconds=60)
+    job = {
+        "job_id": "retained-current-job",
+        "status": "queued",
+        "requested_at": "2026-05-20T09:00:00+00:00",
+        "started_at": None,
+        "finished_at": None,
+        "as_of": None,
+        "row_count": None,
+        "cache_invalidation_status": None,
+        "error": None,
+        "owner_token": "owner-retained",
+        "generation": 5,
+    }
+    api_module._set_fund_refresh_job(job)
+    backend.set(api_module._FUND_REFRESH_ACTIVE_KEY, job["job_id"], ttl_seconds=600)
+    monkeypatch.setattr(
+        fund_service_module,
+        "refresh_funds_snapshot",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "rows": [{"fund_code": "TLY"}],
+            "resolution_status": "available",
+            "as_of": "2026-05-20",
+            "source_metadata": {"snapshot_action": "retained_current", "resolved_as_of": "2026-05-20"},
+        },
+    )
+    monkeypatch.setattr(
+        fund_service_module,
+        "commit_funds_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("retained_current must not re-commit snapshot"),
+    )
+
+    api_module._run_fund_refresh_job(job["job_id"], 5)
+
+    completed_job = api_module._get_fund_refresh_job(job["job_id"])
+    assert completed_job["status"] == "succeeded"
+    assert completed_job["snapshot_action"] == "retained_current"
+    assert completed_job["cache_invalidation_status"] == "skipped_unchanged"
+    assert backend.get("api:funds:keep") == {"ok": True}
+
+
 def test_api_allocation_history_returns_pending_without_synchronous_upstream_work(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api_module, "_require_known_fund_code", lambda fund_code: "TLY")
     monkeypatch.setattr(
