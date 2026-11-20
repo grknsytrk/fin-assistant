@@ -221,6 +221,9 @@ FUNDS_HOLDINGS_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_TTL_SECONDS", 
 # 2 hours catches newly published monthly reports without hammering KAP or
 # rewriting Supabase JSON cache on unchanged reports.
 FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS", "7200"))
+FUNDS_HOLDINGS_DISCLOSURE_CHECK_SETTLED_TTL_SECONDS = int(
+    os.getenv("RAGFIN_FUNDS_HOLDINGS_DISCLOSURE_CHECK_SETTLED_TTL_SECONDS", str(24 * 60 * 60))
+)
 FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_HOLDINGS_NEGATIVE_TTL_SECONDS", str(30 * 60)))
 FUNDS_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_FUNDS_HISTORY_CHUNK_DAYS", "60"))
 FUNDS_WEB_HISTORY_CHUNK_DAYS = int(os.getenv("RAGFIN_FUNDS_WEB_HISTORY_CHUNK_DAYS", "30"))
@@ -605,6 +608,12 @@ def close_shared_http_clients() -> None:
         close_openfigi_client()
     except Exception:
         LOGGER.debug("error closing OpenFIGI HTTP client", exc_info=True)
+    try:
+        from app.funds_api.holdings_enrichment import close_gefas_http_client
+
+        close_gefas_http_client()
+    except Exception:
+        LOGGER.debug("error closing GEFAS HTTP client", exc_info=True)
 
 
 atexit.register(close_shared_http_clients)
@@ -1478,6 +1487,7 @@ from app.funds.holdings_kap_parser import (
     _holdings_report_index,
     _holdings_positions_hash,
     _holdings_meta_with_runtime_cache_flags,
+    _effective_holdings_disclosure_check_ttl_seconds,
     _holdings_disclosure_check_due,
     _holdings_disclosure_check_meta,
     _cached_holdings_matches_disclosures,
@@ -1544,6 +1554,7 @@ from app.funds.holdings_kap_parser import (
     _unavailable_holdings_payload,
     _parse_iso_date,
     _holdings_cache_is_stale,
+    _reusable_previous_report_from_cache,
     refresh_fund_holdings,
     get_fund_holdings_payload,
 )

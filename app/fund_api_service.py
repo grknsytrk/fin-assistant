@@ -645,10 +645,11 @@ from app.funds_api.holdings_enrichment import (
     _fetch_gefas_gyf_quote, _foreign_holding_known_name, _foreign_holding_provider_name,
     _foreign_holding_provider_symbol, _foreign_holding_should_use_provider_name,
     _fund_holding_sector_map, _fund_holdings_live_payload, _fund_snapshot_row_map,
-    _fund_snapshot_row_map_with_meta, _gefas_chart_date, _gefas_gyf_config, _holding_code,
-    _holding_type, _holding_weight_scale_context, _per_position_basis_points_threshold,
-    _position_daily_market_fields, _quote_map_for_foreign_holdings,
-    _quote_map_for_holding_stocks, _validate_fund_holding_weights, _validated_holding_weight,
+    _fund_snapshot_row_map_with_meta, _gefas_chart_date, _gefas_gyf_config,
+    _get_gefas_http_client, _holding_code, _holding_type, _holding_weight_scale_context,
+    _per_position_basis_points_threshold, _position_daily_market_fields,
+    _quote_map_for_foreign_holdings, _quote_map_for_holding_stocks,
+    _validate_fund_holding_weights, _validated_holding_weight, close_gefas_http_client,
 )
 from app.funds_api.jobs_and_collector import (
     _active_fund_refresh_job, _allocation_history_active_key, _allocation_history_job_get,

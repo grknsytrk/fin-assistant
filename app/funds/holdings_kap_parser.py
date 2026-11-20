@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import logging
 import math
 import re
 import sys
+import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -564,20 +566,55 @@ def _holdings_meta_with_runtime_cache_flags(
     return result
 
 
+def _effective_holdings_disclosure_check_ttl_seconds(
+    cached_meta: Optional[Dict[str, Any]] = None,
+) -> int:
+    base_ttl = int(_fund_service().FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS)
+    if base_ttl < 7200 or not isinstance(cached_meta, dict):
+        return base_ttl
+    latest_report = cached_meta.get("latest_report")
+    latest_report_date = None
+    if isinstance(latest_report, dict):
+        latest_report_date = _seam("_parse_iso_date")(latest_report.get("report_date"))
+    if latest_report_date is None:
+        latest_report_date = _seam("_parse_iso_date")(cached_meta.get("as_of"))
+    if latest_report_date is not None:
+        today = _fund_service()._utc_now().date()
+        month_age = (today.year - latest_report_date.year) * 12 + (today.month - latest_report_date.month)
+        if month_age <= 0 or (month_age == 1 and today.day > 10):
+            settled_ttl = int(
+                getattr(
+                    _fund_service(),
+                    "FUNDS_HOLDINGS_DISCLOSURE_CHECK_SETTLED_TTL_SECONDS",
+                    24 * 60 * 60,
+                )
+            )
+            return max(base_ttl, settled_ttl)
+    return base_ttl
+
+
 def _holdings_disclosure_check_due(cached_meta: Dict[str, Any]) -> bool:
     check = cached_meta.get("disclosure_check")
     if not isinstance(check, dict):
         return True
     age = _fund_service()._cache_age_seconds(check.get("checked_at"))
-    return age is None or age > _fund_service().FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS
+    base_ttl = int(_fund_service().FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS)
+    effective_ttl = _seam("_effective_holdings_disclosure_check_ttl_seconds")(cached_meta)
+    stored_ttl = _fund_service()._coerce_int(check.get("ttl_seconds"))
+    if stored_ttl is not None and 0 < stored_ttl < base_ttl:
+        effective_ttl = min(effective_ttl, stored_ttl)
+    return age is None or age > effective_ttl
 
 
-def _holdings_disclosure_check_meta(disclosures: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _holdings_disclosure_check_meta(
+    disclosures: List[Dict[str, Any]],
+    cached_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     latest_index = _seam("_kap_disclosure_index")(disclosures[0]) if disclosures else None
     previous_index = _seam("_kap_disclosure_index")(disclosures[1]) if len(disclosures) > 1 else None
     return {
         "checked_at": _fund_service()._utc_now_iso(),
-        "ttl_seconds": _fund_service().FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS,
+        "ttl_seconds": _seam("_effective_holdings_disclosure_check_ttl_seconds")(cached_meta),
         "latest_disclosure_index": latest_index,
         "previous_disclosure_index": previous_index,
         "report_count": len(disclosures),
@@ -617,7 +654,12 @@ def _cached_holdings_with_disclosure_check(
     meta = dict(previous_meta)
     meta["parser_version"] = _seam("KAP_HOLDINGS_PARSE_VERSION")
     meta["positions_hash"] = _seam("_holdings_positions_hash")(positions)
-    meta["disclosure_check"] = _seam("_holdings_disclosure_check_meta")(disclosures)
+    check_meta_fn = _seam("_holdings_disclosure_check_meta")
+    meta["disclosure_check"] = (
+        check_meta_fn(disclosures, meta)
+        if check_meta_fn is _holdings_disclosure_check_meta
+        else check_meta_fn(disclosures)
+    )
     meta["last_static_cache_validated_at"] = _fund_service()._utc_now_iso()
     payload["source_metadata"] = _seam("_holdings_meta_with_runtime_cache_flags")(
         meta,
@@ -2394,6 +2436,41 @@ def _holdings_cache_is_stale(cached: Dict[str, Any]) -> bool:
     return age is None or age > _fund_service().FUNDS_HOLDINGS_TTL_SECONDS
 
 
+def _reusable_previous_report_from_cache(
+    cached_payload: Optional[Dict[str, Any]],
+    previous_disclosure_row: Dict[str, Any],
+) -> Optional[Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
+    if not isinstance(cached_payload, dict):
+        return None
+    if _seam("_kap_report_positions") is not _kap_report_positions:
+        return None
+    cached_meta = cached_payload.get("source_metadata") if isinstance(cached_payload.get("source_metadata"), dict) else {}
+    if _fund_service()._coerce_int(cached_meta.get("parser_version")) != _seam("KAP_HOLDINGS_PARSE_VERSION"):
+        return None
+    latest_report = cached_meta.get("latest_report") if isinstance(cached_meta.get("latest_report"), dict) else None
+    if latest_report is None:
+        return None
+    if not str(latest_report.get("file_name") or latest_report.get("attachment_obj_id") or "").strip():
+        return None
+    prev_index = _seam("_kap_disclosure_index")(previous_disclosure_row)
+    cached_latest_index = _seam("_holdings_report_index")(latest_report)
+    if not prev_index or not cached_latest_index or prev_index != cached_latest_index:
+        return None
+    reused_positions: List[Dict[str, Any]] = []
+    for pos in list(cached_payload.get("positions") or []):
+        if not isinstance(pos, dict):
+            continue
+        if str(pos.get("change_status") or "").strip().lower() == "removed":
+            continue
+        weight = _fund_service()._coerce_float(pos.get("weight"))
+        if weight is None or weight <= 0:
+            continue
+        reused_positions.append(dict(pos))
+    if not reused_positions:
+        return None
+    return reused_positions, dict(latest_report)
+
+
 def refresh_fund_holdings(
     processed_dir: Path,
     fund_code: str,
@@ -2401,19 +2478,53 @@ def refresh_fund_holdings(
     cached_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized = _fund_service().normalize_fund_code(fund_code)
-    metadata = _seam("_kap_search_fund_metadata")(normalized)
-    if not metadata:
-        payload = _seam("_unavailable_holdings_payload")(
-            normalized,
-            message="KAP fon kaydı bulunamadı.",
-            warnings=[f"KAP fund search returned no exact match for {normalized}"],
-        )
-        payload["source_metadata"]["positions_hash"] = _seam("_holdings_positions_hash")(payload.get("positions") or [])
-        _fund_service()._write_json(_fund_service()._holdings_path(processed_dir, normalized), payload)
-        return payload
-    fund_oid = str(metadata.get("fund_oid") or "").strip()
-    subject_oid = _seam("_kap_portfolio_subject_oid")(fund_oid)
-    disclosures = _seam("_kap_list_portfolio_disclosures")(fund_oid, subject_oid)
+    cached_meta = (
+        cached_payload.get("source_metadata")
+        if isinstance(cached_payload, dict) and isinstance(cached_payload.get("source_metadata"), dict)
+        else {}
+    )
+    cached_fund_oid = str(cached_meta.get("fund_oid") or "").strip()
+    cached_subject_oid = str(cached_meta.get("subject_oid") or "").strip()
+
+    metadata: Optional[Dict[str, Any]] = None
+    fund_oid = ""
+    subject_oid = ""
+    disclosures: List[Dict[str, Any]] = []
+
+    if cached_fund_oid and cached_subject_oid:
+        try:
+            disclosures = list(
+                _seam("_kap_list_portfolio_disclosures")(cached_fund_oid, cached_subject_oid) or []
+            )
+        except Exception:
+            disclosures = []
+        if disclosures:
+            fund_oid = cached_fund_oid
+            subject_oid = cached_subject_oid
+            metadata = {
+                "fund_code": normalized,
+                "fund_oid": cached_fund_oid,
+                "fund_name": cached_meta.get("fund_name"),
+            }
+
+    if not disclosures:
+        metadata = _seam("_kap_search_fund_metadata")(normalized)
+        if not metadata:
+            payload = _seam("_unavailable_holdings_payload")(
+                normalized,
+                message="KAP fon kaydı bulunamadı.",
+                warnings=[f"KAP fund search returned no exact match for {normalized}"],
+            )
+            payload["source_metadata"]["positions_hash"] = _seam("_holdings_positions_hash")(payload.get("positions") or [])
+            _fund_service()._write_json(_fund_service()._holdings_path(processed_dir, normalized), payload)
+            return payload
+        fund_oid = str(metadata.get("fund_oid") or "").strip()
+        subject_oid = _seam("_kap_portfolio_subject_oid")(fund_oid)
+        if (fund_oid, subject_oid) != (cached_fund_oid, cached_subject_oid):
+            disclosures = list(
+                _seam("_kap_list_portfolio_disclosures")(fund_oid, subject_oid) or []
+            )
+
     if not disclosures:
         payload = _seam("_unavailable_holdings_payload")(
             normalized,
@@ -2431,18 +2542,71 @@ def refresh_fund_holdings(
 
     warnings: List[str] = []
     report_payloads: List[Tuple[List[Dict[str, Any]], Dict[str, Any]]] = []
-    for row in disclosures[:2]:
+    top_rows = list(disclosures[:2])
+    reused_previous: Optional[Tuple[List[Dict[str, Any]], Dict[str, Any]]] = None
+    if len(top_rows) > 1:
+        reused_previous = _seam("_reusable_previous_report_from_cache")(cached_payload, top_rows[1])
+
+    def _fetch_and_parse_single_report(
+        row: Dict[str, Any],
+        *,
+        slot: int = 0,
+        first_detail_done: Optional[threading.Event] = None,
+    ) -> Tuple[Optional[Tuple[List[Dict[str, Any]], Dict[str, Any]]], List[str]]:
+        local_warnings: List[str] = []
         disclosure_index = _seam("_kap_disclosure_index")(row)
         if not disclosure_index:
-            continue
-        detail = _seam("_kap_fetch_report_detail")(disclosure_index)
+            if slot == 0 and first_detail_done is not None:
+                first_detail_done.set()
+            return None, local_warnings
+        if slot > 0 and first_detail_done is not None:
+            first_detail_done.wait(timeout=0.002)
+        try:
+            detail = _seam("_kap_fetch_report_detail")(disclosure_index)
+        finally:
+            if slot == 0 and first_detail_done is not None:
+                first_detail_done.set()
         if not detail:
-            warnings.append(f"KAP disclosure detail unavailable: {disclosure_index}")
-            continue
-        positions, report_meta = _seam("_kap_report_positions")(processed_dir, detail, fund_code=normalized)
-        if report_meta.get("warning"):
-            warnings.append(str(report_meta["warning"]))
-        report_payloads.append((positions, report_meta))
+            local_warnings.append(f"KAP disclosure detail unavailable: {disclosure_index}")
+            return None, local_warnings
+        positions_out, report_meta_out = _seam("_kap_report_positions")(
+            processed_dir,
+            detail,
+            fund_code=normalized,
+        )
+        if report_meta_out.get("warning"):
+            local_warnings.append(str(report_meta_out["warning"]))
+        return (positions_out, report_meta_out), local_warnings
+
+    if reused_previous is not None:
+        parsed_first, first_warnings = _fetch_and_parse_single_report(top_rows[0], slot=0)
+        warnings.extend(first_warnings)
+        if parsed_first is not None:
+            report_payloads.append(parsed_first)
+        report_payloads.append(reused_previous)
+    elif len(top_rows) == 2:
+        first_detail_done = threading.Event()
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="kap-holdings-pdf") as executor:
+            futures = [
+                executor.submit(
+                    _fetch_and_parse_single_report,
+                    row,
+                    slot=idx,
+                    first_detail_done=first_detail_done,
+                )
+                for idx, row in enumerate(top_rows)
+            ]
+            for future in futures:
+                parsed_item, item_warnings = future.result()
+                warnings.extend(item_warnings)
+                if parsed_item is not None:
+                    report_payloads.append(parsed_item)
+    else:
+        for row in top_rows:
+            parsed_item, item_warnings = _fetch_and_parse_single_report(row, slot=0)
+            warnings.extend(item_warnings)
+            if parsed_item is not None:
+                report_payloads.append(parsed_item)
 
     latest_positions = report_payloads[0][0] if report_payloads else []
     latest_meta = report_payloads[0][1] if report_payloads else {}
@@ -2475,6 +2639,16 @@ def refresh_fund_holdings(
     )
     positions = _seam("_normalize_holding_positions_for_response")(processed_dir, positions, fund_code=normalized)
     parse_status = "ok" if latest_positions and previous_positions else "partial"
+    check_meta_context = {
+        "as_of": latest_meta.get("report_date"),
+        "latest_report": latest_meta or None,
+    }
+    check_meta_fn = _seam("_holdings_disclosure_check_meta")
+    disclosure_check_meta = (
+        check_meta_fn(disclosures, check_meta_context)
+        if check_meta_fn is _holdings_disclosure_check_meta
+        else check_meta_fn(disclosures)
+    )
     payload = {
         "fund_code": normalized,
         "status": parse_status,
@@ -2494,10 +2668,10 @@ def refresh_fund_holdings(
             "parser_version": _seam("KAP_HOLDINGS_PARSE_VERSION"),
             "fund_oid": fund_oid,
             "subject_oid": subject_oid,
-            "fund_name": metadata.get("fund_name"),
+            "fund_name": (metadata or {}).get("fund_name"),
             "latest_report": latest_meta or None,
             "previous_report": previous_meta or None,
-            "disclosure_check": _seam("_holdings_disclosure_check_meta")(disclosures),
+            "disclosure_check": disclosure_check_meta,
             "positions_hash": _seam("_holdings_positions_hash")(positions),
             "warnings": warnings,
         },
@@ -2596,6 +2770,7 @@ __all__ = [
     "_holdings_report_index",
     "_holdings_positions_hash",
     "_holdings_meta_with_runtime_cache_flags",
+    "_effective_holdings_disclosure_check_ttl_seconds",
     "_holdings_disclosure_check_due",
     "_holdings_disclosure_check_meta",
     "_cached_holdings_matches_disclosures",
@@ -2662,6 +2837,7 @@ __all__ = [
     "_unavailable_holdings_payload",
     "_parse_iso_date",
     "_holdings_cache_is_stale",
+    "_reusable_previous_report_from_cache",
     "refresh_fund_holdings",
     "get_fund_holdings_payload",
 ]

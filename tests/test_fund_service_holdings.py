@@ -461,3 +461,356 @@ def test_fund_allocation_history_executor_defaults_to_three_workers() -> None:
     from app import fund_api_service
 
     assert fund_api_service._FUND_ALLOCATION_HISTORY_EXECUTOR._max_workers == 3
+
+
+def test_refresh_fund_holdings_reuses_cached_kap_oids_and_falls_back_when_stale(
+    monkeypatch, tmp_path
+) -> None:
+    search_calls: list[str] = []
+    subject_calls: list[str] = []
+    list_calls: list[tuple[str, str]] = []
+
+    cached_positions = [
+        {
+            "fund_code": "TLY",
+            "asset_code": "DSTKF",
+            "asset_name": "DESTEK FINANS FAKTORING A.S.",
+            "asset_type": "local_equity",
+            "weight": 23.6,
+            "previous_weight": 20.4,
+            "weight_change": 3.2,
+            "change_status": "increased",
+            "report_date": "2026-04-30",
+            "previous_report_date": "2026-03-31",
+            "source_report_url": "https://www.kap.org.tr/tr/Bildirim/200",
+            "source_type": "kap_pdf",
+            "parse_confidence": 0.9,
+        }
+    ]
+    cached_payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": cached_positions,
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-05-05T10:00:00+00:00",
+            "as_of": "2026-04-30",
+            "parse_status": "ok",
+            "parser_version": fund_service.KAP_HOLDINGS_PARSE_VERSION,
+            "fund_oid": "cached-fund-oid",
+            "subject_oid": "cached-subject-oid",
+            "fund_name": "Tera Portfoy Birinci Serbest Fon",
+            "latest_report": {"disclosure_index": 200, "report_date": "2026-04-30", "file_name": "TLY_2026.04.pdf"},
+            "previous_report": {"disclosure_index": 100, "report_date": "2026-03-31", "file_name": "TLY_2026.03.pdf"},
+            "positions_hash": fund_service._holdings_positions_hash(cached_positions),
+        },
+    }
+
+    monkeypatch.setattr(
+        fund_service,
+        "_kap_search_fund_metadata",
+        lambda code: (
+            search_calls.append(code)
+            or {"fund_code": code, "fund_oid": "fresh-fund-oid", "fund_name": "Tera Portfoy"}
+        ),
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "_kap_portfolio_subject_oid",
+        lambda f_oid: subject_calls.append(f_oid) or "fresh-subject-oid",
+    )
+
+    # Case 1: Cached OIDs return disclosures -> skips search POST and subject HTML GET completely!
+    monkeypatch.setattr(
+        fund_service,
+        "_kap_list_portfolio_disclosures",
+        lambda f_oid, s_oid: (
+            list_calls.append((f_oid, s_oid))
+            or [
+                {"disclosureBasic": {"disclosureIndex": 200, "publishDate": "05.05.2026 09:00:00"}},
+                {"disclosureBasic": {"disclosureIndex": 100, "publishDate": "05.04.2026 09:00:00"}},
+            ]
+        ),
+    )
+
+    res1 = fund_service.refresh_fund_holdings(tmp_path, "TLY", cached_payload=cached_payload)
+    assert res1["status"] == "ok"
+    assert search_calls == []
+    assert subject_calls == []
+    assert list_calls == [("cached-fund-oid", "cached-subject-oid")]
+
+    # Case 2: Cached OIDs are stale (return empty) -> falls back to _kap_search_fund_metadata + _kap_portfolio_subject_oid!
+    list_calls.clear()
+    monkeypatch.setattr(
+        fund_service,
+        "_kap_list_portfolio_disclosures",
+        lambda f_oid, s_oid: (
+            list_calls.append((f_oid, s_oid))
+            or (
+                []
+                if f_oid == "cached-fund-oid"
+                else [
+                    {"disclosureBasic": {"disclosureIndex": 200, "publishDate": "05.05.2026 09:00:00"}},
+                    {"disclosureBasic": {"disclosureIndex": 100, "publishDate": "05.04.2026 09:00:00"}},
+                ]
+            )
+        ),
+    )
+
+    res2 = fund_service.refresh_fund_holdings(tmp_path, "TLY", cached_payload=cached_payload)
+    assert res2["status"] == "ok"
+    assert search_calls == ["TLY"]
+    assert subject_calls == ["fresh-fund-oid"]
+    assert list_calls == [
+        ("cached-fund-oid", "cached-subject-oid"),
+        ("fresh-fund-oid", "fresh-subject-oid"),
+    ]
+
+
+def test_effective_holdings_disclosure_check_ttl_is_calendar_aware(monkeypatch) -> None:
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(fund_service, "FUNDS_HOLDINGS_DISCLOSURE_CHECK_TTL_SECONDS", 7200)
+    monkeypatch.setattr(fund_service, "FUNDS_HOLDINGS_DISCLOSURE_CHECK_SETTLED_TTL_SECONDS", 86400)
+
+    cached_meta = {
+        "as_of": "2026-04-30",
+        "latest_report": {"disclosure_index": 200, "report_date": "2026-04-30"},
+        "disclosure_check": {
+            "checked_at": "2026-05-18T08:00:00+00:00",
+            "ttl_seconds": 86400,
+        },
+    }
+
+    # On May 18 (day > 10, previous month's April report already cached), TTL is 24h (86400s).
+    monkeypatch.setattr(
+        fund_service,
+        "_utc_now",
+        lambda: datetime(2026, 5, 18, 14, 0, tzinfo=timezone.utc),
+    )
+    assert fund_service._effective_holdings_disclosure_check_ttl_seconds(cached_meta) == 86400
+    # 6 hours elapsed (< 24h) -> check is NOT due!
+    assert fund_service._holdings_disclosure_check_due(cached_meta) is False
+
+    # On May 5 (day <= 10, publication window for April report if March report is cached), TTL is 2h (7200s).
+    march_cached_meta = {
+        "as_of": "2026-03-31",
+        "latest_report": {"disclosure_index": 100, "report_date": "2026-03-31"},
+        "disclosure_check": {
+            "checked_at": "2026-04-05T08:00:00+00:00",
+            "ttl_seconds": 7200,
+        },
+    }
+    monkeypatch.setattr(
+        fund_service,
+        "_utc_now",
+        lambda: datetime(2026, 4, 5, 11, 0, tzinfo=timezone.utc),
+    )
+    assert fund_service._effective_holdings_disclosure_check_ttl_seconds(march_cached_meta) == 7200
+    # 3 hours elapsed (> 2h) -> check IS due!
+    assert fund_service._holdings_disclosure_check_due(march_cached_meta) is True
+
+
+def test_refresh_fund_holdings_reuses_previous_month_positions_on_new_report_rollover(
+    monkeypatch, tmp_path
+) -> None:
+    latest_may_text = """
+FON PORTFÖY DEĞERİ TABLOSU
+Hisse Senedi
+DSTKF Destek Finans Faktoring A.S. 1.000,00 10,00 10.000,00 26,00TRYTRADSTKFXXX
+BIMAS Bim Birlesik Magazalar A.S. 100,00 5,00 500,00 4,50TRYTRABIMASXXX
+"""
+    cached_april_positions = [
+        {
+            "fund_code": "TLY",
+            "asset_code": "DSTKF",
+            "asset_name": "DESTEK FINANS FAKTORING A.S.",
+            "asset_type": "local_equity",
+            "weight": 20.0,
+            "previous_weight": 18.0,
+            "weight_change": 2.0,
+            "change_status": "increased",
+            "report_date": "2026-04-30",
+            "previous_report_date": "2026-03-31",
+            "source_report_url": "https://www.kap.org.tr/tr/Bildirim/200",
+            "source_type": "kap_pdf",
+            "parse_confidence": 0.9,
+        },
+        {
+            "fund_code": "TLY",
+            "asset_code": "AKBNK",
+            "asset_name": "AKBANK T.A.S.",
+            "asset_type": "local_equity",
+            "weight": 5.0,
+            "previous_weight": 5.0,
+            "weight_change": 0.0,
+            "change_status": "unchanged",
+            "report_date": "2026-04-30",
+            "previous_report_date": "2026-03-31",
+            "source_report_url": "https://www.kap.org.tr/tr/Bildirim/200",
+            "source_type": "kap_pdf",
+            "parse_confidence": 0.9,
+        },
+        {
+            "fund_code": "TLY",
+            "asset_code": "OLDREMOVED",
+            "asset_name": "ESKI HISSE",
+            "asset_type": "local_equity",
+            "weight": 0.0,
+            "previous_weight": 3.0,
+            "weight_change": -3.0,
+            "change_status": "removed",
+            "report_date": "2026-04-30",
+            "previous_report_date": "2026-03-31",
+            "source_report_url": "https://www.kap.org.tr/tr/Bildirim/100",
+            "source_type": "kap_pdf",
+            "parse_confidence": 0.9,
+        },
+    ]
+    cached_payload = {
+        "fund_code": "TLY",
+        "status": "ok",
+        "positions": cached_april_positions,
+        "source": "kap_portfolio_allocation_report",
+        "source_metadata": {
+            "source": "kap_portfolio_allocation_report",
+            "fetched_at": "2026-05-05T10:00:00+00:00",
+            "as_of": "2026-04-30",
+            "parse_status": "ok",
+            "parser_version": fund_service.KAP_HOLDINGS_PARSE_VERSION,
+            "fund_oid": "fund-oid",
+            "subject_oid": "subject-oid",
+            "fund_name": "Tera Portfoy",
+            "latest_report": {
+                "disclosure_index": 200,
+                "report_date": "2026-04-30",
+                "file_name": "TLY_2026.04.pdf",
+                "attachment_obj_id": "april-pdf",
+                "source_url": "https://www.kap.org.tr/tr/Bildirim/200",
+            },
+            "previous_report": {
+                "disclosure_index": 100,
+                "report_date": "2026-03-31",
+                "file_name": "TLY_2026.03.pdf",
+            },
+            "positions_hash": fund_service._holdings_positions_hash(cached_april_positions),
+        },
+    }
+
+    detail_calls: list[int] = []
+    download_calls: list[str] = []
+
+    monkeypatch.setattr(
+        fund_service,
+        "_kap_list_portfolio_disclosures",
+        lambda _f_oid, _s_oid: [
+            {"disclosureBasic": {"disclosureIndex": 300, "publishDate": "04.06.2026 09:00:00"}},
+            {"disclosureBasic": {"disclosureIndex": 200, "publishDate": "05.05.2026 09:00:00"}},
+        ],
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "_kap_fetch_report_detail",
+        lambda idx: (
+            detail_calls.append(idx)
+            or {
+                "disclosure": {"disclosureBasic": {"disclosureIndex": idx, "year": 2026, "donem": 5}},
+                "attachments": [{"objId": "may-pdf", "fileName": "TLY_2026.05.pdf", "fileExtension": "pdf"}],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "_kap_download_attachment",
+        lambda obj_id: download_calls.append(obj_id) or b"may-pdf-bytes",
+    )
+    monkeypatch.setattr(fund_service, "_extract_kap_pdf_text", lambda _data: latest_may_text)
+
+    payload = fund_service.refresh_fund_holdings(tmp_path, "TLY", cached_payload=cached_payload)
+
+    assert payload["status"] == "ok"
+    # Only the new report (300) was fetched & parsed; report 200 was reused from cached_payload!
+    assert detail_calls == [300]
+    assert download_calls == ["may-pdf"]
+    by_code = {item["asset_code"]: item for item in payload["positions"]}
+    assert by_code["DSTKF"]["weight"] == 26.0
+    assert by_code["DSTKF"]["previous_weight"] == 20.0
+    assert by_code["DSTKF"]["weight_change"] == 6.0
+    assert by_code["DSTKF"]["change_status"] == "increased"
+    assert by_code["BIMAS"]["change_status"] == "new"
+    assert by_code["AKBNK"]["change_status"] == "removed"
+    assert by_code["AKBNK"]["previous_weight"] == 5.0
+    assert "OLDREMOVED" not in by_code
+
+
+def test_refresh_fund_holdings_parses_two_reports_in_parallel_on_cold_cache(
+    monkeypatch, tmp_path
+) -> None:
+    import threading
+    import time
+
+    latest_text = """
+FON PORTFÖY DEĞERİ TABLOSU
+Hisse Senedi
+DSTKF Destek Finans Faktoring A.S. 1.000,00 10,00 10.000,00 24,00TRYTRADSTKFXXX
+"""
+    previous_text = """
+FON PORTFÖY DEĞERİ TABLOSU
+Hisse Senedi
+DSTKF Destek Finans Faktoring A.S. 1.000,00 10,00 10.000,00 19,00TRYTRADSTKFXXX
+"""
+    lock = threading.Lock()
+    active = 0
+    peak_concurrency = 0
+
+    monkeypatch.setattr(
+        fund_service,
+        "_kap_search_fund_metadata",
+        lambda _code: {"fund_code": "TLY", "fund_oid": "fund-oid", "fund_name": "Tera Portfoy"},
+    )
+    monkeypatch.setattr(fund_service, "_kap_portfolio_subject_oid", lambda _f_oid: "subject-oid")
+    monkeypatch.setattr(
+        fund_service,
+        "_kap_list_portfolio_disclosures",
+        lambda _f_oid, _s_oid: [
+            {"disclosureBasic": {"disclosureIndex": 200, "publishDate": "05.05.2026 09:00:00"}},
+            {"disclosureBasic": {"disclosureIndex": 100, "publishDate": "05.04.2026 09:00:00"}},
+        ],
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "_kap_fetch_report_detail",
+        lambda idx: {
+            "disclosure": {"disclosureBasic": {"disclosureIndex": idx, "year": 2026, "donem": 4 if idx == 200 else 3}},
+            "attachments": [{"objId": f"obj-{idx}", "fileName": f"TLY_{idx}.pdf", "fileExtension": "pdf"}],
+        },
+    )
+
+    def fake_download(obj_id: str) -> bytes:
+        nonlocal active, peak_concurrency
+        with lock:
+            active += 1
+            if active > peak_concurrency:
+                peak_concurrency = active
+        try:
+            time.sleep(0.04)
+            return obj_id.encode("utf-8")
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(fund_service, "_kap_download_attachment", fake_download)
+    monkeypatch.setattr(
+        fund_service,
+        "_extract_kap_pdf_text",
+        lambda data: latest_text if data == b"obj-200" else previous_text,
+    )
+
+    payload = fund_service.refresh_fund_holdings(tmp_path, "TLY")
+
+    assert payload["status"] == "ok"
+    assert peak_concurrency == 2
+    assert payload["positions"][0]["weight"] == 24.0
+    assert payload["positions"][0]["previous_weight"] == 19.0
+    assert payload["positions"][0]["weight_change"] == 5.0

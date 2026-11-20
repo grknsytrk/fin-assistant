@@ -2213,3 +2213,228 @@ def test_api_fund_holdings_partial_when_pdf_not_parsed(
     assert payload["status"] == "partial"
     assert payload["positions"] == []
     assert payload["source_metadata"]["parse_status"] == "partial"
+
+
+def test_gefas_http_client_pooling_parallel_metrics_and_urlopen_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    import time
+    import urllib.request
+    from app.funds_api import holdings_enrichment as he_module
+
+    # 1. Verify persistent httpx.Client reuse and teardown via close_shared_http_clients()
+    he_module.close_gefas_http_client()
+    client1, is_ephemeral1 = he_module._get_gefas_http_client()
+    client2, is_ephemeral2 = he_module._get_gefas_http_client()
+    assert is_ephemeral1 is False
+    assert is_ephemeral2 is False
+    assert client1 is client2
+    assert not client1.is_closed
+
+    fund_service_module.close_shared_http_clients()
+    assert client1.is_closed
+    assert he_module._GEFAS_HTTP_CLIENT is None
+
+    # 2. Verify urllib.request.urlopen monkeypatch seam continues to work
+    urlopen_urls: List[str] = []
+
+    class _FakeUrlopenResp:
+        def __enter__(self) -> "_FakeUrlopenResp":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            pass
+
+        def read(self) -> bytes:
+            return b'{"datas": [8100.5], "labels": ["18.05.2026"]}'
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda req, timeout=8: urlopen_urls.append(req.full_url) or _FakeUrlopenResp(),
+    )
+    chart_via_seam = api_module._fetch_gefas_gyf_chart("TRYTALP00036", 0)
+    assert chart_via_seam["datas"] == [8100.5]
+    assert len(urlopen_urls) == 1
+
+    # 3. Verify _fetch_gefas_gyf_quote fetches metric=0 and metric=2 in parallel
+    api_module._GEFAS_GYF_QUOTE_CACHE.clear()
+    monkeypatch.setattr(api_module, "_shared_cache_get_dict", lambda _key: None)
+    monkeypatch.setattr(api_module, "_shared_cache_set", lambda *_args, **_kwargs: None)
+
+    lock = threading.Lock()
+    active = 0
+    peak_concurrency = 0
+
+    def fake_chart(isin: str, metric: int) -> Dict[str, Any]:
+        nonlocal active, peak_concurrency
+        with lock:
+            active += 1
+            if active > peak_concurrency:
+                peak_concurrency = active
+        try:
+            time.sleep(0.03)
+            if metric == 0:
+                return {"datas": [8043.16], "labels": ["18.05.2026"]}
+            return {"datas": [0.25], "labels": ["18.05.2026"]}
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(api_module, "_fetch_gefas_gyf_chart", fake_chart)
+    quote = api_module._fetch_gefas_gyf_quote("TPKGYF")
+    assert quote is not None
+    assert peak_concurrency == 2
+    assert quote["price"] == pytest.approx(8043.16)
+    assert quote["change_pct"] == pytest.approx(0.25)
+
+
+def test_enrich_fund_holdings_runs_four_legs_and_cold_caches_in_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    import time
+
+    api_module._FUND_HOLDING_SECTOR_MAP_CACHE.clear()
+    api_module._FOREIGN_HOLDING_QUOTE_CACHE.clear()
+    api_module._GEFAS_GYF_QUOTE_CACHE.clear()
+    monkeypatch.setattr(api_module, "_shared_cache_get_dict", lambda _key: None)
+    monkeypatch.setattr(api_module, "_shared_cache_set", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        api_module,
+        "_fund_snapshot_row_map_with_meta",
+        lambda: ({"TLY": {"as_of": "2026-05-20", "aum": 100_000_000.0}}, {"cache_hit": True, "row_count": 1}),
+    )
+
+    # 1. Verify _fund_holding_sector_map cold build runs remaining sectors in parallel and preserves priority order
+    sector_lock = threading.Lock()
+    sector_active = 0
+    sector_peak = 0
+    first_priority = api_module._FUND_HOLDING_SECTOR_PRIORITY[0]
+    second_priority = api_module._FUND_HOLDING_SECTOR_PRIORITY[1]
+
+    def fake_bist_universe(sector_code: str) -> Dict[str, Any]:
+        nonlocal sector_active, sector_peak
+        with sector_lock:
+            sector_active += 1
+            if sector_active > sector_peak:
+                sector_peak = sector_active
+        try:
+            time.sleep(0.015)
+            # Both first_priority and second_priority contain OVERLAP -> first_priority must win!
+            symbols = ["OVERLAP", f"SYM_{sector_code}"] if sector_code in {first_priority, second_priority} else [f"SYM_{sector_code}"]
+            return {"symbols": symbols, "source": "test_bist", "source_date": "2026-05-20"}
+        finally:
+            with sector_lock:
+                sector_active -= 1
+
+    monkeypatch.setattr(api_module, "get_bist_index_universe", fake_bist_universe, raising=False)
+    sector_map, sector_meta = api_module._fund_holding_sector_map()
+    assert sector_peak >= 2
+    assert sector_map["OVERLAP"]["sector_code"] == first_priority
+    assert sector_meta["cache_hit"] is False
+
+    # 2. Verify _quote_map_for_foreign_holdings fetches multiple Yahoo misses in parallel
+    yahoo_lock = threading.Lock()
+    yahoo_active = 0
+    yahoo_peak = 0
+
+    def fake_yahoo_quote(symbol: str) -> Dict[str, Any]:
+        nonlocal yahoo_active, yahoo_peak
+        with yahoo_lock:
+            yahoo_active += 1
+            if yahoo_active > yahoo_peak:
+                yahoo_peak = yahoo_active
+        try:
+            time.sleep(0.025)
+            return {
+                "ok": True,
+                "price": 100.0,
+                "currency": "USD",
+                "change_pct": 1.5,
+                "as_of": "2026-05-20T10:00:00+00:00",
+                "long_name": f"Asset {symbol}",
+            }
+        finally:
+            with yahoo_lock:
+                yahoo_active -= 1
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_quote", fake_yahoo_quote)
+    foreign_quotes = api_module._quote_map_for_foreign_holdings(
+        [
+            {"asset_code": "AAPL", "asset_type": "foreign_equity", "provider_symbol": "AAPL"},
+            {"asset_code": "MSFT", "asset_type": "foreign_equity", "provider_symbol": "MSFT"},
+            {"asset_code": "NVDA", "asset_type": "foreign_equity", "provider_symbol": "NVDA"},
+        ]
+    )
+    assert yahoo_peak >= 2
+    assert set(foreign_quotes.keys()) == {"AAPL", "MSFT", "NVDA"}
+
+    # 3. Verify _enrich_fund_holdings_with_daily_market_data executes all 4 legs concurrently
+    leg_lock = threading.Lock()
+    leg_active = 0
+    leg_peak = 0
+
+    def _enter_leg() -> None:
+        nonlocal leg_active, leg_peak
+        with leg_lock:
+            leg_active += 1
+            if leg_active > leg_peak:
+                leg_peak = leg_active
+        time.sleep(0.03)
+
+    def _exit_leg() -> None:
+        nonlocal leg_active
+        with leg_lock:
+            leg_active -= 1
+
+    def slow_stocks(_symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        _enter_leg()
+        try:
+            return {"DSTKF": {"price": 40.0, "currency": "TRY", "change_pct": 2.0, "as_of": "2026-05-20"}}
+        finally:
+            _exit_leg()
+
+    def slow_gefas(_code: str) -> Optional[Dict[str, Any]]:
+        _enter_leg()
+        try:
+            return {"price": 8000.0, "currency": "TRY", "change_pct": 0.5, "as_of": "2026-05-20", "source": "gefas_gyf"}
+        finally:
+            _exit_leg()
+
+    def slow_foreign(_positions: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        _enter_leg()
+        try:
+            return {"AAPL": {"price": 190.0, "currency": "USD", "change_pct": 1.0, "as_of": "2026-05-20", "source": "yahoo_finance_chart"}}
+        finally:
+            _exit_leg()
+
+    def slow_sector() -> Any:
+        _enter_leg()
+        try:
+            return ({"DSTKF": {"sector_code": "XFINK", "sector_label": "Faktoring"}}, {"cache_hit": True, "symbol_count": 1})
+        finally:
+            _exit_leg()
+
+    monkeypatch.setattr(api_module, "_quote_map_for_holding_stocks", slow_stocks)
+    monkeypatch.setattr(api_module, "_fetch_gefas_gyf_quote", slow_gefas)
+    monkeypatch.setattr(api_module, "_quote_map_for_foreign_holdings", slow_foreign)
+    monkeypatch.setattr(api_module, "_fund_holding_sector_map", slow_sector)
+
+    enriched = api_module._enrich_fund_holdings_with_daily_market_data(
+        {
+            "fund_code": "TLY",
+            "status": "ok",
+            "positions": [
+                {"asset_code": "DSTKF", "asset_name": "Destek", "asset_type": "local_equity", "weight": 20.0},
+                {"asset_code": "TPKGYF", "asset_name": "Tera GYF", "asset_type": "fund", "weight": 10.0},
+                {"asset_code": "AAPL", "asset_name": "Apple", "asset_type": "foreign_equity", "provider_symbol": "AAPL", "weight": 10.0},
+            ],
+            "source": "kap_portfolio_allocation_report",
+            "source_metadata": {"as_of": "2026-04-30", "warnings": []},
+        },
+        "TLY",
+    )
+    assert leg_peak == 4
+    assert enriched["portfolio_effect"]["priced_weight"] == 40.0

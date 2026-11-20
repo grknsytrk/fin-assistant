@@ -1,8 +1,55 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import atexit
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from typing import Any, Dict, List, Optional, Tuple
+import urllib.error
+import urllib.request
+
+import httpx
 
 from app.funds_api import _fas
+
+_ORIGINAL_URLOPEN = urllib.request.urlopen
+_ORIGINAL_HTTPX_CLIENT = httpx.Client
+_GEFAS_CLIENT_LOCK = threading.Lock()
+_GEFAS_HTTP_CLIENT: Optional[httpx.Client] = None
+
+
+def _get_gefas_http_client(timeout_seconds: float = 8.0) -> Tuple[httpx.Client, bool]:
+    """Return a shared persistent HTTP client for GEFAS requests, or a fresh mock in tests."""
+    if httpx.Client is not _ORIGINAL_HTTPX_CLIENT:
+        return httpx.Client(timeout=timeout_seconds, follow_redirects=True), True
+    global _GEFAS_HTTP_CLIENT
+    with _GEFAS_CLIENT_LOCK:
+        if _GEFAS_HTTP_CLIENT is None or _GEFAS_HTTP_CLIENT.is_closed:
+            _GEFAS_HTTP_CLIENT = httpx.Client(
+                timeout=timeout_seconds,
+                follow_redirects=True,
+                limits=httpx.Limits(
+                    max_keepalive_connections=10,
+                    max_connections=20,
+                    keepalive_expiry=30.0,
+                ),
+            )
+        return _GEFAS_HTTP_CLIENT, False
+
+
+def close_gefas_http_client() -> None:
+    """Close the shared GEFAS HTTP client cleanly."""
+    global _GEFAS_HTTP_CLIENT
+    with _GEFAS_CLIENT_LOCK:
+        client = _GEFAS_HTTP_CLIENT
+        _GEFAS_HTTP_CLIENT = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+atexit.register(close_gefas_http_client)
 
 
 def _fund_holding_sector_map() -> tuple[Dict[str, Dict[str, str]], Dict[str, Any]]:
@@ -42,15 +89,45 @@ def _fund_holding_sector_map() -> tuple[Dict[str, Dict[str, str]], Dict[str, Any
         fas, "get_bist_index_universe", _kap_service.get_bist_index_universe
     )
 
+    priority_codes = list(fas._FUND_HOLDING_SECTOR_PRIORITY)
+    sector_results: Dict[str, Tuple[Optional[Dict[str, Any]], Optional[Exception]]] = {}
+    if priority_codes:
+        first_code = priority_codes[0]
+        try:
+            sector_results[first_code] = (get_bist_index_universe(first_code), None)
+        except Exception as exc:
+            sector_results[first_code] = (None, exc)
+        remaining_codes = priority_codes[1:]
+        if len(remaining_codes) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(6, len(remaining_codes)),
+                thread_name_prefix="holdings-sector",
+            ) as executor:
+                future_by_code = {
+                    sector_code: executor.submit(get_bist_index_universe, sector_code)
+                    for sector_code in remaining_codes
+                }
+                for sector_code in remaining_codes:
+                    try:
+                        sector_results[sector_code] = (future_by_code[sector_code].result(), None)
+                    except Exception as exc:
+                        sector_results[sector_code] = (None, exc)
+        else:
+            for sector_code in remaining_codes:
+                try:
+                    sector_results[sector_code] = (get_bist_index_universe(sector_code), None)
+                except Exception as exc:
+                    sector_results[sector_code] = (None, exc)
+
     sector_map: Dict[str, Dict[str, str]] = {}
     warnings: List[str] = []
     source = None
     source_date = None
-    for sector_code in fas._FUND_HOLDING_SECTOR_PRIORITY:
-        try:
-            universe = get_bist_index_universe(sector_code)
-        except Exception as exc:
-            warnings.append(f"{sector_code}: {exc}")
+    for sector_code in priority_codes:
+        universe, exc = sector_results.get(sector_code, (None, None))
+        if exc is not None or not isinstance(universe, dict):
+            if exc is not None:
+                warnings.append(f"{sector_code}: {exc}")
             continue
         source = source or universe.get("source")
         source_date = source_date or universe.get("source_date")
@@ -278,26 +355,39 @@ def _gefas_chart_date(raw: Any) -> Optional[str]:
 
 def _fetch_gefas_gyf_chart(isin: str, metric: int) -> Dict[str, Any]:
     fas = _fas()
-    import urllib.error
-    import urllib.request
-
     normalized_isin = str(isin or "").strip().upper()
     if not normalized_isin:
         return {}
     url = f"https://gefas.gov.tr/gyf/detay/grafik/{normalized_isin}/0/0/{metric}"
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/json,text/plain,*/*",
-            "Referer": "https://gefas.gov.tr/tr/gyf/detay",
-            "User-Agent": "Mozilla/5.0",
-        },
-    )
+    headers = {
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": "https://gefas.gov.tr/tr/gyf/detay",
+        "User-Agent": "Mozilla/5.0",
+    }
+    if urllib.request.urlopen is not _ORIGINAL_URLOPEN:
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                return fas.json.loads(response.read().decode("utf-8", errors="replace"))
+        except (urllib.error.URLError, TimeoutError, fas.json.JSONDecodeError, Exception):
+            return {}
+
+    client, is_ephemeral = _get_gefas_http_client(timeout_seconds=8.0)
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            return fas.json.loads(response.read().decode("utf-8", errors="replace"))
-    except (urllib.error.URLError, TimeoutError, fas.json.JSONDecodeError, Exception):
+        try:
+            response = client.get(url, headers=headers, timeout=8.0)
+        except httpx.RemoteProtocolError:
+            response = client.get(url, headers=headers, timeout=8.0)
+        response.raise_for_status()
+        return fas.json.loads(response.content.decode("utf-8", errors="replace"))
+    except (httpx.HTTPError, TimeoutError, fas.json.JSONDecodeError, Exception):
         return {}
+    finally:
+        if is_ephemeral:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 def _fetch_gefas_gyf_quote(symbol: str) -> Optional[Dict[str, Any]]:
@@ -322,8 +412,11 @@ def _fetch_gefas_gyf_quote(symbol: str) -> Optional[Dict[str, Any]]:
             data["_cache_hit"] = True
         return data
 
-    price_chart = fas._fetch_gefas_gyf_chart(config["isin"], 0)
-    return_chart = fas._fetch_gefas_gyf_chart(config["isin"], 2)
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="gefas-chart") as executor:
+        price_future = executor.submit(fas._fetch_gefas_gyf_chart, config["isin"], 0)
+        return_future = executor.submit(fas._fetch_gefas_gyf_chart, config["isin"], 2)
+        price_chart = price_future.result()
+        return_chart = return_future.result()
     prices = list(price_chart.get("datas") or [])
     price_labels = list(price_chart.get("labels") or [])
     returns = list(return_chart.get("datas") or [])
@@ -376,10 +469,25 @@ def _quote_map_for_holding_stocks(symbols: List[str]) -> Dict[str, Dict[str, Any
         if fas._api_number((quotes.get(symbol) or {}).get("price")) is None
         or fas._api_number((quotes.get(symbol) or {}).get("change_pct")) is None
     ]
-    for symbol in missing_symbols[: fas._INFOYATIRIM_STOCK_PAGE_FALLBACK_LIMIT]:
-        fallback = fas._fetch_infoyatirim_stock_page_quote(symbol)
-        if fallback:
-            quotes[symbol] = fas._merge_market_price_fallback(quotes.get(symbol, {}), fallback)
+    fallback_targets = list(missing_symbols[: fas._INFOYATIRIM_STOCK_PAGE_FALLBACK_LIMIT])
+    if len(fallback_targets) > 1:
+        with ThreadPoolExecutor(
+            max_workers=min(4, len(fallback_targets)),
+            thread_name_prefix="holdings-stock-fb",
+        ) as executor:
+            fallback_futures = {
+                symbol: executor.submit(fas._fetch_infoyatirim_stock_page_quote, symbol)
+                for symbol in fallback_targets
+            }
+            for symbol in fallback_targets:
+                fallback = fallback_futures[symbol].result()
+                if fallback:
+                    quotes[symbol] = fas._merge_market_price_fallback(quotes.get(symbol, {}), fallback)
+    else:
+        for symbol in fallback_targets:
+            fallback = fas._fetch_infoyatirim_stock_page_quote(symbol)
+            if fallback:
+                quotes[symbol] = fas._merge_market_price_fallback(quotes.get(symbol, {}), fallback)
     return quotes
 
 
@@ -432,6 +540,7 @@ def _quote_map_for_foreign_holdings(positions: List[Dict[str, Any]]) -> Dict[str
     raw_bulk = fas._shared_cache_get_dict(fas._FOREIGN_QUOTES_BULK_KEY)
     bulk_quotes: Dict[str, Any] = dict(raw_bulk) if isinstance(raw_bulk, dict) else {}
     bulk_dirty = False
+    yahoo_missing: List[str] = []
     for symbol in l1_missing:
         shared_entry = bulk_quotes.get(symbol)
         if (
@@ -445,30 +554,49 @@ def _quote_map_for_foreign_holdings(positions: List[Dict[str, Any]]) -> Dict[str
             if shared_cached:
                 quotes[symbol] = dict(shared_cached)
             continue
+        yahoo_missing.append(symbol)
 
-        raw_quote = fas._fetch_yahoo_quote(symbol)
-        data: Dict[str, Any] = {}
-        if raw_quote.get("ok") and (
-            fas._api_number(raw_quote.get("price")) is not None
-            or fas._api_number(raw_quote.get("change_pct")) is not None
-        ):
-            data = {
-                "price": fas._api_number(raw_quote.get("price")),
-                "currency": raw_quote.get("currency"),
-                "change_pct": fas._api_number(raw_quote.get("change_pct")),
-                "as_of": raw_quote.get("as_of"),
-                "source": "yahoo_finance_chart",
-                "provider_symbol": symbol,
-                "short_name": raw_quote.get("short_name"),
-                "long_name": raw_quote.get("long_name"),
+    if yahoo_missing:
+        raw_quotes_by_symbol: Dict[str, Dict[str, Any]] = {}
+        if len(yahoo_missing) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(6, len(yahoo_missing)),
+                thread_name_prefix="holdings-yahoo",
+            ) as executor:
+                yahoo_futures = {
+                    symbol: executor.submit(fas._fetch_yahoo_quote, symbol)
+                    for symbol in yahoo_missing
+                }
+                for symbol in yahoo_missing:
+                    raw_quotes_by_symbol[symbol] = yahoo_futures[symbol].result() or {}
+        else:
+            only_symbol = yahoo_missing[0]
+            raw_quotes_by_symbol[only_symbol] = fas._fetch_yahoo_quote(only_symbol) or {}
+
+        for symbol in yahoo_missing:
+            raw_quote = raw_quotes_by_symbol.get(symbol) or {}
+            data: Dict[str, Any] = {}
+            if raw_quote.get("ok") and (
+                fas._api_number(raw_quote.get("price")) is not None
+                or fas._api_number(raw_quote.get("change_pct")) is not None
+            ):
+                data = {
+                    "price": fas._api_number(raw_quote.get("price")),
+                    "currency": raw_quote.get("currency"),
+                    "change_pct": fas._api_number(raw_quote.get("change_pct")),
+                    "as_of": raw_quote.get("as_of"),
+                    "source": "yahoo_finance_chart",
+                    "provider_symbol": symbol,
+                    "short_name": raw_quote.get("short_name"),
+                    "long_name": raw_quote.get("long_name"),
+                }
+                quotes[symbol] = data
+            fas._FOREIGN_HOLDING_QUOTE_CACHE[symbol] = {"_ts": now, "data": data}
+            bulk_quotes[symbol] = {
+                "d": data,
+                "exp": now + fas._FOREIGN_HOLDING_QUOTE_CACHE_TTL,
             }
-            quotes[symbol] = data
-        fas._FOREIGN_HOLDING_QUOTE_CACHE[symbol] = {"_ts": now, "data": data}
-        bulk_quotes[symbol] = {
-            "d": data,
-            "exp": now + fas._FOREIGN_HOLDING_QUOTE_CACHE_TTL,
-        }
-        bulk_dirty = True
+            bulk_dirty = True
 
     if bulk_dirty:
         fas._shared_cache_set(
@@ -852,20 +980,57 @@ def _enrich_fund_holdings_with_daily_market_data(
             )
         )
     ]
-    stock_quotes = fas._quote_map_for_holding_stocks(stock_symbols)
-    gefas_quotes: Dict[str, Dict[str, Any]] = {}
-    gefas_quote_cache_hits = 0
-    for position in positions:
-        code = fas._holding_code(position)
-        if fas._holding_type(position) != "fund" or not fas._gefas_gyf_config(code):
-            continue
-        quote = fas._fetch_gefas_gyf_quote(code)
-        if quote:
-            if quote.get("_cache_hit"):
-                gefas_quote_cache_hits += 1
-            gefas_quotes[code] = quote
-    foreign_quotes = fas._quote_map_for_foreign_holdings(positions)
-    sector_map, sector_meta = fas._fund_holding_sector_map()
+    gefas_position_codes = [
+        fas._holding_code(position)
+        for position in positions
+        if fas._holding_type(position) == "fund" and fas._gefas_gyf_config(fas._holding_code(position))
+    ]
+
+    def _run_gefas_leg() -> Tuple[Dict[str, Dict[str, Any]], int]:
+        local_gefas_quotes: Dict[str, Dict[str, Any]] = {}
+        local_gefas_hits = 0
+        if not gefas_position_codes:
+            return local_gefas_quotes, local_gefas_hits
+        unique_gefas_codes = list(dict.fromkeys(gefas_position_codes))
+        first_fetch_by_code: Dict[str, Optional[Dict[str, Any]]] = {}
+        if len(unique_gefas_codes) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(4, len(unique_gefas_codes)),
+                thread_name_prefix="holdings-gefas",
+            ) as gefas_pool:
+                gefas_futures = {
+                    code: gefas_pool.submit(fas._fetch_gefas_gyf_quote, code)
+                    for code in unique_gefas_codes
+                }
+                for code in unique_gefas_codes:
+                    first_fetch_by_code[code] = gefas_futures[code].result()
+        else:
+            only_code = unique_gefas_codes[0]
+            first_fetch_by_code[only_code] = fas._fetch_gefas_gyf_quote(only_code)
+
+        seen_gefas_codes: set[str] = set()
+        for code in gefas_position_codes:
+            if code not in seen_gefas_codes:
+                seen_gefas_codes.add(code)
+                quote = first_fetch_by_code.get(code)
+            else:
+                quote = fas._fetch_gefas_gyf_quote(code)
+            if quote:
+                if quote.get("_cache_hit"):
+                    local_gefas_hits += 1
+                local_gefas_quotes[code] = quote
+        return local_gefas_quotes, local_gefas_hits
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="holdings-enrich") as executor:
+        stock_future = executor.submit(fas._quote_map_for_holding_stocks, stock_symbols)
+        gefas_future = executor.submit(_run_gefas_leg)
+        foreign_future = executor.submit(fas._quote_map_for_foreign_holdings, positions)
+        sector_future = executor.submit(fas._fund_holding_sector_map)
+
+        stock_quotes = stock_future.result()
+        gefas_quotes, gefas_quote_cache_hits = gefas_future.result()
+        foreign_quotes = foreign_future.result()
+        sector_map, sector_meta = sector_future.result()
 
     enriched_positions: List[Dict[str, Any]] = []
     estimated_return_pct = 0.0
