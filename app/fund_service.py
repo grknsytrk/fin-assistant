@@ -156,6 +156,18 @@ TEFAS_PACER_MAX_INTERVAL_SECONDS = max(
     TEFAS_PACER_MIN_INTERVAL_SECONDS,
     float(os.getenv("RAGFIN_TEFAS_PACER_MAX_INTERVAL_SECONDS", "2.0")),
 )
+TEFAS_HISTORY_MAX_WORKERS = max(
+    1,
+    int(os.getenv("RAGFIN_TEFAS_HISTORY_MAX_WORKERS", "3")),
+)
+FUNDS_FINTABLES_FETCH_MAX_WORKERS = max(
+    1,
+    int(os.getenv("RAGFIN_FUNDS_FINTABLES_FETCH_MAX_WORKERS", "4")),
+)
+FUNDS_COLLECTOR_COVERAGE_SKIP_RATIO = min(
+    1.0,
+    max(0.0, float(os.getenv("RAGFIN_FUNDS_COLLECTOR_COVERAGE_SKIP_RATIO", "0.90"))),
+)
 TEFASFON_SOURCE_URL = os.getenv("RAGFIN_TEFASFON_SOURCE_URL", "https://pypi.org/project/tefasfon/")
 TEFASFON_FUNDS_SOURCE = "tefasfon_funds"
 TEFASFON_RETURNS_SOURCE = "tefasfon_returns"
@@ -166,6 +178,7 @@ TEFAS_DIRECT_RETURNS_SOURCE = "tefas_direct_returns"
 TEFAS_DIRECT_PORTFOLIO_SOURCE = "tefas_direct_portfolio"
 FINTABLES_UDF_HISTORY_SOURCE = "fintables_udf_history"
 FINTABLES_YIELD_SUMMARY_SOURCE = "fintables_yield_summary"
+LOCAL_YIELD_SUMMARY_SOURCE = "local_fund_snapshot"
 DAILY_RETURN_LOCAL_PRICE_SOURCE = "local_price_diff"
 FUND_HISTORY_SOURCE_POLICY = "fintables_daily_tefas_fallback"
 _TEFAS_ALLOWED_FUND_TYPES = {"SEC", "PEN", "ETF", "RE", "VC"}
@@ -195,6 +208,10 @@ FUNDS_ALLOCATION_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_ALLOCATION_TTL_SECOND
 FUNDS_ALLOCATION_EMPTY_TTL_SECONDS = int(os.getenv("RAGFIN_FUNDS_ALLOCATION_EMPTY_TTL_SECONDS", str(15 * 60)))
 FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_REQUESTS = int(
     os.getenv("RAGFIN_FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_REQUESTS", "30")
+)
+FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_CONSECUTIVE_EMPTY = max(
+    1,
+    int(os.getenv("RAGFIN_FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_CONSECUTIVE_EMPTY", "3")),
 )
 FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS = int(
     os.getenv("RAGFIN_FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS", "2")
@@ -960,6 +977,10 @@ def _allocations_history_path(processed_dir: Path, fund_code: str, lookback_days
     return _allocations_dir(processed_dir) / f"{normalize_fund_code(fund_code)}_history_{bounded}d.json"
 
 
+def _allocations_canonical_history_path(processed_dir: Path, fund_code: str) -> Path:
+    return _allocations_dir(processed_dir) / f"{normalize_fund_code(fund_code)}_history_canonical.json"
+
+
 def _holdings_dir(processed_dir: Path) -> Path:
     return _fund_cache_dir(processed_dir) / "holdings"
 
@@ -1628,6 +1649,7 @@ from app.funds.snapshot_store import (
     _snapshot_row_from_record,
     _read_fund_snapshot_rows,
     _read_fund_snapshot_category_returns,
+    _read_covered_fund_price_dates,
     _copy_legacy_snapshot,
     _snapshot_metadata_from_store,
     ensure_fund_snapshot_store,
@@ -1705,6 +1727,7 @@ from app.funds.performance_and_allocations import (
     _fund_return_rank_value,
     _fund_category_rankings,
     get_fund_detail_payload,
+    _local_yield_summary_periods,
     get_fund_yield_summary_payload,
     _valid_performance_points,
     _legacy_history_points,
@@ -1741,6 +1764,8 @@ from app.funds.performance_and_allocations import (
     get_fund_performance_payload,
     refresh_fund_allocations,
     refresh_fund_allocations_history,
+    _slice_allocation_history_payload,
+    _load_cached_allocation_history_payload,
     get_fund_allocations_history_payload,
     get_fund_allocations_payload,
 )

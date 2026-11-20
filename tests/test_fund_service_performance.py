@@ -368,62 +368,101 @@ def test_tefasfon_fetch_history_chunks_wide_ranges_to_90_days(monkeypatch) -> No
 
     monkeypatch.setattr(fund_service, "TefasClient", lambda: FakeTefasClient())
 
-    # 1-year request: 2025-01-01 to 2025-12-31 (365 days) -> exactly 5 chunks <= 90 days
+    # Primary direct path must issue a single full-range request without 90-day double-chunking.
     rows = client.fetch_history("TLY", date(2025, 1, 1), date(2025, 12, 31))
+    assert direct_calls == [(("TLY",), date(2025, 1, 1), date(2025, 12, 31))]
+    assert len(rows) == 1
 
-    # Verify chunk count and boundaries
-    assert len(direct_calls) == 5
-    for codes, c_start, c_end in direct_calls:
+    # Fallback path (when direct returns empty) must still chunk wide ranges into <= 90 days.
+    class EmptyTefasClient:
+        def fetch_fund_history(self, *, fund_codes, start_date, end_date):
+            return []
+
+    fallback_calls = []
+
+    def fake_fetch_funds(*, start_date, end_date, fund_codes=None):
+        fallback_calls.append((tuple(fund_codes or ()), start_date, end_date))
+        return [
+            {
+                "fonKodu": fund_codes[0],
+                "tarih": start_date.isoformat(),
+                "fiyat": 10.0,
+                "source": "tefasfon_funds",
+            }
+        ]
+
+    monkeypatch.setattr(fund_service, "TefasClient", lambda: EmptyTefasClient())
+    monkeypatch.setattr(client, "fetch_funds", fake_fetch_funds)
+
+    fallback_rows = client.fetch_history("TLY", date(2025, 1, 1), date(2025, 12, 31))
+
+    assert len(fallback_calls) == 5
+    for codes, c_start, c_end in fallback_calls:
         assert codes == ("TLY",)
-        assert (c_end - c_start).days < 90
         assert (c_end - c_start).days + 1 <= 90
-
-    # Verify contiguity: each chunk starts the day after previous chunk ends
-    assert direct_calls[0][1] == date(2025, 1, 1)
-    assert direct_calls[0][2] == date(2025, 3, 31)
-    assert direct_calls[1][1] == date(2025, 4, 1)
-    assert direct_calls[1][2] == date(2025, 6, 29)
-    assert direct_calls[2][1] == date(2025, 6, 30)
-    assert direct_calls[2][2] == date(2025, 9, 27)
-    assert direct_calls[3][1] == date(2025, 9, 28)
-    assert direct_calls[3][2] == date(2025, 12, 26)
-    assert direct_calls[4][1] == date(2025, 12, 27)
-    assert direct_calls[4][2] == date(2025, 12, 31)
-
-    assert len(rows) == 5
+    assert fallback_calls[0][1] == date(2025, 1, 1)
+    assert fallback_calls[0][2] == date(2025, 3, 31)
+    assert fallback_calls[1][1] == date(2025, 4, 1)
+    assert fallback_calls[1][2] == date(2025, 6, 29)
+    assert fallback_calls[2][1] == date(2025, 6, 30)
+    assert fallback_calls[2][2] == date(2025, 9, 27)
+    assert fallback_calls[3][1] == date(2025, 9, 28)
+    assert fallback_calls[3][2] == date(2025, 12, 26)
+    assert fallback_calls[4][1] == date(2025, 12, 27)
+    assert fallback_calls[4][2] == date(2025, 12, 31)
+    assert len(fallback_rows) == 5
 
 
 def test_tefasfon_fetch_history_recovers_from_single_chunk_failure(monkeypatch) -> None:
-    client = fund_service.TefasFonClient(fund_types=["SEC"])
-    call_count = 0
+    # Part 1: Direct calendar-month fetch keeps surviving months when one month fails.
+    direct = fund_service.TefasClient()
 
-    class FakeTefasClient:
-        def fetch_fund_history(self, *, fund_codes, start_date, end_date):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 2:
-                # Chunk 2 fails with network error
-                raise fund_service.TefasUpstreamError("Temporary gateway error")
-            return [
-                {
-                    "fonKodu": fund_codes[0],
-                    "tarih": start_date.isoformat(),
-                    "fiyat": float(call_count),
-                    "source": "tefasfon_funds",
-                }
-            ]
+    def fake_range(*, fund_code, start_date, end_date):
+        if start_date.month == 2:
+            raise fund_service.TefasUpstreamError("Temporary Feb error")
+        return [
+            {
+                "fund_code": fund_code,
+                "date": start_date.isoformat(),
+                "price": float(start_date.month),
+                "source": "tefasfon_funds",
+            }
+        ]
 
-    monkeypatch.setattr(fund_service, "TefasClient", lambda: FakeTefasClient())
-    monkeypatch.setattr(
-        client,
-        "fetch_funds",
-        lambda **kw: (_ for _ in ()).throw(fund_service.TefasUpstreamError("fallback down")),
+    monkeypatch.setattr(direct, "fetch_fund_range", fake_range)
+    direct_rows = direct.fetch_fund_history(
+        fund_codes=["TLY"],
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 3, 31),
     )
+    assert [row["date"] for row in direct_rows] == ["2026-01-01", "2026-03-01"]
 
-    # 180-day range -> 2 chunks of 90 days
+    # Part 2: Fallback chunk loop also survives a single 90-day chunk failure.
+    client = fund_service.TefasFonClient(fund_types=["SEC"])
+    fallback_count = 0
+
+    class EmptyTefasClient:
+        def fetch_fund_history(self, *, fund_codes, start_date, end_date):
+            return []
+
+    def fake_fallback_funds(*, start_date, end_date, fund_codes=None):
+        nonlocal fallback_count
+        fallback_count += 1
+        if fallback_count == 2:
+            raise fund_service.TefasUpstreamError("Temporary fallback chunk error")
+        return [
+            {
+                "fonKodu": fund_codes[0],
+                "tarih": start_date.isoformat(),
+                "fiyat": 1.0,
+                "source": "tefasfon_funds",
+            }
+        ]
+
+    monkeypatch.setattr(fund_service, "TefasClient", lambda: EmptyTefasClient())
+    monkeypatch.setattr(client, "fetch_funds", fake_fallback_funds)
+
     rows = client.fetch_history("TLY", date(2026, 1, 1), date(2026, 6, 29))
-
-    # Chunk 1 succeeds, Chunk 2 fails, overall result retains Chunk 1 data
     assert len(rows) == 1
     assert rows[0]["tarih"] == "2026-01-01"
 
@@ -1694,3 +1733,186 @@ def test_tefasfon_yield_summary_fills_weekly_period_from_history() -> None:
     assert summary["source"] == "tefasfon_returns"
     assert summary["periods"]["1m"]["prev_close"] == pytest.approx(88.0)
     assert summary["periods"]["1w"]["prev_close"] == pytest.approx(100.0)
+
+
+def test_fetch_fund_overview_metric_rows_uses_single_fund_range_before_daily_snapshot(
+    monkeypatch, tmp_path
+) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    range_calls: list[tuple[str, date, date]] = []
+    snapshot_calls: list[date] = []
+
+    class FakeDirectClient:
+        def fetch_fund_range(self, *, fund_code, start_date, end_date):
+            range_calls.append((fund_code, start_date, end_date))
+            if start_date.month == 4:
+                return [
+                    {
+                        "fund_code": "TLY",
+                        "date": "2026-04-30",
+                        "price": 12.5,
+                        "aum": 250_000_000.0,
+                        "investor_count": 1250,
+                        "share_count": 20_000_000.0,
+                        "source": "tefasfon_funds",
+                    }
+                ]
+            return []
+
+    def fake_daily_snapshot(_self, as_of: date):
+        snapshot_calls.append(as_of)
+        if as_of == date(2026, 3, 31):
+            return [
+                {
+                    "fonKodu": "TLY",
+                    "tarih": "2026-03-31",
+                    "fiyat": 11.0,
+                    "portfoyBuyukluk": 200_000_000.0,
+                    "kisiSayisi": 1000,
+                    "tedPaySayisi": 18_000_000.0,
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(fund_service, "TefasClient", lambda: FakeDirectClient())
+    monkeypatch.setattr(fund_service.TefasFonClient, "fetch_daily_funds_snapshot", fake_daily_snapshot)
+
+    rows, fetched_months, warnings = fund_service._fetch_fund_overview_metric_rows(
+        "TLY",
+        [
+            {"month": "2026-03", "month_start": date(2026, 3, 1), "target_date": date(2026, 3, 31)},
+            {"month": "2026-04", "month_start": date(2026, 4, 1), "target_date": date(2026, 4, 30)},
+        ],
+        client=fund_service.TefasFonClient(),
+        processed_dir=tmp_path,
+    )
+
+    assert sorted(call[1].month for call in range_calls) == [3, 4]
+    # April was resolved via single-fund range so daily snapshot was NEVER requested for April!
+    assert snapshot_calls == [date(2026, 3, 31)]
+    assert fetched_months == {"2026-03": "2026-03-31", "2026-04": "2026-04-30"}
+    assert len(rows) == 2
+    assert rows[1]["aum"] == 250_000_000.0
+    assert warnings == []
+
+
+def test_get_fund_yield_summary_payload_uses_local_snapshot_fast_path_zero_http(
+    monkeypatch, tmp_path
+) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    monkeypatch.delenv("RAGFIN_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    target_day = date(2026, 5, 20)
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> "FixedDate":
+            return cls(2026, 5, 20)
+
+    monkeypatch.setattr(fund_service, "date", FixedDate)
+    monkeypatch.setattr(fund_service, "_turkey_market_today", lambda: target_day)
+    assert fund_service.commit_funds_snapshot(
+        tmp_path,
+        {
+            "status": "ok",
+            "as_of": target_day.isoformat(),
+            "rows": [
+                {
+                    "fund_code": "TLY",
+                    "name": "TERA TEST FONU",
+                    "as_of": target_day.isoformat(),
+                    "price": 120.0,
+                    "tefas_open": True,
+                    "period_returns": {
+                        "1w": 2.0,
+                        "1m": 20.0,
+                        "3m": 50.0,
+                        "6m": 80.0,
+                        "ytd": 60.0,
+                        "1y": 100.0,
+                    },
+                }
+            ],
+            "source_metadata": {"source": "tefasfon_funds"},
+        },
+        job_id="local-fast-test",
+        owner_token="local-fast-test",
+        generation=1,
+    )
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "TLY", "date": "2026-04-20", "price": 95.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2026-05-10", "price": 125.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2026-05-20", "price": 120.0, "source": "fintables_udf_history"},
+        ],
+        source="fintables_udf_history",
+    )
+
+    monkeypatch.setattr(
+        fund_service,
+        "fetch_fintables_yield_summary",
+        lambda *_a, **_k: pytest.fail("Fintables should not be called when local snapshot is complete"),
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "TefasFonClient",
+        lambda: pytest.fail("TEFAS should not be called when local snapshot is complete"),
+    )
+
+    payload = fund_service.get_fund_yield_summary_payload("TLY", processed_dir=tmp_path)
+
+    assert payload["status"] == "ok"
+    assert payload["source"] == "local_fund_snapshot"
+    assert payload["source_metadata"]["local_fast_path"] is True
+    assert payload["source_metadata"]["fallback_used"] is False
+    assert payload["periods"]["1m"]["prev_close"] == pytest.approx(100.0)
+    assert payload["periods"]["1m"]["high"] == pytest.approx(125.0)
+    assert payload["periods"]["1m"]["low"] == pytest.approx(95.0)
+    assert payload["periods"]["1m"]["prev_close_date"] == "2026-04-20"
+    assert payload["periods"]["oldest"]["prev_close"] == pytest.approx(95.0)
+
+    # Stale snapshot (> 5 days old) cleanly falls back to Fintables.
+    stale_dir = tmp_path / "stale_case"
+    fintables_calls: list[str] = []
+    assert fund_service.commit_funds_snapshot(
+        stale_dir,
+        {
+            "status": "ok",
+            "as_of": "2026-05-01",
+            "rows": [
+                {
+                    "fund_code": "TLY",
+                    "name": "TERA TEST FONU",
+                    "as_of": "2026-05-01",
+                    "price": 105.0,
+                    "tefas_open": True,
+                    "period_returns": {"1m": 10.0, "3m": 20.0, "6m": 30.0, "1y": 40.0},
+                }
+            ],
+            "source_metadata": {"source": "tefasfon_funds"},
+        },
+        job_id="stale-test",
+        owner_token="stale-test",
+        generation=1,
+    )
+    fund_service.upsert_fund_price_points(
+        stale_dir,
+        [{"fund_code": "TLY", "date": "2026-05-01", "price": 105.0, "source": "fintables_udf_history"}],
+        source="fintables_udf_history",
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "fetch_fintables_yield_summary",
+        lambda code: fintables_calls.append(code)
+        or {
+            "fund_code": code,
+            "source": "fintables_yield_summary",
+            "source_url": "https://fintables.example/yield",
+            "periods": {"1m": {"prev_close_date": "2026-04-20", "prev_close": 90.0, "high": 110.0, "low": 88.0}},
+            "raw": {},
+        },
+    )
+    stale_fallback = fund_service.get_fund_yield_summary_payload("TLY", processed_dir=stale_dir)
+    assert fintables_calls == ["TLY"]
+    assert stale_fallback["source"] == "fintables_yield_summary"

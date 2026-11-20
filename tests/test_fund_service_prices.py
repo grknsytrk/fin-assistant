@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import date
 
 import pytest
@@ -787,3 +789,84 @@ def test_fund_price_write_preserves_snapshot_all_rows_and_postgres_queries_reuse
     assert fund_service._peek_all_snapshot_rows(tmp_path, 7) is not None
 
     fund_service.reset_fund_caches_for_tests()
+
+
+def test_fetch_tefasfon_daily_snapshots_skips_dates_already_covered_in_db(tmp_path) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    target_codes = [f"T{idx:02d}" for idx in range(10)]
+    seed_points = []
+    # 2026-05-06 (Wed): 9/10 target codes covered -> >= 90% threshold -> should skip!
+    for code in target_codes[:9]:
+        seed_points.append({"fund_code": code, "date": "2026-05-06", "price": 10.0, "source": "tefasfon_funds"})
+    # 2026-05-07 (Thu): only 8/10 target codes + 5 unrelated codes -> < 90% -> must NOT skip!
+    for code in target_codes[:8]:
+        seed_points.append({"fund_code": code, "date": "2026-05-07", "price": 10.5, "source": "tefasfon_funds"})
+    for idx in range(5):
+        seed_points.append({"fund_code": f"Z{idx:02d}", "date": "2026-05-07", "price": 20.0, "source": "tefasfon_funds"})
+    # 2026-05-08 (Fri): 0/10 covered -> must fetch!
+    fund_service.upsert_fund_price_points(tmp_path, seed_points, source="tefasfon_funds")
+
+    snapshot_calls: list[str] = []
+
+    class FakeTefasFonClient:
+        def fetch_daily_funds_snapshot(self, as_of):
+            snapshot_calls.append(as_of.isoformat())
+            return [{"fonKodu": target_codes[0], "tarih": as_of.isoformat(), "fiyat": 11.0}]
+
+    rows, warnings = fund_service._fetch_tefasfon_daily_snapshots_for_codes(
+        target_codes,
+        start_date=date(2026, 5, 6),
+        end_date=date(2026, 5, 8),
+        client=FakeTefasFonClient(),
+        processed_dir=tmp_path,
+    )
+
+    assert snapshot_calls == ["2026-05-07", "2026-05-08"]
+    assert len(rows) == 2
+    assert warnings == []
+
+
+def test_fetch_fintables_udf_history_for_codes_runs_in_parallel_with_deterministic_order(
+    monkeypatch,
+) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+    order_seen: list[str] = []
+
+    class FakeFintablesClient:
+        def fetch_udf_history(self, fund_code, start_date, end_date):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                order_seen.append(fund_code)
+            try:
+                if fund_code == "AAA" and fund_service._get_fintables_sticky_transport() is None:
+                    # First synchronous warmup call locks sticky transport before fanout.
+                    fund_service._set_fintables_sticky_transport("proxy")
+                time.sleep(0.03)
+                if fund_code == "CCC":
+                    raise fund_service.FintablesUpstreamError("blocked CCC")
+                return [{"fund_code": fund_code, "date": start_date.isoformat(), "price": 1.0}]
+            finally:
+                with lock:
+                    active -= 1
+
+    monkeypatch.setattr(fund_service, "FUNDS_FINTABLES_FETCH_MAX_WORKERS", 4)
+    try:
+        rows, warnings = fund_service._fetch_fintables_udf_history_for_codes(
+            ["HHH", "CCC", "AAA", "DDD", "EEE", "BBB", "FFF", "GGG"],
+            start_date=date(2026, 5, 1),
+            end_date=date(2026, 5, 10),
+            client=FakeFintablesClient(),
+        )
+
+        # Warmup ran AAA first, then remaining 7 codes fanned out across workers.
+        assert order_seen[0] == "AAA"
+        assert peak >= 2
+        assert [row["fund_code"] for row in rows] == ["AAA", "BBB", "DDD", "EEE", "FFF", "GGG", "HHH"]
+        assert warnings == ["fintables_udf_history failed for CCC: blocked CCC"]
+    finally:
+        fund_service.reset_fund_caches_for_tests()

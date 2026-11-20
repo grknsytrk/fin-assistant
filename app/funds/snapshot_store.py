@@ -1534,15 +1534,92 @@ def _fetch_fintables_udf_history_for_codes(
     end_date: date,
     client: Optional[FintablesClient] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
-    fintables = client or _fund_service().FintablesClient()
+    fs = _fund_service()
+    codes = sorted({fs.normalize_fund_code(code) for code in fund_codes if fs.normalize_fund_code(code)})
+    if not codes or start_date > end_date:
+        return [], []
+    fintables = client or fs.FintablesClient()
+    max_workers = max(1, int(getattr(fs, "FUNDS_FINTABLES_FETCH_MAX_WORKERS", 4)))
+
+    def _fetch_one(code: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        try:
+            return list(fintables.fetch_udf_history(code, start_date, end_date)), None
+        except fs.FintablesUpstreamError as exc:
+            return [], f"fintables_udf_history failed for {code}: {exc}"
+
+    results_by_code: Dict[str, Tuple[List[Dict[str, Any]], Optional[str]]] = {}
+    if len(codes) <= 1 or max_workers <= 1:
+        for code in codes:
+            results_by_code[code] = _fetch_one(code)
+    else:
+        remaining = codes
+        if fs._get_fintables_sticky_transport() is None:
+            # Let the first call resolve & pin the working transport (direct/curl_cffi/proxy)
+            # before fanning out so parallel workers skip redundant blocked handshakes.
+            results_by_code[codes[0]] = _fetch_one(codes[0])
+            remaining = codes[1:]
+        if remaining:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(max_workers, len(remaining)),
+                thread_name_prefix="fintables-udf",
+            ) as executor:
+                future_by_code = {executor.submit(_fetch_one, code): code for code in remaining}
+                for future, code in future_by_code.items():
+                    results_by_code[code] = future.result()
+
     rows: List[Dict[str, Any]] = []
     warnings: List[str] = []
-    for fund_code in sorted({_fund_service().normalize_fund_code(code) for code in fund_codes if _fund_service().normalize_fund_code(code)}):
-        try:
-            rows.extend(fintables.fetch_udf_history(fund_code, start_date, end_date))
-        except _fund_service().FintablesUpstreamError as exc:
-            warnings.append(f"fintables_udf_history failed for {fund_code}: {exc}")
+    for code in codes:
+        code_rows, code_warning = results_by_code[code]
+        rows.extend(code_rows)
+        if code_warning:
+            warnings.append(code_warning)
     return rows, warnings
+
+
+def _read_covered_fund_price_dates(
+    processed_dir: Path,
+    *,
+    start_date: date,
+    end_date: date,
+    target_codes: Iterable[str],
+    min_coverage_ratio: Optional[float] = None,
+) -> set[str]:
+    fs = _fund_service()
+    codes = sorted({fs.normalize_fund_code(code) for code in target_codes if fs.normalize_fund_code(code)})
+    ratio = fs.FUNDS_COLLECTOR_COVERAGE_SKIP_RATIO if min_coverage_ratio is None else float(min_coverage_ratio)
+    if not codes or start_date > end_date or ratio <= 0:
+        return set()
+    if not fs.database_enabled() and not fs._fund_prices_db_path(processed_dir).exists():
+        return set()
+
+    threshold = max(1, math.ceil(len(codes) * min(1.0, ratio)))
+    counts_by_date: Dict[str, int] = {}
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+    with fs._connect_fund_prices_db(processed_dir) as conn:
+        for offset in range(0, len(codes), 500):
+            batch = codes[offset : offset + 500]
+            placeholders = ", ".join("?" for _ in batch)
+            rows = conn.execute(
+                f"""
+                SELECT date, COUNT(DISTINCT fund_code) AS covered_count
+                FROM fund_prices
+                WHERE date >= ? AND date <= ? AND price > 0 AND fund_code IN ({placeholders})
+                GROUP BY date
+                """,
+                [start_iso, end_iso, *batch],
+            )
+            for row in rows:
+                point_date = str(row["date"] if isinstance(row, dict) or hasattr(row, "keys") else row[0])
+                covered_count = int(row["covered_count"] if isinstance(row, dict) or hasattr(row, "keys") else row[1])
+                counts_by_date[point_date] = counts_by_date.get(point_date, 0) + covered_count
+
+    return {
+        point_date
+        for point_date, covered_count in counts_by_date.items()
+        if covered_count >= threshold
+    }
 
 
 def _fetch_tefasfon_history_for_codes(
@@ -1580,17 +1657,26 @@ def _fetch_tefasfon_daily_snapshots_for_codes(
     start_date: date,
     end_date: date,
     client: Optional[TefasFonClient] = None,
+    processed_dir: Optional[Path] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     codes = sorted({_fund_service().normalize_fund_code(code) for code in fund_codes if _fund_service().normalize_fund_code(code)})
     if not codes or start_date > end_date:
         return [], []
+    covered_dates: set[str] = set()
+    if processed_dir is not None:
+        covered_dates = _seam("_read_covered_fund_price_dates")(
+            processed_dir,
+            start_date=start_date,
+            end_date=end_date,
+            target_codes=codes,
+        )
     wanted = set(codes)
     tefas = client or _fund_service().TefasFonClient()
     rows: List[Dict[str, Any]] = []
     warnings: List[str] = []
     current = start_date
     while current <= end_date:
-        if current.weekday() >= 5:
+        if current.weekday() >= 5 or current.isoformat() in covered_dates:
             current += timedelta(days=1)
             continue
         try:
@@ -2144,6 +2230,7 @@ def collect_daily_fund_prices(
                 target_codes,
                 start_date=start_date,
                 end_date=effective_as_of,
+                processed_dir=processed_dir,
             )
             warnings.append("tefasfon_funds used daily all-fund snapshots for large target universe")
         else:
@@ -2158,6 +2245,7 @@ def collect_daily_fund_prices(
                 target_codes,
                 start_date=start_date,
                 end_date=effective_as_of,
+                processed_dir=processed_dir,
             )
             if snapshot_rows:
                 warnings.append("tefasfon_funds code-filtered history was empty; used daily all-fund snapshots")
@@ -2502,6 +2590,7 @@ __all__ = [
     "_snapshot_row_from_record",
     "_read_fund_snapshot_rows",
     "_read_fund_snapshot_category_returns",
+    "_read_covered_fund_price_dates",
     "_copy_legacy_snapshot",
     "_snapshot_metadata_from_store",
     "ensure_fund_snapshot_store",

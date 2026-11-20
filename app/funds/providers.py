@@ -1212,6 +1212,7 @@ class TefasFonClient:
             return []
         rows: List[Dict[str, Any]] = []
         direct_rate_limit_error: Optional[BaseException] = None
+        direct_request_errors: List[str] = []
         for fund_type in self.fund_types:
             try:
                 rows.extend(
@@ -1225,12 +1226,17 @@ class TefasFonClient:
             except fs.TefasRateLimitError as exc:
                 direct_rate_limit_error = exc
                 break
-            except fs.TefasUpstreamError:
+            except fs.TefasUpstreamError as exc:
+                direct_request_errors.append(str(exc))
                 continue
         if rows:
             return rows
         if direct_rate_limit_error is not None:
             raise direct_rate_limit_error
+        if not direct_request_errors:
+            # Direct TEFAS endpoint returned an authoritative valid empty payload;
+            # skip redundant tefasfon/getter retries against the same endpoint.
+            return []
 
         # Keep the package's getter implementation as a compatibility fallback.
         # TEFAS occasionally changes the public payload contract; this prevents a
@@ -1556,10 +1562,9 @@ class TefasFonClient:
                 and normalize(str(row.get("fonKodu") or row.get("fund_code") or "")) == normalized
             ]
 
-        chunks = _seam("_generate_date_chunks")(start_date, end_date, max_chunk_days=fs.TEFAS_HISTORY_CHUNK_MAX_DAYS)
         rows_by_date: Dict[str, Dict[str, Any]] = {}
-        chunk_errors: List[Any] = []
         direct_client = _seam("TefasClient")()
+        direct_error: Optional[Any] = None
 
         def add_rows(rows: Iterable[Dict[str, Any]]) -> None:
             for row in matching_rows(rows):
@@ -1570,57 +1575,63 @@ class TefasFonClient:
                     else:
                         rows_by_date[point_date] = dict(row)
 
-        for chunk_start, chunk_end in chunks:
-            chunk_success = False
-            last_chunk_error: Optional[Any] = None
+        # 1. Primary: single-layer direct TEFAS query (calendar-month chunked inside TefasClient)
+        try:
+            direct_rows = direct_client.fetch_fund_history(
+                fund_codes=[normalized],
+                start_date=start_date,
+                end_date=end_date,
+            )
+            matched_direct = matching_rows(direct_rows)
+            if matched_direct:
+                add_rows(matched_direct)
+        except fs.TefasRateLimitError:
+            raise
+        except fs.TefasUpstreamError as exc:
+            direct_error = exc
+            fs.LOGGER.warning(
+                "TEFAS direct history failed for %s [%s to %s]: %s",
+                normalized,
+                start_date.isoformat(),
+                end_date.isoformat(),
+                exc,
+            )
 
-            # 1. Primary: fast direct single-fund query
+        if rows_by_date:
+            return [rows_by_date[point_date] for point_date in sorted(rows_by_date)]
+
+        # 2. Fallback: bounded <= 90-day chunks when using tefasfon.get_funds
+        chunks = _seam("_generate_date_chunks")(start_date, end_date, max_chunk_days=fs.TEFAS_HISTORY_CHUNK_MAX_DAYS)
+        chunk_errors: List[Any] = []
+        for chunk_start, chunk_end in chunks:
             try:
-                direct_rows = direct_client.fetch_fund_history(
-                    fund_codes=[normalized],
+                fallback_rows = self.fetch_funds(
                     start_date=chunk_start,
                     end_date=chunk_end,
+                    fund_codes=[normalized],
                 )
-                matched_direct = matching_rows(direct_rows)
-                if matched_direct:
-                    add_rows(matched_direct)
-                    chunk_success = True
+                matched_fallback = matching_rows(fallback_rows)
+                if matched_fallback:
+                    add_rows(matched_fallback)
             except fs.TefasRateLimitError:
                 raise
             except fs.TefasUpstreamError as exc:
-                last_chunk_error = exc
-
-            # 2. Fallback: bounded to <=90 days so tefasfon doesn't stall
-            if not chunk_success:
-                try:
-                    fallback_rows = self.fetch_funds(
-                        start_date=chunk_start,
-                        end_date=chunk_end,
-                        fund_codes=[normalized],
-                    )
-                    matched_fallback = matching_rows(fallback_rows)
-                    if matched_fallback:
-                        add_rows(matched_fallback)
-                        chunk_success = True
-                except fs.TefasRateLimitError:
-                    raise
-                except fs.TefasUpstreamError as exc:
-                    last_chunk_error = exc
-
-            if not chunk_success and last_chunk_error is not None:
                 fs.LOGGER.warning(
-                    "TEFAS history chunk failed for %s [%s to %s]: %s",
+                    "TEFAS fallback history chunk failed for %s [%s to %s]: %s",
                     normalized,
                     chunk_start.isoformat(),
                     chunk_end.isoformat(),
-                    last_chunk_error,
+                    exc,
                 )
-                chunk_errors.append(last_chunk_error)
+                chunk_errors.append(exc)
 
-        if not rows_by_date and chunk_errors:
+        if rows_by_date:
+            return [rows_by_date[point_date] for point_date in sorted(rows_by_date)]
+        if chunk_errors:
             raise chunk_errors[-1]
-
-        return [rows_by_date[point_date] for point_date in sorted(rows_by_date)]
+        if direct_error is not None:
+            raise direct_error
+        return []
 
     def fetch_latest_fund_list_snapshot_result(
         self,
@@ -1667,32 +1678,48 @@ class TefasFonClient:
                     empty_dates.append(target_text)
                     continue
             else:
-                try:
-                    fund_rows = _seam("_merge_tefasfon_returns")(fund_rows, self.fetch_returns())
-                except fs.TefasUpstreamError as exc:
-                    warnings.append(f"tefasfon_returns failed: {exc}")
-                try:
-                    fund_rows = _seam("_merge_tefasfon_management_fees")(
-                        fund_rows,
-                        self.fetch_management_fees(as_of=target_date),
+                previous_business_day = fs._previous_turkey_market_business_day(target_date)
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=3,
+                    thread_name_prefix="tefas-enrich",
+                ) as executor:
+                    returns_fut = executor.submit(self.fetch_returns)
+                    fees_fut = executor.submit(self.fetch_management_fees, as_of=target_date)
+                    daily_fut = executor.submit(
+                        self.fetch_returns,
+                        start_date=previous_business_day,
+                        end_date=target_date,
                     )
-                except fs.TefasUpstreamError as exc:
-                    warnings.append(f"tefasfon_management_fees failed: {exc}")
-                try:
-                    previous_business_day = fs._previous_turkey_market_business_day(target_date)
-                    fund_rows = _seam("_merge_tefasfon_range_returns")(
-                        fund_rows,
-                        daily_return_rows=self.fetch_returns(
-                            start_date=previous_business_day,
-                            end_date=target_date,
-                        ),
-                        weekly_return_rows=self.fetch_returns(
-                            start_date=target_date - timedelta(days=7),
-                            end_date=target_date,
-                        ),
+                    weekly_fut = executor.submit(
+                        self.fetch_returns,
+                        start_date=target_date - timedelta(days=7),
+                        end_date=target_date,
                     )
-                except fs.TefasUpstreamError as exc:
-                    warnings.append(f"tefasfon_range_returns failed: {exc}")
+                    try:
+                        fund_rows = _seam("_merge_tefasfon_returns")(fund_rows, returns_fut.result())
+                    except fs.TefasUpstreamError as exc:
+                        warnings.append(f"tefasfon_returns failed: {exc}")
+                    try:
+                        fund_rows = _seam("_merge_tefasfon_management_fees")(fund_rows, fees_fut.result())
+                    except fs.TefasUpstreamError as exc:
+                        warnings.append(f"tefasfon_management_fees failed: {exc}")
+
+                    daily_return_rows: List[Dict[str, Any]] = []
+                    weekly_return_rows: List[Dict[str, Any]] = []
+                    try:
+                        daily_return_rows = daily_fut.result()
+                    except fs.TefasUpstreamError as exc:
+                        warnings.append(f"tefasfon_range_returns failed: {exc}")
+                    try:
+                        weekly_return_rows = weekly_fut.result()
+                    except fs.TefasUpstreamError as exc:
+                        warnings.append(f"tefasfon_range_returns failed: {exc}")
+                    if daily_return_rows or weekly_return_rows:
+                        fund_rows = _seam("_merge_tefasfon_range_returns")(
+                            fund_rows,
+                            daily_return_rows=daily_return_rows,
+                            weekly_return_rows=weekly_return_rows,
+                        )
                 open_rows, skipped_closed, _skipped_unknown = fs._filter_tefas_open_rows(fund_rows)
                 if skipped_closed:
                     warnings.append(f"tefas_open_only skipped {skipped_closed} closed fund rows")
@@ -2725,22 +2752,62 @@ class TefasClient:
                 )
                 chunks.append((current, chunk_end))
                 current = chunk_end + timedelta(days=1)
-            for chunk_start, chunk_end in chunks:
-                try:
-                    chunk_rows.extend(
-                        self.fetch_fund_range(
+            max_workers = max(1, int(getattr(fs, "TEFAS_HISTORY_MAX_WORKERS", 3)))
+            if len(chunks) <= 1 or max_workers <= 1:
+                for chunk_start, chunk_end in chunks:
+                    try:
+                        chunk_rows.extend(
+                            self.fetch_fund_range(
+                                fund_code=normalized_code,
+                                start_date=chunk_start,
+                                end_date=chunk_end,
+                            )
+                        )
+                    except fs.TefasRateLimitError:
+                        raise
+                    except fs.TefasUpstreamError as exc:
+                        # A single empty/temporarily bad month must not erase the
+                        # valid months around it. If every chunk fails, surface the
+                        # last upstream error to the caller for its normal fallback.
+                        chunk_errors.append(exc)
+            else:
+                stop_event = threading.Event()
+                worker_count = min(max_workers, len(chunks))
+
+                def _fetch_chunk(chunk_start: date, chunk_end: date) -> Tuple[str, Any]:
+                    if stop_event.is_set():
+                        return ("skipped", None)
+                    try:
+                        rows = self.fetch_fund_range(
                             fund_code=normalized_code,
                             start_date=chunk_start,
                             end_date=chunk_end,
                         )
-                    )
-                except fs.TefasRateLimitError:
-                    raise
-                except fs.TefasUpstreamError as exc:
-                    # A single empty/temporarily bad month must not erase the
-                    # valid months around it. If every chunk fails, surface the
-                    # last upstream error to the caller for its normal fallback.
-                    chunk_errors.append(exc)
+                        return ("ok", rows)
+                    except fs.TefasRateLimitError as exc:
+                        stop_event.set()
+                        return ("rate_limit", exc)
+                    except fs.TefasUpstreamError as exc:
+                        return ("error", exc)
+
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=worker_count,
+                    thread_name_prefix="tefas-history",
+                ) as executor:
+                    futures = [
+                        executor.submit(_fetch_chunk, chunk_start, chunk_end)
+                        for chunk_start, chunk_end in chunks
+                    ]
+                    outcomes = [future.result() for future in futures]
+
+                for status, payload in outcomes:
+                    if status == "rate_limit":
+                        raise payload
+                for status, payload in outcomes:
+                    if status == "ok":
+                        chunk_rows.extend(payload)
+                    elif status == "error":
+                        chunk_errors.append(payload)
 
             if chunk_rows:
                 by_date: Dict[str, Dict[str, Any]] = {}

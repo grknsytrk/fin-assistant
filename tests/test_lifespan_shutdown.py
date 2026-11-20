@@ -30,7 +30,7 @@ def test_individual_shutdown_helpers():
     finally:
         fund_api_service._FUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         fund_api_service._FUND_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-        fund_api_service._FUND_ALLOCATION_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        fund_api_service._FUND_ALLOCATION_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=3)
 
     # Test KAP statement executor shutdown
     orig_kap_stmt = kap_statement_refresh._KAP_STATEMENT_EXECUTOR
@@ -92,6 +92,6 @@ def test_lifespan_shuts_down_all_executors(monkeypatch):
         api_runtime._MARKET_SWR_REVALIDATION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         fund_api_service._FUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         fund_api_service._FUND_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-        fund_api_service._FUND_ALLOCATION_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        fund_api_service._FUND_ALLOCATION_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=3)
         kap_statement_refresh._KAP_STATEMENT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         kap_api_service._KAP_FLOW_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1)

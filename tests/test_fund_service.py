@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import date
 
 import pytest
@@ -133,7 +135,7 @@ def test_tefas_client_history_splits_at_calendar_month_boundaries(monkeypatch) -
         end_date=date(2026, 3, 31),
     )
 
-    assert ranges == [
+    assert sorted(ranges) == [
         (date(2026, 2, 1), date(2026, 2, 28)),
         (date(2026, 3, 1), date(2026, 3, 31)),
     ]
@@ -561,3 +563,142 @@ def test_memory_cache_evicts_oldest_entries(monkeypatch) -> None:
     assert fund_service._MEMORY_CACHE["key-2"]["value"] == 999
 
     fund_service.reset_fund_caches_for_tests()
+
+
+def test_tefas_client_fetch_fund_history_parallel_chunks_and_rate_limit_early_stop(
+    monkeypatch,
+) -> None:
+    client = fund_service.TefasClient()
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+    visited_months: list[int] = []
+
+    def fake_range(*, fund_code, start_date, end_date):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            visited_months.append(start_date.month)
+        try:
+            time.sleep(0.03)
+            if start_date.month == 3:
+                raise fund_service.TefasUpstreamError("temporary month 3 glitch")
+            return [
+                {
+                    "fund_code": fund_code,
+                    "date": start_date.isoformat(),
+                    "price": float(start_date.month),
+                    "source": "tefasfon_funds",
+                }
+            ]
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(client, "fetch_fund_range", fake_range)
+    monkeypatch.setattr(fund_service, "TEFAS_FUND_HISTORY_CHUNK_DAYS", 31)
+    monkeypatch.setattr(fund_service, "TEFAS_HISTORY_MAX_WORKERS", 3)
+
+    rows = client.fetch_fund_history(
+        fund_codes=["TLY"],
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 5, 31),
+    )
+
+    assert 2 <= peak <= 3
+    assert sorted(visited_months) == [1, 2, 3, 4, 5]
+    assert [row["date"] for row in rows] == [
+        "2026-01-01",
+        "2026-02-01",
+        "2026-04-01",
+        "2026-05-01",
+    ]
+
+    # Rate limit aborts queued months early instead of hammering all remaining chunks.
+    rate_calls: list[int] = []
+
+    def fake_rate_limited(*, fund_code, start_date, end_date):
+        with lock:
+            rate_calls.append(start_date.month)
+        if start_date.month <= 3:
+            raise fund_service.TefasRateLimitError("TEFAS 429")
+        time.sleep(0.05)
+        return []
+
+    monkeypatch.setattr(client, "fetch_fund_range", fake_rate_limited)
+    monkeypatch.setattr(fund_service, "TEFAS_HISTORY_MAX_WORKERS", 2)
+
+    with pytest.raises(fund_service.TefasRateLimitError):
+        client.fetch_fund_history(
+            fund_codes=["TLY"],
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 8, 31),
+        )
+    assert len(rate_calls) < 8
+
+
+def test_tefasfon_enrich_runs_four_upstream_calls_in_parallel() -> None:
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    class ParallelFakeClient(fund_service.TefasFonClient):
+        def __init__(self) -> None:
+            pass
+
+        def _enter(self) -> None:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+
+        def _leave(self) -> None:
+            nonlocal active
+            with lock:
+                active -= 1
+
+        def fetch_daily_funds_snapshot(self, as_of):
+            return [
+                {
+                    "fonKodu": "TLY",
+                    "fonUnvan": "TERA TEST FONU",
+                    "tarih": as_of.isoformat(),
+                    "fiyat": 100.0,
+                    "tefasDurum": True,
+                }
+            ]
+
+        def fetch_returns(self, *, fund_codes=None, start_date=None, end_date=None):
+            self._enter()
+            try:
+                time.sleep(0.03)
+                if start_date is None and end_date is None:
+                    return [{"fonKodu": "TLY", "getiri1a": 12.5}]
+                if (end_date - start_date).days <= 3:
+                    return [{"fonKodu": "TLY", "getiriOrani": 0.45}]
+                return [{"fonKodu": "TLY", "getiriOrani": 2.1}]
+            finally:
+                self._leave()
+
+        def fetch_management_fees(self, *, fund_codes=None, lookback_days=21, as_of=None):
+            self._enter()
+            try:
+                time.sleep(0.03)
+                raise fund_service.TefasUpstreamError("fees timeout")
+            finally:
+                self._leave()
+
+    result = ParallelFakeClient().fetch_latest_fund_list_snapshot_result(
+        as_of=date(2026, 5, 20),
+        lookback_days=1,
+        enrich=True,
+    )
+
+    assert peak >= 2
+    assert len(result.rows) == 1
+    assert result.rows[0]["getiri1a"] == pytest.approx(12.5)
+    assert result.rows[0]["returns_source"] == "tefasfon_returns"
+    assert result.rows[0]["daily_return"] == pytest.approx(0.45)
+    assert result.rows[0]["return_1w"] == pytest.approx(2.1)
+    assert any("tefasfon_management_fees failed" in msg for msg in result.warnings)

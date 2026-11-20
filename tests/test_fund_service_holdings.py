@@ -307,3 +307,157 @@ def test_get_fund_allocations_history_payload_caches_empty_result(monkeypatch, t
     assert second["source_metadata"]["cache_hit"] is True
     assert first_call_count > 1
     assert len(calls) == first_call_count
+
+
+def test_tefasfon_portfolio_authoritative_empty_skips_redundant_fallbacks() -> None:
+    calls: list[str] = []
+
+    class FakeTefasFonClient(fund_service.TefasFonClient):
+        def __init__(self) -> None:
+            self.fund_types = ("SEC",)
+
+        def _fetch_portfolio_direct_request(self, fund_code, start_date, end_date, *, fund_type):
+            calls.append("direct_request")
+            return []
+
+        def _fetch_portfolio_direct(self, fund_code, start_date, end_date, *, fund_type):
+            calls.append("tefasfon_direct")
+            raise AssertionError("authoritative empty direct response must not trigger tefasfon direct fallback")
+
+        def _call_dataframe(self, function_name, *, context, **kwargs):
+            calls.append("tefasfon_dataframe")
+            raise AssertionError("authoritative empty direct response must not trigger tefasfon dataframe fallback")
+
+    rows = FakeTefasFonClient().fetch_portfolio(
+        fund_code="TLY",
+        start_date=date(2026, 4, 1),
+        end_date=date(2026, 4, 30),
+    )
+
+    assert rows == []
+    assert calls == ["direct_request"]
+
+
+def test_refresh_fund_allocations_history_daily_fallback_early_exits_after_consecutive_empty_days(
+    monkeypatch, tmp_path
+) -> None:
+    calls: list[tuple[date, date]] = []
+
+    class FakeTefasFonClient:
+        def fetch_portfolio(self, *, fund_code, start_date, end_date):
+            calls.append((start_date, end_date))
+            return []
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+    monkeypatch.setattr(fund_service, "FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_CONSECUTIVE_EMPTY", 3)
+
+    payload = fund_service.refresh_fund_allocations_history(
+        tmp_path,
+        "EMPTYFUND",
+        lookback_days=30,
+        as_of=date(2026, 4, 30),
+        allow_daily_fallback=True,
+    )
+
+    assert payload["status"] == "empty"
+    # 1 full range query + 3 newest consecutive empty business days (Apr 30, Apr 29, Apr 28) -> stops!
+    assert calls == [
+        (date(2026, 4, 1), date(2026, 4, 30)),
+        (date(2026, 4, 30), date(2026, 4, 30)),
+        (date(2026, 4, 29), date(2026, 4, 29)),
+        (date(2026, 4, 28), date(2026, 4, 28)),
+    ]
+
+
+def test_get_fund_allocations_history_payload_slices_smaller_lookback_from_canonical_store_zero_http(
+    monkeypatch, tmp_path
+) -> None:
+    calls: list[tuple[date, date]] = []
+
+    class FakeTefasFonClient:
+        def fetch_portfolio(self, *, fund_code, start_date, end_date):
+            calls.append((start_date, end_date))
+            return [
+                {"fonKodu": fund_code, "tarih": "2026-02-15", "hs": 45.0, "source": "tefasfon_portfolio"},
+                {"fonKodu": fund_code, "tarih": "2026-04-10", "hs": 52.0, "source": "tefasfon_portfolio"},
+                {"fonKodu": fund_code, "tarih": "2026-04-28", "hs": 58.0, "source": "tefasfon_portfolio"},
+            ]
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+
+    seeded = fund_service.refresh_fund_allocations_history(
+        tmp_path,
+        "TLY",
+        lookback_days=90,
+        as_of=date(2026, 4, 30),
+    )
+    assert len(calls) == 1
+    assert [row["date"] for row in seeded["history"]] == ["2026-02-15", "2026-04-10", "2026-04-28"]
+
+    # Shorter lookback windows slice directly from the canonical cache with 0 TEFAS calls.
+    sliced_30 = fund_service.get_fund_allocations_history_payload(tmp_path, "TLY", lookback_days=30)
+    assert sliced_30["source_metadata"]["cache_hit"] is True
+    assert sliced_30["lookback_days"] == 30
+    assert [row["date"] for row in sliced_30["history"]] == ["2026-04-10", "2026-04-28"]
+
+    sliced_7 = fund_service.get_fund_allocations_history_payload(tmp_path, "TLY", lookback_days=7)
+    assert sliced_7["source_metadata"]["cache_hit"] is True
+    assert sliced_7["lookback_days"] == 7
+    assert [row["date"] for row in sliced_7["history"]] == ["2026-04-28"]
+    assert len(calls) == 1
+
+
+def test_refresh_fund_allocations_history_fetches_only_delta_span_on_tail_and_head_expansion(
+    monkeypatch, tmp_path
+) -> None:
+    calls: list[tuple[date, date]] = []
+
+    class FakeTefasFonClient:
+        def fetch_portfolio(self, *, fund_code, start_date, end_date):
+            calls.append((start_date, end_date))
+            rows = []
+            if start_date <= date(2026, 4, 15) <= end_date:
+                rows.append({"fonKodu": fund_code, "tarih": "2026-04-15", "hs": 50.0, "source": "tefasfon_portfolio"})
+            if start_date <= date(2026, 4, 28) <= end_date:
+                rows.append({"fonKodu": fund_code, "tarih": "2026-04-28", "hs": 56.0, "source": "tefasfon_portfolio"})
+            if start_date <= date(2026, 3, 10) <= end_date:
+                rows.append({"fonKodu": fund_code, "tarih": "2026-03-10", "hs": 42.0, "source": "tefasfon_portfolio"})
+            return rows
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: FakeTefasFonClient())
+
+    # 1. Seed 30d ending 2026-04-25 -> [2026-03-27 .. 2026-04-25]
+    seed_payload = fund_service.refresh_fund_allocations_history(
+        tmp_path,
+        "TLY",
+        lookback_days=30,
+        as_of=date(2026, 4, 25),
+    )
+    assert calls[-1] == (date(2026, 3, 27), date(2026, 4, 25))
+    assert [row["date"] for row in seed_payload["history"]] == ["2026-04-15"]
+
+    # 2. Advance as_of to 2026-04-30 with lookback=30 -> fetches ONLY tail delta (2026-04-26..2026-04-30)
+    tail_payload = fund_service.refresh_fund_allocations_history(
+        tmp_path,
+        "TLY",
+        lookback_days=30,
+        as_of=date(2026, 4, 30),
+    )
+    assert calls[-1] == (date(2026, 4, 26), date(2026, 4, 30))
+    assert [row["date"] for row in tail_payload["history"]] == ["2026-04-15", "2026-04-28"]
+
+    # 3. Expand lookback to 60d ending 2026-04-30 -> fetches ONLY head delta (2026-03-02..2026-03-26)
+    head_payload = fund_service.refresh_fund_allocations_history(
+        tmp_path,
+        "TLY",
+        lookback_days=60,
+        as_of=date(2026, 4, 30),
+    )
+    assert calls[-1] == (date(2026, 3, 2), date(2026, 3, 26))
+    assert [row["date"] for row in head_payload["history"]] == ["2026-03-10", "2026-04-15", "2026-04-28"]
+
+
+def test_fund_allocation_history_executor_defaults_to_three_workers() -> None:
+    from app import fund_api_service
+
+    assert fund_api_service._FUND_ALLOCATION_HISTORY_EXECUTOR._max_workers == 3

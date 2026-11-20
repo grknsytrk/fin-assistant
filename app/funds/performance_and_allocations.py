@@ -922,6 +922,78 @@ def get_fund_detail_payload(processed_dir: Path, fund_code: str) -> Dict[str, An
     }
 
 
+def _local_yield_summary_periods(
+    processed_dir: Path,
+    normalized_code: str,
+    latest_row: Dict[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    """Build yield-summary period anchors from cached catalog + local prices without HTTP."""
+    fs = _fund_service()
+    latest_price = fs._coerce_float(latest_row.get("price"))
+    latest_date = fs._fund_date(latest_row.get("as_of"))
+    if latest_price is None or latest_price <= 0 or not latest_date:
+        return {}
+    try:
+        latest_dt = date.fromisoformat(latest_date)
+    except ValueError:
+        return {}
+    if latest_dt < fs._latest_fund_snapshot_target_date() - timedelta(days=5):
+        return {}
+
+    period_returns = latest_row.get("period_returns")
+    periods: Dict[str, Dict[str, Any]] = {}
+    if isinstance(period_returns, dict):
+        for key in ("1w", "1m", "3m", "6m", "ytd", "1y", "3y", "5y"):
+            return_pct = fs._coerce_float(period_returns.get(key))
+            if return_pct is None:
+                continue
+            denominator = 1.0 + (return_pct / 100.0)
+            if denominator <= 0:
+                continue
+            periods[key] = {
+                "prev_close_date": None,
+                "prev_close": latest_price / denominator,
+                "high": None,
+                "low": None,
+                "latest_date": latest_date,
+                "return_pct": return_pct,
+            }
+
+    if fs.database_enabled() or fs._fund_prices_db_path(processed_dir).exists():
+        try:
+            local_points = fs.read_fund_price_points_range(
+                processed_dir,
+                normalized_code,
+                start_date=latest_dt - timedelta(days=375),
+                end_date=latest_dt,
+            )
+        except Exception:
+            local_points = []
+        if local_points:
+            point_periods = fs._yield_periods_from_points(local_points, normalized_code)
+            for key, pt_info in point_periods.items():
+                if not isinstance(pt_info, dict):
+                    continue
+                if key in periods:
+                    for field_name in ("prev_close_date", "high", "low"):
+                        if periods[key].get(field_name) is None and pt_info.get(field_name) is not None:
+                            periods[key][field_name] = pt_info[field_name]
+                elif pt_info.get("prev_close") is not None:
+                    periods[key] = {
+                        **pt_info,
+                        "latest_date": latest_date,
+                    }
+
+    core_present = [
+        key
+        for key in ("1w", "1m", "3m", "6m", "ytd", "1y")
+        if isinstance(periods.get(key), dict) and periods[key].get("prev_close") is not None
+    ]
+    if "1m" in core_present and (len(core_present) >= 4 or ("1w" in core_present and "3m" in core_present)):
+        return periods
+    return {}
+
+
 def get_fund_yield_summary_payload(fund_code: str, processed_dir: Optional[Path] = None) -> Dict[str, Any]:
     normalized = _fund_service().normalize_fund_code(fund_code)
     warnings: List[str] = []
@@ -936,6 +1008,30 @@ def get_fund_yield_summary_payload(fund_code: str, processed_dir: Optional[Path]
         if latest_row:
             latest_price = _fund_service()._coerce_float(latest_row.get("price"))
             latest_date = _fund_service()._fund_date(latest_row.get("as_of"))
+            local_periods = _seam("_local_yield_summary_periods")(processed_dir, normalized, latest_row)
+            if local_periods:
+                local_source = _fund_service().LOCAL_YIELD_SUMMARY_SOURCE
+                return {
+                    "fund_code": normalized,
+                    "status": "ok",
+                    "source": local_source,
+                    "source_url": "",
+                    "periods": local_periods,
+                    "source_metadata": {
+                        "source": local_source,
+                        "source_url": "",
+                        "fetched_at": _fund_service()._utc_now_iso(),
+                        "purpose": "period_summary_only",
+                        "writes_fund_prices": False,
+                        "summary_source_used": local_source,
+                        "source_policy": _fund_service().FUND_HISTORY_SOURCE_POLICY,
+                        "fallback_used": False,
+                        "local_fast_path": True,
+                        "adapter_version": None,
+                        "warnings": [],
+                        "warning": None,
+                    },
+                }
     summary: Dict[str, Any] = {}
     try:
         summary = _fund_service().fetch_fintables_yield_summary(normalized)
@@ -1709,6 +1805,83 @@ def _fetch_fund_overview_metric_rows(
             if best is not None:
                 stored_by_month[month] = best[1]
 
+    missing_targets = [target for target in targets if str(target["month"]) not in stored_by_month]
+    direct_by_month: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+    rate_limited = False
+    can_use_single_fund_range = (
+        bool(missing_targets)
+        and type(client) is _fund_service().TefasFonClient
+        and "fetch_daily_funds_snapshot" not in getattr(client, "__dict__", {})
+    )
+    if can_use_single_fund_range:
+        fs = _fund_service()
+        direct_client = fs.TefasClient()
+        stop_event = threading.Event()
+
+        def _fetch_target_range(target: Dict[str, Any]) -> Tuple[str, str, Optional[str], Optional[Dict[str, Any]], Optional[str]]:
+            target_month = str(target["month"])
+            t_date = target["target_date"]
+            l_bound = max(
+                target["month_start"],
+                t_date - timedelta(days=max(0, fs.FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS)),
+            )
+            if stop_event.is_set():
+                return ("skipped", target_month, None, None, None)
+            try:
+                range_rows = direct_client.fetch_fund_range(
+                    fund_code=normalized,
+                    start_date=l_bound,
+                    end_date=t_date,
+                )
+            except fs.TefasRateLimitError as exc:
+                stop_event.set()
+                return ("rate_limit", target_month, None, None, f"tefasfon_funds overview metric range rate-limited: {exc}")
+            except fs.TefasUpstreamError as exc:
+                return ("error", target_month, None, None, f"tefasfon_funds overview metric range failed for {t_date.isoformat()}: {exc}")
+
+            best_row: Optional[Tuple[date, Dict[str, Any]]] = None
+            for raw_row in range_rows:
+                if not isinstance(raw_row, dict):
+                    continue
+                if {"fund_code", "date", "price"}.issubset(raw_row.keys()) and (
+                    "aum" in raw_row or "investor_count" in raw_row
+                ):
+                    norm_row = dict(raw_row)
+                else:
+                    norm_row = fs._normalize_history_row(raw_row) or dict(raw_row)
+                if fs.normalize_fund_code(str(norm_row.get("fund_code") or norm_row.get("fonKodu") or normalized)) != normalized:
+                    continue
+                point_date = _seam("_fund_point_date")(norm_row)
+                if point_date is None or point_date < l_bound or point_date > t_date:
+                    continue
+                if not _seam("_has_overview_metrics")(norm_row):
+                    continue
+                if best_row is None or point_date > best_row[0]:
+                    best_row = (point_date, norm_row)
+            if best_row is None:
+                return ("empty", target_month, None, None, None)
+            return ("ok", target_month, best_row[0].isoformat(), best_row[1], None)
+
+        if len(missing_targets) == 1:
+            outcomes = [_fetch_target_range(missing_targets[0])]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(3, len(missing_targets)),
+                thread_name_prefix="tefas-overview",
+            ) as executor:
+                futures = [executor.submit(_fetch_target_range, target) for target in missing_targets]
+                outcomes = [future.result() for future in futures]
+
+        for status, target_month, matched_iso, matched_row, err_msg in outcomes:
+            if status == "rate_limit":
+                rate_limited = True
+                if err_msg:
+                    warnings.append(err_msg)
+            elif status == "error" and err_msg:
+                warnings.append(err_msg)
+            elif status == "ok" and matched_iso and matched_row is not None:
+                direct_by_month[target_month] = (matched_iso, matched_row)
+
     for target in targets:
         month = str(target["month"])
         target_date = target["target_date"]
@@ -1716,6 +1889,17 @@ def _fetch_fund_overview_metric_rows(
         if stored_match is not None:
             rows.append(stored_match)
             fetched_months[month] = str(stored_match.get("date") or "")
+            continue
+        direct_match = direct_by_month.get(month)
+        if direct_match is not None:
+            matched_iso, matched_row = direct_match
+            rows.append(matched_row)
+            fetched_months[month] = matched_iso
+            continue
+        if rate_limited:
+            warnings.append(
+                f"tefasfon_funds overview metric row not found for {normalized} around {target_date.isoformat()}"
+            )
             continue
         lower_bound = max(target["month_start"], target_date - timedelta(days=max(0, _fund_service().FUNDS_OVERVIEW_METRIC_LOOKBACK_DAYS)))
         current = target_date
@@ -2702,6 +2886,126 @@ def refresh_fund_allocations(
     return payload
 
 
+def _slice_allocation_history_payload(
+    payload: Dict[str, Any],
+    *,
+    normalized_code: str,
+    lookback_days: int,
+    as_of_date: Optional[date] = None,
+    cache_hit: bool = True,
+    stale: bool = False,
+) -> Dict[str, Any]:
+    """Slice a cached or canonical allocation history payload cleanly to ``lookback_days``."""
+    fs = _fund_service()
+    bounded_lookback = max(1, min(365, int(lookback_days)))
+    meta = dict(payload.get("source_metadata") or {})
+    effective_as_of = as_of_date
+    if effective_as_of is None:
+        for candidate in (
+            meta.get("requested_end_date"),
+            meta.get("covered_end_date"),
+            meta.get("as_of"),
+        ):
+            parsed = fs._fund_date(candidate)
+            if parsed:
+                try:
+                    effective_as_of = date.fromisoformat(parsed)
+                    break
+                except ValueError:
+                    continue
+    if effective_as_of is None:
+        effective_as_of = fs.date.today()
+
+    window_start = effective_as_of - timedelta(days=bounded_lookback - 1)
+    start_iso = window_start.isoformat()
+    end_iso = effective_as_of.isoformat()
+
+    sliced_history: List[Dict[str, Any]] = []
+    for day_entry in list(payload.get("history") or []):
+        if not isinstance(day_entry, dict):
+            continue
+        day_iso = fs._fund_date(day_entry.get("date"))
+        if not day_iso or day_iso < start_iso or day_iso > end_iso:
+            continue
+        sliced_history.append(
+            {
+                "date": day_iso,
+                "allocations": [dict(item) for item in list(day_entry.get("allocations") or []) if isinstance(item, dict)],
+            }
+        )
+
+    raw_status = str(payload.get("status") or "").strip().lower()
+    if sliced_history:
+        status = "ok"
+    elif raw_status in {"ok", "empty", ""}:
+        status = "empty"
+    else:
+        status = raw_status
+
+    meta["cache_hit"] = cache_hit
+    meta["stale"] = stale
+    meta["requested_start_date"] = start_iso
+    meta["requested_end_date"] = end_iso
+    meta["as_of"] = sliced_history[-1]["date"] if sliced_history else (meta.get("as_of") or end_iso)
+
+    result = dict(payload)
+    result["fund_code"] = normalized_code
+    result["status"] = status
+    result["lookback_days"] = bounded_lookback
+    result["history"] = sliced_history
+    result["stale"] = stale
+    result["source_metadata"] = meta
+    return result
+
+
+def _load_cached_allocation_history_payload(
+    processed_dir: Path,
+    normalized_code: str,
+    lookback_days: int,
+) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """Load the best cached allocation history payload and report whether it covers ``lookback_days``."""
+    fs = _fund_service()
+    bounded_lookback = max(1, min(365, int(lookback_days)))
+    canonical = fs._read_json(fs._allocations_canonical_history_path(processed_dir, normalized_code))
+
+    def _covers(candidate: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(candidate, dict):
+            return False
+        meta = candidate.get("source_metadata") if isinstance(candidate.get("source_metadata"), dict) else {}
+        try:
+            covered_lb = int(meta.get("covered_lookback_days") or candidate.get("lookback_days") or 0)
+        except (TypeError, ValueError):
+            covered_lb = 0
+        if covered_lb >= bounded_lookback:
+            return True
+        cov_start = fs._fund_date(meta.get("covered_start_date") or meta.get("requested_start_date"))
+        cov_end = fs._fund_date(meta.get("covered_end_date") or meta.get("requested_end_date"))
+        if cov_start and cov_end:
+            try:
+                span_days = (date.fromisoformat(cov_end) - date.fromisoformat(cov_start)).days + 1
+                return span_days >= bounded_lookback
+            except ValueError:
+                return False
+        return False
+
+    canonical_covers = _covers(canonical)
+    if canonical is not None and canonical_covers:
+        return canonical, True
+
+    legacy: Optional[Dict[str, Any]] = None
+    # In Postgres mode, avoid an extra json_cache query when canonical is already populated cleanly.
+    if canonical is None or not canonical_covers:
+        legacy = fs._read_json(fs._allocations_history_path(processed_dir, normalized_code, bounded_lookback))
+    elif not fs.database_enabled():
+        legacy = fs._read_local_json(fs._allocations_history_path(processed_dir, normalized_code, bounded_lookback))
+
+    if isinstance(legacy, dict) and (canonical is None or not canonical_covers):
+        return legacy, True
+    if canonical is not None:
+        return canonical, canonical_covers
+    return (legacy, True) if isinstance(legacy, dict) else (None, False)
+
+
 def refresh_fund_allocations_history(
     processed_dir: Path,
     fund_code: str,
@@ -2710,82 +3014,177 @@ def refresh_fund_allocations_history(
     as_of: Optional[date] = None,
     allow_daily_fallback: bool = True,
 ) -> Dict[str, Any]:
-    normalized = _fund_service().normalize_fund_code(fund_code)
+    fs = _fund_service()
+    normalized = fs.normalize_fund_code(fund_code)
     bounded_lookback = max(1, min(365, int(lookback_days)))
-    fetched_at = _fund_service()._utc_now_iso()
-    effective_as_of = as_of or _fund_service().date.today()
+    fetched_at = fs._utc_now_iso()
+    effective_as_of = as_of or fs.date.today()
     start_date = effective_as_of - timedelta(days=bounded_lookback - 1)
     warnings: List[str] = []
-    client = _fund_service().TefasFonClient()
-    rate_limited = False
-    try:
-        rows = client.fetch_portfolio(
-            fund_code=normalized,
-            start_date=start_date,
-            end_date=effective_as_of,
-        )
-    except _fund_service().TefasUpstreamError as exc:
-        rows = []
-        warnings = [f"tefasfon_portfolio_history failed: {exc}"]
-        rate_limited = _fund_service()._is_tefas_rate_limit(exc)
-    if not rows and not rate_limited and allow_daily_fallback:
-        daily_dates: List[date] = []
-        target_date = start_date
-        while target_date <= effective_as_of:
-            if target_date.weekday() < 5:
-                daily_dates.append(target_date)
-            target_date += timedelta(days=1)
-        max_daily_requests = max(0, _fund_service().FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_REQUESTS)
-        if len(daily_dates) > max_daily_requests:
-            warnings.append(
-                "tefasfon_portfolio_history range query was empty; "
-                f"daily fallback skipped because it needs {len(daily_dates)} requests "
-                f"(budget: {max_daily_requests})"
-            )
-            daily_dates = []
-        daily_rows: List[Dict[str, Any]] = []
-        daily_warnings: List[str] = []
+    client = fs.TefasFonClient()
 
-        def fetch_daily_portfolio(day: date) -> Tuple[date, List[Dict[str, Any]], Optional[str]]:
+    canonical_path = fs._allocations_canonical_history_path(processed_dir, normalized)
+    existing_canonical = fs._read_json(canonical_path)
+    seed_by_date: Dict[str, List[Dict[str, Any]]] = {}
+    cov_start: Optional[date] = None
+    cov_end: Optional[date] = None
+    cov_lookback = 0
+    if isinstance(existing_canonical, dict):
+        for day_entry in list(existing_canonical.get("history") or []):
+            if not isinstance(day_entry, dict):
+                continue
+            day_iso = fs._fund_date(day_entry.get("date"))
+            allocs = [dict(item) for item in list(day_entry.get("allocations") or []) if isinstance(item, dict)]
+            if day_iso and allocs:
+                seed_by_date[day_iso] = allocs
+        existing_meta = existing_canonical.get("source_metadata") if isinstance(existing_canonical.get("source_metadata"), dict) else {}
+        raw_cov_start = fs._fund_date(existing_meta.get("covered_start_date") or existing_meta.get("requested_start_date"))
+        raw_cov_end = fs._fund_date(existing_meta.get("covered_end_date") or existing_meta.get("requested_end_date"))
+        if raw_cov_start and raw_cov_end:
             try:
-                return day, client.fetch_portfolio(fund_code=normalized, start_date=day, end_date=day), None
-            except _fund_service().TefasUpstreamError as exc:
-                return day, [], f"tefasfon_portfolio_history failed for {day.isoformat()}: {exc}"
+                cov_start = date.fromisoformat(raw_cov_start)
+                cov_end = date.fromisoformat(raw_cov_end)
+            except ValueError:
+                cov_start = None
+                cov_end = None
+        try:
+            cov_lookback = int(existing_meta.get("covered_lookback_days") or existing_canonical.get("lookback_days") or 0)
+        except (TypeError, ValueError):
+            cov_lookback = 0
 
-        if daily_dates:
-            max_workers = max(
-                1,
-                min(
-                    _fund_service().FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS,
-                    _fund_service().FUNDS_DETAIL_MAX_WORKERS,
-                    len(daily_dates),
-                ),
+    spans_to_fetch: List[Tuple[date, date]] = []
+    used_delta_cache = False
+    if seed_by_date and cov_start is not None and cov_end is not None and cov_start <= cov_end:
+        used_delta_cache = True
+        if effective_as_of < cov_start or start_date > cov_end:
+            spans_to_fetch.append((start_date, effective_as_of))
+        else:
+            if start_date < cov_start:
+                spans_to_fetch.append((start_date, cov_start - timedelta(days=1)))
+            if effective_as_of > cov_end:
+                spans_to_fetch.append((cov_end + timedelta(days=1), effective_as_of))
+            if not spans_to_fetch:
+                # Explicitly forced refresh on an already-covered window refreshes a compact tail.
+                tail_start = max(start_date, effective_as_of - timedelta(days=min(bounded_lookback - 1, 6)))
+                spans_to_fetch.append((tail_start, effective_as_of))
+    else:
+        spans_to_fetch.append((start_date, effective_as_of))
+
+    fresh_rows: List[Dict[str, Any]] = []
+    rate_limited = False
+    max_empty = max(1, int(getattr(fs, "FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_CONSECUTIVE_EMPTY", 3)))
+
+    for span_start, span_end in spans_to_fetch:
+        if span_start > span_end or rate_limited:
+            continue
+        span_rows: List[Dict[str, Any]] = []
+        try:
+            span_rows = client.fetch_portfolio(
+                fund_code=normalized,
+                start_date=span_start,
+                end_date=span_end,
             )
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max_workers,
-                thread_name_prefix="tefas-portfolio-history",
-            ) as executor:
-                futures = [executor.submit(fetch_daily_portfolio, day) for day in daily_dates]
-                for future in concurrent.futures.as_completed(futures):
-                    _day, day_rows, warning = future.result()
-                    daily_rows.extend(day_rows)
-                    if warning:
-                        daily_warnings.append(warning)
+        except fs.TefasUpstreamError as exc:
+            span_rows = []
+            warnings.append(f"tefasfon_portfolio_history failed: {exc}")
+            rate_limited = fs._is_tefas_rate_limit(exc)
 
-        if daily_rows:
-            warnings.append("tefasfon_portfolio_history range query was empty; used daily snapshots")
-            rows = daily_rows
-        warnings.extend(daily_warnings[:20])
+        if not span_rows and not rate_limited and allow_daily_fallback:
+            daily_dates: List[date] = []
+            target_date = span_start
+            while target_date <= span_end:
+                if target_date.weekday() < 5:
+                    daily_dates.append(target_date)
+                target_date += timedelta(days=1)
+            max_daily_requests = max(0, fs.FUNDS_ALLOCATION_HISTORY_DAILY_FALLBACK_MAX_REQUESTS)
+            if len(daily_dates) > max_daily_requests:
+                warnings.append(
+                    "tefasfon_portfolio_history range query was empty; "
+                    f"daily fallback skipped because it needs {len(daily_dates)} requests "
+                    f"(budget: {max_daily_requests})"
+                )
+                daily_dates = []
 
-    allocations_by_date: Dict[str, List[Dict[str, Any]]] = {}
-    for row in rows:
+            daily_rows: List[Dict[str, Any]] = []
+            daily_warnings: List[str] = []
+            if daily_dates:
+                # Probe newest business days first; abort immediately after max_empty consecutive
+                # empty business days instead of scanning weeks with no TEFAS portfolio filings.
+                reversed_dates = list(reversed(daily_dates))
+                probe_count = min(max_empty, len(reversed_dates))
+                probed_dates: set[date] = set()
+                found_any = False
+                for probe_day in reversed_dates[:probe_count]:
+                    probed_dates.add(probe_day)
+                    try:
+                        day_rows = client.fetch_portfolio(fund_code=normalized, start_date=probe_day, end_date=probe_day)
+                    except fs.TefasRateLimitError as exc:
+                        rate_limited = True
+                        daily_warnings.append(f"tefasfon_portfolio_history failed for {probe_day.isoformat()}: {exc}")
+                        break
+                    except fs.TefasUpstreamError as exc:
+                        daily_warnings.append(f"tefasfon_portfolio_history failed for {probe_day.isoformat()}: {exc}")
+                        continue
+                    if day_rows:
+                        daily_rows.extend(day_rows)
+                        found_any = True
+                        break
+
+                remaining_dates = [day for day in daily_dates if day not in probed_dates]
+                if found_any and remaining_dates and not rate_limited:
+                    rate_limit_stop = threading.Event()
+
+                    def fetch_daily_portfolio(day: date) -> Tuple[date, List[Dict[str, Any]], Optional[str], bool]:
+                        if rate_limit_stop.is_set():
+                            return day, [], None, False
+                        try:
+                            return day, client.fetch_portfolio(fund_code=normalized, start_date=day, end_date=day), None, False
+                        except fs.TefasRateLimitError as exc:
+                            rate_limit_stop.set()
+                            return day, [], f"tefasfon_portfolio_history failed for {day.isoformat()}: {exc}", True
+                        except fs.TefasUpstreamError as exc:
+                            return day, [], f"tefasfon_portfolio_history failed for {day.isoformat()}: {exc}", False
+
+                    max_workers = max(
+                        1,
+                        min(
+                            fs.FUNDS_ALLOCATION_HISTORY_DAILY_MAX_WORKERS,
+                            fs.FUNDS_DETAIL_MAX_WORKERS,
+                            len(remaining_dates),
+                        ),
+                    )
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=max_workers,
+                        thread_name_prefix="tefas-portfolio-history",
+                    ) as executor:
+                        futures = [executor.submit(fetch_daily_portfolio, day) for day in remaining_dates]
+                        for future in concurrent.futures.as_completed(futures):
+                            _day, day_rows, warning, hit_limit = future.result()
+                            daily_rows.extend(day_rows)
+                            if warning:
+                                daily_warnings.append(warning)
+                            if hit_limit:
+                                rate_limited = True
+
+                if daily_rows:
+                    warnings.append("tefasfon_portfolio_history range query was empty; used daily snapshots")
+                    span_rows = daily_rows
+                warnings.extend(daily_warnings[:20])
+        fresh_rows.extend(span_rows)
+
+    allocations_by_date: Dict[str, List[Dict[str, Any]]] = dict(seed_by_date) if used_delta_cache else {}
+    fresh_by_date: Dict[str, List[Dict[str, Any]]] = {}
+    for row in fresh_rows:
         for allocation in _seam("_normalize_allocation_row")(row, fallback_code=normalized):
-            report_date = _fund_service()._fund_date(allocation.get("report_date"))
+            report_date = fs._fund_date(allocation.get("report_date"))
             if not report_date:
                 continue
-            allocations_by_date.setdefault(report_date, []).append(allocation)
+            fresh_by_date.setdefault(report_date, []).append(allocation)
+    for report_date, day_allocations in fresh_by_date.items():
+        allocations_by_date[report_date] = day_allocations
 
-    history = [
+    retention_floor_iso = (effective_as_of - timedelta(days=400)).isoformat()
+    full_history = [
         {
             "date": report_date,
             "allocations": sorted(
@@ -2795,39 +3194,68 @@ def refresh_fund_allocations_history(
             ),
         }
         for report_date, allocations in sorted(allocations_by_date.items())
+        if report_date >= retention_floor_iso
     ]
-    payload = {
+
+    if used_delta_cache and cov_start is not None and cov_end is not None:
+        merged_cov_start = max(effective_as_of - timedelta(days=399), min(start_date, cov_start))
+        merged_cov_end = max(effective_as_of, cov_end)
+        covered_lookback = max(
+            bounded_lookback,
+            cov_lookback,
+            (merged_cov_end - merged_cov_start).days + 1,
+        )
+    else:
+        merged_cov_start = start_date
+        merged_cov_end = effective_as_of
+        covered_lookback = bounded_lookback
+
+    canonical_payload = {
         "fund_code": normalized,
-        "status": "ok" if history else "empty",
-        "lookback_days": bounded_lookback,
-        "history": history,
-        "source": _fund_service().TEFASFON_PORTFOLIO_SOURCE,
+        "status": "ok" if full_history else "empty",
+        "lookback_days": min(365, covered_lookback),
+        "history": full_history,
+        "source": fs.TEFASFON_PORTFOLIO_SOURCE,
         "stale": False,
         "source_metadata": {
-            "source": _fund_service().TEFASFON_PORTFOLIO_SOURCE,
-            "source_url": _fund_service().TEFASFON_SOURCE_URL,
+            "source": fs.TEFASFON_PORTFOLIO_SOURCE,
+            "source_url": fs.TEFASFON_SOURCE_URL,
             "fetched_at": fetched_at,
-            "as_of": history[-1]["date"] if history else effective_as_of.isoformat(),
+            "as_of": full_history[-1]["date"] if full_history else merged_cov_end.isoformat(),
             "cache_hit": False,
             "stale": False,
-            "parse_status": "ok_tefasfon_portfolio_history" if history else "empty_tefasfon_portfolio_history",
+            "parse_status": "ok_tefasfon_portfolio_history" if full_history else "empty_tefasfon_portfolio_history",
             "source_policy": "tefasfon_primary",
             "fallback_used": False,
             "warnings": warnings,
-            "requested_start_date": start_date.isoformat(),
-            "requested_end_date": effective_as_of.isoformat(),
+            "requested_start_date": merged_cov_start.isoformat(),
+            "requested_end_date": merged_cov_end.isoformat(),
+            "covered_start_date": merged_cov_start.isoformat(),
+            "covered_end_date": merged_cov_end.isoformat(),
+            "covered_lookback_days": covered_lookback,
         },
     }
-    if history or os.getenv("RAGFIN_FUNDS_CACHE_EMPTY_ALLOCATION_HISTORY", "1").strip().lower() not in {
+    cache_empty = os.getenv("RAGFIN_FUNDS_CACHE_EMPTY_ALLOCATION_HISTORY", "1").strip().lower() not in {
         "0",
         "false",
         "no",
         "off",
-    }:
-        _fund_service()._write_json(_fund_service()._allocations_history_path(processed_dir, normalized, bounded_lookback), payload)
-    if history:
-        _seam("_promote_latest_allocation_history")(processed_dir, normalized, payload)
-    return payload
+    }
+    sliced_payload = _seam("_slice_allocation_history_payload")(
+        canonical_payload,
+        normalized_code=normalized,
+        lookback_days=bounded_lookback,
+        as_of_date=effective_as_of,
+        cache_hit=False,
+        stale=False,
+    )
+    if full_history or cache_empty:
+        fs._write_json(canonical_path, canonical_payload)
+        if not fs.database_enabled():
+            fs._write_json(fs._allocations_history_path(processed_dir, normalized, bounded_lookback), sliced_payload)
+    if sliced_payload.get("history"):
+        _seam("_promote_latest_allocation_history")(processed_dir, normalized, sliced_payload)
+    return sliced_payload
 
 
 def get_fund_allocations_history_payload(
@@ -2837,45 +3265,53 @@ def get_fund_allocations_history_payload(
     lookback_days: int = 30,
     auto_refresh: bool = True,
 ) -> Dict[str, Any]:
-    normalized = _fund_service().normalize_fund_code(fund_code)
+    fs = _fund_service()
+    normalized = fs.normalize_fund_code(fund_code)
     bounded_lookback = max(1, min(365, int(lookback_days)))
-    path = _fund_service()._allocations_history_path(processed_dir, normalized, bounded_lookback)
-    payload = _fund_service()._read_json(path)
+    payload, covers_window = _seam("_load_cached_allocation_history_payload")(
+        processed_dir,
+        normalized,
+        bounded_lookback,
+    )
     stale = True
     if payload:
-        cache_age = _fund_service()._cache_age_seconds(payload.get("source_metadata", {}).get("fetched_at"))
+        cache_age = fs._cache_age_seconds(payload.get("source_metadata", {}).get("fetched_at"))
         history_present = bool(payload.get("history"))
-        ttl = _fund_service().FUNDS_ALLOCATION_TTL_SECONDS if history_present else _fund_service().FUNDS_ALLOCATION_EMPTY_TTL_SECONDS
+        ttl = fs.FUNDS_ALLOCATION_TTL_SECONDS if history_present else fs.FUNDS_ALLOCATION_EMPTY_TTL_SECONDS
         stale = (cache_age or (ttl + 1)) > ttl
-        if not stale:
-            meta = dict(payload.get("source_metadata") or {})
-            meta["cache_hit"] = True
-            meta["stale"] = False
-            payload = dict(payload)
-            payload["stale"] = False
-            payload["source_metadata"] = meta
-            return payload
+        if not stale and covers_window:
+            return _seam("_slice_allocation_history_payload")(
+                payload,
+                normalized_code=normalized,
+                lookback_days=bounded_lookback,
+                cache_hit=True,
+                stale=False,
+            )
 
     if not auto_refresh:
         if payload:
-            meta = dict(payload.get("source_metadata") or {})
-            meta["cache_hit"] = True
-            meta["stale"] = True
-            meta["warning"] = "allocation history refresh is pending"
-            payload = dict(payload)
-            payload["stale"] = True
-            payload["source_metadata"] = meta
-            return payload
+            sliced = _seam("_slice_allocation_history_payload")(
+                payload,
+                normalized_code=normalized,
+                lookback_days=bounded_lookback,
+                cache_hit=True,
+                stale=True,
+            )
+            sliced_warnings = list(sliced["source_metadata"].get("warnings") or [])
+            if not sliced["source_metadata"].get("warning"):
+                sliced["source_metadata"]["warning"] = "allocation history refresh is pending"
+            sliced["source_metadata"]["warnings"] = sliced_warnings
+            return sliced
         return {
             "fund_code": normalized,
             "status": "pending",
             "lookback_days": bounded_lookback,
             "history": [],
-            "source": _fund_service().TEFASFON_PORTFOLIO_SOURCE,
+            "source": fs.TEFASFON_PORTFOLIO_SOURCE,
             "stale": True,
             "source_metadata": {
-                "source": _fund_service().TEFASFON_PORTFOLIO_SOURCE,
-                "source_url": _fund_service().TEFASFON_SOURCE_URL,
+                "source": fs.TEFASFON_PORTFOLIO_SOURCE,
+                "source_url": fs.TEFASFON_SOURCE_URL,
                 "fetched_at": None,
                 "as_of": None,
                 "cache_hit": False,
@@ -2891,15 +3327,18 @@ def get_fund_allocations_history_payload(
     if fresh.get("history"):
         return fresh
     if payload:
-        meta = dict(payload.get("source_metadata") or {})
-        meta["cache_hit"] = True
-        meta["stale"] = True
+        sliced = _seam("_slice_allocation_history_payload")(
+            payload,
+            normalized_code=normalized,
+            lookback_days=bounded_lookback,
+            cache_hit=True,
+            stale=True,
+        )
+        meta = dict(sliced.get("source_metadata") or {})
         meta["warnings"] = list(meta.get("warnings") or []) + list(fresh.get("source_metadata", {}).get("warnings") or [])
         meta["warning"] = meta["warnings"][0] if meta["warnings"] else None
-        payload = dict(payload)
-        payload["stale"] = True
-        payload["source_metadata"] = meta
-        return payload
+        sliced["source_metadata"] = meta
+        return sliced
     return fresh
 
 
@@ -2986,6 +3425,7 @@ __all__ = [
     "_fund_return_rank_value",
     "_fund_category_rankings",
     "get_fund_detail_payload",
+    "_local_yield_summary_periods",
     "get_fund_yield_summary_payload",
     "_valid_performance_points",
     "_legacy_history_points",
@@ -3022,6 +3462,8 @@ __all__ = [
     "get_fund_performance_payload",
     "refresh_fund_allocations",
     "refresh_fund_allocations_history",
+    "_slice_allocation_history_payload",
+    "_load_cached_allocation_history_payload",
     "get_fund_allocations_history_payload",
     "get_fund_allocations_payload",
 ]
