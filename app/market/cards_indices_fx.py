@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from app.market import _market_service
@@ -1463,18 +1464,37 @@ def _market_comparison_history_payload(request: MarketComparisonHistoryRequest) 
         "index": _ms._index_comparison_history,
         "fx": _ms._fx_comparison_history,
     }
-    return {
-        "start_date": request.start_date.isoformat(),
-        "end_date": request.end_date.isoformat(),
-        "assets": [
+    assets_list = list(request.assets)
+    if len(assets_list) > 1:
+        with ThreadPoolExecutor(
+            max_workers=min(6, len(assets_list)),
+            thread_name_prefix="market-compare",
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _ms._comparison_history_cached_asset,
+                    asset,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    handler=handlers[asset.kind],
+                )
+                for asset in assets_list
+            ]
+            resolved_assets = [future.result() for future in futures]
+    else:
+        resolved_assets = [
             _ms._comparison_history_cached_asset(
                 asset,
                 start_date=request.start_date,
                 end_date=request.end_date,
                 handler=handlers[asset.kind],
             )
-            for asset in request.assets
-        ],
+            for asset in assets_list
+        ]
+    return {
+        "start_date": request.start_date.isoformat(),
+        "end_date": request.end_date.isoformat(),
+        "assets": resolved_assets,
         "source": "mixed",
         "as_of": _ms.datetime.now(_ms.timezone.utc).isoformat(),
     }

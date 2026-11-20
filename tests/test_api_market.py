@@ -1709,3 +1709,60 @@ def test_warm_stock_return_bases_sync_populates_and_refreshes_xutum_payload(
     warmed_payload = api_module._market_stocks_payload(index_name="XUTUM")
     assert warmed_payload["rows"][0]["return_1w_pct"] == 20.0
     assert warmed_payload["rows"][0]["return_1m_pct"] == 50.0
+
+
+def test_market_comparison_history_fetches_multiple_assets_in_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    import time
+
+    lock = threading.Lock()
+    active = 0
+    peak_concurrency = 0
+
+    def fake_cached_asset(asset: Any, *, start_date: Any, end_date: Any, handler: Any) -> Dict[str, Any]:
+        nonlocal active, peak_concurrency
+        with lock:
+            active += 1
+            if active > peak_concurrency:
+                peak_concurrency = active
+        try:
+            time.sleep(0.03)
+            return {
+                "id": asset.id or f"{asset.kind}:{asset.symbol}",
+                "kind": asset.kind,
+                "symbol": asset.symbol,
+                "label": asset.label or asset.symbol,
+                "points": [{"date": start_date.isoformat(), "value": 100.0}],
+                "source": "test",
+                "error": None,
+            }
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(api_module, "_comparison_history_cached_asset", fake_cached_asset)
+    client = TestClient(app)
+    resp = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2026-01-01",
+            "end_date": "2026-05-01",
+            "assets": [
+                {"id": "fund:TLY", "kind": "fund", "symbol": "TLY"},
+                {"id": "fund:AFT", "kind": "fund", "symbol": "AFT"},
+                {"id": "index:XU100", "kind": "index", "symbol": "XU100"},
+                {"id": "fx:USD/TRY", "kind": "fx", "symbol": "USD/TRY"},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert peak_concurrency >= 3
+    assert [a["id"] for a in body["assets"]] == [
+        "fund:TLY",
+        "fund:AFT",
+        "index:XU100",
+        "fx:USD/TRY",
+    ]
