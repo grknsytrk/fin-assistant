@@ -7,82 +7,68 @@ describe('Worker Cron Collision Resolution', () => {
         vi.useRealTimers();
     });
 
-    it('skips 1-minute cron on 5-minute boundaries during active hours', () => {
-        // Monday 2026-11-09 12:xx UTC = 15:xx Istanbul (active weekday daytime)
-        const atMinute00 = Date.parse('2026-11-09T12:00:00Z');
-        const atMinute05 = Date.parse('2026-11-09T12:05:00Z');
-        const atMinute55 = Date.parse('2026-11-09T12:55:00Z');
-
-        expect(resolveScheduledRefreshPath('* * * * *', atMinute00)).toBeNull();
-        expect(resolveScheduledRefreshPath('* * * * *', atMinute05)).toBeNull();
-        expect(resolveScheduledRefreshPath('* * * * *', atMinute55)).toBeNull();
-    });
-
-    it('verifies all 5-minute boundaries across an entire hour yield for 1-minute cron', () => {
-        const fiveMinuteBoundaries = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
-        for (const minute of fiveMinuteBoundaries) {
-            const date = new Date(Date.UTC(2026, 10, 9, 14, minute, 0));
-            expect(
-                resolveScheduledRefreshPath('* * * * *', date.getTime()),
-                `Minute ${minute} should yield to deep refresh (return null)`
-            ).toBeNull();
+    it('skips fast cron on 10-minute boundaries and odd minutes during peak BIST hours', () => {
+        // Monday 2026-11-09 12:xx UTC = 15:xx Istanbul (weekday peak 09:00-18:59)
+        for (const minute of [0, 1, 3, 5, 10, 15, 20, 30, 50, 55]) {
+            const ts = Date.UTC(2026, 10, 9, 12, minute, 0);
+            expect(resolveScheduledRefreshPath('*/2 * * * *', ts)).toBeNull();
+            expect(resolveScheduledRefreshPath('* * * * *', ts)).toBeNull();
         }
     });
 
-    it('executes 1-minute fast refresh on non-5-minute boundaries during active Istanbul hours', () => {
-        // Monday 2026-11-09 12:xx UTC = 15:xx Istanbul
-        const atMinute01 = Date.parse('2026-11-09T12:01:00Z');
-        const atMinute04 = Date.parse('2026-11-09T12:04:00Z');
-
-        expect(resolveScheduledRefreshPath('* * * * *', atMinute01)).toBe(FAST_REFRESH_PATH);
-        expect(resolveScheduledRefreshPath('* * * * *', atMinute04)).toBe(FAST_REFRESH_PATH);
-    });
-
-    it('verifies all non-5-minute minutes return FAST_REFRESH_PATH for 1-minute cron during active Istanbul hours', () => {
-        // Monday 2026-11-09 08:xx UTC = 11:xx Istanbul
+    it('executes fast refresh on even non-10-minute boundaries during peak Istanbul hours', () => {
+        // Monday 2026-11-09 08:xx UTC = 11:xx Istanbul (weekday peak 09:00-18:59)
         for (let minute = 0; minute < 60; minute++) {
-            if (minute % 5 !== 0) {
-                const date = new Date(Date.UTC(2026, 10, 9, 8, minute, 15));
-                expect(
-                    resolveScheduledRefreshPath('* * * * *', date.getTime()),
-                    `Minute ${minute} should execute fast refresh`
-                ).toBe(FAST_REFRESH_PATH);
-            }
+            const ts = new Date(Date.UTC(2026, 10, 9, 8, minute, 15)).getTime();
+            const expected = (minute % 2 === 0 && minute % 10 !== 0) ? FAST_REFRESH_PATH : null;
+            expect(resolveScheduledRefreshPath('*/2 * * * *', ts)).toBe(expected);
+            expect(resolveScheduledRefreshPath('* * * * *', ts)).toBe(expected);
         }
     });
 
-    it('executes deep refresh on 5-minute cron during active Istanbul hours', () => {
-        // Monday 2026-11-09 12:xx UTC = 15:xx Istanbul
-        const atMinute00 = Date.parse('2026-11-09T12:00:00Z');
-        const atMinute05 = Date.parse('2026-11-09T12:05:00Z');
-        const atMinute10 = Date.parse('2026-11-09T12:10:00Z');
+    it('skips fast cron and runs deep refresh every 10 minutes during shoulder hours (07:00-08:59 and 19:00-23:59 Istanbul)', () => {
+        // Monday 2026-11-09 04:xx UTC = 07:xx Istanbul (early shoulder)
+        expect(resolveScheduledRefreshPath('*/2 * * * *', Date.parse('2026-11-09T04:02:00Z'))).toBeNull();
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-09T04:00:00Z'))).toBe(DEEP_REFRESH_PATH);
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-09T04:10:00Z'))).toBe(DEEP_REFRESH_PATH);
+        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-09T04:05:00Z'))).toBeNull();
 
-        expect(resolveScheduledRefreshPath('*/5 * * * *', atMinute00)).toBe(DEEP_REFRESH_PATH);
-        expect(resolveScheduledRefreshPath('*/5 * * * *', atMinute05)).toBe(DEEP_REFRESH_PATH);
-        expect(resolveScheduledRefreshPath('*/5 * * * *', atMinute10)).toBe(DEEP_REFRESH_PATH);
+        // Monday 2026-11-09 17:xx UTC = 20:xx Istanbul (evening shoulder)
+        expect(resolveScheduledRefreshPath('*/2 * * * *', Date.parse('2026-11-09T17:04:00Z'))).toBeNull();
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-09T17:20:00Z'))).toBe(DEEP_REFRESH_PATH);
+        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-09T17:15:00Z'))).toBeNull();
     });
 
-    it('skips fast cron and throttles deep cron to :00 and :30 during Istanbul night hours and weekends', () => {
-        // Monday 2026-11-09 01:xx UTC = 04:xx Istanbul (night quiet window 00:00-07:00)
-        expect(resolveScheduledRefreshPath('* * * * *', Date.parse('2026-11-09T01:01:00Z'))).toBeNull();
-        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-09T01:00:00Z'))).toBe(DEEP_REFRESH_PATH);
-        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-09T01:05:00Z'))).toBeNull();
-        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-09T01:30:00Z'))).toBe(DEEP_REFRESH_PATH);
-        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-09T01:35:00Z'))).toBeNull();
+    it('executes deep refresh only on 10-minute boundaries during peak Istanbul hours', () => {
+        // Monday 2026-11-09 12:xx UTC = 15:xx Istanbul
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-09T12:00:00Z'))).toBe(DEEP_REFRESH_PATH);
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-09T12:10:00Z'))).toBe(DEEP_REFRESH_PATH);
+        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-09T12:05:00Z'))).toBeNull();
+        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-09T12:10:00Z'))).toBe(DEEP_REFRESH_PATH);
+    });
+
+    it('skips fast cron and throttles deep cron to hourly (:00) during Istanbul night hours and weekends', () => {
+        // Monday 2026-11-09 01:xx UTC = 04:xx Istanbul (night quiet window 00:00-06:59)
+        expect(resolveScheduledRefreshPath('*/2 * * * *', Date.parse('2026-11-09T01:02:00Z'))).toBeNull();
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-09T01:00:00Z'))).toBe(DEEP_REFRESH_PATH);
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-09T01:10:00Z'))).toBeNull();
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-09T01:30:00Z'))).toBeNull();
 
         // Saturday 2026-11-07 12:xx UTC = 15:xx Istanbul (weekend quiet window)
-        expect(resolveScheduledRefreshPath('* * * * *', Date.parse('2026-11-07T12:01:00Z'))).toBeNull();
-        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-07T12:00:00Z'))).toBe(DEEP_REFRESH_PATH);
-        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-07T12:05:00Z'))).toBeNull();
-        expect(resolveScheduledRefreshPath('*/5 * * * *', Date.parse('2026-11-07T12:30:00Z'))).toBe(DEEP_REFRESH_PATH);
+        expect(resolveScheduledRefreshPath('*/2 * * * *', Date.parse('2026-11-07T12:02:00Z'))).toBeNull();
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-07T12:00:00Z'))).toBe(DEEP_REFRESH_PATH);
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-07T12:10:00Z'))).toBeNull();
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Date.parse('2026-11-07T12:30:00Z'))).toBeNull();
     });
 
     it('handles non-finite or missing scheduledTime safely', () => {
         // When scheduledTime is not finite, resolveScheduledRefreshPath falls back to Date.now()
         vi.useFakeTimers();
-        vi.setSystemTime(new Date('2026-11-09T12:01:00Z'));
+        vi.setSystemTime(new Date('2026-11-09T12:02:00Z'));
+        expect(resolveScheduledRefreshPath('*/2 * * * *', Number.NaN)).toBe(FAST_REFRESH_PATH);
         expect(resolveScheduledRefreshPath('* * * * *', Number.NaN)).toBe(FAST_REFRESH_PATH);
-        expect(resolveScheduledRefreshPath('*/5 * * * *', Number.NaN)).toBe(DEEP_REFRESH_PATH);
+        vi.setSystemTime(new Date('2026-11-09T12:10:00Z'));
+        expect(resolveScheduledRefreshPath('*/10 * * * *', Number.NaN)).toBe(DEEP_REFRESH_PATH);
     });
 
     it('exports the expected path constants', () => {

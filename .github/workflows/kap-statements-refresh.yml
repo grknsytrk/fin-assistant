@@ -1,11 +1,11 @@
 name: refresh KAP statements
 
-# Runs automatically once a day after evening KAP disclosures (23:30 Europe/Istanbul)
+# Runs automatically on weekdays after evening KAP disclosures (23:30 Europe/Istanbul)
 # and can also be triggered manually via workflow_dispatch.
 on:
   schedule:
-    # 20:30 UTC = 23:30 Europe/Istanbul (UTC+3) every day
-    - cron: "30 20 * * *"
+    # 20:30 UTC = 23:30 Europe/Istanbul (UTC+3), Monday-Friday
+    - cron: "30 20 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
@@ -48,6 +48,10 @@ on:
         description: "İzin verilen maksimum KAP engeli (429/403) sayısı (varsayılan: 5)"
         type: string
         default: "5"
+      force_historical_multiples:
+        description: "Tarihsel çarpanları mevcut olsa bile sıfırdan yeniden hesapla (yüksek Supabase egress; normalde kapalı bırakın)"
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -70,6 +74,7 @@ jobs:
       CONCURRENCY: ${{ inputs.concurrency || '1' }}
       MAX_ALLOWED_FAILURES: ${{ inputs.max_allowed_failures || '10' }}
       MAX_ALLOWED_BLOCKED: ${{ inputs.max_allowed_blocked || '5' }}
+      FORCE_HISTORICAL_MULTIPLES: ${{ inputs.force_historical_multiples || 'false' }}
     steps:
       - name: validate inputs
         shell: bash
@@ -91,6 +96,15 @@ jobs:
             echo "concurrency must be 1 or 2" >&2
             exit 1
           fi
+
+      - name: wake api
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --retry 10 --retry-all-errors --retry-delay 6 \
+            --connect-timeout 10 --max-time 60 \
+            "$FIN_API_BASE_URL/health" > /dev/null
 
       - name: request statement refresh job
         id: request
@@ -414,11 +428,15 @@ jobs:
         run: |
           set -euo pipefail
           warm_universe="$UNIVERSE"
-          query="universe=$(jq -rn --arg v "$warm_universe" '$v|@uri')"
+          only_missing="true"
+          if [[ "${FORCE_HISTORICAL_MULTIPLES:-false}" == "true" ]]; then
+            only_missing="false"
+          fi
+          query="universe=$(jq -rn --arg v "$warm_universe" '$v|@uri')&only_missing=$only_missing"
           if [[ "$warm_universe" == "symbols" && -n "${SYMBOLS//[[:space:]]/}" ]]; then
             query+="&symbols=$(jq -rn --arg v "$SYMBOLS" '$v|@uri')"
           fi
-          echo "warming historical valuation multiples (universe=$warm_universe)..."
+          echo "warming historical valuation multiples (universe=$warm_universe, only_missing=$only_missing)..."
           response="$(curl --fail-with-body --silent --show-error --retry 2 \
             --connect-timeout 15 --max-time 600 \
             -X POST \

@@ -1,6 +1,8 @@
 export const FAST_REFRESH_PATH = "/admin/kap/refresh?fast=1";
 export const DEEP_REFRESH_PATH = "/admin/kap/refresh";
 
+const FAST_CRON_EXPRESSIONS = new Set(["* * * * *", "*/2 * * * *"]);
+
 const istanbulScheduleFormatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "Europe/Istanbul",
     weekday: "short",
@@ -25,21 +27,27 @@ export function resolveScheduledRefreshPath(cron: string, scheduledTime: number)
     const isWeekend = weekday === "Sat" || weekday === "Sun";
     const isNightHours = hour < 7;
     const isQuietWindow = isWeekend || isNightHours;
+    const isPeakWindow = !isWeekend && hour >= 9 && hour < 19;
 
-    if (cron === "* * * * *") {
-        // Skip 1-minute fast cron during Istanbul night hours (00:00-07:00) and weekends.
-        if (isQuietWindow) {
+    if (FAST_CRON_EXPRESSIONS.has(cron)) {
+        // Run fast KAP polling only during weekday peak BIST hours (09:00-18:59 Istanbul).
+        if (!isPeakWindow) {
             return null;
         }
-        // Prevent collision: on 5-minute boundaries, yield to deep refresh.
-        if (minute % 5 === 0) {
+        // Poll every 2 minutes on even minutes and yield to deep refresh on 10-minute boundaries.
+        if (minute % 2 !== 0 || minute % 10 === 0) {
             return null;
         }
         return FAST_REFRESH_PATH;
     }
 
-    // Throttle deep refresh (*/5) during night/weekends to run only at :00 and :30.
-    if (isQuietWindow && minute !== 0 && minute !== 30) {
+    // Keep the backend warm 24/7 with hourly deep refreshes during nights and weekends.
+    if (isQuietWindow) {
+        return minute === 0 ? DEEP_REFRESH_PATH : null;
+    }
+
+    // During active weekday hours (07:00-23:59 Istanbul), run deep refresh every 10 minutes.
+    if (minute % 10 !== 0) {
         return null;
     }
 

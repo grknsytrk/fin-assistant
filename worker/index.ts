@@ -306,7 +306,7 @@ export default {
             console.error(JSON.stringify({
                 message: "KAP flow refresh failed",
                 cron: controller.cron,
-                refreshPath: controller.cron === "* * * * *" ? FAST_REFRESH_PATH : DEEP_REFRESH_PATH,
+                refreshPath: (controller.cron === "* * * * *" || controller.cron === "*/2 * * * *") ? FAST_REFRESH_PATH : DEEP_REFRESH_PATH,
                 scheduledTime: controller.scheduledTime,
                 error: asErrorMessage(error),
             }));
