@@ -1302,23 +1302,27 @@ export function FundPeriodStatsStrip({ stats }: { stats: FundPerformanceResponse
                 <div className="fund-period-stat" key={period.key}>
                     <div className="fund-period-stat-head">
                         <span>{fundPeriodStatTitle(period.key, period.label)}</span>
-                        <small>{formatDate(period.start_date)} - {formatDate(period.end_date)}</small>
+                        <small>{formatDate(period.start_date)} – {formatDate(period.end_date)}</small>
                     </div>
-                    <div className="fund-period-stat-main">
-                        <strong className={pctClass(period.average_daily_return)}>
-                            {formatPct(period.average_daily_return)}
-                        </strong>
-                        <span>ortalama günlük</span>
-                    </div>
-                    <div className="fund-period-stat-grid">
-                        <span>Toplam</span>
-                        <strong className={pctClass(period.cumulative_return)}>{formatPct(period.cumulative_return)}</strong>
-                        <span>İş günü</span>
-                        <strong>{period.trading_days.toLocaleString('tr-TR')}</strong>
-                        <span>Pozitif / Negatif</span>
-                        <strong>
-                            {period.positive_days.toLocaleString('tr-TR')} / {period.negative_days.toLocaleString('tr-TR')}
-                        </strong>
+                    <div className="fund-period-stat-metrics">
+                        <div>
+                            <span>Toplam</span>
+                            <strong className={pctClass(period.cumulative_return)}>{formatPct(period.cumulative_return)}</strong>
+                        </div>
+                        <div>
+                            <span>Günlük Ort.</span>
+                            <strong className={pctClass(period.average_daily_return)}>{formatPct(period.average_daily_return)}</strong>
+                        </div>
+                        <div>
+                            <span>İş Günü</span>
+                            <strong>{period.trading_days.toLocaleString('tr-TR')}</strong>
+                        </div>
+                        <div>
+                            <span>Poz / Neg</span>
+                            <strong>
+                                {period.positive_days.toLocaleString('tr-TR')} / {period.negative_days.toLocaleString('tr-TR')}
+                            </strong>
+                        </div>
                     </div>
                 </div>
             ))}

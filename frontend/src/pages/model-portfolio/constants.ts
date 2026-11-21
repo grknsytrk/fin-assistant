@@ -5,6 +5,7 @@ export type PerformanceSeries = 'portfolio' | 'xu100' | 'xu030';
 export type ExplainedOption = {
     value: string;
     label: string;
+    shortLabel?: string;
     badge: string;
     tone: 'emerald' | 'blue' | 'amber' | 'purple';
     description: string;
@@ -34,6 +35,7 @@ export const RATING_OPTIONS: ExplainedOption[] = [
     {
         value: 'Endeks Üstü Getiri',
         label: 'Endeks Üstü Getiri (AL)',
+        shortLabel: 'Endeks Üstü (AL)',
         badge: 'AL · ANA ÖNERİ',
         tone: 'emerald',
         description: 'BIST 100 endeksinden belirgin şekilde pozitif ayrışması beklenen standart model portföy hissesi.',
@@ -41,6 +43,7 @@ export const RATING_OPTIONS: ExplainedOption[] = [
     {
         value: 'Güçlü AL / Model Portföy',
         label: 'Güçlü AL / En Çok Beğenilen',
+        shortLabel: 'Güçlü AL (Favori)',
         badge: 'GÜÇLÜ AL · FAVORİ',
         tone: 'blue',
         description: 'Derin çarpan iskontosu ve yakın vadeli güçlü bilanço/haber katalizörü barındıran yüksek beklentili seçim.',
@@ -48,6 +51,7 @@ export const RATING_OPTIONS: ExplainedOption[] = [
     {
         value: 'Uzun Vadeli Biriktir',
         label: 'Uzun Vadeli Biriktir',
+        shortLabel: 'Uzun Vadeli Biriktir',
         badge: 'BİRİKTİR · DEFANSİF',
         tone: 'amber',
         description: 'Kademeli alıma uygun, düzenli nakit akışı, temettü verimi ve bileşik büyüme odaklı çekirdek pozisyon.',
@@ -55,6 +59,7 @@ export const RATING_OPTIONS: ExplainedOption[] = [
     {
         value: 'Taktiksel / Kısa-Orta Vade',
         label: 'Taktiksel / Dönemsel Fırsat',
+        shortLabel: 'Taktiksel / Dönemsel',
         badge: 'TAKTİKSEL · DÖNEMSEL',
         tone: 'purple',
         description: 'Çeyreklik bilanço beklentisi, mevsimsellik veya sektörel haber akışı odaklı taktiksel getiri fırsatı.',
@@ -65,6 +70,7 @@ export const HORIZON_OPTIONS: ExplainedOption[] = [
     {
         value: '1-3 Ay',
         label: '1-3 Ay (Çeyreklik / Kısa Vade)',
+        shortLabel: '1-3 Ay (Kısa Vade)',
         badge: 'KISA VADE',
         tone: 'purple',
         description: 'Yaklaşan finansal sonuçlar veya kısa vadeli katalizörlerin fiyatlanması beklenen vade.',
@@ -72,6 +78,7 @@ export const HORIZON_OPTIONS: ExplainedOption[] = [
     {
         value: '3-6 Ay',
         label: '3-6 Ay (Orta Vade)',
+        shortLabel: '3-6 Ay (Orta Vade)',
         badge: 'ORTA VADE',
         tone: 'amber',
         description: '1-2 çeyreklik marj iyileşmesi ve hedef çarpanlara yakınsama beklenen dönem.',
@@ -79,6 +86,7 @@ export const HORIZON_OPTIONS: ExplainedOption[] = [
     {
         value: '6-12 Ay',
         label: '6-12 Ay (Standart Model Portföy)',
+        shortLabel: '6-12 Ay (Standart)',
         badge: '12 AY HEDEF',
         tone: 'blue',
         description: 'Aracı kurum araştırma raporları ve model portföyler için standart 1 yıllık hedef fiyat ufku.',
@@ -86,6 +94,7 @@ export const HORIZON_OPTIONS: ExplainedOption[] = [
     {
         value: '12+ Ay',
         label: '12+ Ay (Uzun Vadeli Yatırım)',
+        shortLabel: '12+ Ay (Uzun Vade)',
         badge: 'UZUN VADE',
         tone: 'emerald',
         description: 'Yeni kapasite devreye girişi, ihracat pazarı genişlemesi veya çok yıllık büyüme hikayesi.',

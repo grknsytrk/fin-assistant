@@ -41,16 +41,19 @@ export function MpExplainedDropdown({
 
     return (
         <div className="mp-field mp-explained-select-wrap" ref={wrapRef}>
-            <span className="mp-field-label">{label}</span>
+            <div className="mp-field-label-row">
+                <span className="mp-field-label">{label}</span>
+            </div>
             <button
                 type="button"
                 className={`mp-explained-trigger${open ? ' is-open' : ''}`}
                 aria-label={`${label}: ${selected.label}`}
+                title={selected.label}
                 aria-expanded={open}
                 onClick={() => setOpen((p) => !p)}
             >
                 <div className="mp-explained-trigger-main">
-                    <span className="mp-explained-trigger-title">{selected.label}</span>
+                    <span className="mp-explained-trigger-title">{selected.shortLabel || selected.label}</span>
                 </div>
                 <ChevronDown size={15} className={`mp-explained-chevron${open ? ' is-open' : ''}`} />
             </button>

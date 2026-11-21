@@ -890,7 +890,7 @@ export default function FundsPage({
                 visiblePerformancePoints,
                 performance?.source_metadata?.coverage_state === 'range_incomplete',
             );
-            for (const period of EXTENDED_DETAIL_RETURN_PERIODS) {
+            for (const period of [...DETAIL_RETURN_PERIODS, ...EXTENDED_DETAIL_RETURN_PERIODS]) {
                 if (computed[period.key] != null) continue;
                 const yieldPeriod = yieldSummary?.periods?.[period.key];
                 const yieldReturnPct = yieldPeriod?.return_pct;

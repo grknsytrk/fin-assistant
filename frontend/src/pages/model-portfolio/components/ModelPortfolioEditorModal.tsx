@@ -1053,7 +1053,9 @@ export function ModelPortfolioEditorModal({
                                     </div>
 
                                     <div className="mp-field">
-                                        <span className="mp-field-label">Beklenti Etiketleri</span>
+                                        <div className="mp-field-label-row">
+                                            <span className="mp-field-label">Beklenti Etiketleri</span>
+                                        </div>
                                         <div className="mp-catalyst-choices" role="group" aria-label="Beklenti etiketleri">
                                             {CATALYST_OPTIONS.map((item) => {
                                                 const active = catalysts.includes(item.value);
@@ -1127,7 +1129,7 @@ export function ModelPortfolioEditorModal({
                                             {renderImproveButton('thesis', thesis)}
                                         </div>
                                         <textarea
-                                            rows={3}
+                                            rows={2}
                                             aria-label="Yatırım tezi"
                                             value={thesis}
                                             onChange={(e) => setThesis(e.target.value)}
@@ -1145,7 +1147,7 @@ export function ModelPortfolioEditorModal({
                                             {renderImproveButton('risk_note', riskNote)}
                                         </div>
                                         <textarea
-                                            rows={3}
+                                            rows={2}
                                             aria-label="Temel riskler"
                                             value={riskNote}
                                             onChange={(e) => setRiskNote(e.target.value)}

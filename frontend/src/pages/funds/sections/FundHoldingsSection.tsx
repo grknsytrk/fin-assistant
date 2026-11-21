@@ -34,7 +34,6 @@ import {
     formatPct,
     formatSignedCompactCurrency,
     holdingAssetCategory,
-    holdingCategoryLabel,
     holdingChangeStatus,
     holdingDisplayCode,
     holdingLogoKind,
@@ -940,21 +939,21 @@ export function FundHoldingsPanel({
                     {portfolioEffect && (
                         <div className="fund-holdings-effect-summary" aria-label="KAP ağırlıklarıyla günlük tahmin">
                             <div className="fund-holdings-effect-card">
-                                <span>Tahmini günlük fon getirisi</span>
+                                <span>Tahmini Günlük Getiri</span>
                                 <strong className={pctClass(portfolioEffect.estimated_return_pct)}>
                                     {formatPct(portfolioEffect.estimated_return_pct)}
                                 </strong>
                                 <small>KAP ağırlıklarıyla</small>
                             </div>
                             <div className="fund-holdings-effect-card">
-                                <span>Tahmini günlük K/Z</span>
+                                <span>Tahmini Günlük K/Z</span>
                                 <strong className={pctClass(portfolioEffect.estimated_pnl_value)}>
                                     {formatSignedCompactCurrency(portfolioEffect.estimated_pnl_value)}
                                 </strong>
                                 <small>{portfolioEffect.as_of ? formatDate(portfolioEffect.as_of) : 'Günlük'}</small>
                             </div>
                             <div className="fund-holdings-effect-card">
-                                <span>Fiyatlanan ağırlık</span>
+                                <span>Fiyatlanan Ağırlık</span>
                                 <strong>{formatAllocationWeight(portfolioEffect.priced_weight)}</strong>
                                 <small>
                                     Eksik {formatAllocationWeight(portfolioEffect.missing_weight)}
@@ -962,32 +961,43 @@ export function FundHoldingsPanel({
                             </div>
                         </div>
                     )}
-                    <div className="fund-holdings-filters" aria-label="Varlık tipi filtresi">
-                        {FUND_HOLDING_CATEGORY_FILTERS.map((item) => (
-                            <button
-                                key={item.key}
-                                type="button"
-                                className={categoryFilter === item.key ? 'is-active' : ''}
-                                onClick={() => onCategoryFilterChange(item.key)}
-                            >
-                                {item.label}
-                            </button>
-                        ))}
-                    </div>
-                    <div className="fund-holdings-filters fund-holdings-change-filters" aria-label="Değişim filtresi">
-                        {FUND_HOLDING_CHANGE_FILTERS.map((item) => (
-                            <button
-                                key={item.key}
-                                type="button"
-                                className={changeFilter === item.key ? 'is-active' : ''}
-                                onClick={() => onChangeFilterChange(item.key)}
-                            >
-                                {item.label}
-                            </button>
-                        ))}
+                    <div className="fund-holdings-toolbar">
+                        <div className="fund-holdings-filters" aria-label="Varlık tipi filtresi">
+                            {FUND_HOLDING_CATEGORY_FILTERS.map((item) => (
+                                <button
+                                    key={item.key}
+                                    type="button"
+                                    className={categoryFilter === item.key ? 'is-active' : ''}
+                                    onClick={() => onCategoryFilterChange(item.key)}
+                                >
+                                    {item.label}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="fund-holdings-filters fund-holdings-change-filters" aria-label="Değişim filtresi">
+                            {FUND_HOLDING_CHANGE_FILTERS.map((item) => (
+                                <button
+                                    key={item.key}
+                                    type="button"
+                                    className={changeFilter === item.key ? 'is-active' : ''}
+                                    onClick={() => onChangeFilterChange(item.key)}
+                                >
+                                    {item.label}
+                                </button>
+                            ))}
+                        </div>
                     </div>
                     {rankingPositions.length > 0 && (
                         <div className="fund-holdings-rank-panel" aria-label="Güncel ağırlık sıralaması">
+                            <div className="fund-holdings-rank-top">
+                                <span className="fund-holdings-rank-title">
+                                    Öne Çıkan Pozisyonlar ({Math.min(10, rankingPositions.length)}/{rankingPositions.length})
+                                </span>
+                                <div className="fund-holdings-rank-legend" aria-hidden="true">
+                                    <span><i className="fund-holdings-rank-legend-current" />{currentMonthLabel}</span>
+                                    <span><i className="fund-holdings-rank-legend-previous" />{previousMonthLabel}</span>
+                                </div>
+                            </div>
                             <div className="fund-holdings-rank-head" aria-hidden="true">
                                 <span>#</span>
                                 <span />
@@ -995,7 +1005,7 @@ export function FundHoldingsPanel({
                                 <span>Güncel Ağırlık / Değişim</span>
                                 <span>Önceki Sıra</span>
                             </div>
-                            {rankingPositions.map((position, index) => {
+                            {rankingPositions.slice(0, 10).map((position, index) => {
                                 const category = holdingAssetCategory(position) || 'local_equity';
                                 const symbol = holdingLogoSymbol(position);
                                 const logoKind = holdingLogoKind(category);
@@ -1093,10 +1103,6 @@ export function FundHoldingsPanel({
                                     </div>
                                 );
                             })}
-                            <div className="fund-holdings-rank-legend" aria-hidden="true">
-                                <span><i className="fund-holdings-rank-legend-current" />{currentMonthLabel}</span>
-                                <span><i className="fund-holdings-rank-legend-previous" />{previousMonthLabel}</span>
-                            </div>
                         </div>
                     )}
                     <div className="fund-holdings-table-wrap">
@@ -1191,7 +1197,6 @@ export function FundHoldingsPanel({
                                                     <span>
                                                         <strong title={position.asset_code || undefined}>{holdingDisplayCode(position)}</strong>
                                                         <small title={position.asset_name}>{position.asset_name}</small>
-                                                        <em>{holdingCategoryLabel(position)}</em>
                                                     </span>
                                                 </>
                                             );

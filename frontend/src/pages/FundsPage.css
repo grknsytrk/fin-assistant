@@ -646,27 +646,35 @@
 .fund-history-table-wrap {
     overflow-x: auto;
     overflow-y: visible;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
-    border-radius: 8px;
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    background: var(--surface-color);
 }
 
 .fund-history-table {
     width: 100%;
     border-collapse: collapse;
+    font-size: 0.82rem;
 }
 
 .fund-history-table th,
 .fund-history-table td {
-    padding: 0.8rem;
-    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 58%, transparent);
+    padding: 0.58rem 0.85rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 52%, transparent);
     text-align: left;
     white-space: nowrap;
 }
 
+.fund-history-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
 .fund-history-table th {
+    background: color-mix(in srgb, var(--bg-color) 45%, var(--surface-color));
     color: var(--text-secondary);
-    font-size: 0.72rem;
-    letter-spacing: 0.08em;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
 }
 
