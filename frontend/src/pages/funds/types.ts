@@ -269,6 +269,25 @@ export const STOCK_SEARCH_LABELS: Record<string, string[]> = {
     YEOTK: ['YEO Teknoloji Enerji ve Endüstri A.Ş.'],
 };
 
+export interface GlobalComparisonIndexSpec {
+    symbol: string;
+    displaySymbol: string;
+    label: string;
+    aliases: string[];
+}
+
+export const GLOBAL_COMPARISON_INDICES: GlobalComparisonIndexSpec[] = [
+    { symbol: 'SP500', displaySymbol: 'S&P 500', label: 'S&P 500 (ABD)', aliases: ['SP500', 'S&P500', 'SPX', 'GSPC', 'ABD', 'Yabancı Endeks'] },
+    { symbol: 'NASDAQ', displaySymbol: 'NASDAQ', label: 'Nasdaq Composite (ABD)', aliases: ['IXIC', 'ABD', 'Teknoloji', 'Yabancı Endeks'] },
+    { symbol: 'NASDAQ100', displaySymbol: 'NDX', label: 'Nasdaq 100 (ABD)', aliases: ['NASDAQ 100', 'NDX', 'QQQ', 'ABD', 'Teknoloji', 'Yabancı Endeks'] },
+    { symbol: 'DOW', displaySymbol: 'DOW', label: 'Dow Jones (ABD)', aliases: ['DJI', 'DJIA', 'ABD', 'Yabancı Endeks'] },
+    { symbol: 'DAX', displaySymbol: 'DAX', label: 'DAX 40 (Almanya)', aliases: ['GDAXI', 'Almanya', 'Avrupa', 'Yabancı Endeks'] },
+    { symbol: 'FTSE', displaySymbol: 'FTSE 100', label: 'FTSE 100 (İngiltere)', aliases: ['FTSE100', 'UK', 'İngiltere', 'Avrupa', 'Yabancı Endeks'] },
+    { symbol: 'CAC40', displaySymbol: 'CAC 40', label: 'CAC 40 (Fransa)', aliases: ['FCHI', 'Fransa', 'Avrupa', 'Yabancı Endeks'] },
+    { symbol: 'NIKKEI', displaySymbol: 'NIKKEI 225', label: 'Nikkei 225 (Japonya)', aliases: ['N225', 'Japonya', 'Asya', 'Yabancı Endeks'] },
+    { symbol: 'HANGSENG', displaySymbol: 'HANG SENG', label: 'Hang Seng (Hong Kong)', aliases: ['HSI', 'Çin', 'Hong Kong', 'Asya', 'Yabancı Endeks'] },
+];
+
 export type FundsCatalogPayload = {
     funds: FundsResponse;
     categories: FundCategoriesResponse;

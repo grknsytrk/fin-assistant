@@ -1296,10 +1296,22 @@ def _index_comparison_history(
 ) -> Dict[str, Any]:
     _ms = _market_service()
     try:
-        symbol = _ms._normalize_market_index(asset.symbol)
-        label = asset.label or _ms._MARKET_INDEX_META[symbol]["label"]
+        global_index_map: Dict[str, Tuple[str, List[str]]] = {
+            sym: (lbl, list(cands))
+            for sym, lbl, cands in _ms._WATCH_GLOBAL_INDEX_CANDIDATES
+        }
+        global_index_map.setdefault("NASDAQ100", ("Nasdaq 100", ["^NDX", "QQQ"]))
+        raw_symbol = str(asset.symbol or "").strip().upper()
+        if raw_symbol in global_index_map:
+            symbol = raw_symbol
+            default_label, yahoo_candidates = global_index_map[raw_symbol]
+            label = asset.label or default_label
+        else:
+            symbol = _ms._normalize_market_index(asset.symbol)
+            label = asset.label or _ms._MARKET_INDEX_META[symbol]["label"]
+            yahoo_candidates = _ms._MARKET_INDEX_META[symbol]["yahoo_candidates"]
         errors: List[str] = []
-        for yahoo_symbol in _ms._MARKET_INDEX_META[symbol]["yahoo_candidates"]:
+        for yahoo_symbol in yahoo_candidates:
             chart = _ms._fetch_yahoo_chart_period_raw(
                 yahoo_symbol,
                 interval="1d",

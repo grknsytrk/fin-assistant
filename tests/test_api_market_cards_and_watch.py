@@ -744,6 +744,52 @@ def test_market_comparison_history_returns_partial_errors(monkeypatch: pytest.Mo
     assert payload["assets"][1]["error"] == "not_found"
 
 
+def test_market_comparison_history_supports_global_indices(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_symbols: List[str] = []
+
+    def fake_chart(yahoo_symbol: str, *, interval: str, start_date: Any, end_date: Any) -> Dict[str, Any]:
+        assert interval == "1d"
+        requested_symbols.append(yahoo_symbol)
+        base = 5800.0 if yahoo_symbol == "^GSPC" else 20500.0
+        return {
+            "ok": True,
+            "points": [
+                {"time": "2026-04-01T14:00:00+00:00", "close": base},
+                {"time": "2026-04-05T14:00:00+00:00", "close": base + 50.0},
+            ],
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_period_raw", fake_chart)
+
+    client = TestClient(app)
+    response = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-05",
+            "assets": [
+                {"id": "index:SP500", "kind": "index", "symbol": "SP500", "label": "S&P 500 (ABD)"},
+                {"id": "index:NASDAQ100", "kind": "index", "symbol": "NASDAQ100", "label": "Nasdaq 100 (ABD)"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert requested_symbols == ["^GSPC", "^NDX"]
+    assert payload["assets"][0]["symbol"] == "SP500"
+    assert payload["assets"][0]["points"] == [
+        {"date": "2026-04-01", "value": 5800.0},
+        {"date": "2026-04-05", "value": 5850.0},
+    ]
+    assert payload["assets"][1]["symbol"] == "NASDAQ100"
+    assert payload["assets"][1]["points"] == [
+        {"date": "2026-04-01", "value": 20500.0},
+        {"date": "2026-04-05", "value": 20550.0},
+    ]
+    assert all(asset["error"] is None for asset in payload["assets"])
+
+
 def test_fetch_stock_card_intraday_maps_chart_meta(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_chart(_yahoo_symbol: str, *, interval: str, range_: str) -> Dict[str, Any]:
         assert interval == "5m"

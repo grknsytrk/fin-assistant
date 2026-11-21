@@ -38,6 +38,7 @@ import {
 import {
     DEFAULT_COMPARISON_IDS,
     DETAIL_RETURN_PERIODS,
+    GLOBAL_COMPARISON_INDICES,
     STOCK_SEARCH_LABELS,
     type ComparisonAsset,
     type ComparisonPeriod,
@@ -45,6 +46,20 @@ import {
     type FundComparisonState,
 } from '../types';
 import './FundReturnComparison.css';
+
+const GLOBAL_COMPARISON_INDEX_ASSETS: ComparisonAsset[] = GLOBAL_COMPARISON_INDICES.map((spec) => ({
+    id: comparisonAssetId('index', spec.symbol),
+    kind: 'index',
+    symbol: spec.symbol,
+    displaySymbol: spec.displaySymbol,
+    label: spec.label,
+    logoName: spec.label,
+    returns: {},
+}));
+
+const GLOBAL_INDEX_SEARCH_ALIASES: Record<string, string[]> = Object.fromEntries(
+    GLOBAL_COMPARISON_INDICES.map((spec) => [spec.symbol, spec.aliases]),
+);
 
 export function useFundComparisonState({
     selectedFund,
@@ -215,10 +230,14 @@ export function useFundComparisonState({
         const fundAssets = [...mergedFunds.values()]
             .filter((row) => comparisonAssetId('fund', row.fund_code) !== currentFundId)
             .map(fundToComparisonAsset);
+        const dynamicIndexAssets = indexRows.map(indexToComparisonAsset);
+        const existingIndexIds = new Set(dynamicIndexAssets.map((asset) => asset.id));
+        const globalIndexAssets = GLOBAL_COMPARISON_INDEX_ASSETS.filter((asset) => !existingIndexIds.has(asset.id));
         return [
             ...fundAssets,
             ...stockRows.map(stockToComparisonAsset),
-            ...indexRows.map(indexToComparisonAsset),
+            ...dynamicIndexAssets,
+            ...globalIndexAssets,
             ...fxRows.map(fxToComparisonAsset).filter((asset): asset is ComparisonAsset => Boolean(asset)),
         ];
     }, [fundSearchRows, funds, fxRows, indexRows, selectedFundCode, stockRows]);
@@ -243,6 +262,7 @@ export function useFundComparisonState({
                     asset.label,
                     comparisonAssetKindLabel(asset.kind),
                     ...(asset.kind === 'stock' ? STOCK_SEARCH_LABELS[asset.symbol] || [] : []),
+                    ...(asset.kind === 'index' ? GLOBAL_INDEX_SEARCH_ALIASES[asset.symbol] || [] : []),
                 ];
                 const normalizedParts = searchParts.map(normalizeCompareSearch);
                 const compactParts = searchParts.map(compactCompareSearch);
@@ -367,7 +387,7 @@ export function FundComparisonControls({
                                 searchResults.map((asset) => (
                                     <button key={asset.id} type="button" onClick={() => addAsset(asset)}>
                                         <SymbolLogo
-                                            symbol={asset.symbol}
+                                            symbol={asset.symbol === 'NASDAQ100' ? 'NASDAQ' : asset.symbol}
                                             name={asset.logoName || asset.label}
                                             kind={comparisonLogoKind(asset.kind)}
                                             logoUrl={asset.logoUrl}
