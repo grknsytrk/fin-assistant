@@ -738,3 +738,329 @@
         gap: 0.55rem;
     }
 }
+
+/* ==========================================================================
+   Scoped Clean Screener-Style Theme for ModelPortfolioEditorModal
+   ========================================================================== */
+
+.mp-modal.mp-editor-modal {
+    max-width: 860px;
+    max-height: min(90vh, 820px);
+    border-radius: 6px;
+    background: var(--surface-color);
+    border: 1px solid var(--surface-border);
+}
+
+.mp-editor-modal .mp-modal-header {
+    padding: 0.95rem 1.25rem;
+    background: #0c0e12;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.mp-editor-title-group {
+    min-width: 0;
+}
+
+.mp-editor-title-group h3 {
+    margin: 0;
+    font-size: 1.02rem;
+    font-weight: 700;
+    color: #f4f4f5;
+    letter-spacing: -0.015em;
+}
+
+.mp-editor-subtitle {
+    margin: 0.16rem 0 0;
+    font-size: 0.72rem;
+    color: #71717a;
+    font-variant-numeric: tabular-nums;
+}
+
+.mp-editor-close-btn {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.04);
+    color: #a1a1aa;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color 0.14s ease, background-color 0.14s ease, border-color 0.14s ease;
+}
+
+.mp-editor-close-btn:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(255, 255, 255, 0.14);
+}
+
+.mp-editor-modal .mp-modal-body {
+    padding: 1.05rem 1.25rem;
+    gap: 0.85rem;
+}
+
+.mp-editor-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.85rem;
+    align-items: stretch;
+}
+
+.mp-editor-card {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid rgba(255, 255, 255, 0.065);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.018);
+    overflow: visible;
+}
+
+.mp-editor-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    flex-shrink: 0;
+    padding: 0.56rem 0.85rem;
+    background: rgba(255, 255, 255, 0.028);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+    border-radius: 8px 8px 0 0;
+    color: #e4e4e7;
+    font-size: 0.74rem;
+    font-weight: 600;
+}
+
+.mp-editor-card-header svg {
+    color: #a1a1aa;
+    flex-shrink: 0;
+}
+
+.mp-editor-card-content {
+    flex: 1;
+    padding: 0.8rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.72rem;
+}
+
+.mp-editor-modal .mp-field-label {
+    color: #71717a;
+    font-size: 0.69rem;
+    font-weight: 500;
+}
+
+.mp-editor-modal .mp-field input,
+.mp-editor-modal .mp-field textarea,
+.mp-editor-modal .mp-explained-trigger {
+    background: #0a0c0f;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 6px;
+    color: #f4f4f5;
+    font-size: 0.76rem;
+}
+
+.mp-editor-modal .mp-field input:focus,
+.mp-editor-modal .mp-field textarea:focus {
+    border-color: rgba(34, 197, 94, 0.6);
+    background: #0d1117;
+    box-shadow: none;
+}
+
+.mp-editor-modal .mp-explained-trigger:hover,
+.mp-editor-modal .mp-explained-trigger.is-open {
+    border-color: rgba(34, 197, 94, 0.5);
+    background: #0d1117;
+}
+
+.mp-editor-modal .mp-explained-trigger-title {
+    font-size: 0.76rem;
+    font-weight: 500;
+}
+
+.mp-editor-modal .mp-explained-chevron.is-open,
+.mp-editor-modal .mp-explained-check {
+    color: #4ade80;
+}
+
+.mp-editor-modal .mp-explained-menu,
+.mp-editor-modal .mp-symbol-dropdown {
+    border-radius: 7px;
+    border-color: rgba(255, 255, 255, 0.1);
+    background: #101319;
+}
+
+.mp-editor-modal .mp-explained-option:hover {
+    background: rgba(255, 255, 255, 0.045);
+}
+
+.mp-editor-modal .mp-explained-option.is-selected {
+    background: rgba(34, 197, 94, 0.09);
+}
+
+.mp-editor-modal .mp-symbol-option:hover {
+    background: rgba(34, 197, 94, 0.09);
+}
+
+.mp-editor-modal .mp-symbol-option strong {
+    color: #f4f4f5;
+}
+
+.mp-editor-modal .mp-quick-pill,
+.mp-editor-modal .mp-mini-preset-btn {
+    height: 24px;
+    padding: 0 0.48rem;
+    border-radius: 5px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.03);
+    color: #a1a1aa;
+    font-size: 0.68rem;
+}
+
+.mp-editor-modal .mp-quick-pill:hover:not(:disabled),
+.mp-editor-modal .mp-mini-preset-btn:hover {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.065);
+    color: #f4f4f5;
+}
+
+.mp-editor-modal .mp-quick-pill.active {
+    border-color: rgba(34, 197, 94, 0.42);
+    background: rgba(34, 197, 94, 0.12);
+    color: #4ade80;
+}
+
+.mp-editor-modal .mp-catalyst-choice {
+    height: 27px;
+    padding: 0 0.62rem;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.03);
+    color: #a1a1aa;
+    font-size: 0.71rem;
+}
+
+.mp-editor-modal .mp-catalyst-choice:hover {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.06);
+    color: #f4f4f5;
+}
+
+.mp-editor-modal .mp-catalyst-choice.active {
+    border-color: rgba(34, 197, 94, 0.42);
+    background: rgba(34, 197, 94, 0.12);
+    color: #4ade80;
+}
+
+.mp-editor-modal .mp-selected-stock-banner,
+.mp-editor-modal .mp-add-preview-grid {
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.mp-editor-modal .mp-add-existing-banner {
+    border-color: rgba(34, 197, 94, 0.25);
+    background: rgba(34, 197, 94, 0.05);
+}
+
+.mp-editor-modal .mp-add-existing-badge,
+.mp-editor-modal .mp-symbol-active-pill {
+    border-color: rgba(34, 197, 94, 0.32);
+    background: rgba(34, 197, 94, 0.12);
+    color: #4ade80;
+    border-radius: 4px;
+}
+
+.mp-editor-modal .mp-ai-refine-button {
+    border-radius: 5px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    color: #a1a1aa;
+}
+
+.mp-editor-modal .mp-ai-refine-button svg {
+    color: #4ade80;
+}
+
+.mp-editor-modal .mp-ai-refine-button:hover:not(:disabled) {
+    color: #f4f4f5;
+    border-color: rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.065);
+}
+
+.mp-editor-modal .mp-modal-footer-sticky {
+    padding: 0.8rem 1.25rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    background: #0c0e12;
+}
+
+.mp-editor-modal .mp-footer-summary {
+    color: #a1a1aa;
+    font-size: 0.73rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.mp-editor-modal .mp-footer-summary b {
+    color: #4ade80;
+}
+
+.mp-editor-modal .mp-btn-subtle {
+    border-radius: 6px;
+    border-color: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.035);
+    color: #d4d4d8;
+}
+
+.mp-editor-modal .mp-btn-subtle:hover:not(:disabled) {
+    border-color: rgba(255, 255, 255, 0.15);
+    background: rgba(255, 255, 255, 0.07);
+    color: #f4f4f5;
+}
+
+.mp-editor-modal .mp-btn-ghost {
+    height: 32px;
+    border-radius: 6px;
+    color: #a1a1aa;
+}
+
+.mp-editor-modal .mp-btn-ghost:hover:not(:disabled) {
+    color: #f4f4f5;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.mp-editor-modal .mp-btn-primary {
+    height: 32px;
+    padding: 0 1rem;
+    border: 0;
+    border-radius: 6px;
+    background: #22c55e;
+    color: #052e16;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+.mp-editor-modal .mp-btn-primary:hover:not(:disabled) {
+    background: #4ade80;
+}
+
+.mp-editor-modal .mp-btn-primary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+@media (max-width: 780px) {
+    .mp-editor-modal .mp-modal-header {
+        padding: 0.85rem 1rem;
+    }
+
+    .mp-editor-modal .mp-modal-body {
+        padding: 0.85rem 1rem 1rem;
+    }
+
+    .mp-editor-cards-grid {
+        grid-template-columns: 1fr;
+    }
+}

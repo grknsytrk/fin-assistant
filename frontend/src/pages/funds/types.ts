@@ -255,7 +255,7 @@ export type ComparisonReturnSource = {
     return_1y_pct?: number | null;
 };
 
-export const FUND_DONUT_COLORS = ['#4f46e5', '#a3e635', '#818cf8', '#84cc16', '#f472b6', '#8b5cf6', '#c084fc', '#14b8a6'];
+export const FUND_DONUT_COLORS = ['#3b82f6', '#10b981', '#6366f1', '#f59e0b', '#06b6d4', '#8b5cf6', '#ec4899', '#64748b'];
 export const DEFAULT_COMPARISON_IDS: string[] = [];
 export const FUND_CHART_COMPARISON_COLORS = ['#22c55e', '#60a5fa', '#f59e0b', '#f472b6', '#a78bfa', '#14b8a6', '#f97316', '#e879f9'];
 

@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
-    BriefcaseBusiness,
     Check,
     ChevronDown,
+    FileText,
+    Layers,
     Pencil,
     Search,
     SlidersHorizontal,
+    Tag,
+    TrendingUp,
     X,
 } from 'lucide-react';
 import { apiClient } from '../../../api/client';
@@ -527,7 +530,7 @@ export function ModelPortfolioEditorModal({
         <div className="mp-modal-backdrop" onClick={onClose}>
             <div
                 ref={dialogRef}
-                className="mp-modal mp-modal-lg"
+                className="mp-modal mp-modal-lg mp-editor-modal"
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="mp-editor-dialog-title"
@@ -536,10 +539,7 @@ export function ModelPortfolioEditorModal({
             >
                 {/* Sticky Header */}
                 <div className="mp-modal-header">
-                    <div className="mp-modal-title-row">
-                        <div className="mp-modal-icon-badge">
-                            <BriefcaseBusiness size={15} />
-                        </div>
+                    <div className="mp-editor-title-group">
                         <h3 id="mp-editor-dialog-title">
                             {isEdit
                                 ? `${editingPosition?.symbol} Pozisyonunu Düzenle`
@@ -547,16 +547,28 @@ export function ModelPortfolioEditorModal({
                                     ? `${existingActivePosition.symbol} Pozisyonuna Ekleme Yap`
                                     : 'Hisse Ekle'}
                         </h3>
+                        <p className="mp-editor-subtitle">
+                            {isEdit && editingPosition
+                                ? `Mevcut ağırlık %${editingPosition.weight_pct.toFixed(1)} · Giriş ${editingPosition.entry_date}`
+                                : isAddToExisting && existingActivePosition
+                                    ? `Portföyde %${existingActivePosition.weight_pct.toFixed(1)} · Kullanılabilir nakit %${availableWeightPct.toFixed(1)}`
+                                    : `Model Portföy · Kullanılabilir nakit payı %${availableWeightPct.toFixed(1)}`}
+                        </p>
                     </div>
-                    <button type="button" className="mp-icon-btn" aria-label="Pozisyon formunu kapat" onClick={onClose}>
-                        <X size={15} />
+                    <button type="button" className="mp-editor-close-btn" aria-label="Pozisyon formunu kapat" onClick={onClose}>
+                        <X size={16} />
                     </button>
                 </div>
 
                 <form onSubmit={handleSubmit} className="mp-editor-shell">
                     <div className="mp-modal-body mp-editor-form">
-                        {/* SECTION 1: Stock Selection, Date & Sector */}
-                        <div className="mp-editor-section">
+                        {/* CARD 1: Stock Selection, Date & Sector */}
+                        <div className="mp-editor-card">
+                            <div className="mp-editor-card-header">
+                                <Layers size={13} aria-hidden="true" />
+                                <span>{isAddToExisting ? 'Pozisyon & Ekleme Tarihi' : 'Hisse & Konumlandırma'}</span>
+                            </div>
+                            <div className="mp-editor-card-content">
                             <div className={isAddToExisting ? 'mp-form-grid-2' : 'mp-form-grid-3'}>
                                 <div className="mp-field mp-symbol-picker">
                                     <div className="mp-field-label-row">
@@ -800,12 +812,17 @@ export function ModelPortfolioEditorModal({
                                     </label>
                                 </div>
                             )}
+                            </div>
                         </div>
 
-                        {/* SECTION 2: Price, Target Price & Weight */}
+                        {/* CARD 2+: Price, Weight, Strategy & Analysis */}
                         {isAddToExisting && existingActivePosition ? (
-                            <>
-                                <div className="mp-editor-section">
+                            <div className="mp-editor-card">
+                                <div className="mp-editor-card-header">
+                                    <TrendingUp size={13} aria-hidden="true" />
+                                    <span>Ekleme Detayı & Not</span>
+                                </div>
+                                <div className="mp-editor-card-content">
                                     <div className="mp-form-grid-2">
                                         <div className="mp-field">
                                             <div className="mp-field-label-row">
@@ -888,9 +905,7 @@ export function ModelPortfolioEditorModal({
                                             </div>
                                         </div>
                                     )}
-                                </div>
 
-                                <div className="mp-editor-section">
                                     <div className="mp-field">
                                         <div className="mp-field-label-row">
                                             <span className="mp-field-label">Ekleme Notu (İsteğe bağlı)</span>
@@ -909,237 +924,260 @@ export function ModelPortfolioEditorModal({
                                         )}
                                     </div>
                                 </div>
-                            </>
+                            </div>
                         ) : (
                         <>
-                        <div className="mp-editor-section">
-                            <div className="mp-form-grid-3">
-                                <div className="mp-field">
-                                    <div className="mp-field-label-row">
-                                        <span className="mp-field-label">Giriş Fiyatı (₺) *</span>
-                                        {prefillLoading && <em className="mp-prefill-tag">Çekiliyor...</em>}
-                                    </div>
-                                    <input
-                                        type="number"
-                                        aria-label="Giriş fiyatı"
-                                        step="0.01"
-                                        value={entryPrice}
-                                        onChange={(e) => setEntryPrice(e.target.value)}
-                                        placeholder="0.00"
-                                    />
+                        <div className="mp-editor-cards-grid">
+                            {/* Left Card: Price & Weight */}
+                            <div className="mp-editor-card">
+                                <div className="mp-editor-card-header">
+                                    <TrendingUp size={13} aria-hidden="true" />
+                                    <span>Fiyat & Ağırlık</span>
                                 </div>
+                                <div className="mp-editor-card-content">
+                                    <div className="mp-form-grid-2">
+                                        <div className="mp-field">
+                                            <div className="mp-field-label-row">
+                                                <span className="mp-field-label">Giriş Fiyatı (₺) *</span>
+                                                {prefillLoading && <em className="mp-prefill-tag">Çekiliyor...</em>}
+                                            </div>
+                                            <input
+                                                type="number"
+                                                aria-label="Giriş fiyatı"
+                                                step="0.01"
+                                                value={entryPrice}
+                                                onChange={(e) => setEntryPrice(e.target.value)}
+                                                placeholder="0.00"
+                                            />
+                                        </div>
 
-                                <div className="mp-field">
-                                    <div className="mp-field-label-row">
-                                        <span className="mp-field-label">Hedef Fiyat (₺) *</span>
-                                        {impliedUpsidePct != null && (
-                                            <span className={`mp-upside-live-pill ${toneClass(impliedUpsidePct)}`}>
-                                                {formatPct(impliedUpsidePct)}
+                                        <div className="mp-field">
+                                            <div className="mp-field-label-row">
+                                                <span className="mp-field-label">Hedef Fiyat (₺) *</span>
+                                                {impliedUpsidePct != null && (
+                                                    <span className={`mp-upside-live-pill ${toneClass(impliedUpsidePct)}`}>
+                                                        {formatPct(impliedUpsidePct)}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <input
+                                                type="number"
+                                                aria-label="Hedef fiyat"
+                                                step="0.01"
+                                                value={targetPrice}
+                                                onChange={(e) => setTargetPrice(e.target.value)}
+                                                placeholder="0.00"
+                                            />
+                                            <div className="mp-quick-pills-row">
+                                                {[25, 35, 50, 75].map((pct) => (
+                                                    <button
+                                                        key={pct}
+                                                        type="button"
+                                                        className="mp-quick-pill"
+                                                        disabled={!Number(entryPrice)}
+                                                        onClick={() => applyTargetUpsidePreset(pct)}
+                                                        title={`Giriş fiyatının %${pct} üzerini hesapla`}
+                                                    >
+                                                        +%{pct}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="mp-field">
+                                        <div className="mp-field-label-row">
+                                            <span className="mp-field-label">Portföy Ağırlığı (%) *</span>
+                                            <span className="mp-field-micro-hint mp-mono">
+                                                Kalan: %{remainingCashAfterWeight.toFixed(1)}
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="number"
+                                            aria-label="Portföy ağırlığı yüzde"
+                                            step="0.5"
+                                            min="0.5"
+                                            max="100"
+                                            value={weightPct}
+                                            onChange={(e) => setWeightPct(e.target.value)}
+                                        />
+                                        <div className="mp-quick-pills-row">
+                                            {[5, 10, 15, 20].map((w) => (
+                                                <button
+                                                    key={w}
+                                                    type="button"
+                                                    className={`mp-quick-pill${Number(weightPct) === w ? ' active' : ''}`}
+                                                    onClick={() => setWeightPct(String(Math.min(w, availableWeightPct)))}
+                                                >
+                                                    %{w}
+                                                </button>
+                                            ))}
+                                            <button
+                                                type="button"
+                                                className="mp-quick-pill"
+                                                title={`Kullanılabilir maksimum: %${availableWeightPct.toFixed(0)}`}
+                                                onClick={() => setWeightPct(String(availableWeightPct))}
+                                            >
+                                                Maks
+                                            </button>
+                                        </div>
+                                        {!isEdit && availableWeightPct <= 0 && (
+                                            <span className="mp-field-micro-hint mp-field-warning-text">
+                                                Portföy %100 dolu; yeni hisse için pay açın.
                                             </span>
                                         )}
                                     </div>
-                                    <input
-                                        type="number"
-                                        aria-label="Hedef fiyat"
-                                        step="0.01"
-                                        value={targetPrice}
-                                        onChange={(e) => setTargetPrice(e.target.value)}
-                                        placeholder="0.00"
-                                    />
-                                    <div className="mp-quick-pills-row">
-                                        {[25, 35, 50, 75].map((pct) => (
-                                            <button
-                                                key={pct}
-                                                type="button"
-                                                className="mp-quick-pill"
-                                                disabled={!Number(entryPrice)}
-                                                onClick={() => applyTargetUpsidePreset(pct)}
-                                                title={`Giriş fiyatının %${pct} üzerini hesapla`}
-                                            >
-                                                +%{pct}
-                                            </button>
-                                        ))}
-                                    </div>
                                 </div>
+                            </div>
 
-                                <div className="mp-field">
-                                    <div className="mp-field-label-row">
-                                        <span className="mp-field-label">Portföy Ağırlığı (%) *</span>
-                                        <span className="mp-field-micro-hint mp-mono">
-                                            Kalan: %{remainingCashAfterWeight.toFixed(1)}
-                                        </span>
+                            {/* Right Card: Strategy & Catalysts */}
+                            <div className="mp-editor-card">
+                                <div className="mp-editor-card-header">
+                                    <Tag size={13} aria-hidden="true" />
+                                    <span>Strateji & Beklenti Etiketleri</span>
+                                </div>
+                                <div className="mp-editor-card-content">
+                                    <div className="mp-form-grid-2">
+                                        <MpExplainedDropdown
+                                            label="Tavsiye"
+                                            value={rating}
+                                            options={RATING_OPTIONS}
+                                            onChange={setRating}
+                                        />
+                                        <MpExplainedDropdown
+                                            label="Vade"
+                                            value={horizon}
+                                            options={HORIZON_OPTIONS}
+                                            onChange={setHorizon}
+                                        />
                                     </div>
-                                    <input
-                                        type="number"
-                                        aria-label="Portföy ağırlığı yüzde"
-                                        step="0.5"
-                                        min="0.5"
-                                        max="100"
-                                        value={weightPct}
-                                        onChange={(e) => setWeightPct(e.target.value)}
-                                    />
-                                    <div className="mp-quick-pills-row">
-                                        {[5, 10, 15, 20].map((w) => (
+
+                                    <div className="mp-field">
+                                        <span className="mp-field-label">Beklenti Etiketleri</span>
+                                        <div className="mp-catalyst-choices" role="group" aria-label="Beklenti etiketleri">
+                                            {CATALYST_OPTIONS.map((item) => {
+                                                const active = catalysts.includes(item.value);
+                                                return (
+                                                    <button
+                                                        key={item.value}
+                                                        type="button"
+                                                        className={`mp-catalyst-choice${active ? ' active' : ''}`}
+                                                        aria-pressed={active}
+                                                        onClick={() => toggleCatalyst(item.value)}
+                                                    >
+                                                        {active && <Check size={12} />}
+                                                        {item.label}
+                                                    </button>
+                                                );
+                                            })}
+                                            {catalysts
+                                                .filter((item) => !CATALYST_OPTIONS.some((option) => option.value === item))
+                                                .map((item) => (
+                                                    <button
+                                                        key={item}
+                                                        type="button"
+                                                        className="mp-catalyst-choice active"
+                                                        aria-pressed="true"
+                                                        onClick={() => toggleCatalyst(item)}
+                                                    >
+                                                        <Check size={12} />
+                                                        {item}
+                                                    </button>
+                                                ))}
+                                        </div>
+                                        <div className="mp-custom-catalyst-row">
+                                            <input
+                                                type="text"
+                                                aria-label="Başka bir beklenti etiketi ekle"
+                                                value={customCatalyst}
+                                                onChange={(e) => setCustomCatalyst(e.target.value)}
+                                                placeholder="Özel etiket..."
+                                                onKeyDown={(e) => {
+                                                    if (e.key === 'Enter') {
+                                                        e.preventDefault();
+                                                        addCustomCatalyst();
+                                                    }
+                                                }}
+                                            />
                                             <button
-                                                key={w}
                                                 type="button"
-                                                className={`mp-quick-pill${Number(weightPct) === w ? ' active' : ''}`}
-                                                onClick={() => setWeightPct(String(Math.min(w, availableWeightPct)))}
+                                                className="mp-btn mp-btn-subtle"
+                                                onClick={addCustomCatalyst}
+                                                disabled={!customCatalyst.trim()}
                                             >
-                                                %{w}
+                                                Ekle
                                             </button>
-                                        ))}
-                                        <button
-                                            type="button"
-                                            className="mp-quick-pill"
-                                            title={`Kullanılabilir maksimum: %${availableWeightPct.toFixed(0)}`}
-                                            onClick={() => setWeightPct(String(availableWeightPct))}
-                                        >
-                                            Maks
-                                        </button>
+                                        </div>
                                     </div>
-                                    {!isEdit && availableWeightPct <= 0 && (
-                                        <span className="mp-field-micro-hint mp-field-warning-text">
-                                            Portföy %100 dolu; yeni hisse için pay açın.
-                                        </span>
-                                    )}
                                 </div>
                             </div>
                         </div>
 
-                        {/* SECTION 3: Strategy & Horizon */}
-                        <div className="mp-editor-section">
-                            <div className="mp-form-grid-2">
-                                <MpExplainedDropdown
-                                    label="Tavsiye"
-                                    value={rating}
-                                    options={RATING_OPTIONS}
-                                    onChange={setRating}
-                                />
-                                <MpExplainedDropdown
-                                    label="Vade"
-                                    value={horizon}
-                                    options={HORIZON_OPTIONS}
-                                    onChange={setHorizon}
-                                />
+                        {/* Card 4: Analysis & Notes */}
+                        <div className="mp-editor-card">
+                            <div className="mp-editor-card-header">
+                                <FileText size={13} aria-hidden="true" />
+                                <span>Analiz & Notlar</span>
                             </div>
-                        </div>
-
-                        {/* SECTION 4: Thesis & Catalysts */}
-                        <div className="mp-editor-section">
-                            <div className="mp-field">
-                                <span className="mp-field-label">Beklenti Etiketleri</span>
-                                <div className="mp-catalyst-choices" role="group" aria-label="Beklenti etiketleri">
-                                    {CATALYST_OPTIONS.map((item) => {
-                                        const active = catalysts.includes(item.value);
-                                        return (
-                                            <button
-                                                key={item.value}
-                                                type="button"
-                                                className={`mp-catalyst-choice${active ? ' active' : ''}`}
-                                                aria-pressed={active}
-                                                onClick={() => toggleCatalyst(item.value)}
-                                            >
-                                                {active && <Check size={12} />}
-                                                {item.label}
-                                            </button>
-                                        );
-                                    })}
-                                    {catalysts
-                                        .filter((item) => !CATALYST_OPTIONS.some((option) => option.value === item))
-                                        .map((item) => (
-                                            <button
-                                                key={item}
-                                                type="button"
-                                                className="mp-catalyst-choice active"
-                                                aria-pressed="true"
-                                                onClick={() => toggleCatalyst(item)}
-                                            >
-                                                <Check size={12} />
-                                                {item}
-                                            </button>
-                                        ))}
-                                </div>
-                                <div className="mp-custom-catalyst-row">
-                                    <input
-                                        type="text"
-                                        aria-label="Başka bir beklenti etiketi ekle"
-                                        value={customCatalyst}
-                                        onChange={(e) => setCustomCatalyst(e.target.value)}
-                                        placeholder="Özel etiket..."
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter') {
-                                                e.preventDefault();
-                                                addCustomCatalyst();
-                                            }
-                                        }}
-                                    />
-                                    <button
-                                        type="button"
-                                        className="mp-btn mp-btn-subtle"
-                                        onClick={addCustomCatalyst}
-                                        disabled={!customCatalyst.trim()}
-                                    >
-                                        Ekle
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div className="mp-field">
-                                <div className="mp-field-label-row">
-                                    <span className="mp-field-label">Yatırım Tezi</span>
-                                    {renderImproveButton('thesis', thesis)}
-                                </div>
-                                <textarea
-                                    rows={3}
-                                    aria-label="Yatırım tezi"
-                                    value={thesis}
-                                    onChange={(e) => setThesis(e.target.value)}
-                                    placeholder="Katalizörler ve temel beklentiler..."
-                                    disabled={improvingField === 'thesis'}
-                                />
-                                {improveError?.field === 'thesis' && (
-                                    <span className="mp-ai-refine-error" role="alert">{improveError.message}</span>
-                                )}
-                            </div>
-
-                            <div className="mp-field">
-                                <div className="mp-field-label-row">
-                                    <span className="mp-field-label">Temel Riskler</span>
-                                    {renderImproveButton('risk_note', riskNote)}
-                                </div>
-                                <textarea
-                                    rows={2}
-                                    aria-label="Temel riskler"
-                                    value={riskNote}
-                                    onChange={(e) => setRiskNote(e.target.value)}
-                                    placeholder="Marj baskısı, kur, talep riskleri..."
-                                    disabled={improvingField === 'risk_note'}
-                                />
-                                {improveError?.field === 'risk_note' && (
-                                    <span className="mp-ai-refine-error" role="alert">{improveError.message}</span>
-                                )}
-                            </div>
-
-                            {isEdit && (
-                                <div className="mp-field">
-                                    <div className="mp-field-label-row">
-                                        <span className="mp-field-label">Revizyon Notu</span>
-                                        {renderImproveButton('revision_note', revisionNote)}
+                            <div className="mp-editor-card-content">
+                                <div className="mp-form-grid-2">
+                                    <div className="mp-field">
+                                        <div className="mp-field-label-row">
+                                            <span className="mp-field-label">Yatırım Tezi</span>
+                                            {renderImproveButton('thesis', thesis)}
+                                        </div>
+                                        <textarea
+                                            rows={3}
+                                            aria-label="Yatırım tezi"
+                                            value={thesis}
+                                            onChange={(e) => setThesis(e.target.value)}
+                                            placeholder="Katalizörler ve temel beklentiler..."
+                                            disabled={improvingField === 'thesis'}
+                                        />
+                                        {improveError?.field === 'thesis' && (
+                                            <span className="mp-ai-refine-error" role="alert">{improveError.message}</span>
+                                        )}
                                     </div>
-                                    <input
-                                        type="text"
-                                        aria-label="Revizyon notu"
-                                        value={revisionNote}
-                                        onChange={(e) => setRevisionNote(e.target.value)}
-                                        placeholder="Örn: 3Ç bilançosu sonrası hedef revizesi"
-                                        disabled={improvingField === 'revision_note'}
-                                    />
-                                    {improveError?.field === 'revision_note' && (
-                                        <span className="mp-ai-refine-error" role="alert">{improveError.message}</span>
-                                    )}
+
+                                    <div className="mp-field">
+                                        <div className="mp-field-label-row">
+                                            <span className="mp-field-label">Temel Riskler</span>
+                                            {renderImproveButton('risk_note', riskNote)}
+                                        </div>
+                                        <textarea
+                                            rows={3}
+                                            aria-label="Temel riskler"
+                                            value={riskNote}
+                                            onChange={(e) => setRiskNote(e.target.value)}
+                                            placeholder="Marj baskısı, kur, talep riskleri..."
+                                            disabled={improvingField === 'risk_note'}
+                                        />
+                                        {improveError?.field === 'risk_note' && (
+                                            <span className="mp-ai-refine-error" role="alert">{improveError.message}</span>
+                                        )}
+                                    </div>
                                 </div>
-                            )}
+
+                                {isEdit && (
+                                    <div className="mp-field">
+                                        <div className="mp-field-label-row">
+                                            <span className="mp-field-label">Revizyon Notu</span>
+                                            {renderImproveButton('revision_note', revisionNote)}
+                                        </div>
+                                        <input
+                                            type="text"
+                                            aria-label="Revizyon notu"
+                                            value={revisionNote}
+                                            onChange={(e) => setRevisionNote(e.target.value)}
+                                            placeholder="Örn: 3Ç bilançosu sonrası hedef revizesi"
+                                            disabled={improvingField === 'revision_note'}
+                                        />
+                                        {improveError?.field === 'revision_note' && (
+                                            <span className="mp-ai-refine-error" role="alert">{improveError.message}</span>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
                         </div>
                         </>
                         )}

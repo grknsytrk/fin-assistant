@@ -1,7 +1,11 @@
 .fund-overview-metrics-row {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.75rem;
+    gap: 0;
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    background: var(--surface-color);
+    overflow: hidden;
 }
 
 .fund-overview-metric-card {
@@ -9,10 +13,15 @@
     grid-template-rows: auto 1fr;
     gap: 0.5rem;
     min-width: 0;
-    padding: 0.75rem 0.9rem 0.65rem;
-    border: 1px solid var(--surface-border);
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+    padding: 0.85rem 1rem 0.75rem;
+    border: 0;
+    border-right: 1px solid var(--surface-border);
+    border-radius: 0;
+    background: transparent;
+}
+
+.fund-overview-metric-card:last-child {
+    border-right: 0;
 }
 
 .fund-overview-metric-copy {
@@ -23,8 +32,10 @@
 
 .fund-overview-metric-copy span {
     color: var(--text-secondary);
-    font-size: 0.84rem;
+    font-size: 0.7rem;
     font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
 }
 
 .fund-overview-metric-copy strong {
@@ -35,7 +46,8 @@
     flex-wrap: wrap;
     color: var(--text-primary);
     font-family: var(--font-mono);
-    font-size: 1.02rem;
+    font-size: 0.98rem;
+    font-weight: 600;
     line-height: 1.1;
     overflow-wrap: anywhere;
 }
@@ -108,7 +120,7 @@
     color: var(--text-primary);
     font-family: var(--font-mono);
     font-size: 0.9rem;
-    font-weight: 900;
+    font-weight: 700;
     line-height: 1.05;
     white-space: nowrap;
 }
@@ -140,9 +152,9 @@
 .fund-overview-metric-bar em {
     overflow: hidden;
     color: var(--text-muted);
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     font-style: normal;
-    font-weight: 800;
+    font-weight: 500;
     text-align: center;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -150,39 +162,44 @@
 
 .fund-category-ranking-panel {
     display: grid;
-    gap: 0.9rem;
-    padding: 1rem;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+    gap: 0;
+    padding: 0;
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    background: var(--surface-color);
+    overflow: hidden;
 }
 
 .fund-category-ranking-head {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 1rem;
+    padding: 0.72rem 1rem;
+    border-bottom: 1px solid var(--surface-border);
 }
 
 .fund-category-ranking-head div {
-    display: grid;
-    gap: 0.18rem;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.65rem;
     min-width: 0;
 }
 
 .fund-category-ranking-head span {
-    color: var(--text-primary);
-    font-size: 0.92rem;
-    font-weight: 850;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    font-weight: 600;
     letter-spacing: 0.06em;
     text-transform: uppercase;
 }
 
 .fund-category-ranking-head strong {
     overflow: hidden;
-    color: var(--text-secondary);
-    font-size: 0.78rem;
-    font-weight: 700;
+    color: var(--text-primary);
+    font-size: 0.84rem;
+    font-weight: 600;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -193,64 +210,79 @@
     gap: 0.35rem;
     color: var(--text-secondary);
     font-family: var(--font-mono);
+    font-size: 0.76rem;
     white-space: nowrap;
 }
 
 .fund-category-ranking-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 0.7rem;
+    gap: 0;
 }
 
 .fund-category-ranking-card {
     display: grid;
-    justify-items: center;
-    gap: 0.38rem;
+    justify-items: start;
+    gap: 0.25rem;
     min-width: 0;
-    padding: 0.8rem 0.6rem;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 54%, transparent);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--bg-color) 62%, var(--surface-color));
-    text-align: center;
+    padding: 0.85rem 1rem;
+    border: 0;
+    border-right: 1px solid color-mix(in srgb, var(--surface-border) 65%, transparent);
+    border-radius: 0;
+    background: transparent;
+    text-align: left;
+}
+
+.fund-category-ranking-card:last-child {
+    border-right: 0;
 }
 
 .fund-category-ranking-card span {
     color: var(--text-secondary);
-    font-size: 0.78rem;
+    font-size: 0.72rem;
+    font-weight: 500;
 }
 
 .fund-category-ranking-card strong {
-    padding: 0.18rem 0.52rem;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--success-color) 18%, transparent);
-    color: var(--success-color);
+    padding: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-primary);
     font-family: var(--font-mono);
-    font-size: 1.02rem;
+    font-size: 1.05rem;
+    font-weight: 700;
 }
 
 .fund-category-ranking-card small {
-    color: var(--text-secondary);
+    color: var(--success-color);
+    font-family: var(--font-mono);
     font-size: 0.74rem;
+    font-weight: 500;
 }
 
 .fund-chart-panel,
 .fund-heatmap-panel {
-    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+    border: 1px solid var(--surface-border);
+    border-radius: 6px;
+    background: var(--surface-color);
 }
 
 .fund-chart-panel {
     min-width: 0;
-    padding: 0.85rem;
+    padding: 0;
+    overflow: visible;
+    display: flex;
+    flex-direction: column;
 }
 
 .fund-chart-toolbar {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 0.8rem;
-    margin-bottom: 0.65rem;
+    margin-bottom: 0;
+    padding: 0.65rem 1rem;
+    border-bottom: 1px solid var(--surface-border);
 }
 
 .fund-chart-range-row {
@@ -278,26 +310,26 @@
 
 .fund-chart-range {
     min-width: 2.4rem;
-    height: 2rem;
+    height: 1.9rem;
     padding: 0 0.55rem;
     border: 1px solid transparent;
-    border-radius: 7px;
-    background: transparent;
+    border-radius: 4px;
+    background: var(--bg-color);
     color: var(--text-secondary);
-    font-size: 0.78rem;
-    font-weight: 700;
+    font-size: 0.74rem;
+    font-weight: 600;
     cursor: pointer;
     transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .fund-chart-range:hover {
-    background: color-mix(in srgb, var(--surface-border) 38%, transparent);
+    border-color: color-mix(in srgb, var(--accent-color) 52%, transparent);
     color: var(--text-primary);
 }
 
 .fund-chart-range.is-active {
-    border-color: color-mix(in srgb, var(--accent-color) 56%, transparent);
-    background: color-mix(in srgb, var(--accent-color) 18%, transparent);
+    border-color: color-mix(in srgb, var(--accent-color) 65%, transparent);
+    background: color-mix(in srgb, var(--accent-color) 14%, var(--surface-color));
     color: var(--text-primary);
 }
 
@@ -308,7 +340,8 @@
 .fund-chart-return {
     flex: 0 0 auto;
     font-family: var(--font-mono);
-    font-weight: 800;
+    font-size: 0.84rem;
+    font-weight: 600;
     white-space: nowrap;
 }
 
@@ -316,7 +349,7 @@
     display: flex;
     flex: 1 1 420px;
     flex-wrap: wrap;
-    gap: 0.42rem;
+    gap: 0.35rem;
     min-width: 0;
     margin: 0;
     padding: 0;
@@ -324,43 +357,44 @@
 
 .fund-chart-return-strip button {
     display: flex;
-    min-width: 5.65rem;
-    min-height: 2.65rem;
-    flex: 0 1 6.4rem;
+    min-width: 4.8rem;
+    min-height: 2.35rem;
+    flex: 0 1 5.6rem;
     flex-direction: column;
     justify-content: center;
     gap: 0.08rem;
-    padding: 0.34rem 0.52rem;
+    padding: 0.28rem 0.5rem;
     border: 1px solid transparent;
-    border-radius: 7px;
-    background: transparent;
+    border-radius: 4px;
+    background: var(--bg-color);
     color: inherit;
     text-align: left;
-    transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+    transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .fund-chart-return-strip button:hover,
 .fund-chart-return-strip button:focus-visible {
-    border-color: color-mix(in srgb, var(--surface-border) 68%, transparent);
-    background: color-mix(in srgb, var(--surface-border) 34%, transparent);
+    border-color: color-mix(in srgb, var(--accent-color) 52%, transparent);
+    color: var(--text-primary);
 }
 
 .fund-chart-return-strip button.is-active {
-    border-color: color-mix(in srgb, var(--surface-border) 82%, transparent);
-    background: color-mix(in srgb, var(--surface-border) 52%, transparent);
+    border-color: color-mix(in srgb, var(--accent-color) 65%, transparent);
+    background: color-mix(in srgb, var(--accent-color) 14%, var(--surface-color));
 }
 
 .fund-chart-return-strip span {
     display: block;
     color: var(--text-secondary);
-    font-size: 0.74rem;
-    font-weight: 800;
+    font-size: 0.7rem;
+    font-weight: 600;
     line-height: 1.05;
 }
 
 .fund-chart-return-strip strong {
     font-family: var(--font-mono);
-    font-size: 0.78rem;
+    font-size: 0.76rem;
+    font-weight: 600;
     line-height: 1.15;
     white-space: nowrap;
 }
@@ -368,17 +402,21 @@
 .fund-custom-range {
     display: flex;
     gap: 0.45rem;
-    margin: 0 0 0.6rem;
+    margin: 0;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--surface-border);
 }
 
 .fund-custom-range input {
     min-width: 0;
-    height: 2rem;
+    height: 30px;
     padding: 0 0.55rem;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 78%, transparent);
-    border-radius: 7px;
-    background: color-mix(in srgb, var(--bg-color) 84%, var(--surface-color));
+    border: 1px solid var(--surface-border);
+    border-radius: 4px;
+    background: var(--bg-color);
     color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
 }
 
 .fund-detail-chart {
@@ -386,8 +424,8 @@
     width: 100%;
     height: auto;
     aspect-ratio: 860 / 430;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--bg-color) 84%, var(--surface-color));
+    border-radius: 0;
+    background: transparent;
     cursor: crosshair;
     touch-action: none;
     user-select: none;
@@ -491,14 +529,14 @@
     fill: var(--text-secondary);
     font-family: var(--font-mono);
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 600;
 }
 
 .fund-chart-measure-value {
     fill: var(--text-primary);
     font-family: var(--font-mono);
     font-size: 17px;
-    font-weight: 900;
+    font-weight: 700;
 }
 
 .fund-chart-measure-value.is-positive {
@@ -519,8 +557,8 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.45rem 0.8rem;
-    margin-top: 0.7rem;
-    padding: 0 0.1rem;
+    margin-top: 0;
+    padding: 0.55rem 1rem 0.55rem;
 }
 
 .fund-chart-legend span {
@@ -530,8 +568,8 @@
     min-width: 0;
     color: var(--text-secondary);
     font-family: var(--font-mono);
-    font-size: 0.76rem;
-    font-weight: 800;
+    font-size: 0.74rem;
+    font-weight: 600;
 }
 
 .fund-chart-legend i {
@@ -548,23 +586,28 @@
 }
 
 .fund-chart-error {
-    margin-top: 0.5rem;
+    margin-top: 0;
+    padding: 0.5rem 1rem 0.65rem;
     color: var(--danger-color);
     font-size: 0.78rem;
 }
 
 .fund-chart-note {
-    margin-top: 0.5rem;
+    margin-top: 0;
+    padding: 0.5rem 1rem 0.65rem;
     color: var(--text-secondary);
     font-size: 0.78rem;
 }
 
 
 .fund-heatmap-panel h2 {
-    margin: 0 0 0.9rem;
+    margin: 0;
+    padding: 0.72rem 1rem;
+    border-bottom: 1px solid var(--surface-border);
     color: var(--text-secondary);
-    font-size: 0.82rem;
-    letter-spacing: 0.08em;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
 }
 
@@ -633,23 +676,31 @@
 }
 
 .fund-heatmap-stats div {
-    padding: 0.75rem;
-    border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--surface-color) 92%, var(--bg-color));
+    padding: 0.72rem 1rem;
+    border: 0;
+    border-right: 1px solid color-mix(in srgb, var(--surface-border) 60%, transparent);
+    border-radius: 0;
+    background: transparent;
+}
+
+.fund-heatmap-stats div:last-child {
+    border-right: 0;
 }
 
 .fund-heatmap-stats span {
     display: block;
-    margin-bottom: 0.35rem;
+    margin-bottom: 0.28rem;
     color: var(--text-secondary);
-    font-size: 0.72rem;
-    font-weight: 800;
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
 }
 
 .fund-heatmap-stats strong {
     font-family: var(--font-mono);
+    font-size: 0.86rem;
+    font-weight: 600;
 }
 
 .fund-return-bounds {
@@ -663,11 +714,13 @@
 
 
 .fund-heatmap-panel {
-    padding: 1rem;
+    padding: 0;
+    overflow: hidden;
 }
 
 .fund-heatmap {
     overflow-x: auto;
+    padding: 0.9rem 1rem;
 }
 
 .fund-heatmap-months,
@@ -682,7 +735,7 @@
     margin-bottom: 0.32rem;
     color: var(--text-secondary);
     font-size: 0.7rem;
-    font-weight: 800;
+    font-weight: 600;
     text-align: center;
 }
 
@@ -701,23 +754,23 @@
     display: grid;
     min-height: 34px;
     place-items: center;
-    border-radius: 4px;
+    border-radius: 3px;
     border: 1px solid color-mix(in srgb, var(--surface-border) 50%, transparent);
     color: var(--text-primary);
     font-family: var(--font-mono);
     font-size: 0.72rem;
-    font-weight: 600;
+    font-weight: 500;
 }
 
 .fund-heatmap-cell.is-positive {
-    background: rgb(34 197 94 / calc(0.14 + var(--heat-intensity) * 0.38));
-    border-color: rgb(34 197 94 / calc(0.22 + var(--heat-intensity) * 0.28));
+    background: rgb(34 197 94 / calc(0.10 + var(--heat-intensity) * 0.28));
+    border-color: rgb(34 197 94 / calc(0.18 + var(--heat-intensity) * 0.24));
     color: #dcfce7;
 }
 
 .fund-heatmap-cell.is-negative {
-    background: rgb(244 63 94 / calc(0.14 + var(--heat-intensity) * 0.38));
-    border-color: rgb(244 63 94 / calc(0.22 + var(--heat-intensity) * 0.28));
+    background: rgb(244 63 94 / calc(0.10 + var(--heat-intensity) * 0.28));
+    border-color: rgb(244 63 94 / calc(0.18 + var(--heat-intensity) * 0.24));
     color: #ffe4e6;
 }
 
@@ -728,8 +781,9 @@
 .fund-heatmap-stats {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 0.55rem;
-    margin-top: 0.85rem;
+    gap: 0;
+    margin-top: 0;
+    border-top: 1px solid var(--surface-border);
 }
 
 .fund-investor-cell {
@@ -761,8 +815,25 @@
         grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
+    .fund-heatmap-stats div:nth-child(3n),
+    .fund-heatmap-stats div:last-child {
+        border-right: 0;
+    }
+
+    .fund-heatmap-stats div:nth-child(-n+3) {
+        border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 60%, transparent);
+    }
+
     .fund-category-ranking-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .fund-category-ranking-card:nth-child(even) {
+        border-right: 0;
+    }
+
+    .fund-category-ranking-card:nth-child(-n+2) {
+        border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 65%, transparent);
     }
 }
 
@@ -773,8 +844,22 @@
         grid-template-columns: 1fr;
     }
 
+    .fund-overview-metric-card,
+    .fund-category-ranking-card,
+    .fund-heatmap-stats div {
+        border-right: 0;
+        border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 65%, transparent);
+    }
+
+    .fund-overview-metric-card:last-child,
+    .fund-category-ranking-card:last-child,
+    .fund-heatmap-stats div:last-child {
+        border-bottom: 0;
+    }
+
     .fund-category-ranking-head {
         flex-direction: column;
+        align-items: flex-start;
         gap: 0.45rem;
     }
 
