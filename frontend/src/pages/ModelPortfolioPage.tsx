@@ -323,7 +323,11 @@ export default function ModelPortfolioPage() {
             (acc, r) => acc + (r.return_pct != null ? r.weight_pct * r.return_pct : 0),
             0,
         );
-        const portRet = Number((weightedRetSum / 100).toFixed(2));
+        const closedWeightedRetSum = (portfolioData?.closed_positions || []).reduce(
+            (acc, r) => acc + (r.return_pct != null ? (r.weight_pct || 0) * r.return_pct : 0),
+            0,
+        );
+        const portRet = Number(((weightedRetSum + closedWeightedRetSum) / 100).toFixed(2));
         const invRet = totalW > 0 ? Number((weightedRetSum / totalW).toFixed(2)) : null;
         const upsideSum = liveActivePositions.reduce(
             (acc, r) => acc + (r.target_upside_pct != null ? r.weight_pct * r.target_upside_pct : 0),
@@ -343,7 +347,7 @@ export default function ModelPortfolioPage() {
             ? Number((xu100WeightedSum / xu100WeightDenom).toFixed(2))
             : base.xu100_return_pct;
         const effectiveXu100RetPct = liveXu100RetPct ?? base.xu100_return_pct;
-        const relRet = compoundAlpha(invRet, effectiveXu100RetPct);
+        const relRet = compoundAlpha(portRet, effectiveXu100RetPct);
 
         return {
             ...base,
@@ -355,7 +359,7 @@ export default function ModelPortfolioPage() {
             relative_return_pct: relRet,
             weighted_target_upside_pct: avgUpside,
         };
-    }, [liveActivePositions, portfolioData?.summary]);
+    }, [liveActivePositions, portfolioData?.closed_positions, portfolioData?.summary]);
 
     const selectedPosition = useMemo(() => {
         if (!selectedPositionId) return null;
@@ -444,18 +448,24 @@ export default function ModelPortfolioPage() {
             isCash: false,
         }));
         if (liveSummary.cash_weight_pct > 0.05) {
+            const realizedCashAttr = Number(
+                ((portfolioData?.closed_positions || []).reduce(
+                    (acc, r) => acc + (r.return_pct != null ? (r.weight_pct || 0) * r.return_pct : 0),
+                    0,
+                ) / 100).toFixed(2),
+            );
             items.push({
                 symbol: 'NAKİT',
                 label: 'Nakit / Boşta Pay',
                 weight: liveSummary.cash_weight_pct,
                 returnPct: 0,
-                attributionPct: 0,
+                attributionPct: realizedCashAttr,
                 color: '#334155',
                 isCash: true,
             });
         }
         return items;
-    }, [liveActivePositions, liveSummary.cash_weight_pct]);
+    }, [liveActivePositions, liveSummary.cash_weight_pct, portfolioData?.closed_positions]);
 
     const hasPortfolioSetup = Boolean(
         portfolioData?.active_positions.length || portfolioData?.closed_positions.length,
@@ -504,10 +514,10 @@ export default function ModelPortfolioPage() {
                         {[
                             {
                                 label: 'Getiri',
-                                value: formatPct(liveSummary.invested_return_pct),
-                                valueClass: toneClass(liveSummary.invested_return_pct),
-                                valueTitle: 'Her pozisyonun getirisi giriş gününden bugüne ağırlıklı olarak hesaplanır.',
-                                sub: <>Nakit dahil <b>{formatPct(liveSummary.portfolio_return_pct)}</b></>,
+                                value: formatPct(liveSummary.portfolio_return_pct),
+                                valueClass: toneClass(liveSummary.portfolio_return_pct),
+                                valueTitle: 'Nakit payı (%0 getiri) dahil toplam model portföy getirisi.',
+                                sub: <>Hisse bazlı <b>{formatPct(liveSummary.invested_return_pct)}</b></>,
                             },
                             {
                                 label: 'XU100 Alfa',
@@ -646,7 +656,7 @@ export default function ModelPortfolioPage() {
                                                         <span className="mp-attr-weight">%{item.weight.toFixed(1)}</span>
                                                     </div>
                                                     <div className="mp-attribution-right">
-                                                        {item.isCash ? (
+                                                        {item.isCash && item.attributionPct === 0 ? (
                                                             <span className="mp-tone-flat">0,00 puan</span>
                                                         ) : (
                                                             <span className={toneClass(item.attributionPct)}>

@@ -814,6 +814,15 @@ def delete_position(processed_dir: Path, position_id: str) -> Dict[str, Any]:
         if target_idx is None:
             raise KeyError("Model portföy pozisyonu bulunamadı.")
         removed = state["positions"].pop(target_idx)
+        removed_symbol = str(removed.get("symbol") or "").strip().upper()
+        if removed_symbol and not any(
+            str(p.get("symbol") or "").strip().upper() == removed_symbol for p in state["positions"]
+        ):
+            state["changelog"] = [
+                entry
+                for entry in state["changelog"]
+                if str(entry.get("symbol") or "").strip().upper() != removed_symbol
+            ]
         _save_model_portfolio_state(processed_dir, state)
         return removed
 
@@ -1024,7 +1033,17 @@ def build_model_portfolio_payload(
         for r in active_rows
         if r.get("return_pct") is not None
     )
-    portfolio_return_pct = round(weighted_return_sum / 100.0, 2) if active_rows else None
+    closed_weighted_return_sum = sum(
+        float(r.get("weight_pct") or 0.0) * float(r.get("return_pct") or 0.0)
+        for r in closed_rows
+        if r.get("return_pct") is not None
+    )
+    has_positions = bool(active_rows or closed_rows)
+    portfolio_return_pct = (
+        round((weighted_return_sum + closed_weighted_return_sum) / 100.0, 2)
+        if has_positions
+        else None
+    )
     invested_return_pct = (
         round(weighted_return_sum / total_weight_pct, 2)
         if total_weight_pct > 0 and active_rows
@@ -1042,7 +1061,7 @@ def build_model_portfolio_payload(
         if xu100_weight_denom > 0
         else None
     )
-    relative_return_pct = compound_relative_return_pct(invested_return_pct, xu100_return_pct)
+    relative_return_pct = compound_relative_return_pct(portfolio_return_pct, xu100_return_pct)
 
     upside_pairs = [
         (float(r.get("weight_pct") or 0.0), float(r.get("target_upside_pct")))
@@ -1164,8 +1183,8 @@ def build_model_portfolio_performance_payload(
             continue
     canonical_start = min(entry_dates) if entry_dates else today
 
-    # The series cache predates closed-position support, so bump its version.
-    cache_key = f"api:model-portfolio:performance:v4:ver={version}:day={today_iso}"
+    # The series cache includes cash weight (0% daily return) in the 100 TL base.
+    cache_key = f"api:model-portfolio:performance:v5:ver={version}:day={today_iso}"
     now_ts = time.time()
 
     with _STATE_LOCK:
@@ -1352,9 +1371,10 @@ def build_model_portfolio_performance_payload(
                 included_weight_sum += weight
 
         if idx > 0 and included_weight_sum > 0:
-            # Normalize the daily return by the included stock sleeve weight so
-            # the 100 TL index tracks the positions actually held that day.
-            portfolio_daily_ret = weighted_daily_ret / included_weight_sum
+            # Keep any unallocated sleeve (100 - included_weight_sum) in cash at 0% return
+            # so cash weight buffers drawdowns rather than scaling up the stock sleeve.
+            portfolio_base_weight = max(100.0, included_weight_sum)
+            portfolio_daily_ret = weighted_daily_ret / portfolio_base_weight
             portfolio_index = portfolio_index * (1.0 + portfolio_daily_ret)
 
         port_ret_pct = round(portfolio_index - 100.0, 2)

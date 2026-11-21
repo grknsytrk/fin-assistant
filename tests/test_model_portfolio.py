@@ -491,7 +491,7 @@ def test_performance_series_supports_a_portfolio_with_only_closed_positions(
     assert payload["cache_status"] == "miss"
     assert payload["points"], "a fully closed portfolio must still expose its realized track record"
     assert payload["points"][-1]["date"] == "2026-01-10"
-    assert payload["points"][-1]["portfolio_return_pct"] == 10.0
+    assert payload["points"][-1]["portfolio_return_pct"] == 4.0
 
 
 def test_load_model_portfolio_state_uses_conditional_cache_and_honors_read_monkeypatch(
