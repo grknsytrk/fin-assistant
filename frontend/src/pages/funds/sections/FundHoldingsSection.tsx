@@ -991,7 +991,7 @@ export function FundHoldingsPanel({
                         <div className="fund-holdings-rank-panel" aria-label="Güncel ağırlık sıralaması">
                             <div className="fund-holdings-rank-top">
                                 <span className="fund-holdings-rank-title">
-                                    Öne Çıkan Pozisyonlar ({Math.min(10, rankingPositions.length)}/{rankingPositions.length})
+                                    Güncel Ağırlık Sıralaması ({rankingPositions.length})
                                 </span>
                                 <div className="fund-holdings-rank-legend" aria-hidden="true">
                                     <span><i className="fund-holdings-rank-legend-current" />{currentMonthLabel}</span>
@@ -1005,7 +1005,7 @@ export function FundHoldingsPanel({
                                 <span>Güncel Ağırlık / Değişim</span>
                                 <span>Önceki Sıra</span>
                             </div>
-                            {rankingPositions.slice(0, 10).map((position, index) => {
+                            {rankingPositions.map((position, index) => {
                                 const category = holdingAssetCategory(position) || 'local_equity';
                                 const symbol = holdingLogoSymbol(position);
                                 const logoKind = holdingLogoKind(category);

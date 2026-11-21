@@ -14,6 +14,7 @@ import { FundComparisonControls } from '../components/FundReturnComparison';
 import {
     chartDateMs,
     comparisonAssetId,
+    downsamplePointsWeekly,
     estimateCashFlow,
     formatChartDate,
     formatCompactCurrency,
@@ -307,7 +308,10 @@ export function FundPerformanceChart({
                     inWindow.unshift({ date: firstChartDate, value: preAnchor.value });
                 }
             }
-            return [asset.id, inWindow];
+            const sampledWindow = (selectedRange === '3y' || selectedRange === '5y')
+                ? downsamplePointsWeekly(inWindow)
+                : inWindow;
+            return [asset.id, sampledWindow];
         }),
     );
     const comparisonPendingSymbols = comparisonAssets

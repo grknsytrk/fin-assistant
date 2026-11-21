@@ -1228,6 +1228,32 @@ def _comparison_history_points_from_chart(
     return [deduped[key] for key in sorted(deduped)]
 
 
+def _downsample_comparison_points_weekly(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if len(points) <= 2:
+        return list(points)
+    _ms = _market_service()
+    first = points[0]
+    last = points[-1]
+    by_week: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    for point in points:
+        point_date = str(point.get("date") or "").strip()
+        if not point_date:
+            continue
+        try:
+            iso = _ms.date.fromisoformat(point_date).isocalendar()
+            by_week[(int(iso[0]), int(iso[1]))] = point
+        except ValueError:
+            continue
+    sampled = [by_week[k] for k in sorted(by_week)]
+    if not sampled:
+        return list(points)
+    if sampled[0].get("date") != first.get("date"):
+        sampled.insert(0, first)
+    if sampled[-1].get("date") != last.get("date"):
+        sampled.append(last)
+    return sampled
+
+
 def _extract_fund_comparison_points(
     payload: Dict[str, Any],
     *,
@@ -1248,6 +1274,8 @@ def _extract_fund_comparison_points(
         if point_date < start_iso or point_date > end_iso:
             continue
         points.append({"date": point_date, "value": price})
+    if (end_date - start_date).days > 400:
+        return _downsample_comparison_points_weekly(points)
     return points
 
 
@@ -1316,9 +1344,10 @@ def _stock_comparison_history(
     try:
         symbol = _ms._normalize_market_stock_card_symbol(asset.symbol)
         yahoo_symbol = f"{symbol}.IS"
+        interval = "1wk" if (end_date - start_date).days > 400 else "1d"
         chart = _ms._fetch_yahoo_chart_period_raw(
             yahoo_symbol,
-            interval="1d",
+            interval=interval,
             start_date=start_date,
             end_date=end_date,
         )
@@ -1370,11 +1399,12 @@ def _index_comparison_history(
             label = asset.label or _ms._MARKET_INDEX_META[symbol]["label"]
             yahoo_candidates = _ms._MARKET_INDEX_META[symbol]["yahoo_candidates"]
         native_ccy = _ms._comparison_asset_native_currency("index", symbol)
+        interval = "1wk" if (end_date - start_date).days > 400 else "1d"
         errors: List[str] = []
         for yahoo_symbol in yahoo_candidates:
             chart = _ms._fetch_yahoo_chart_period_raw(
                 yahoo_symbol,
-                interval="1d",
+                interval=interval,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -1439,11 +1469,12 @@ def _fx_comparison_history(
         )
 
     yahoo_candidates, default_label = entry
+    interval = "1wk" if (end_date - start_date).days > 400 else "1d"
     errors: List[str] = []
     for yahoo_symbol in yahoo_candidates:
         chart = _ms._fetch_yahoo_chart_period_raw(
             yahoo_symbol,
-            interval="1d",
+            interval=interval,
             start_date=start_date,
             end_date=end_date,
         )
@@ -1637,7 +1668,8 @@ def _convert_comparison_series_to_try(
         effective_fx = last_fx
         if effective_fx is None:
             gap_days = (first_fx_date - _ms.date.fromisoformat(pt_date)).days
-            if 0 < gap_days <= 3:
+            max_initial_fx_gap = 7 if (end_date - start_date).days > 400 else 3
+            if 0 < gap_days <= max_initial_fx_gap:
                 effective_fx = float(sorted_fx[0]["value"])
         if effective_fx is not None:
             converted_points.append({

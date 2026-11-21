@@ -1067,6 +1067,65 @@ def test_market_comparison_history_keeps_try_assets_unconverted_when_target_try(
     ]
 
 
+def test_market_comparison_history_uses_weekly_interval_and_downsamples_funds_for_3y_5y(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intervals: List[tuple[str, str]] = []
+
+    def fake_fund_history(processed_dir: Any, fund_code: str, **kwargs: Any) -> Dict[str, Any]:
+        return {
+            "status": "ok",
+            "source": "sqlite",
+            "currency": "TRY",
+            "points": [
+                {"date": "2023-11-20", "price": 1.00},
+                {"date": "2023-11-21", "price": 1.02},
+                {"date": "2023-11-24", "price": 1.05},
+                {"date": "2026-11-16", "price": 2.10},
+                {"date": "2026-11-20", "price": 2.25},
+            ],
+            "source_metadata": {"chart_granularity": "weekly"},
+        }
+
+    def fake_chart(yahoo_symbol: str, *, interval: str, start_date: Any, end_date: Any) -> Dict[str, Any]:
+        intervals.append((yahoo_symbol, interval))
+        return {
+            "ok": True,
+            "points": [
+                {"time": "2023-11-20T14:00:00+00:00", "close": 15000.0},
+                {"time": "2026-11-20T14:00:00+00:00", "close": 21000.0},
+            ],
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_fund_performance_payload", fake_fund_history)
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_period_raw", fake_chart)
+
+    client = TestClient(app)
+    response = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2023-11-20",
+            "end_date": "2026-11-20",
+            "assets": [
+                {"id": "fund:GUH", "kind": "fund", "symbol": "GUH"},
+                {"id": "index:NASDAQ100", "kind": "index", "symbol": "NASDAQ100"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    by_id = {item["id"]: item for item in payload["assets"]}
+    assert ("^NDX", "1wk") in intervals
+    # Same-week midweek point 2023-11-21 is collapsed into the weekly bucket ending 2023-11-24
+    assert by_id["fund:GUH"]["points"] == [
+        {"date": "2023-11-20", "value": 1.00},
+        {"date": "2023-11-24", "value": 1.05},
+        {"date": "2026-11-20", "value": 2.25},
+    ]
+
+
+
 def test_fetch_stock_card_intraday_maps_chart_meta(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_chart(_yahoo_symbol: str, *, interval: str, range_: str) -> Dict[str, Any]:
         assert interval == "5m"

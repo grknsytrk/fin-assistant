@@ -1754,6 +1754,7 @@ from app.funds.performance_and_allocations import (
     _legacy_history_points,
     _migrate_legacy_history_to_sqlite,
     _fund_performance_payload_from_points,
+    _downsample_fund_points_weekly,
     _has_requested_price_coverage,
     _latest_fund_point_date,
     _recent_tail_refresh_target,

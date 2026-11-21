@@ -1587,10 +1587,20 @@ def _fund_performance_payload_from_points(
     if history_job is not None:
         metadata["history_job"] = history_job
 
+    is_weekly_window = bool(
+        start_date is not None
+        and end_date is not None
+        and not full_history_requested
+        and (end_date - start_date).days > 400
+    )
+    response_points = _downsample_fund_points_weekly(ordered) if is_weekly_window else ordered
+    if is_weekly_window:
+        metadata["chart_granularity"] = "weekly"
+
     return {
         "fund_code": normalized_code,
-        "status": "ok" if ordered else "empty",
-        "points": ordered,
+        "status": "ok" if response_points else "empty",
+        "points": response_points,
         "period_stats": _seam("_fund_period_stats")(ordered, as_of=effective_end),
         "source": "sqlite",
         "source_url": str(_fund_service()._fund_prices_db_path(processed_dir)),
@@ -1599,6 +1609,32 @@ def _fund_performance_payload_from_points(
         "stale": bool(stale),
         "source_metadata": metadata,
     }
+
+
+def _downsample_fund_points_weekly(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Downsample an ordered daily fund price series to weekly closes (preserving first & last point)."""
+    if len(points) <= 2:
+        return list(points)
+    first = points[0]
+    last = points[-1]
+    by_week: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    for point in points:
+        point_date = _fund_service()._fund_date(point.get("date"))
+        if not point_date:
+            continue
+        try:
+            iso = date.fromisoformat(point_date).isocalendar()
+            by_week[(int(iso[0]), int(iso[1]))] = point
+        except ValueError:
+            continue
+    sampled = [by_week[k] for k in sorted(by_week)]
+    if not sampled:
+        return list(points)
+    if sampled[0].get("date") != first.get("date"):
+        sampled.insert(0, first)
+    if sampled[-1].get("date") != last.get("date"):
+        sampled.append(last)
+    return sampled
 
 
 def _has_requested_price_coverage(
@@ -2701,16 +2737,45 @@ def _fetch_fast_long_fund_history(
         # rows when the Fintables response really covers the requested range.
         points.extend(fintables_rows_with_tail)
     else:
+        existing_tail: List[Dict[str, Any]] = []
+        direct_fetch_end = end_date
+        if (end_date - start_date).days > 400:
+            try:
+                cached_pts = _fund_service()._read_preferred_fund_price_points(
+                    processed_dir,
+                    normalized,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                valid_cached = _seam("_valid_performance_points")(cached_pts, normalized)
+                if valid_cached:
+                    first_cached_dt = date.fromisoformat(valid_cached[0]["date"])
+                    last_cached_dt = date.fromisoformat(valid_cached[-1]["date"])
+                    if (
+                        first_cached_dt > start_date
+                        and last_cached_dt >= end_date - timedelta(days=7)
+                        and not _seam("_history_internal_gap_warnings")(valid_cached, resolution="daily")
+                    ):
+                        existing_tail = valid_cached
+                        direct_fetch_end = first_cached_dt - timedelta(days=1)
+            except Exception:
+                existing_tail = []
+                direct_fetch_end = end_date
         try:
-            direct_rows = _fund_service().TefasClient().fetch_fund_history(
-                fund_codes=[normalized],
-                start_date=start_date,
-                end_date=end_date,
+            direct_rows = (
+                _fund_service().TefasClient().fetch_fund_history(
+                    fund_codes=[normalized],
+                    start_date=start_date,
+                    end_date=direct_fetch_end,
+                )
+                if start_date <= direct_fetch_end
+                else []
             )
         except _fund_service().TefasUpstreamError as exc:
             direct_rows = []
             warnings.append(f"tefas_fund_list daily history bootstrap failed: {exc}")
-        valid_direct_rows = _seam("_valid_performance_points")(direct_rows, normalized)
+        combined_direct = list(direct_rows) + list(existing_tail) if direct_rows else []
+        valid_direct_rows = _seam("_valid_performance_points")(combined_direct, normalized)
         if _seam("_history_is_usable_daily_range")(
             valid_direct_rows,
             start_date=start_date,
@@ -2730,6 +2795,8 @@ def _fetch_fast_long_fund_history(
                 if valid_fintables_rows
                 else "fintables_udf_history_unavailable_tefas_fallback"
             )
+            if (end_date - start_date).days > 400 and not valid_fintables_rows:
+                return valid_direct_rows, warnings, fallback_used, fallback_reason
         points.extend(fintables_rows_with_tail)
         points.extend(valid_direct_rows)
 
@@ -3810,6 +3877,7 @@ __all__ = [
     "_legacy_history_points",
     "_migrate_legacy_history_to_sqlite",
     "_fund_performance_payload_from_points",
+    "_downsample_fund_points_weekly",
     "_has_requested_price_coverage",
     "_latest_fund_point_date",
     "_recent_tail_refresh_target",

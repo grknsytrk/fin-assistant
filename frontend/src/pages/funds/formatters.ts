@@ -463,6 +463,35 @@ export function rangeStartDate(range: FundChartRange, endDateIso: string, custom
     return start.toISOString().slice(0, 10);
 }
 
+export function isoWeekBucketKey(isoDate: string): string {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate || '').trim());
+    if (!match) return isoDate;
+    const d = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+    const dayNum = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+    const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+    const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+    return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+export function downsamplePointsWeekly<T extends { date: string }>(points: T[]): T[] {
+    if (points.length <= 2) return points;
+    const first = points[0];
+    const last = points[points.length - 1];
+    const byWeek = new Map<string, T>();
+    for (const point of points) {
+        byWeek.set(isoWeekBucketKey(point.date), point);
+    }
+    const sampled = Array.from(byWeek.values()).sort((a, b) => a.date.localeCompare(b.date));
+    if (sampled[0]?.date !== first.date) {
+        sampled.unshift(first);
+    }
+    if (sampled[sampled.length - 1]?.date !== last.date) {
+        sampled.push(last);
+    }
+    return sampled;
+}
+
 export function filterPointsForRange(
     points: FundPricePoint[],
     range: FundChartRange,
@@ -480,7 +509,10 @@ export function filterPointsForRange(
         const ts = new Date(point.date).getTime();
         return Number.isFinite(ts) && ts >= startTs && ts <= endTs;
     });
-    if (!inRange.length || points[0]?.date >= startIso) return inRange;
+    const isWeeklyRange = range === '3y' || range === '5y';
+    if (!inRange.length || points[0]?.date >= startIso) {
+        return isWeeklyRange ? downsamplePointsWeekly(inRange) : inRange;
+    }
 
     let anchor: FundPricePoint | null = null;
     for (const point of points) {
@@ -488,8 +520,8 @@ export function filterPointsForRange(
         if (!Number.isFinite(ts) || ts > startTs) break;
         anchor = point;
     }
-    if (!anchor || anchor.date === inRange[0]?.date) return inRange;
-    return [anchor, ...inRange];
+    const sliced = !anchor || anchor.date === inRange[0]?.date ? inRange : [anchor, ...inRange];
+    return isWeeklyRange ? downsamplePointsWeekly(sliced) : sliced;
 }
 
 export function hasUsableRangeCoverage(points: FundPricePoint[], startIso: string, endIso: string): boolean {
