@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response
+from pydantic import field_validator
 
 from app.api_runtime import (
     Any,
@@ -60,6 +61,17 @@ class MarketComparisonHistoryRequest(BaseModel):
     assets: List[MarketComparisonHistoryAsset] = Field(..., min_length=1, max_length=8)
     start_date: date
     end_date: date
+    target_currency: Optional[Literal["TRY"]] = None
+
+    @field_validator("target_currency", mode="before")
+    @classmethod
+    def _normalize_target_currency(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip().upper()
+            return stripped or None
+        return value
 
 @router.get("/market/universe")
 def market_universe(index: str = Query("XUTUM"), refresh: bool = Query(False)) -> Dict[str, Any]:

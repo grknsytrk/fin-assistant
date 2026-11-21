@@ -1160,6 +1160,18 @@ def _comparison_error_message(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _comparison_asset_native_currency(kind: str, symbol: str) -> str:
+    _ms = _market_service()
+    norm_kind = str(kind or "").strip().lower()
+    norm_symbol = str(symbol or "").strip().upper()
+    if norm_kind == "index":
+        return _ms._GLOBAL_INDEX_NATIVE_CURRENCY.get(norm_symbol, "TRY")
+    if norm_kind == "fx" and "/" in norm_symbol:
+        quote_ccy = norm_symbol.split("/", 1)[1].strip()
+        return quote_ccy or "TRY"
+    return "TRY"
+
+
 def _comparison_history_result(
     asset: MarketComparisonHistoryAsset,
     *,
@@ -1168,7 +1180,16 @@ def _comparison_history_result(
     points: List[Dict[str, Any]],
     source: str,
     error: Optional[str] = None,
+    native_currency: Optional[str] = None,
+    currency: Optional[str] = None,
+    fx_converted: bool = False,
+    fx_pair: Optional[str] = None,
 ) -> Dict[str, Any]:
+    resolved_native = (
+        str(native_currency or _comparison_asset_native_currency(asset.kind, symbol)).strip().upper()
+        or "TRY"
+    )
+    resolved_currency = str(currency or resolved_native).strip().upper() or "TRY"
     return {
         "id": asset.id or f"{asset.kind}:{symbol}",
         "kind": asset.kind,
@@ -1177,6 +1198,10 @@ def _comparison_history_result(
         "points": points,
         "source": source,
         "error": error,
+        "native_currency": resolved_native,
+        "currency": resolved_currency,
+        "fx_converted": bool(fx_converted),
+        "fx_pair": fx_pair,
     }
 
 
@@ -1232,6 +1257,7 @@ def _fund_comparison_history(
             if point_date < start_date.isoformat() or point_date > end_date.isoformat():
                 continue
             points.append({"date": point_date, "value": price})
+        fund_currency = str(payload.get("currency") or "TRY").strip().upper() or "TRY"
         return _ms._comparison_history_result(
             asset,
             symbol=symbol,
@@ -1239,6 +1265,8 @@ def _fund_comparison_history(
             points=points,
             source=str(payload.get("source") or "sqlite"),
             error=None if points else str(payload.get("source_metadata", {}).get("warning") or payload.get("status") or "data_unavailable"),
+            native_currency=fund_currency,
+            currency=fund_currency,
         )
     except Exception as exc:
         return _ms._comparison_history_result(
@@ -1248,6 +1276,8 @@ def _fund_comparison_history(
             points=[],
             source="sqlite",
             error=_ms._comparison_error_message(exc),
+            native_currency="TRY",
+            currency="TRY",
         )
 
 
@@ -1275,6 +1305,8 @@ def _stock_comparison_history(
             points=points,
             source="yahoo_finance_chart",
             error=None if chart.get("ok") and points else str(chart.get("error") or "data_unavailable"),
+            native_currency="TRY",
+            currency="TRY",
         )
     except Exception as exc:
         symbol = str(asset.symbol or "").strip().upper()
@@ -1285,6 +1317,8 @@ def _stock_comparison_history(
             points=[],
             source="yahoo_finance_chart",
             error=_ms._comparison_error_message(exc),
+            native_currency="TRY",
+            currency="TRY",
         )
 
 
@@ -1310,6 +1344,7 @@ def _index_comparison_history(
             symbol = _ms._normalize_market_index(asset.symbol)
             label = asset.label or _ms._MARKET_INDEX_META[symbol]["label"]
             yahoo_candidates = _ms._MARKET_INDEX_META[symbol]["yahoo_candidates"]
+        native_ccy = _ms._comparison_asset_native_currency("index", symbol)
         errors: List[str] = []
         for yahoo_symbol in yahoo_candidates:
             chart = _ms._fetch_yahoo_chart_period_raw(
@@ -1326,6 +1361,8 @@ def _index_comparison_history(
                     label=label,
                     points=points,
                     source="yahoo_finance_chart",
+                    native_currency=native_ccy,
+                    currency=native_ccy,
                 )
             errors.append(str(chart.get("error") or "data_unavailable"))
         return _ms._comparison_history_result(
@@ -1335,9 +1372,12 @@ def _index_comparison_history(
             points=[],
             source="yahoo_finance_chart",
             error="; ".join(errors[:3]) if errors else "data_unavailable",
+            native_currency=native_ccy,
+            currency=native_ccy,
         )
     except Exception as exc:
         symbol = str(asset.symbol or "").strip().upper()
+        native_ccy = _ms._comparison_asset_native_currency("index", symbol)
         return _ms._comparison_history_result(
             asset,
             symbol=symbol,
@@ -1345,6 +1385,8 @@ def _index_comparison_history(
             points=[],
             source="yahoo_finance_chart",
             error=_ms._comparison_error_message(exc),
+            native_currency=native_ccy,
+            currency=native_ccy,
         )
 
 
@@ -1356,8 +1398,9 @@ def _fx_comparison_history(
 ) -> Dict[str, Any]:
     _ms = _market_service()
     symbol = str(asset.symbol or "").strip().upper()
-    direct_map = {entry[0]: entry for entry in _ms._FX_DIRECT_MAP}
-    entry = direct_map.get(symbol)
+    native_ccy = _ms._comparison_asset_native_currency("fx", symbol)
+    direct_map = {entry[0]: (list(entry[1]), entry[2]) for entry in _ms._FX_DIRECT_MAP}
+    entry = direct_map.get(symbol) or _ms._COMPARISON_FX_EXTRA_MAP.get(symbol)
     if not entry:
         return _ms._comparison_history_result(
             asset,
@@ -1366,9 +1409,11 @@ def _fx_comparison_history(
             points=[],
             source="yahoo_finance_chart",
             error="unsupported_fx_symbol",
+            native_currency=native_ccy,
+            currency=native_ccy,
         )
 
-    _, yahoo_candidates, default_label = entry
+    yahoo_candidates, default_label = entry
     errors: List[str] = []
     for yahoo_symbol in yahoo_candidates:
         chart = _ms._fetch_yahoo_chart_period_raw(
@@ -1385,6 +1430,8 @@ def _fx_comparison_history(
                 label=asset.label or default_label,
                 points=points,
                 source="yahoo_finance_chart",
+                native_currency=native_ccy,
+                currency=native_ccy,
             )
         errors.append(str(chart.get("error") or "data_unavailable"))
 
@@ -1395,7 +1442,199 @@ def _fx_comparison_history(
         points=[],
         source="yahoo_finance_chart",
         error="; ".join(errors[:3]) if errors else "data_unavailable",
+        native_currency=native_ccy,
+        currency=native_ccy,
     )
+
+
+def _positive_dated_series(points: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: Dict[str, float] = {}
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        point_date = str(point.get("date") or "").strip()
+        if not point_date:
+            continue
+        try:
+            value = float(point.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value == value and value != float("inf"):
+            deduped[point_date] = value
+    return [{"date": key, "value": deduped[key]} for key in sorted(deduped)]
+
+
+def _align_fx_cross_series(
+    usd_try_points: List[Dict[str, Any]],
+    usd_ccy_points: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    usd_try = _positive_dated_series(usd_try_points)
+    usd_ccy = _positive_dated_series(usd_ccy_points)
+    if not usd_try or not usd_ccy:
+        return []
+    all_dates = sorted({pt["date"] for pt in usd_try} | {pt["date"] for pt in usd_ccy})
+    i = 0
+    j = 0
+    last_usd_try: Optional[float] = None
+    last_usd_ccy: Optional[float] = None
+    crossed: List[Dict[str, Any]] = []
+    for target_date in all_dates:
+        while i < len(usd_try) and usd_try[i]["date"] <= target_date:
+            last_usd_try = float(usd_try[i]["value"])
+            i += 1
+        while j < len(usd_ccy) and usd_ccy[j]["date"] <= target_date:
+            last_usd_ccy = float(usd_ccy[j]["value"])
+            j += 1
+        if last_usd_try is not None and last_usd_ccy is not None and last_usd_ccy > 0:
+            crossed.append({"date": target_date, "value": round(last_usd_try / last_usd_ccy, 8)})
+    return crossed
+
+
+def _fetch_comparison_fx_leg(
+    pair_symbol: str,
+    *,
+    start_date: date,
+    end_date: date,
+) -> List[Dict[str, Any]]:
+    _ms = _market_service()
+    from app.routers.market import MarketComparisonHistoryAsset
+
+    fx_asset = MarketComparisonHistoryAsset(
+        id=f"fx:{pair_symbol}",
+        kind="fx",
+        symbol=pair_symbol,
+        label=pair_symbol,
+    )
+    res = _ms._comparison_history_cached_asset(
+        fx_asset,
+        start_date=start_date,
+        end_date=end_date,
+        handler=_ms._fx_comparison_history,
+    )
+    if res.get("error"):
+        return []
+    return _positive_dated_series(res.get("points") or [])
+
+
+def _resolve_fx_to_try_series(
+    native_currency: str,
+    *,
+    start_date: date,
+    end_date: date,
+    fx_cache: Dict[str, List[Dict[str, Any]]],
+) -> Tuple[List[Dict[str, Any]], str, Optional[str]]:
+    _ms = _market_service()
+    ccy = str(native_currency or "").strip().upper()
+    pair = f"{ccy}/TRY"
+    fx_start = start_date - _ms.timedelta(days=10)
+
+    if ccy in {"USD", "EUR", "GBP"}:
+        if pair not in fx_cache:
+            fx_cache[pair] = _fetch_comparison_fx_leg(pair, start_date=fx_start, end_date=end_date)
+        pts = fx_cache[pair]
+        if not pts:
+            return ([], pair, f"fx_rate_unavailable:{pair}")
+        return (pts, pair, None)
+
+    if ccy in {"JPY", "HKD"}:
+        cross_leg = f"USD/{ccy}"
+        if "USD/TRY" not in fx_cache:
+            fx_cache["USD/TRY"] = _fetch_comparison_fx_leg("USD/TRY", start_date=fx_start, end_date=end_date)
+        if cross_leg not in fx_cache:
+            fx_cache[cross_leg] = _fetch_comparison_fx_leg(cross_leg, start_date=fx_start, end_date=end_date)
+        usd_try_pts = fx_cache["USD/TRY"]
+        usd_ccy_pts = fx_cache[cross_leg]
+        crossed = _ms._align_fx_cross_series(usd_try_pts, usd_ccy_pts)
+        if not crossed:
+            return ([], pair, f"fx_rate_unavailable:{pair}")
+        return (crossed, pair, None)
+
+    return ([], pair, f"unsupported_fx_currency:{ccy}")
+
+
+def _convert_comparison_series_to_try(
+    result: Dict[str, Any],
+    *,
+    target_currency: str,
+    start_date: date,
+    end_date: date,
+    fx_cache: Dict[str, List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    _ms = _market_service()
+    out = dict(result)
+    kind = str(out.get("kind") or "").strip().lower()
+    symbol = str(out.get("symbol") or "").strip().upper()
+    native_ccy = (
+        str(out.get("native_currency") or _ms._comparison_asset_native_currency(kind, symbol))
+        .strip()
+        .upper()
+        or "TRY"
+    )
+    out["native_currency"] = native_ccy
+    out["currency"] = str(out.get("currency") or native_ccy).strip().upper() or native_ccy
+    out["fx_converted"] = bool(out.get("fx_converted", False))
+    out["fx_pair"] = out.get("fx_pair")
+
+    if (
+        str(target_currency or "").strip().upper() != "TRY"
+        or kind != "index"
+        or out.get("error")
+        or not out.get("points")
+        or native_ccy == "TRY"
+    ):
+        return out
+
+    fx_points, fx_pair, fx_err = _ms._resolve_fx_to_try_series(
+        native_ccy,
+        start_date=start_date,
+        end_date=end_date,
+        fx_cache=fx_cache,
+    )
+    sorted_fx = _positive_dated_series(fx_points)
+    if fx_err or not sorted_fx:
+        out["points"] = []
+        out["currency"] = "TRY"
+        out["fx_converted"] = False
+        out["fx_pair"] = fx_pair
+        out["error"] = fx_err or f"fx_rate_unavailable:{fx_pair}"
+        return out
+
+    sorted_index = _positive_dated_series(out.get("points") or [])
+    first_fx_date = _ms.date.fromisoformat(sorted_fx[0]["date"])
+    fx_i = 0
+    last_fx: Optional[float] = None
+    converted_points: List[Dict[str, Any]] = []
+    for pt in sorted_index:
+        pt_date = pt["date"]
+        while fx_i < len(sorted_fx) and sorted_fx[fx_i]["date"] <= pt_date:
+            last_fx = float(sorted_fx[fx_i]["value"])
+            fx_i += 1
+        effective_fx = last_fx
+        if effective_fx is None:
+            gap_days = (first_fx_date - _ms.date.fromisoformat(pt_date)).days
+            if 0 < gap_days <= 3:
+                effective_fx = float(sorted_fx[0]["value"])
+        if effective_fx is not None:
+            converted_points.append({
+                "date": pt_date,
+                "value": round(float(pt["value"]) * effective_fx, 6),
+            })
+
+    if not converted_points:
+        out["points"] = []
+        out["currency"] = "TRY"
+        out["fx_converted"] = False
+        out["fx_pair"] = fx_pair
+        out["error"] = f"fx_rate_unavailable:{fx_pair}"
+        return out
+
+    out["points"] = converted_points
+    out["native_currency"] = native_ccy
+    out["currency"] = "TRY"
+    out["fx_converted"] = True
+    out["fx_pair"] = fx_pair
+    out["error"] = None
+    return out
 
 
 def _comparison_history_cache_key(
@@ -1503,9 +1742,88 @@ def _market_comparison_history_payload(request: MarketComparisonHistoryRequest) 
             )
             for asset in assets_list
         ]
+    target_currency = str(getattr(request, "target_currency", None) or "").strip().upper() or None
+    if target_currency == "TRY":
+        fx_cache: Dict[str, List[Dict[str, Any]]] = {}
+        fx_start = request.start_date - _ms.timedelta(days=10)
+        required_legs: List[str] = []
+        seen_legs: Set[str] = set()
+        for res in resolved_assets:
+            if str(res.get("kind") or "").lower() != "index" or res.get("error") or not res.get("points"):
+                continue
+            native_ccy = str(
+                res.get("native_currency")
+                or _ms._comparison_asset_native_currency("index", str(res.get("symbol") or ""))
+            ).strip().upper()
+            if native_ccy in {"USD", "EUR", "GBP"}:
+                leg = f"{native_ccy}/TRY"
+                if leg not in seen_legs:
+                    seen_legs.add(leg)
+                    required_legs.append(leg)
+            elif native_ccy in {"JPY", "HKD"}:
+                for leg in ("USD/TRY", f"USD/{native_ccy}"):
+                    if leg not in seen_legs:
+                        seen_legs.add(leg)
+                        required_legs.append(leg)
+
+        if len(required_legs) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(4, len(required_legs)),
+                thread_name_prefix="market-compare-fx",
+            ) as executor:
+                leg_futures = {
+                    leg: executor.submit(
+                        _fetch_comparison_fx_leg,
+                        leg,
+                        start_date=fx_start,
+                        end_date=request.end_date,
+                    )
+                    for leg in required_legs
+                }
+                for leg, future in leg_futures.items():
+                    fx_cache[leg] = future.result()
+        elif len(required_legs) == 1:
+            leg = required_legs[0]
+            fx_cache[leg] = _fetch_comparison_fx_leg(
+                leg,
+                start_date=fx_start,
+                end_date=request.end_date,
+            )
+
+        resolved_assets = [
+            _ms._convert_comparison_series_to_try(
+                res,
+                target_currency="TRY",
+                start_date=request.start_date,
+                end_date=request.end_date,
+                fx_cache=fx_cache,
+            )
+            for res in resolved_assets
+        ]
+    else:
+        enriched_assets: List[Dict[str, Any]] = []
+        for res in resolved_assets:
+            item = dict(res)
+            native_ccy = (
+                str(
+                    item.get("native_currency")
+                    or _ms._comparison_asset_native_currency(str(item.get("kind") or ""), str(item.get("symbol") or ""))
+                )
+                .strip()
+                .upper()
+                or "TRY"
+            )
+            item["native_currency"] = native_ccy
+            item["currency"] = str(item.get("currency") or native_ccy).strip().upper() or native_ccy
+            item["fx_converted"] = bool(item.get("fx_converted", False))
+            item["fx_pair"] = item.get("fx_pair")
+            enriched_assets.append(item)
+        resolved_assets = enriched_assets
+
     return {
         "start_date": request.start_date.isoformat(),
         "end_date": request.end_date.isoformat(),
+        "target_currency": target_currency,
         "assets": resolved_assets,
         "source": "mixed",
         "as_of": _ms.datetime.now(_ms.timezone.utc).isoformat(),

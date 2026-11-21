@@ -437,6 +437,13 @@ export function latestFundDate(...values: Array<string | null | undefined>): str
         .at(-1) || null;
 }
 
+export function shiftIsoDateDays(isoDate: string, deltaDays: number): string {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate || '').trim());
+    if (!match) return isoDate;
+    const utcMs = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + deltaDays);
+    return new Date(utcMs).toISOString().slice(0, 10);
+}
+
 export function rangeStartDate(range: FundChartRange, endDateIso: string, customStartDate: string): string {
     const end = new Date(endDateIso);
     if (Number.isNaN(end.getTime())) return isoDateDaysAgo(30);

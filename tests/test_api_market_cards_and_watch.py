@@ -790,6 +790,226 @@ def test_market_comparison_history_supports_global_indices(monkeypatch: pytest.M
     assert all(asset["error"] is None for asset in payload["assets"])
 
 
+def test_market_comparison_history_converts_foreign_indices_to_try(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fx_calls: List[str] = []
+
+    def fake_chart(yahoo_symbol: str, *, interval: str, start_date: Any, end_date: Any) -> Dict[str, Any]:
+        assert interval == "1d"
+        if yahoo_symbol in {"USDTRY=X", "EURTRY=X", "USDJPY=X", "USDHKD=X"}:
+            fx_calls.append(yahoo_symbol)
+        series_map: Dict[str, List[Dict[str, Any]]] = {
+            "^IXIC": [
+                {"time": "2026-04-06T14:00:00+00:00", "close": 100.0},
+                {"time": "2026-04-07T14:00:00+00:00", "close": 105.0},
+                {"time": "2026-04-08T14:00:00+00:00", "close": 110.0},
+            ],
+            "^GSPC": [
+                {"time": "2026-04-06T14:00:00+00:00", "close": 5000.0},
+                {"time": "2026-04-08T14:00:00+00:00", "close": 5100.0},
+            ],
+            "^GDAXI": [
+                {"time": "2026-04-06T14:00:00+00:00", "close": 20000.0},
+                {"time": "2026-04-08T14:00:00+00:00", "close": 20200.0},
+            ],
+            "^N225": [
+                {"time": "2026-04-06T06:00:00+00:00", "close": 40000.0},
+                {"time": "2026-04-08T06:00:00+00:00", "close": 42000.0},
+            ],
+            "^HSI": [
+                {"time": "2026-04-06T06:00:00+00:00", "close": 20000.0},
+                {"time": "2026-04-08T06:00:00+00:00", "close": 21000.0},
+            ],
+            # USDTRY intentionally omits 2026-04-07 to verify causal carry-forward
+            # uses 2026-04-06 (40.0), never future 2026-04-08 (42.0).
+            "USDTRY=X": [
+                {"time": "2026-04-06T08:00:00+00:00", "close": 40.0},
+                {"time": "2026-04-08T08:00:00+00:00", "close": 42.0},
+            ],
+            "EURTRY=X": [
+                {"time": "2026-04-06T08:00:00+00:00", "close": 44.0},
+                {"time": "2026-04-08T08:00:00+00:00", "close": 45.0},
+            ],
+            "USDJPY=X": [
+                {"time": "2026-04-06T08:00:00+00:00", "close": 160.0},
+                {"time": "2026-04-08T08:00:00+00:00", "close": 150.0},
+            ],
+            "USDHKD=X": [
+                {"time": "2026-04-06T08:00:00+00:00", "close": 8.0},
+                {"time": "2026-04-08T08:00:00+00:00", "close": 7.5},
+            ],
+        }
+        return {"ok": True, "points": series_map[yahoo_symbol]}
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_period_raw", fake_chart)
+
+    client = TestClient(app)
+    response = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2026-04-06",
+            "end_date": "2026-04-08",
+            "target_currency": "TRY",
+            "assets": [
+                {"id": "index:NASDAQ", "kind": "index", "symbol": "NASDAQ"},
+                {"id": "index:SP500", "kind": "index", "symbol": "SP500"},
+                {"id": "index:DAX", "kind": "index", "symbol": "DAX"},
+                {"id": "index:NIKKEI", "kind": "index", "symbol": "NIKKEI"},
+                {"id": "index:HANGSENG", "kind": "index", "symbol": "HANGSENG"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["target_currency"] == "TRY"
+    assert fx_calls.count("USDTRY=X") == 1
+
+    by_id = {item["id"]: item for item in payload["assets"]}
+    nasdaq = by_id["index:NASDAQ"]
+    assert nasdaq["native_currency"] == "USD"
+    assert nasdaq["currency"] == "TRY"
+    assert nasdaq["fx_converted"] is True
+    assert nasdaq["fx_pair"] == "USD/TRY"
+    assert nasdaq["points"] == [
+        {"date": "2026-04-06", "value": 4000.0},
+        {"date": "2026-04-07", "value": 4200.0},
+        {"date": "2026-04-08", "value": 4620.0},
+    ]
+
+    dax = by_id["index:DAX"]
+    assert dax["native_currency"] == "EUR"
+    assert dax["fx_converted"] is True
+    assert dax["fx_pair"] == "EUR/TRY"
+    assert dax["points"] == [
+        {"date": "2026-04-06", "value": 880000.0},
+        {"date": "2026-04-08", "value": 909000.0},
+    ]
+
+    nikkei = by_id["index:NIKKEI"]
+    assert nikkei["native_currency"] == "JPY"
+    assert nikkei["fx_converted"] is True
+    assert nikkei["fx_pair"] == "JPY/TRY"
+    assert nikkei["points"] == [
+        {"date": "2026-04-06", "value": 10000.0},
+        {"date": "2026-04-08", "value": 11760.0},
+    ]
+
+    hsi = by_id["index:HANGSENG"]
+    assert hsi["native_currency"] == "HKD"
+    assert hsi["fx_converted"] is True
+    assert hsi["fx_pair"] == "HKD/TRY"
+    assert hsi["points"] == [
+        {"date": "2026-04-06", "value": 100000.0},
+        {"date": "2026-04-08", "value": 117600.0},
+    ]
+
+
+def test_market_comparison_history_try_fx_failure_does_not_leak_unconverted_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_chart(yahoo_symbol: str, *, interval: str, start_date: Any, end_date: Any) -> Dict[str, Any]:
+        if yahoo_symbol == "USDTRY=X":
+            return {"ok": False, "error": "upstream_down", "points": []}
+        return {
+            "ok": True,
+            "points": [
+                {"time": "2026-04-10T14:00:00+00:00", "close": 100.0},
+                {"time": "2026-04-12T14:00:00+00:00", "close": 105.0},
+            ],
+        }
+
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_period_raw", fake_chart)
+
+    client = TestClient(app)
+    response = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2026-04-10",
+            "end_date": "2026-04-12",
+            "target_currency": "TRY",
+            "assets": [
+                {"id": "index:NASDAQ", "kind": "index", "symbol": "NASDAQ"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    asset = response.json()["assets"][0]
+    assert asset["points"] == []
+    assert asset["fx_converted"] is False
+    assert asset["fx_pair"] == "USD/TRY"
+    assert asset["error"] == "fx_rate_unavailable:USD/TRY"
+
+
+def test_market_comparison_history_keeps_try_assets_unconverted_when_target_try(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_fund_history(processed_dir: Any, fund_code: str, **kwargs: Any) -> Dict[str, Any]:
+        return {
+            "status": "ok",
+            "source": "sqlite",
+            "currency": "TRY",
+            "points": [
+                {"date": "2026-04-15", "price": 12.0},
+                {"date": "2026-04-17", "price": 12.6},
+            ],
+            "source_metadata": {},
+        }
+
+    def fake_chart(yahoo_symbol: str, *, interval: str, start_date: Any, end_date: Any) -> Dict[str, Any]:
+        base = {"BIMAS.IS": 400.0, "XU100.IS": 9800.0, "USDTRY=X": 41.0}[yahoo_symbol]
+        return {
+            "ok": True,
+            "points": [
+                {"time": "2026-04-15T10:00:00+00:00", "close": base},
+                {"time": "2026-04-17T10:00:00+00:00", "close": base + 2.0},
+            ],
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_fund_performance_payload", fake_fund_history)
+    monkeypatch.setattr(api_module, "_fetch_yahoo_chart_period_raw", fake_chart)
+
+    client = TestClient(app)
+    response = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2026-04-15",
+            "end_date": "2026-04-17",
+            "target_currency": "TRY",
+            "assets": [
+                {"id": "fund:TLY", "kind": "fund", "symbol": "TLY"},
+                {"id": "stock:BIMAS", "kind": "stock", "symbol": "BIMAS"},
+                {"id": "index:XU100", "kind": "index", "symbol": "XU100"},
+                {"id": "fx:USD/TRY", "kind": "fx", "symbol": "USD/TRY"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    by_id = {item["id"]: item for item in payload["assets"]}
+    assert all(item["fx_converted"] is False for item in payload["assets"])
+    assert all(item["error"] is None for item in payload["assets"])
+    assert by_id["fund:TLY"]["points"] == [
+        {"date": "2026-04-15", "value": 12.0},
+        {"date": "2026-04-17", "value": 12.6},
+    ]
+    assert by_id["stock:BIMAS"]["points"] == [
+        {"date": "2026-04-15", "value": 400.0},
+        {"date": "2026-04-17", "value": 402.0},
+    ]
+    assert by_id["index:XU100"]["points"] == [
+        {"date": "2026-04-15", "value": 9800.0},
+        {"date": "2026-04-17", "value": 9802.0},
+    ]
+    assert by_id["fx:USD/TRY"]["points"] == [
+        {"date": "2026-04-15", "value": 41.0},
+        {"date": "2026-04-17", "value": 43.0},
+    ]
+
+
 def test_fetch_stock_card_intraday_maps_chart_meta(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_chart(_yahoo_symbol: str, *, interval: str, range_: str) -> Dict[str, Any]:
         assert interval == "5m"

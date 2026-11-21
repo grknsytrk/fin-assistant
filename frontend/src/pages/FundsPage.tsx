@@ -97,6 +97,7 @@ import {
     pctClass,
     periodReturnsFromPerformancePoints,
     rangeStartDate,
+    shiftIsoDateDays,
     shouldRefreshSnapshot,
     sortFundPoints,
     updateFundsCatalogSnapshot,
@@ -927,6 +928,12 @@ export default function FundsPage({
         .filter((value): value is string => Boolean(value))
         .sort()
         .at(0) || null;
+    const comparisonHistoryFetchStartDate = comparisonHistoryStartDate
+        ? shiftIsoDateDays(comparisonHistoryStartDate, -10)
+        : null;
+    const baseFundCurrency = (selectedFund?.currency || 'TRY').trim().toUpperCase() || 'TRY';
+    const comparisonTargetCurrency: 'TRY' | undefined =
+        comparisonState.fxAdjusted && baseFundCurrency === 'TRY' ? 'TRY' : undefined;
     const comparisonAssets = comparisonState.selectedAssets;
     const comparisonAssetRequests = useMemo(
         () => comparisonAssets.map((asset) => ({
@@ -941,7 +948,7 @@ export default function FundsPage({
         .map((asset) => `${asset.id}:${asset.kind}:${asset.symbol}:${asset.label || ''}`)
         .join('|');
     useEffect(() => {
-        if (!comparisonAssetRequests.length || !comparisonHistoryStartDate || !comparisonChartEndDate) {
+        if (!comparisonAssetRequests.length || !comparisonHistoryFetchStartDate || !comparisonChartEndDate) {
             setComparisonHistory(null);
             setComparisonHistoryError(null);
             setComparisonHistoryLoading(false);
@@ -960,8 +967,9 @@ export default function FundsPage({
         apiClient
             .marketComparisonHistory(
                 {
-                    start_date: comparisonHistoryStartDate,
+                    start_date: comparisonHistoryFetchStartDate,
                     end_date: comparisonChartEndDate,
+                    target_currency: comparisonTargetCurrency,
                     assets: comparisonAssetRequests,
                 },
                 { signal: controller.signal },
@@ -982,7 +990,13 @@ export default function FundsPage({
         return () => {
             controller.abort();
         };
-    }, [comparisonAssetRequestKey, comparisonChartEndDate, comparisonChartStartDate, comparisonHistoryStartDate, pendingChartRange]);
+    }, [
+        comparisonAssetRequestKey,
+        comparisonChartEndDate,
+        comparisonHistoryFetchStartDate,
+        comparisonTargetCurrency,
+        pendingChartRange,
+    ]);
     const detailSourceWarnings = useMemo(
         () => fundCode
             ? buildFundHistoryDiagnosticLines({

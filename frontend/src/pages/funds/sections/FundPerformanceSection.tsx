@@ -29,6 +29,7 @@ import {
     nearestChartPoint,
     pctClass,
     returnBetween,
+    shiftIsoDateDays,
 } from '../formatters';
 import {
     DETAIL_RETURN_PERIODS,
@@ -244,20 +245,42 @@ export function FundPerformanceChart({
     const tickIndexes = Array.from(new Set([0, Math.floor((validPoints.length - 1) / 2), validPoints.length - 1]));
     const firstChartDate = validPoints[0]?.date || '';
     const lastChartDate = validPoints[validPoints.length - 1]?.date || '';
+    const minHolidayAnchorDate = firstChartDate ? shiftIsoDateDays(firstChartDate, -10) : '';
     const selectedComparisonIds = comparisonAssets.map((asset) => asset.id);
     const comparisonHistoryAssets = comparisonHistory?.assets || [];
     const comparisonHistoryById = new Map(comparisonHistoryAssets.map((asset) => [asset.id, asset]));
     const comparisonPointsById = new Map(
-        comparisonHistoryAssets.map((asset) => [
-            asset.id,
-            (asset.points || []).filter((point) => (
-                point.date >= firstChartDate
-                && point.date <= lastChartDate
-                && Number.isFinite(Number(point.value))
-                && Number(point.value) > 0
-            )),
-        ]),
+        comparisonHistoryAssets.map((asset) => {
+            const orderedValid = (asset.points || [])
+                .filter((point) => (
+                    Boolean(point.date)
+                    && Number.isFinite(Number(point.value))
+                    && Number(point.value) > 0
+                ))
+                .sort((a, b) => a.date.localeCompare(b.date));
+            const inWindow = orderedValid.filter((point) => (
+                point.date >= firstChartDate && point.date <= lastChartDate
+            ));
+            if (inWindow.length > 0 && inWindow[0].date > firstChartDate && minHolidayAnchorDate) {
+                let preAnchor: (typeof orderedValid)[number] | null = null;
+                for (const point of orderedValid) {
+                    if (point.date >= firstChartDate) break;
+                    preAnchor = point;
+                }
+                if (preAnchor && preAnchor.date >= minHolidayAnchorDate) {
+                    inWindow.unshift({ date: firstChartDate, value: preAnchor.value });
+                }
+            }
+            return [asset.id, inWindow];
+        }),
     );
+    const comparisonAssetErrors = comparisonAssets
+        .map((asset) => {
+            const err = comparisonHistoryById.get(asset.id)?.error;
+            if (!err) return null;
+            return `${asset.displaySymbol || asset.symbol}: ${err}`;
+        })
+        .filter((msg): msg is string => Boolean(msg));
     const comparisonHistoryMatches = comparisonAssets.length > 0
         && Boolean(comparisonHistory)
         && selectedComparisonIds.every((id) => comparisonHistoryById.has(id));
@@ -321,6 +344,10 @@ export function FundPerformanceChart({
             asset: baseAsset,
             points: validPoints.map((point) => ({ date: point.date, value: Number(point.price) })),
             source: 'fund_performance',
+            nativeCurrency: (currency || 'TRY').toUpperCase(),
+            currency: (currency || 'TRY').toUpperCase(),
+            fxConverted: false,
+            fxPair: null,
         };
         const externalSeries: FundChartComparisonSeries[] = comparisonAssets.map((asset) => {
             const history = historyById.get(asset.id);
@@ -330,8 +357,18 @@ export function FundPerformanceChart({
                     .map((point) => ({ date: point.date, value: Number(point.value) })),
                 source: history?.source,
                 error: history?.error,
+                nativeCurrency: history?.native_currency || asset.nativeCurrency || 'TRY',
+                currency: history?.currency || asset.nativeCurrency || 'TRY',
+                fxConverted: Boolean(history?.fx_converted),
+                fxPair: history?.fx_pair || null,
             };
         });
+        const comparisonSeriesDisplayLabel = (series: Pick<FundChartComparisonSeries, 'asset' | 'fxConverted' | 'nativeCurrency'>) => {
+            const baseLabel = series.asset.displaySymbol || series.asset.symbol;
+            if (series.fxConverted) return `${baseLabel} (TL)`;
+            if (series.nativeCurrency && series.nativeCurrency !== 'TRY') return `${baseLabel} (${series.nativeCurrency})`;
+            return baseLabel;
+        };
         const rawSeries = [baseSeries, ...externalSeries];
         const normalizedSeries = rawSeries
             .map((series, index) => {
@@ -458,7 +495,7 @@ export function FundPerformanceChart({
                 .filter((item): item is { series: typeof normalizedSeries[number]; point: { date: string; value: number } } => Boolean(item))
                 .slice(0, 4)
             : [];
-        const tooltipWidth = isMobileChart ? 300 : 172;
+        const tooltipWidth = isMobileChart ? 340 : 212;
         const tooltipHeight = isMobileChart
             ? Math.max(86, 42 + tooltipRows.length * 30)
             : Math.max(48, 24 + tooltipRows.length * 15);
@@ -480,7 +517,7 @@ export function FundPerformanceChart({
                 {controls}
                 {customRangeInputs}
                 <svg
-                    key={`${fundCode}-${selectedRange}-${validPoints.length}-compare-${comparisonAssets.map((asset) => asset.id).join('-')}`}
+                    key={`${fundCode}-${selectedRange}-${validPoints.length}-compare-${comparison.fxAdjusted ? 'try' : 'raw'}-${comparisonAssets.map((asset) => asset.id).join('-')}`}
                     className={`fund-detail-chart${isMobileChart ? ' is-mobile-chart' : ''}`}
                     viewBox={`0 0 ${width} ${height}`}
                     preserveAspectRatio="xMidYMid meet"
@@ -625,7 +662,7 @@ export function FundPerformanceChart({
                                     <g key={series.asset.id} transform={`translate(8, ${isMobileChart ? 52 + index * 29 : 35 + index * 15})`}>
                                         <circle cx="3.5" cy="-4" r="2.6" fill={series.color} />
                                         <text x="12" y="0" className="fund-chart-tooltip-muted">
-                                            {(series.asset.displaySymbol || series.asset.symbol).slice(0, 8)}
+                                            {comparisonSeriesDisplayLabel(series).slice(0, 14)}
                                         </text>
                                         <text x={tooltipWidth - 10} y="0" className="fund-chart-tooltip-value" textAnchor="end">
                                             {formatPct(point.value)}
@@ -640,13 +677,21 @@ export function FundPerformanceChart({
                     {normalizedSeries.map((series) => (
                         <span key={series.asset.id}>
                             <i style={{ background: series.color }} />
-                            {series.asset.displaySymbol || series.asset.symbol}
+                            {comparisonSeriesDisplayLabel(series)}
                         </span>
                     ))}
                 </div>
                 <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" />
+                {normalizedSeries.some((series) => series.fxConverted) && (
+                    <div className="fund-chart-note">
+                        Yabancı endeksler günlük kapanış kurlarıyla (USD/TRY, EUR/TRY vb.) TL bazlı getiriye endekslenmiştir.
+                    </div>
+                )}
                 {rangeError && <div className="fund-chart-error">{rangeError}</div>}
                 {comparisonError && <div className="fund-chart-error">{comparisonError}</div>}
+                {comparisonAssetErrors.length > 0 && (
+                    <div className="fund-chart-error">{comparisonAssetErrors.join(' · ')}</div>
+                )}
             </section>
         );
     }
@@ -961,6 +1006,9 @@ export function FundPerformanceChart({
                 <div className="fund-chart-note">Karşılaştırma geçmişi yükleniyor...</div>
             )}
             {comparisonError && <div className="fund-chart-error">{comparisonError}</div>}
+            {comparisonAssetErrors.length > 0 && (
+                <div className="fund-chart-error">{comparisonAssetErrors.join(' · ')}</div>
+            )}
             {rangeError && <div className="fund-chart-error">{rangeError}</div>}
         </section>
     );

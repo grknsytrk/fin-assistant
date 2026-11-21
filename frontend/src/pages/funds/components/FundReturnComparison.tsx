@@ -54,11 +54,16 @@ const GLOBAL_COMPARISON_INDEX_ASSETS: ComparisonAsset[] = GLOBAL_COMPARISON_INDI
     displaySymbol: spec.displaySymbol,
     label: spec.label,
     logoName: spec.label,
+    nativeCurrency: spec.nativeCurrency,
     returns: {},
 }));
 
 const GLOBAL_INDEX_SEARCH_ALIASES: Record<string, string[]> = Object.fromEntries(
     GLOBAL_COMPARISON_INDICES.map((spec) => [spec.symbol, spec.aliases]),
+);
+
+const GLOBAL_INDEX_NATIVE_CURRENCY: Record<string, string> = Object.fromEntries(
+    GLOBAL_COMPARISON_INDICES.map((spec) => [spec.symbol, spec.nativeCurrency]),
 );
 
 export function useFundComparisonState({
@@ -75,6 +80,7 @@ export function useFundComparisonState({
     openSearchSignal: number;
 }): FundComparisonState {
     const [period, setPeriod] = useState<ComparisonPeriod>('1m');
+    const [fxAdjusted, setFxAdjusted] = useState(true);
     const [selectedIds, setSelectedIds] = useState<string[]>(() => [...DEFAULT_COMPARISON_IDS]);
     const [query, setQuery] = useState('');
     const [searchOpen, setSearchOpen] = useState(false);
@@ -111,6 +117,7 @@ export function useFundComparisonState({
 
     useEffect(() => {
         setSelectedIds([...DEFAULT_COMPARISON_IDS]);
+        setFxAdjusted(true);
         setQuery('');
         setSearchOpen(false);
         setSearchSurface(null);
@@ -230,7 +237,11 @@ export function useFundComparisonState({
         const fundAssets = [...mergedFunds.values()]
             .filter((row) => comparisonAssetId('fund', row.fund_code) !== currentFundId)
             .map(fundToComparisonAsset);
-        const dynamicIndexAssets = indexRows.map(indexToComparisonAsset);
+        const dynamicIndexAssets = indexRows.map((row) => {
+            const base = indexToComparisonAsset(row);
+            const nativeCurrency = GLOBAL_INDEX_NATIVE_CURRENCY[base.symbol];
+            return nativeCurrency ? { ...base, nativeCurrency } : base;
+        });
         const existingIndexIds = new Set(dynamicIndexAssets.map((asset) => asset.id));
         const globalIndexAssets = GLOBAL_COMPARISON_INDEX_ASSETS.filter((asset) => !existingIndexIds.has(asset.id));
         return [
@@ -246,6 +257,10 @@ export function useFundComparisonState({
     const selectedAssets = useMemo(
         () => selectedIds.map((id) => assetById.get(id)).filter((asset): asset is ComparisonAsset => Boolean(asset)),
         [assetById, selectedIds],
+    );
+    const hasForeignAssets = useMemo(
+        () => selectedAssets.some((asset) => Boolean(asset.nativeCurrency && asset.nativeCurrency !== 'TRY')),
+        [selectedAssets],
     );
 
     const searchResults = useMemo(() => {
@@ -295,6 +310,9 @@ export function useFundComparisonState({
         selectedIds,
         period,
         setPeriod,
+        fxAdjusted,
+        setFxAdjusted,
+        hasForeignAssets,
         query,
         setQuery,
         searchOpen,
@@ -323,6 +341,9 @@ export function FundComparisonControls({
 }) {
     const {
         selectedAssets,
+        fxAdjusted,
+        setFxAdjusted,
+        hasForeignAssets,
         query,
         setQuery,
         searchOpen,
@@ -410,18 +431,48 @@ export function FundComparisonControls({
             </div>
 
             <div className="fund-comparison-chips" aria-label="Seçili karşılaştırmalar">
-                {selectedAssets.map((asset) => (
-                    <button
-                        key={asset.id}
-                        type="button"
-                        onClick={() => removeAsset(asset.id)}
-                        title={`${asset.displaySymbol || asset.symbol} karşılaştırmadan çıkar`}
-                    >
-                        <i />
-                        {asset.displaySymbol || asset.symbol}
-                    </button>
-                ))}
+                {selectedAssets.map((asset) => {
+                    const baseSymbol = asset.displaySymbol || asset.symbol;
+                    const isForeign = Boolean(asset.nativeCurrency && asset.nativeCurrency !== 'TRY');
+                    const chipLabel = isForeign
+                        ? `${baseSymbol} · ${fxAdjusted ? 'TL' : asset.nativeCurrency}`
+                        : baseSymbol;
+                    return (
+                        <button
+                            key={asset.id}
+                            type="button"
+                            onClick={() => removeAsset(asset.id)}
+                            title={`${chipLabel} karşılaştırmadan çıkar`}
+                        >
+                            <i />
+                            {chipLabel}
+                        </button>
+                    );
+                })}
             </div>
+
+            {hasForeignAssets && (
+                <div className="fund-comparison-fx-toggle" role="group" aria-label="Kur düzeltme modu">
+                    <button
+                        type="button"
+                        className={fxAdjusted ? 'is-active' : undefined}
+                        aria-pressed={fxAdjusted}
+                        onClick={() => setFxAdjusted(true)}
+                        title="Yabancı endeksleri günlük kurla TL bazlı getiriye endeksle"
+                    >
+                        TL Bazlı
+                    </button>
+                    <button
+                        type="button"
+                        className={!fxAdjusted ? 'is-active' : undefined}
+                        aria-pressed={!fxAdjusted}
+                        onClick={() => setFxAdjusted(false)}
+                        title="Yabancı endeksleri kendi yerel para biriminde göster"
+                    >
+                        Orijinal
+                    </button>
+                </div>
+            )}
         </div>
     );
 }
@@ -444,30 +495,50 @@ export function FundReturnComparison({
         selectedIds,
         period,
         setPeriod,
+        fxAdjusted,
     } = comparison;
 
     const chartItems = useMemo(() => {
         if (!baseAsset) return [];
         const comparisonHistoryById = new Map((comparisonHistory?.assets || []).map((asset) => [asset.id, asset]));
         const items = [baseAsset, ...selectedAssets]
-            .map((asset) => ({
-                asset,
-                value: asset.id === baseAsset.id
+            .map((asset) => {
+                const isBase = asset.id === baseAsset.id;
+                const history = comparisonHistoryById.get(asset.id);
+                const isForeign = Boolean(asset.nativeCurrency && asset.nativeCurrency !== 'TRY');
+                const value = isBase
                     ? returnFromFundPoints(basePerformancePoints, period) ?? periodReturnFromAsset(asset, period)
-                    : returnFromDatedValues(comparisonHistoryById.get(asset.id)?.points, period)
-                        ?? periodReturnFromAsset(asset, period),
-            }))
+                    : isForeign
+                        ? returnFromDatedValues(history?.points, period)
+                        : returnFromDatedValues(history?.points, period) ?? periodReturnFromAsset(asset, period);
+                const fxConverted = Boolean(history?.fx_converted);
+                const nativeCurrency = history?.native_currency || asset.nativeCurrency || 'TRY';
+                const fxPair = history?.fx_pair || (nativeCurrency !== 'TRY' ? `${nativeCurrency}/TRY` : null);
+                const baseSymbol = asset.displaySymbol || asset.symbol;
+                const displayName = !isBase && isForeign
+                    ? `${baseSymbol} (${fxConverted ? 'TL' : nativeCurrency})`
+                    : baseSymbol;
+                return {
+                    asset,
+                    value,
+                    fxConverted,
+                    nativeCurrency,
+                    fxPair,
+                    isForeign: !isBase && isForeign,
+                    displayName,
+                };
+            })
             .filter((item) => item.value != null);
         return items.sort((a, b) => {
             const valueDiff = Number(b.value) - Number(a.value);
             if (valueDiff !== 0) return valueDiff;
-            return (a.asset.displaySymbol || a.asset.symbol).localeCompare(b.asset.displaySymbol || b.asset.symbol, 'tr');
+            return a.displayName.localeCompare(b.displayName, 'tr');
         });
     }, [baseAsset, basePerformancePoints, comparisonHistory, period, selectedAssets]);
 
     useEffect(() => {
         setHover(null);
-    }, [period, selectedIds]);
+    }, [fxAdjusted, period, selectedIds]);
 
     if (!baseAsset) {
         return null;
@@ -553,14 +624,13 @@ export function FundReturnComparison({
                             );
                         })}
                         <line x1={padding.left} x2={chartWidth - padding.right} y1={zeroY} y2={zeroY} className="fund-comparison-zero" />
-                        {chartItems.map(({ asset, value }, index) => {
+                        {chartItems.map(({ asset, value, displayName }, index) => {
                             const numericValue = Number(value);
                             const x = startX + index * (barWidth + barGap);
                             const y = numericValue >= 0 ? yFor(numericValue) : zeroY;
                             const height = Math.max(2, Math.abs(zeroY - yFor(numericValue)));
                             const isBase = asset.id === baseAsset.id;
                             const isActive = hover?.assetId === asset.id;
-                            const displaySymbol = asset.displaySymbol || asset.symbol;
                             return (
                                 <g
                                     key={asset.id}
@@ -599,7 +669,7 @@ export function FundReturnComparison({
                                         textAnchor="middle"
                                         transform={`rotate(-32 ${barWidth / 2} ${chartHeight - 18})`}
                                     >
-                                        {displaySymbol}
+                                        {displayName}
                                     </text>
                                 </g>
                             );
@@ -617,8 +687,13 @@ export function FundReturnComparison({
                         ].filter(Boolean).join(' ')}
                         style={{ left: `${hover.x}px`, top: `${hover.y}px` }}
                     >
-                        <span>{hoverItem.asset.displaySymbol || hoverItem.asset.symbol}</span>
+                        <span>{hoverItem.displayName}</span>
                         <strong>{formatPct(hoverItem.value)}</strong>
+                        {hoverItem.fxConverted ? (
+                            <small>{hoverItem.fxPair || `${hoverItem.nativeCurrency}/TRY`} kur düzeltmeli</small>
+                        ) : hoverItem.isForeign ? (
+                            <small>{hoverItem.nativeCurrency} bazlı (orijinal)</small>
+                        ) : null}
                     </div>
                 ) : null}
             </div>

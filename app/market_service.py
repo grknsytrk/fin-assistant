@@ -656,6 +656,22 @@ _FX_DIRECT_MAP: List[tuple[str, List[str], str]] = [
     ("DXY", ["DX-Y.NYB"], "Dolar Endeksi"),
 ]
 
+_COMPARISON_FX_EXTRA_MAP: Dict[str, tuple[List[str], str]] = {
+    "USD/HKD": (["USDHKD=X", "HKD=X"], "Dolar / Hong Kong Doları"),
+}
+
+_GLOBAL_INDEX_NATIVE_CURRENCY: Dict[str, str] = {
+    "SP500": "USD",
+    "NASDAQ": "USD",
+    "NASDAQ100": "USD",
+    "DOW": "USD",
+    "DAX": "EUR",
+    "CAC40": "EUR",
+    "FTSE": "GBP",
+    "NIKKEI": "JPY",
+    "HANGSENG": "HKD",
+}
+
 _FX_DERIVED_MAP: List[tuple[str, str, str, str]] = [
     ("CNY/TRY", "Çin Yuanı / TL", "USD/TRY", "USD/CNY"),
 ]
@@ -919,12 +935,16 @@ from app.market.cards_indices_fx import (
     _index_returns_from_bases,
     _market_index_row,
     _comparison_error_message,
+    _comparison_asset_native_currency,
     _comparison_history_result,
     _comparison_history_points_from_chart,
     _fund_comparison_history,
     _stock_comparison_history,
     _index_comparison_history,
     _fx_comparison_history,
+    _align_fx_cross_series,
+    _resolve_fx_to_try_series,
+    _convert_comparison_series_to_try,
     _comparison_history_cache_key,
     _comparison_history_cached_asset,
     _market_comparison_history_payload,

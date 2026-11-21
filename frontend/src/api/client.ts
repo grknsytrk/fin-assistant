@@ -754,6 +754,7 @@ export const apiClient = {
             assets: MarketComparisonHistoryAssetRequest[];
             start_date: string;
             end_date: string;
+            target_currency?: 'TRY' | null;
         },
         options?: { signal?: AbortSignal },
     ) =>

@@ -213,6 +213,7 @@ export type ComparisonAsset = {
     label: string;
     logoName?: string | null;
     logoUrl?: string | null;
+    nativeCurrency?: string;
     returns: Partial<Record<ComparisonPeriod, number | null>>;
 };
 
@@ -222,6 +223,9 @@ export type FundComparisonState = {
     selectedIds: string[];
     period: ComparisonPeriod;
     setPeriod: Dispatch<SetStateAction<ComparisonPeriod>>;
+    fxAdjusted: boolean;
+    setFxAdjusted: Dispatch<SetStateAction<boolean>>;
+    hasForeignAssets: boolean;
     query: string;
     setQuery: Dispatch<SetStateAction<string>>;
     searchOpen: boolean;
@@ -243,6 +247,10 @@ export type FundChartComparisonSeries = {
     points: Array<{ date: string; value: number }>;
     source?: string | null;
     error?: string | null;
+    nativeCurrency?: string | null;
+    currency?: string | null;
+    fxConverted?: boolean;
+    fxPair?: string | null;
 };
 
 export type ComparisonReturnSource = {
@@ -273,19 +281,20 @@ export interface GlobalComparisonIndexSpec {
     symbol: string;
     displaySymbol: string;
     label: string;
+    nativeCurrency: 'USD' | 'EUR' | 'GBP' | 'JPY' | 'HKD';
     aliases: string[];
 }
 
 export const GLOBAL_COMPARISON_INDICES: GlobalComparisonIndexSpec[] = [
-    { symbol: 'SP500', displaySymbol: 'S&P 500', label: 'S&P 500 (ABD)', aliases: ['SP500', 'S&P500', 'SPX', 'GSPC', 'ABD', 'Yabancı Endeks'] },
-    { symbol: 'NASDAQ', displaySymbol: 'NASDAQ', label: 'Nasdaq Composite (ABD)', aliases: ['IXIC', 'ABD', 'Teknoloji', 'Yabancı Endeks'] },
-    { symbol: 'NASDAQ100', displaySymbol: 'NDX', label: 'Nasdaq 100 (ABD)', aliases: ['NASDAQ 100', 'NDX', 'QQQ', 'ABD', 'Teknoloji', 'Yabancı Endeks'] },
-    { symbol: 'DOW', displaySymbol: 'DOW', label: 'Dow Jones (ABD)', aliases: ['DJI', 'DJIA', 'ABD', 'Yabancı Endeks'] },
-    { symbol: 'DAX', displaySymbol: 'DAX', label: 'DAX 40 (Almanya)', aliases: ['GDAXI', 'Almanya', 'Avrupa', 'Yabancı Endeks'] },
-    { symbol: 'FTSE', displaySymbol: 'FTSE 100', label: 'FTSE 100 (İngiltere)', aliases: ['FTSE100', 'UK', 'İngiltere', 'Avrupa', 'Yabancı Endeks'] },
-    { symbol: 'CAC40', displaySymbol: 'CAC 40', label: 'CAC 40 (Fransa)', aliases: ['FCHI', 'Fransa', 'Avrupa', 'Yabancı Endeks'] },
-    { symbol: 'NIKKEI', displaySymbol: 'NIKKEI 225', label: 'Nikkei 225 (Japonya)', aliases: ['N225', 'Japonya', 'Asya', 'Yabancı Endeks'] },
-    { symbol: 'HANGSENG', displaySymbol: 'HANG SENG', label: 'Hang Seng (Hong Kong)', aliases: ['HSI', 'Çin', 'Hong Kong', 'Asya', 'Yabancı Endeks'] },
+    { symbol: 'SP500', displaySymbol: 'S&P 500', label: 'S&P 500 (ABD)', nativeCurrency: 'USD', aliases: ['SP500', 'S&P500', 'SPX', 'GSPC', 'ABD', 'Yabancı Endeks'] },
+    { symbol: 'NASDAQ', displaySymbol: 'NASDAQ', label: 'Nasdaq Composite (ABD)', nativeCurrency: 'USD', aliases: ['IXIC', 'ABD', 'Teknoloji', 'Yabancı Endeks'] },
+    { symbol: 'NASDAQ100', displaySymbol: 'NDX', label: 'Nasdaq 100 (ABD)', nativeCurrency: 'USD', aliases: ['NASDAQ 100', 'NDX', 'QQQ', 'ABD', 'Teknoloji', 'Yabancı Endeks'] },
+    { symbol: 'DOW', displaySymbol: 'DOW', label: 'Dow Jones (ABD)', nativeCurrency: 'USD', aliases: ['DJI', 'DJIA', 'ABD', 'Yabancı Endeks'] },
+    { symbol: 'DAX', displaySymbol: 'DAX', label: 'DAX 40 (Almanya)', nativeCurrency: 'EUR', aliases: ['GDAXI', 'Almanya', 'Avrupa', 'Yabancı Endeks'] },
+    { symbol: 'FTSE', displaySymbol: 'FTSE 100', label: 'FTSE 100 (İngiltere)', nativeCurrency: 'GBP', aliases: ['FTSE100', 'UK', 'İngiltere', 'Avrupa', 'Yabancı Endeks'] },
+    { symbol: 'CAC40', displaySymbol: 'CAC 40', label: 'CAC 40 (Fransa)', nativeCurrency: 'EUR', aliases: ['FCHI', 'Fransa', 'Avrupa', 'Yabancı Endeks'] },
+    { symbol: 'NIKKEI', displaySymbol: 'NIKKEI 225', label: 'Nikkei 225 (Japonya)', nativeCurrency: 'JPY', aliases: ['N225', 'Japonya', 'Asya', 'Yabancı Endeks'] },
+    { symbol: 'HANGSENG', displaySymbol: 'HANG SENG', label: 'Hang Seng (Hong Kong)', nativeCurrency: 'HKD', aliases: ['HSI', 'Çin', 'Hong Kong', 'Asya', 'Yabancı Endeks'] },
 ];
 
 export type FundsCatalogPayload = {

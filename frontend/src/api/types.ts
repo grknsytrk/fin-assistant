@@ -554,11 +554,16 @@ export interface MarketComparisonHistoryAssetSeries {
   points: MarketComparisonHistoryPoint[];
   source: string;
   error: string | null;
+  native_currency?: string | null;
+  currency?: string | null;
+  fx_converted?: boolean;
+  fx_pair?: string | null;
 }
 
 export interface MarketComparisonHistoryResponse {
   start_date: string;
   end_date: string;
+  target_currency?: string | null;
   assets: MarketComparisonHistoryAssetSeries[];
   source: string;
   as_of: string;
