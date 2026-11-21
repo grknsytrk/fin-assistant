@@ -744,6 +744,63 @@ def test_market_comparison_history_returns_partial_errors(monkeypatch: pytest.Mo
     assert payload["assets"][1]["error"] == "not_found"
 
 
+def test_market_comparison_history_fund_skips_overview_metrics_and_serves_local_db_when_swr_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_fund_history(processed_dir: Any, fund_code: str, **kwargs: Any) -> Dict[str, Any]:
+        calls.append({"fund_code": fund_code, **kwargs})
+        return {
+            "status": "ok",
+            "source": "sqlite",
+            "points": [
+                {"date": "2025-11-20", "price": 1.15},
+                {"date": "2026-11-20", "price": 1.68},
+            ],
+            "source_metadata": {},
+        }
+
+    monkeypatch.setattr(fund_service_module, "get_fund_performance_payload", fake_fund_history)
+
+    client = TestClient(app)
+    response = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2025-11-10",
+            "end_date": "2026-11-20",
+            "assets": [{"id": "fund:GUH", "kind": "fund", "symbol": "GUH", "label": "GUH"}],
+        },
+    )
+    assert response.status_code == 200
+    asset_payload = response.json()["assets"][0]
+    assert asset_payload["error"] is None
+    assert len(asset_payload["points"]) == 2
+    assert calls[0]["include_overview_metrics"] is False
+
+    # Simulate single-flight waiter timeout (shared SWR returns pending) while DB already has points
+    monkeypatch.setattr(
+        api_module,
+        "_shared_swr_payload",
+        lambda **_kwargs: (None, "pending", False, True),
+    )
+    response_pending = client.post(
+        "/market/comparison-history",
+        json={
+            "start_date": "2025-11-11",
+            "end_date": "2026-11-20",
+            "assets": [{"id": "fund:GUH", "kind": "fund", "symbol": "GUH", "label": "GUH"}],
+        },
+    )
+    assert response_pending.status_code == 200
+    pending_asset = response_pending.json()["assets"][0]
+    assert pending_asset["error"] is None
+    assert pending_asset["refresh_pending"] is True
+    assert len(pending_asset["points"]) == 2
+    assert calls[-1]["auto_refresh"] is False
+    assert calls[-1]["include_overview_metrics"] is False
+
+
 def test_market_comparison_history_supports_global_indices(monkeypatch: pytest.MonkeyPatch) -> None:
     requested_symbols: List[str] = []
 

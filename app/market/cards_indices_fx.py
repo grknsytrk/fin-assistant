@@ -1228,35 +1228,60 @@ def _comparison_history_points_from_chart(
     return [deduped[key] for key in sorted(deduped)]
 
 
+def _extract_fund_comparison_points(
+    payload: Dict[str, Any],
+    *,
+    start_date: date,
+    end_date: date,
+) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+    for point in list(payload.get("points") or []):
+        try:
+            price = float(point.get("price"))
+        except (TypeError, ValueError):
+            continue
+        point_date = str(point.get("date") or "")
+        if not point_date or price <= 0:
+            continue
+        if point_date < start_iso or point_date > end_iso:
+            continue
+        points.append({"date": point_date, "value": price})
+    return points
+
+
 def _fund_comparison_history(
     asset: MarketComparisonHistoryAsset,
     *,
     start_date: date,
     end_date: date,
+    auto_refresh: bool = True,
 ) -> Dict[str, Any]:
     _ms = _market_service()
     from app.fund_service import get_fund_performance_payload, normalize_fund_code
 
     symbol = normalize_fund_code(asset.symbol)
     try:
-        payload = get_fund_performance_payload(
-            _ms.CONFIG.paths.processed_dir,
-            symbol,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        points: List[Dict[str, Any]] = []
-        for point in list(payload.get("points") or []):
-            try:
-                price = float(point.get("price"))
-            except (TypeError, ValueError):
-                continue
-            point_date = str(point.get("date") or "")
-            if not point_date or price <= 0:
-                continue
-            if point_date < start_date.isoformat() or point_date > end_date.isoformat():
-                continue
-            points.append({"date": point_date, "value": price})
+        try:
+            payload = get_fund_performance_payload(
+                _ms.CONFIG.paths.processed_dir,
+                symbol,
+                start_date=start_date,
+                end_date=end_date,
+                auto_refresh=auto_refresh,
+                include_overview_metrics=False,
+            )
+        except TypeError as exc:
+            if "include_overview_metrics" not in str(exc) and "auto_refresh" not in str(exc):
+                raise
+            payload = get_fund_performance_payload(
+                _ms.CONFIG.paths.processed_dir,
+                symbol,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        points = _extract_fund_comparison_points(payload, start_date=start_date, end_date=end_date)
         fund_currency = str(payload.get("currency") or "TRY").strip().upper() or "TRY"
         return _ms._comparison_history_result(
             asset,
@@ -1687,15 +1712,33 @@ def _comparison_history_cached_asset(
         result = dict(latest_result)
     else:
         # A waiter must not repeat the provider request after the bounded
-        # single-flight wait.  The client can retain its prior chart and retry.
-        result = _ms._comparison_history_result(
-            asset,
-            symbol=str(asset.symbol or "").strip().upper(),
-            label=asset.label,
-            points=[],
-            source="mixed",
-            error="refresh_pending",
-        )
+        # single-flight wait. For funds, serve any already-persisted SQLite/DB
+        # points while the leader finishes the upstream backfill.
+        local_fallback: Optional[Dict[str, Any]] = None
+        if str(asset.kind or "").lower() == "fund":
+            try:
+                candidate = _fund_comparison_history(
+                    asset,
+                    start_date=start_date,
+                    end_date=end_date,
+                    auto_refresh=False,
+                )
+                if candidate.get("points"):
+                    local_fallback = candidate
+            except Exception:
+                local_fallback = None
+        if local_fallback is not None:
+            result = dict(local_fallback)
+        else:
+            result = _ms._comparison_history_result(
+                asset,
+                symbol=str(asset.symbol or "").strip().upper(),
+                label=asset.label,
+                points=[],
+                source="mixed",
+                error="refresh_pending",
+            )
+        refresh_pending = True
     # ``id`` and ``label`` are caller presentation choices, so they must not
     # fragment the expensive provider-series cache.
     symbol = str(result.get("symbol") or asset.symbol).strip().upper()

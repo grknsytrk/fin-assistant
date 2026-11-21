@@ -1021,34 +1021,54 @@ export default function FundsPage({
             return;
         }
         const controller = new AbortController();
-        setComparisonHistory(null);
-        setComparisonHistoryError(null);
-        setComparisonHistoryLoading(true);
-        apiClient
-            .marketComparisonHistory(
-                {
-                    start_date: comparisonHistoryFetchStartDate,
-                    end_date: comparisonChartEndDate,
-                    target_currency: comparisonTargetCurrency,
-                    assets: comparisonAssetRequests,
-                },
-                { signal: controller.signal },
-            )
-            .then((payload) => {
-                setComparisonHistory(payload);
-            })
-            .catch((err) => {
-                if ((err as Error)?.name === 'AbortError') return;
+        let retryTimer: number | null = null;
+        const maxRetries = 12;
+
+        const runFetch = (attempt: number) => {
+            if (controller.signal.aborted) return;
+            if (attempt === 0) {
                 setComparisonHistory(null);
-                setComparisonHistoryError(err instanceof Error ? err.message : 'Karşılaştırma geçmişi alınamadı.');
-            })
-            .finally(() => {
-                if (!controller.signal.aborted) {
+                setComparisonHistoryError(null);
+            }
+            setComparisonHistoryLoading(true);
+            apiClient
+                .marketComparisonHistory(
+                    {
+                        start_date: comparisonHistoryFetchStartDate,
+                        end_date: comparisonChartEndDate,
+                        target_currency: comparisonTargetCurrency,
+                        assets: comparisonAssetRequests,
+                    },
+                    { signal: controller.signal },
+                )
+                .then((payload) => {
+                    if (controller.signal.aborted) return;
+                    setComparisonHistory(payload);
+                    const hasPendingAsset = (payload.assets || []).some(
+                        (item) => Boolean(item.refresh_pending || item.error === 'refresh_pending'),
+                    );
+                    if (hasPendingAsset && attempt < maxRetries) {
+                        retryTimer = window.setTimeout(() => {
+                            runFetch(attempt + 1);
+                        }, 1500);
+                    } else {
+                        setComparisonHistoryLoading(false);
+                    }
+                })
+                .catch((err) => {
+                    if ((err as Error)?.name === 'AbortError' || controller.signal.aborted) return;
+                    setComparisonHistory(null);
+                    setComparisonHistoryError(err instanceof Error ? err.message : 'Karşılaştırma geçmişi alınamadı.');
                     setComparisonHistoryLoading(false);
-                }
-            });
+                });
+        };
+
+        runFetch(0);
         return () => {
             controller.abort();
+            if (retryTimer != null) {
+                window.clearTimeout(retryTimer);
+            }
         };
     }, [
         comparisonAssetRequestKey,

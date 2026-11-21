@@ -563,6 +563,9 @@ export interface MarketComparisonHistoryAssetSeries {
   currency?: string | null;
   fx_converted?: boolean;
   fx_pair?: string | null;
+  cache_status?: string;
+  stale?: boolean;
+  refresh_pending?: boolean;
 }
 
 export interface MarketComparisonHistoryResponse {

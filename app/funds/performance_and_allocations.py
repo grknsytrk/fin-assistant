@@ -2324,6 +2324,7 @@ def _auto_refresh_fund_performance(
     end_date: date,
     write_history_cache: bool = True,
     prefer_fast_long_range: bool = False,
+    include_overview_metrics: bool = True,
 ) -> List[str]:
     normalized = _fund_service().normalize_fund_code(fund_code)
     key = _seam("_auto_fetch_key")(processed_dir, normalized, start_date, end_date)
@@ -2349,14 +2350,27 @@ def _auto_refresh_fund_performance(
         return []
 
     try:
-        payload = _seam("refresh_fund_performance")(
-            processed_dir,
-            normalized,
-            start_date=start_date,
-            end_date=end_date,
-            write_history_cache=write_history_cache,
-            prefer_fast_long_range=prefer_fast_long_range,
-        )
+        try:
+            payload = _seam("refresh_fund_performance")(
+                processed_dir,
+                normalized,
+                start_date=start_date,
+                end_date=end_date,
+                write_history_cache=write_history_cache,
+                prefer_fast_long_range=prefer_fast_long_range,
+                include_overview_metrics=include_overview_metrics,
+            )
+        except TypeError as exc:
+            if "include_overview_metrics" not in str(exc):
+                raise
+            payload = _seam("refresh_fund_performance")(
+                processed_dir,
+                normalized,
+                start_date=start_date,
+                end_date=end_date,
+                write_history_cache=write_history_cache,
+                prefer_fast_long_range=prefer_fast_long_range,
+            )
         if not payload.get("points"):
             error = "fund history returned no valid points"
             _seam("_remember_auto_fetch_failure")(key, error)
@@ -2647,6 +2661,7 @@ def _fetch_fast_long_fund_history(
     start_date: date,
     end_date: date,
     client: TefasFonClient,
+    include_overview_metrics: bool = True,
 ) -> Tuple[List[Dict[str, Any]], List[str], bool, Optional[str]]:
     normalized = _fund_service().normalize_fund_code(fund_code)
     points: List[Dict[str, Any]] = []
@@ -2718,6 +2733,11 @@ def _fetch_fast_long_fund_history(
         points.extend(fintables_rows_with_tail)
         points.extend(valid_direct_rows)
 
+    if not include_overview_metrics:
+        if not points:
+            warnings.append("fast long range bootstrap returned no points")
+        return points, warnings, fallback_used, fallback_reason
+
     recent_start = max(start_date, end_date - timedelta(days=max(1, _fund_service().FUNDS_RECENT_DETAIL_LOOKBACK_DAYS) - 1))
     recent_rows, recent_warnings = _seam("_fetch_recent_detail_rows")(
         normalized,
@@ -2761,6 +2781,7 @@ def refresh_fund_performance(
     end_date: date,
     write_history_cache: bool = True,
     prefer_fast_long_range: bool = False,
+    include_overview_metrics: bool = True,
 ) -> Dict[str, Any]:
     normalized = _fund_service().normalize_fund_code(fund_code)
     warnings: List[str] = []
@@ -2771,13 +2792,25 @@ def refresh_fund_performance(
     tefas_failure_reason: Optional[str] = None
     client = _fund_service().TefasFonClient()
     if prefer_fast_long_range and (end_date - start_date).days > _fund_service().FUNDS_FAST_LONG_RANGE_DAYS:
-        points, fast_warnings, fallback_used, fallback_reason = _seam("_fetch_fast_long_fund_history")(
-            processed_dir,
-            normalized,
-            start_date=start_date,
-            end_date=end_date,
-            client=client,
-        )
+        try:
+            points, fast_warnings, fallback_used, fallback_reason = _seam("_fetch_fast_long_fund_history")(
+                processed_dir,
+                normalized,
+                start_date=start_date,
+                end_date=end_date,
+                client=client,
+                include_overview_metrics=include_overview_metrics,
+            )
+        except TypeError as exc:
+            if "include_overview_metrics" not in str(exc):
+                raise
+            points, fast_warnings, fallback_used, fallback_reason = _seam("_fetch_fast_long_fund_history")(
+                processed_dir,
+                normalized,
+                start_date=start_date,
+                end_date=end_date,
+                client=client,
+            )
         warnings.extend(fast_warnings)
         if not _seam("_valid_performance_points")(points, normalized):
             points = []
@@ -2912,6 +2945,7 @@ def get_fund_performance_payload(
     allow_upstream_fallback: bool = False,
     auto_refresh: bool = True,
     history_job: Optional[Dict[str, Any]] = None,
+    include_overview_metrics: bool = True,
 ) -> Dict[str, Any]:
     normalized = _fund_service().normalize_fund_code(fund_code)
     full_history_requested = start_date is None and end_date is None
@@ -2942,12 +2976,17 @@ def get_fund_performance_payload(
                 end_date=effective_end,
             )
         )
+        coverage_start = (
+            min(effective_end, query_start + timedelta(days=10))
+            if (not include_overview_metrics and query_start is not None)
+            else query_start
+        )
         has_requested_coverage = (
             full_history_cache_hit
             if full_history_requested
             else _seam("_has_requested_price_coverage")(
                 points,
-                start_date=query_start,
+                start_date=coverage_start,
                 end_date=effective_end,
             )
         )
@@ -2955,13 +2994,25 @@ def get_fund_performance_payload(
         has_requested_coverage = True
     if auto_refresh and not has_requested_coverage:
         auto_fetch_attempted = True
-        auto_warnings = _seam("_auto_refresh_fund_performance")(
-            processed_dir,
-            normalized,
-            start_date=effective_start,
-            end_date=effective_end,
-            prefer_fast_long_range=not full_history_requested,
-        )
+        try:
+            auto_warnings = _seam("_auto_refresh_fund_performance")(
+                processed_dir,
+                normalized,
+                start_date=effective_start,
+                end_date=effective_end,
+                prefer_fast_long_range=not full_history_requested,
+                include_overview_metrics=include_overview_metrics,
+            )
+        except TypeError as exc:
+            if "include_overview_metrics" not in str(exc):
+                raise
+            auto_warnings = _seam("_auto_refresh_fund_performance")(
+                processed_dir,
+                normalized,
+                start_date=effective_start,
+                end_date=effective_end,
+                prefer_fast_long_range=not full_history_requested,
+            )
         points = _fund_service()._read_preferred_fund_price_points(
             processed_dir,
             normalized,
@@ -2973,13 +3024,25 @@ def get_fund_performance_payload(
         if latest_point_date is not None:
             auto_fetch_attempted = True
             tail_start = latest_point_date + timedelta(days=1)
-            auto_warnings = _seam("_auto_refresh_fund_performance")(
-                processed_dir,
-                normalized,
-                start_date=tail_start,
-                end_date=_seam("_recent_tail_refresh_target")(effective_end),
-                write_history_cache=False,
-            )
+            try:
+                auto_warnings = _seam("_auto_refresh_fund_performance")(
+                    processed_dir,
+                    normalized,
+                    start_date=tail_start,
+                    end_date=_seam("_recent_tail_refresh_target")(effective_end),
+                    write_history_cache=False,
+                    include_overview_metrics=include_overview_metrics,
+                )
+            except TypeError as exc:
+                if "include_overview_metrics" not in str(exc):
+                    raise
+                auto_warnings = _seam("_auto_refresh_fund_performance")(
+                    processed_dir,
+                    normalized,
+                    start_date=tail_start,
+                    end_date=_seam("_recent_tail_refresh_target")(effective_end),
+                    write_history_cache=False,
+                )
             points = _fund_service()._read_preferred_fund_price_points(
                 processed_dir,
                 normalized,
@@ -2989,7 +3052,7 @@ def get_fund_performance_payload(
 
     recent_detail_backfill: Optional[Dict[str, Any]] = None
     recent_detail_backfill_attempted = False
-    if auto_refresh and points:
+    if auto_refresh and include_overview_metrics and points:
         recent_detail_backfill = _seam("_auto_refresh_fund_recent_details")(
             processed_dir,
             normalized,
@@ -3008,7 +3071,7 @@ def get_fund_performance_payload(
 
     overview_metric_backfill: Optional[Dict[str, Any]] = None
     overview_metric_backfill_attempted = False
-    if auto_refresh and points and not (auto_fetch_attempted and not full_history_requested):
+    if auto_refresh and include_overview_metrics and points and not (auto_fetch_attempted and not full_history_requested):
         overview_targets = (
             None
             if full_history_requested

@@ -310,10 +310,17 @@ export function FundPerformanceChart({
             return [asset.id, inWindow];
         }),
     );
+    const comparisonPendingSymbols = comparisonAssets
+        .filter((asset) => {
+            const historyItem = comparisonHistoryById.get(asset.id);
+            return Boolean(historyItem && (historyItem.refresh_pending || historyItem.error === 'refresh_pending'));
+        })
+        .map((asset) => asset.displaySymbol || asset.symbol);
     const comparisonAssetErrors = comparisonAssets
         .map((asset) => {
-            const err = comparisonHistoryById.get(asset.id)?.error;
-            if (!err) return null;
+            const historyItem = comparisonHistoryById.get(asset.id);
+            const err = historyItem?.error;
+            if (!err || err === 'refresh_pending' || historyItem?.refresh_pending) return null;
             return `${asset.displaySymbol || asset.symbol}: ${err}`;
         })
         .filter((msg): msg is string => Boolean(msg));
@@ -723,6 +730,11 @@ export function FundPerformanceChart({
                         Yabancı endeksler günlük kapanış kurlarıyla (USD/TRY, EUR/TRY vb.) TL bazlı getiriye endekslenmiştir.
                     </div>
                 )}
+                {comparisonPendingSymbols.length > 0 && (
+                    <div className="fund-chart-note">
+                        Karşılaştırma geçmişi hazırlanıyor ({comparisonPendingSymbols.join(', ')})...
+                    </div>
+                )}
                 {rangeError && <div className="fund-chart-error">{rangeError}</div>}
                 {comparisonError && <div className="fund-chart-error">{comparisonError}</div>}
                 {comparisonAssetErrors.length > 0 && (
@@ -1038,8 +1050,12 @@ export function FundPerformanceChart({
                 )}
             </svg>
             <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" />
-            {comparisonLoading && comparisonAssets.length > 0 && (
-                <div className="fund-chart-note">Karşılaştırma geçmişi yükleniyor...</div>
+            {(comparisonPendingSymbols.length > 0 || (comparisonLoading && comparisonAssets.length > 0)) && (
+                <div className="fund-chart-note">
+                    {comparisonPendingSymbols.length > 0
+                        ? `Karşılaştırma geçmişi hazırlanıyor (${comparisonPendingSymbols.join(', ')})...`
+                        : 'Karşılaştırma geçmişi yükleniyor...'}
+                </div>
             )}
             {comparisonError && <div className="fund-chart-error">{comparisonError}</div>}
             {comparisonAssetErrors.length > 0 && (
