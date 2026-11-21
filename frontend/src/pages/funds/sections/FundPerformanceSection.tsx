@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
-import { Trophy } from 'lucide-react';
+import { Calendar, Trophy } from 'lucide-react';
 import type {
     FundDetail,
     FundPerformanceResponse,
@@ -9,6 +9,7 @@ import type {
     MarketComparisonHistoryResponse,
 } from '../../../api/types';
 import { useMobileChartLayout } from '../../../hooks/useMobileChartLayout';
+import { FundDatePicker } from '../components/FundDatePicker';
 import { FundComparisonControls } from '../components/FundReturnComparison';
 import {
     chartDateMs,
@@ -38,6 +39,7 @@ import {
     type FundChartComparisonSeries,
     type FundChartRange,
     type FundComparisonState,
+    type FundDetailReturnPeriod,
     type FundOverviewMetricPoint,
     type FundOverviewMetricSeries,
     type MonthlyReturn,
@@ -45,15 +47,19 @@ import {
 import './FundPerformanceSection.css';
 
 export function FundChartReturnStrip({
+    visiblePeriods = DETAIL_RETURN_PERIODS,
     periodReturns,
     visibleRangeReturn,
+    activeRangeCovered = true,
     yieldPeriods,
     currency,
     selectedRange,
     onRangeSelect,
 }: {
+    visiblePeriods?: readonly FundDetailReturnPeriod[];
     periodReturns: FundSummary['period_returns'] | undefined;
     visibleRangeReturn?: number | null;
+    activeRangeCovered?: boolean;
     yieldPeriods?: FundYieldSummaryResponse['periods'];
     currency?: string | null;
     selectedRange: FundChartRange;
@@ -61,17 +67,20 @@ export function FundChartReturnStrip({
 }) {
     return (
         <div className="fund-chart-return-strip" aria-label="Dönem getirileri">
-            {DETAIL_RETURN_PERIODS.map((period) => {
-                const value = selectedRange === period.key
-                    ? visibleRangeReturn
-                    : periodReturns?.[period.key];
+            {visiblePeriods.map((period) => {
+                const isSelected = selectedRange === period.key;
+                const isExtended = period.key === '3y' || period.key === '5y';
+                const summaryVal = periodReturns?.[period.key];
+                const value = isSelected
+                    ? (isExtended && !activeRangeCovered ? summaryVal : (visibleRangeReturn ?? summaryVal))
+                    : summaryVal;
                 const bounds = formatYieldBounds(yieldPeriods?.[period.key], currency || 'TRY');
                 return (
                     <button
                         type="button"
                         key={period.key}
-                        className={selectedRange === period.key ? 'is-active' : undefined}
-                        aria-pressed={selectedRange === period.key}
+                        className={isSelected ? 'is-active' : undefined}
+                        aria-pressed={isSelected}
                         onClick={() => onRangeSelect(period.key)}
                         title={bounds || period.label}
                     >
@@ -96,6 +105,9 @@ export function FundPerformanceChart({
     rangeError,
     customStartDate,
     customEndDate,
+    maxDate,
+    visiblePeriods = DETAIL_RETURN_PERIODS,
+    activeRangeCovered = true,
     periodReturns,
     historyPending,
     yieldPeriods,
@@ -116,6 +128,9 @@ export function FundPerformanceChart({
     rangeError: string | null;
     customStartDate: string;
     customEndDate: string;
+    maxDate?: string;
+    visiblePeriods?: readonly FundDetailReturnPeriod[];
+    activeRangeCovered?: boolean;
     periodReturns: FundSummary['period_returns'] | undefined;
     historyPending: boolean;
     yieldPeriods?: FundYieldSummaryResponse['periods'];
@@ -164,8 +179,10 @@ export function FundPerformanceChart({
 
     const returnStrip = (
         <FundChartReturnStrip
+            visiblePeriods={visiblePeriods}
             periodReturns={historyPending ? undefined : periodReturns}
             visibleRangeReturn={visibleRangeReturn}
+            activeRangeCovered={activeRangeCovered}
             yieldPeriods={yieldPeriods}
             currency={currency}
             selectedRange={selectedRange}
@@ -185,22 +202,41 @@ export function FundPerformanceChart({
                         selectedRange === 'custom' ? 'is-active' : '',
                         pendingRange === 'custom' ? 'is-loading' : '',
                     ].filter(Boolean).join(' ')}
-                    title="Özel aralık"
+                    title="Özel tarih aralığı seç"
                     aria-pressed={selectedRange === 'custom'}
                     onClick={() => onRangeSelect('custom')}
                 >
-                    Özel
+                    <Calendar size={13} aria-hidden="true" />
+                    <span>Özel</span>
                 </button>
-                <div className={`fund-chart-return ${selectedRange === 'custom' ? pctClass(rangeReturn) : ''}`}>
-                    {selectedRange === 'custom' ? formatPct(visibleRangeReturn) : '-'}
-                </div>
             </div>
         </div>
     );
     const customRangeInputs = selectedRange === 'custom' ? (
         <div className="fund-custom-range">
-            <input type="date" value={customStartDate} onChange={(event) => onCustomStartDateChange(event.target.value)} />
-            <input type="date" value={customEndDate} onChange={(event) => onCustomEndDateChange(event.target.value)} />
+            <div className="fund-custom-range-pickers">
+                <FundDatePicker
+                    label="Başlangıç"
+                    value={customStartDate}
+                    onChange={onCustomStartDateChange}
+                    max={maxDate}
+                    rangeStart={customStartDate}
+                    rangeEnd={customEndDate}
+                />
+                <span className="fund-custom-range-sep" aria-hidden="true">–</span>
+                <FundDatePicker
+                    label="Bitiş"
+                    value={customEndDate}
+                    onChange={onCustomEndDateChange}
+                    max={maxDate}
+                    rangeStart={customStartDate}
+                    rangeEnd={customEndDate}
+                />
+            </div>
+            <div className="fund-custom-range-summary">
+                <span>Dönem Getirisi</span>
+                <strong className={pctClass(visibleRangeReturn)}>{formatPct(visibleRangeReturn)}</strong>
+            </div>
         </div>
     ) : null;
 

@@ -174,6 +174,14 @@ def _point_on_or_before(points: List[Dict[str, Any]], target: date) -> Optional[
     return candidates[-1]
 
 
+def _subtract_years(value: date, years: int) -> date:
+    target_year = value.year - years
+    try:
+        return value.replace(year=target_year)
+    except ValueError:
+        return value.replace(year=target_year, day=28)
+
+
 def _period_returns(points: List[Dict[str, Any]], latest: Dict[str, Any]) -> Dict[str, Optional[float]]:
     latest_date = date.fromisoformat(latest["date"])
     latest_price = latest.get("price")
@@ -184,6 +192,8 @@ def _period_returns(points: List[Dict[str, Any]], latest: Dict[str, Any]) -> Dic
         "6m": latest_date - timedelta(days=180),
         "ytd": date(latest_date.year, 1, 1),
         "1y": latest_date - timedelta(days=365),
+        "3y": _subtract_years(latest_date, 3),
+        "5y": _subtract_years(latest_date, 5),
     }
     returns: Dict[str, Optional[float]] = {}
     for key, target in periods.items():
@@ -193,13 +203,24 @@ def _period_returns(points: List[Dict[str, Any]], latest: Dict[str, Any]) -> Dic
 
 
 def _period_returns_from_raw(raw: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    fs = _fund_service()
+    val_1y = fs._coerce_float(fs._first_present(raw, "getiri1y", "return_1y"))
+    val_3y = fs._coerce_float(fs._first_present(raw, "getiri3y", "return_3y"))
+    val_5y = fs._coerce_float(fs._first_present(raw, "getiri5y", "return_5y"))
+    # TEFAS get_returns returns 0.0 across 3m/6m/1y/3y/5y for some younger/special
+    # funds when the return table lacks coverage. Avoid locking 3Y/5Y tabs onto a bogus 0.0.
+    if val_1y == 0.0 and val_3y == 0.0 and val_5y == 0.0:
+        val_3y = None
+        val_5y = None
     return {
-        "1w": _fund_service()._coerce_float(_fund_service()._first_present(raw, "getiri1h", "return_1w")),
-        "1m": _fund_service()._coerce_float(_fund_service()._first_present(raw, "getiri1a", "return_1m")),
-        "3m": _fund_service()._coerce_float(_fund_service()._first_present(raw, "getiri3a", "return_3m")),
-        "6m": _fund_service()._coerce_float(_fund_service()._first_present(raw, "getiri6a", "return_6m")),
-        "ytd": _fund_service()._coerce_float(_fund_service()._first_present(raw, "getiriyb", "return_ytd")),
-        "1y": _fund_service()._coerce_float(_fund_service()._first_present(raw, "getiri1y", "return_1y")),
+        "1w": fs._coerce_float(fs._first_present(raw, "getiri1h", "return_1w")),
+        "1m": fs._coerce_float(fs._first_present(raw, "getiri1a", "return_1m")),
+        "3m": fs._coerce_float(fs._first_present(raw, "getiri3a", "return_3m")),
+        "6m": fs._coerce_float(fs._first_present(raw, "getiri6a", "return_6m")),
+        "ytd": fs._coerce_float(fs._first_present(raw, "getiriyb", "return_ytd")),
+        "1y": val_1y,
+        "3y": val_3y,
+        "5y": val_5y,
     }
 
 
@@ -479,10 +500,18 @@ def _summary_from_points(fund_code: str, points: List[Dict[str, Any]]) -> Option
     raw = latest.get("raw") if isinstance(latest.get("raw"), dict) else {}
     computed_returns = _seam("_period_returns")(ordered, latest)
     raw_returns = _seam("_period_returns_from_raw")(raw)
-    period_returns = {
+    period_returns: Dict[str, Optional[float]] = {
         key: raw_returns.get(key) if raw_returns.get(key) is not None else computed_returns.get(key)
         for key in ("1w", "1m", "3m", "6m", "ytd", "1y")
     }
+    for extended_key in ("3y", "5y"):
+        ext_val = (
+            raw_returns.get(extended_key)
+            if raw_returns.get(extended_key) is not None
+            else computed_returns.get(extended_key)
+        )
+        if ext_val is not None:
+            period_returns[extended_key] = ext_val
     raw_daily_return = _fund_service()._coerce_float(_fund_service()._first_present(raw, "gunlukGetiri", "daily_return"))
     daily_return_source = _fund_service()._first_text(raw, "daily_return_source")
     if raw.get("range_returns_source"):
@@ -878,6 +907,39 @@ def _fund_category_rankings(
     }
 
 
+def _is_tefas_zero_extended_sentinel(period_returns: Dict[str, Any]) -> bool:
+    fs = _fund_service()
+    v1y = fs._coerce_float(period_returns.get("1y"))
+    v3y = fs._coerce_float(period_returns.get("3y"))
+    v5y = fs._coerce_float(period_returns.get("5y"))
+    return v1y == 0.0 and v3y == 0.0 and v5y == 0.0
+
+
+def _resolve_extended_db_anchor(
+    processed_dir: Path,
+    normalized_code: str,
+    *,
+    latest_price: float,
+    latest_dt: date,
+    min_dt: date,
+    years: int,
+) -> Optional[Dict[str, Any]]:
+    target_dt = _subtract_years(latest_dt, years)
+    if min_dt > target_dt + timedelta(days=7):
+        return None
+    fs = _fund_service()
+    anchor = fs.read_fund_price_on_or_before(processed_dir, normalized_code, target_dt)
+    if not anchor:
+        anchor = fs.read_fund_price_on_or_before(processed_dir, normalized_code, min_dt)
+    if not anchor or anchor.get("price") is None:
+        return None
+    return {
+        "prev_close_date": anchor["date"],
+        "prev_close": anchor["price"],
+        "return_pct": _seam("_return_between")(latest_price, anchor["price"]),
+    }
+
+
 def get_fund_detail_payload(processed_dir: Path, fund_code: str) -> Dict[str, Any]:
     normalized = _fund_service().normalize_fund_code(fund_code)
     row = _seam("_find_fund_row")(processed_dir, normalized)
@@ -905,8 +967,41 @@ def get_fund_detail_payload(processed_dir: Path, fund_code: str) -> Dict[str, An
     else:
         management_fee = applied if applied is not None else prospectus
     tax_info = row.get("tax_info") or _fund_service()._fund_tax_info(row.get("fund_type"))
+    period_returns = dict(row.get("period_returns") or {})
+    if _is_tefas_zero_extended_sentinel(period_returns):
+        period_returns["3y"] = None
+        period_returns["5y"] = None
+    history_start_date: Optional[str] = None
+    min_date_str, _max_date_str = _fund_service().read_fund_price_date_bounds(processed_dir, normalized)
+    if min_date_str:
+        history_start_date = min_date_str
+        latest_price = _fund_service()._coerce_float(row.get("price"))
+        latest_date_str = _fund_service()._fund_date(row.get("as_of"))
+        if latest_price is not None and latest_price > 0 and latest_date_str:
+            try:
+                latest_dt = date.fromisoformat(latest_date_str)
+                min_dt = date.fromisoformat(min_date_str)
+            except ValueError:
+                latest_dt = None
+                min_dt = None
+            if latest_dt is not None and min_dt is not None:
+                for ext_key, years in (("3y", 3), ("5y", 5)):
+                    if _fund_service()._coerce_float(period_returns.get(ext_key)) is not None:
+                        continue
+                    resolved = _resolve_extended_db_anchor(
+                        processed_dir,
+                        normalized,
+                        latest_price=latest_price,
+                        latest_dt=latest_dt,
+                        min_dt=min_dt,
+                        years=years,
+                    )
+                    if resolved is not None:
+                        period_returns[ext_key] = resolved["return_pct"]
     return {
         **row,
+        "period_returns": period_returns,
+        "history_start_date": history_start_date,
         "isin": row.get("isin"),
         "strategy": None,
         "benchmark": None,
@@ -943,7 +1038,10 @@ def _local_yield_summary_periods(
     period_returns = latest_row.get("period_returns")
     periods: Dict[str, Dict[str, Any]] = {}
     if isinstance(period_returns, dict):
+        skip_zero_extended = _is_tefas_zero_extended_sentinel(period_returns)
         for key in ("1w", "1m", "3m", "6m", "ytd", "1y", "3y", "5y"):
+            if skip_zero_extended and key in {"3y", "5y"}:
+                continue
             return_pct = fs._coerce_float(period_returns.get(key))
             if return_pct is None:
                 continue
@@ -981,6 +1079,53 @@ def _local_yield_summary_periods(
                 elif pt_info.get("prev_close") is not None:
                     periods[key] = {
                         **pt_info,
+                        "latest_date": latest_date,
+                    }
+
+        needs_extended_lookup = any(
+            ext_key not in periods or periods[ext_key].get("prev_close") is None
+            for ext_key in ("3y", "5y")
+        )
+        min_date_str, _max_date_str = fs.read_fund_price_date_bounds(processed_dir, normalized_code)
+        if min_date_str:
+            try:
+                min_dt = date.fromisoformat(min_date_str)
+            except ValueError:
+                min_dt = None
+            if needs_extended_lookup and min_dt is not None:
+                for ext_key, years in (("3y", 3), ("5y", 5)):
+                    if ext_key in periods and periods[ext_key].get("prev_close") is not None:
+                        continue
+                    resolved = _resolve_extended_db_anchor(
+                        processed_dir,
+                        normalized_code,
+                        latest_price=latest_price,
+                        latest_dt=latest_dt,
+                        min_dt=min_dt,
+                        years=years,
+                    )
+                    if resolved is not None:
+                        periods[ext_key] = {
+                            "prev_close_date": resolved["prev_close_date"],
+                            "prev_close": resolved["prev_close"],
+                            "high": None,
+                            "low": None,
+                            "latest_date": latest_date,
+                            "return_pct": resolved["return_pct"],
+                        }
+            if min_dt is not None and (
+                "oldest" not in periods
+                or not periods["oldest"].get("prev_close_date")
+                or min_date_str < str(periods["oldest"]["prev_close_date"])
+            ):
+                oldest_anchor = fs.read_fund_price_on_or_before(processed_dir, normalized_code, min_dt)
+                if oldest_anchor and oldest_anchor.get("price") is not None:
+                    existing_oldest = periods.get("oldest") or {}
+                    periods["oldest"] = {
+                        "prev_close_date": oldest_anchor["date"],
+                        "prev_close": oldest_anchor["price"],
+                        "high": existing_oldest.get("high"),
+                        "low": existing_oldest.get("low"),
                         "latest_date": latest_date,
                     }
 
@@ -3405,6 +3550,7 @@ __all__ = [
     "_allocation_payload_report_date",
     "_promote_latest_allocation_history",
     "_return_between",
+    "_subtract_years",
     "_point_on_or_before",
     "_period_returns",
     "_period_returns_from_raw",

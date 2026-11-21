@@ -201,6 +201,16 @@ export const DETAIL_RETURN_PERIODS = [
     { key: '1y', label: '1Y' },
 ] as const;
 
+export const EXTENDED_DETAIL_RETURN_PERIODS = [
+    { key: '3y', label: '3Y' },
+    { key: '5y', label: '5Y' },
+] as const;
+
+export type FundDetailReturnPeriod = {
+    key: '1w' | '1m' | '3m' | '6m' | 'ytd' | '1y' | '3y' | '5y';
+    label: string;
+};
+
 export type ComparisonPeriod = typeof DETAIL_RETURN_PERIODS[number]['key'];
 export type ComparisonAssetKind = 'fund' | 'stock' | 'index' | 'fx';
 export type FundComparisonControlSurface = 'chart' | 'returns';

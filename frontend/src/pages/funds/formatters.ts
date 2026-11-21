@@ -17,6 +17,7 @@ import { STOCK_LOGO_DOMAIN_MAP } from '../../components/symbolLogoMaps';
 import { formatFundQuotePrice, formatFundReportDate } from '../../utils/fundPresentation';
 import {
     DETAIL_RETURN_PERIODS,
+    EXTENDED_DETAIL_RETURN_PERIODS,
     STOCK_SEARCH_LABELS,
     type ComparisonAsset,
     type ComparisonAssetKind,
@@ -698,13 +699,24 @@ export function periodReturnsFromPerformancePoints(
     if (!latest || !first || !Number.isFinite(latestPrice) || latestPrice <= 0) {
         return {};
     }
-    return DETAIL_RETURN_PERIODS.reduce<FundSummary['period_returns']>((returns, period) => {
+    const returns = DETAIL_RETURN_PERIODS.reduce<FundSummary['period_returns']>((acc, period) => {
         const startDate = rangeStartDate(period.key, latest.date, '');
         const basePoint = pointOnOrBefore(ordered, startDate)
             || (allowPartialPeriodFallback && first.date < latest.date ? first : null);
-        returns[period.key] = returnBetween(latestPrice, Number(basePoint?.price));
-        return returns;
+        acc[period.key] = returnBetween(latestPrice, Number(basePoint?.price));
+        return acc;
     }, {});
+    for (const period of EXTENDED_DETAIL_RETURN_PERIODS) {
+        const targetDate = rangeStartDate(period.key, latest.date, '');
+        const minTolerance = shiftIsoDateDays(targetDate, 7);
+        const basePoint = pointOnOrBefore(ordered, targetDate)
+            || (first.date <= minTolerance && first.date < latest.date ? first : null);
+        const val = returnBetween(latestPrice, Number(basePoint?.price));
+        if (val != null) {
+            returns[period.key] = val;
+        }
+    }
+    return returns;
 }
 
 export function formatAllocationWeight(value: number | null | undefined): string {

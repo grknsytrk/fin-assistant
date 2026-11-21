@@ -889,6 +889,14 @@ def _yield_periods_from_points(points: Iterable[Dict[str, Any]], normalized_code
         return {}
     latest = ordered[-1]
     latest_date = date.fromisoformat(latest["date"])
+
+    def _minus_years(value: date, years: int) -> date:
+        target_year = value.year - years
+        try:
+            return value.replace(year=target_year)
+        except ValueError:
+            return value.replace(year=target_year, day=28)
+
     period_targets = {
         "1w": latest_date - timedelta(days=7),
         "1m": latest_date - timedelta(days=30),
@@ -896,10 +904,14 @@ def _yield_periods_from_points(points: Iterable[Dict[str, Any]], normalized_code
         "6m": latest_date - timedelta(days=180),
         "ytd": date(latest_date.year, 1, 1),
         "1y": latest_date - timedelta(days=365),
+        "3y": _minus_years(latest_date, 3),
+        "5y": _minus_years(latest_date, 5),
     }
     periods: Dict[str, Dict[str, Any]] = {}
     for key, target in period_targets.items():
         base = fs._point_on_or_before(ordered, target)
+        if key in {"3y", "5y"} and not base:
+            continue
         period_points = [
             point
             for point in ordered

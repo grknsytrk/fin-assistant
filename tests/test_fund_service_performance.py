@@ -1916,3 +1916,143 @@ def test_get_fund_yield_summary_payload_uses_local_snapshot_fast_path_zero_http(
     stale_fallback = fund_service.get_fund_yield_summary_payload("TLY", processed_dir=stale_dir)
     assert fintables_calls == ["TLY"]
     assert stale_fallback["source"] == "fintables_yield_summary"
+
+
+def test_period_returns_and_summary_handle_3y_5y_and_zero_sentinel() -> None:
+    points_5y = [
+        {"date": "2021-11-19", "price": 10.0},
+        {"date": "2023-11-20", "price": 25.0},
+        {"date": "2025-11-20", "price": 40.0},
+        {"date": "2026-11-20", "price": 50.0},
+    ]
+    summary_5y = fund_service._summary_from_points("TMG", points_5y)
+    assert summary_5y is not None
+    assert summary_5y["period_returns"]["3y"] == pytest.approx(100.0)
+    assert summary_5y["period_returns"]["5y"] == pytest.approx(400.0)
+
+    points_3y_only = points_5y[1:]
+    summary_3y = fund_service._summary_from_points("BUY", points_3y_only)
+    assert summary_3y is not None
+    assert summary_3y["period_returns"]["3y"] == pytest.approx(100.0)
+    assert "5y" not in summary_3y["period_returns"]
+
+    points_young = points_5y[2:]
+    summary_young = fund_service._summary_from_points("YNG", points_young)
+    assert summary_young is not None
+    assert "3y" not in summary_young["period_returns"]
+    assert "5y" not in summary_young["period_returns"]
+
+    # TEFAS 0.0 sentinel across 1y/3y/5y must not leak into extended returns
+    sentinel_raw = {
+        "getiri1a": 5.0,
+        "getiri3a": 10.0,
+        "getiri6a": 12.0,
+        "getiri1y": 0.0,
+        "getiri3y": 0.0,
+        "getiri5y": 0.0,
+    }
+    parsed_sentinel = fund_service._period_returns_from_raw(sentinel_raw)
+    assert parsed_sentinel["3y"] is None
+    assert parsed_sentinel["5y"] is None
+
+
+def test_local_yield_summary_and_detail_enrich_3y_5y_zero_http(monkeypatch, tmp_path) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    monkeypatch.delenv("RAGFIN_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    target_day = date(2026, 11, 20)
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> "FixedDate":
+            return cls(2026, 11, 20)
+
+    monkeypatch.setattr(fund_service, "date", FixedDate)
+    monkeypatch.setattr(fund_service, "_turkey_market_today", lambda: target_day)
+    assert fund_service.commit_funds_snapshot(
+        tmp_path,
+        {
+            "status": "ok",
+            "as_of": target_day.isoformat(),
+            "rows": [
+                {
+                    "fund_code": "TLY",
+                    "name": "TERA BIRINCI",
+                    "as_of": target_day.isoformat(),
+                    "price": 100.0,
+                    "tefas_open": True,
+                    "period_returns": {
+                        "1w": 2.0,
+                        "1m": 10.0,
+                        "3m": 25.0,
+                        "6m": 50.0,
+                        "ytd": 75.0,
+                        "1y": 0.0,
+                        "3y": 0.0,
+                        "5y": 0.0,
+                    },
+                }
+            ],
+            "source_metadata": {"source": "tefasfon_funds"},
+        },
+        job_id="local-ext-test",
+        owner_token="local-ext-test",
+        generation=1,
+    )
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "TLY", "date": "2021-11-19", "price": 10.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2023-11-20", "price": 20.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2026-10-20", "price": 90.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2026-11-20", "price": 100.0, "source": "fintables_udf_history"},
+        ],
+        source="fintables_udf_history",
+    )
+
+    monkeypatch.setattr(
+        fund_service,
+        "fetch_fintables_yield_summary",
+        lambda *_a, **_k: pytest.fail("Fintables HTTP must not be called"),
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "TefasFonClient",
+        lambda: pytest.fail("TEFAS HTTP must not be called"),
+    )
+
+    detail = fund_service.get_fund_detail_payload(tmp_path, "TLY")
+    assert detail["history_start_date"] == "2021-11-19"
+    assert detail["period_returns"]["3y"] == pytest.approx(400.0)
+    assert detail["period_returns"]["5y"] == pytest.approx(900.0)
+
+    yield_payload = fund_service.get_fund_yield_summary_payload("TLY", processed_dir=tmp_path)
+    assert yield_payload["source"] == "local_fund_snapshot"
+    assert yield_payload["periods"]["3y"]["prev_close_date"] == "2023-11-20"
+    assert yield_payload["periods"]["3y"]["prev_close"] == pytest.approx(20.0)
+    assert yield_payload["periods"]["3y"]["return_pct"] == pytest.approx(400.0)
+    assert yield_payload["periods"]["5y"]["prev_close_date"] == "2021-11-19"
+    assert yield_payload["periods"]["5y"]["prev_close"] == pytest.approx(10.0)
+    assert yield_payload["periods"]["5y"]["return_pct"] == pytest.approx(900.0)
+    assert yield_payload["periods"]["oldest"]["prev_close_date"] == "2021-11-19"
+
+
+def test_history_job_should_schedule_allows_widening_running_job_for_3y_5y() -> None:
+    from app import fund_api_service
+
+    running_1y_job = {
+        "job_id": "job-1y",
+        "fund_code": "TMG",
+        "effective_start": "2025-11-20",
+        "effective_end": "2026-11-21",
+        "status": "running",
+    }
+    payload = {
+        "points": [{"date": "2025-11-20", "price": 1.1}, {"date": "2026-11-20", "price": 1.44}],
+        "source_metadata": {"history_source_used": "tefasfon_funds", "available_end_date": "2026-11-20"},
+    }
+    target_1y = {"requested_start": date(2025, 11, 21), "requested_end": date(2026, 11, 21)}
+    target_5y = {"requested_start": date(2021, 11, 21), "requested_end": date(2026, 11, 21)}
+
+    assert fund_api_service._history_job_should_schedule(payload, last_job=running_1y_job, target=target_1y) is False
+    assert fund_api_service._history_job_should_schedule(payload, last_job=running_1y_job, target=target_5y) is True

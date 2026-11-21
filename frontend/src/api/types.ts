@@ -298,6 +298,8 @@ export interface FundPeriodReturns {
   '6m'?: number | null;
   ytd?: number | null;
   '1y'?: number | null;
+  '3y'?: number | null;
+  '5y'?: number | null;
 }
 
 export type FundYieldPeriodKey = '1w' | '1m' | '3m' | '6m' | 'ytd' | '1y' | '3y' | '5y' | 'oldest';
@@ -307,6 +309,8 @@ export interface FundYieldPeriodSummary {
   prev_close: number | null;
   high: number | null;
   low: number | null;
+  latest_date?: string | null;
+  return_pct?: number | null;
 }
 
 export interface FundYieldSummaryResponse {
@@ -366,6 +370,7 @@ export interface FundCategoryRankings {
 export interface FundDetail extends FundSummary {
   strategy: string | null;
   benchmark: string | null;
+  history_start_date?: string | null;
   management_fee: number | null;
   management_fee_applied?: number | null;
   management_fee_prospectus?: number | null;

@@ -55,6 +55,7 @@ import './FundsPage.css';
 import {
     DETAIL_RETURN_PERIODS,
     EMPTY_FUND_SCREENER_FILTERS,
+    EXTENDED_DETAIL_RETURN_PERIODS,
     FUND_HISTORY_TABS,
     FUND_HOLDINGS_LIVE_MAX_BACKOFF_MS,
     FUND_HOLDINGS_LIVE_REFRESH_MS,
@@ -64,6 +65,7 @@ import {
     FUND_SCREENER_RANGE_SPECS,
     FUND_TABS,
     type FundChartRange,
+    type FundDetailReturnPeriod,
     type FundHistorySubtab,
     type FundHoldingCategoryFilter,
     type FundHoldingChangeFilter,
@@ -97,6 +99,7 @@ import {
     pctClass,
     periodReturnsFromPerformancePoints,
     rangeStartDate,
+    returnBetween,
     shiftIsoDateDays,
     shouldRefreshSnapshot,
     sortFundPoints,
@@ -883,13 +886,70 @@ export default function FundsPage({
                     return returns;
                 }, {});
             }
-            return periodReturnsFromPerformancePoints(
+            const computed = periodReturnsFromPerformancePoints(
                 visiblePerformancePoints,
                 performance?.source_metadata?.coverage_state === 'range_incomplete',
             );
+            for (const period of EXTENDED_DETAIL_RETURN_PERIODS) {
+                if (computed[period.key] != null) continue;
+                const yieldPeriod = yieldSummary?.periods?.[period.key];
+                const yieldReturnPct = yieldPeriod?.return_pct;
+                const yieldComputed =
+                    typeof yieldReturnPct === 'number' && Number.isFinite(yieldReturnPct)
+                        ? yieldReturnPct
+                        : returnBetween(detailLatestPrice, yieldPeriod?.prev_close ?? null);
+                const detailVal = selectedFund?.period_returns?.[period.key];
+                const resolved =
+                    yieldComputed ?? (typeof detailVal === 'number' && Number.isFinite(detailVal) ? detailVal : null);
+                if (resolved != null) {
+                    computed[period.key] = resolved;
+                }
+            }
+            return computed;
         },
-        [fintablesHistoryPending, performance?.source_metadata?.coverage_state, visiblePerformancePoints],
+        [
+            detailLatestPrice,
+            fintablesHistoryPending,
+            performance?.source_metadata?.coverage_state,
+            selectedFund?.period_returns,
+            visiblePerformancePoints,
+            yieldSummary?.periods,
+        ],
     );
+    const earliestKnownFundDate = useMemo(() => {
+        const candidates = [
+            visiblePerformancePoints[0]?.date,
+            detail?.history_start_date,
+            performance?.source_metadata?.available_start_date,
+            performance?.source_metadata?.date_min,
+            yieldSummary?.periods?.oldest?.prev_close_date,
+        ].filter((val): val is string => typeof val === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(val));
+        return candidates.sort()[0] || null;
+    }, [
+        detail?.history_start_date,
+        performance?.source_metadata?.available_start_date,
+        performance?.source_metadata?.date_min,
+        visiblePerformancePoints,
+        yieldSummary?.periods?.oldest?.prev_close_date,
+    ]);
+    const visibleDetailPeriods = useMemo<FundDetailReturnPeriod[]>(() => {
+        const base: FundDetailReturnPeriod[] = [...DETAIL_RETURN_PERIODS];
+        for (const period of EXTENDED_DETAIL_RETURN_PERIODS) {
+            const hasReturn = detailPeriodReturns?.[period.key] != null;
+            const targetCutoff = shiftIsoDateDays(rangeStartDate(period.key, latestAvailableDate, ''), 7);
+            const hasDateCoverage = Boolean(earliestKnownFundDate && earliestKnownFundDate <= targetCutoff);
+            if (hasReturn || hasDateCoverage) {
+                base.push({ key: period.key, label: period.label });
+            }
+        }
+        return base;
+    }, [detailPeriodReturns, earliestKnownFundDate, latestAvailableDate]);
+    const activeRangeCovered = useMemo(() => {
+        if (chartRange !== '3y' && chartRange !== '5y') return true;
+        if (chartPoints.length < 2) return false;
+        const targetCutoff = shiftIsoDateDays(rangeStartDate(chartRange, chartEndDate, ''), 14);
+        return chartPoints[0].date <= targetCutoff;
+    }, [chartEndDate, chartPoints, chartRange]);
     const fundsDocumentTitle = useMemo(() => {
         if (fundCode || selectedFund) {
             const normalizedCode = selectedFund?.fund_code || fundCode?.trim().toUpperCase();
@@ -1308,13 +1368,21 @@ export default function FundsPage({
     }, [refreshChartRange]);
 
     const handleCustomStartDateChange = useCallback((value: string) => {
+        const nextEnd = value && customEndDate && value > customEndDate ? value : customEndDate;
         setCustomStartDate(value);
-        refreshChartRange('custom', value, customEndDate);
+        if (nextEnd !== customEndDate) {
+            setCustomEndDate(nextEnd);
+        }
+        refreshChartRange('custom', value, nextEnd);
     }, [customEndDate, refreshChartRange]);
 
     const handleCustomEndDateChange = useCallback((value: string) => {
+        const nextStart = value && customStartDate && value < customStartDate ? value : customStartDate;
         setCustomEndDate(value);
-        refreshChartRange('custom', customStartDate, value);
+        if (nextStart !== customStartDate) {
+            setCustomStartDate(nextStart);
+        }
+        refreshChartRange('custom', nextStart, value);
     }, [customStartDate, refreshChartRange]);
 
     return (
@@ -1736,6 +1804,9 @@ export default function FundsPage({
                                                     rangeError={chartRangeError}
                                                     customStartDate={customStartDate}
                                                     customEndDate={customEndDate}
+                                                    maxDate={latestAvailableDate}
+                                                    visiblePeriods={visibleDetailPeriods}
+                                                    activeRangeCovered={activeRangeCovered}
                                                     periodReturns={detailPeriodReturns}
                                                     yieldPeriods={yieldSummary?.periods}
                                                     currency={selectedFund.currency}

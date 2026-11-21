@@ -776,7 +776,7 @@ def _history_job_should_schedule(
         # probe forever. Once a job records ``fintables_point_count`` (even
         # zero), the probe has been made and should not loop on every request.
         job_status = str(last_job.get("status") or "").strip().lower() if last_job else ""
-        if job_status in {"queued", "running"}:
+        if job_status in {"queued", "running"} and fas._history_job_covers(last_job, target):
             return False
         if not last_job or "fintables_point_count" not in last_job:
             return True
@@ -821,10 +821,14 @@ def _history_job_needs_fintables_probe(
     target: Dict[str, Any],
 ) -> bool:
     fas = _fas()
+    if not last_job:
+        return False
+    job_status = str(last_job.get("status") or "").strip().lower()
+    if job_status in {"queued", "running"}:
+        return False
     target_span_days = (target["requested_end"] - target["requested_start"]).days
     return bool(
         target_span_days > 120
-        and last_job
         and fas._history_job_covers(last_job, target)
         and "fintables_point_count" not in last_job
     )

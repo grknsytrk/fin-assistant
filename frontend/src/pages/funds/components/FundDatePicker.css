@@ -1,0 +1,242 @@
+.fund-datepicker {
+    position: relative;
+    display: inline-flex;
+    min-width: 0;
+}
+
+.fund-datepicker-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    height: 30px;
+    padding: 0 0.65rem;
+    border: 1px solid var(--surface-border);
+    border-radius: 4px;
+    background: var(--bg-color);
+    color: var(--text-primary);
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.14s ease, background-color 0.14s ease;
+}
+
+.fund-datepicker-trigger:hover,
+.fund-datepicker-trigger:focus-visible,
+.fund-datepicker-trigger.is-open {
+    border-color: color-mix(in srgb, var(--accent-color) 65%, transparent);
+    background: var(--surface-hover);
+    outline: none;
+}
+
+.fund-datepicker-icon {
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.fund-datepicker-trigger:hover .fund-datepicker-icon,
+.fund-datepicker-trigger.is-open .fund-datepicker-icon {
+    color: var(--text-primary);
+}
+
+.fund-datepicker-label {
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    font-weight: 600;
+}
+
+.fund-datepicker-value {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.fund-datepicker-popover {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 40;
+    width: 268px;
+    padding: 0.65rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    background: #101319;
+    box-shadow: var(--shadow-lg);
+    color: var(--text-primary);
+    color-scheme: dark;
+}
+
+.fund-datepicker-popover.is-align-right {
+    left: auto;
+    right: 0;
+}
+
+.fund-datepicker-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.35rem;
+    margin-bottom: 0.55rem;
+}
+
+.fund-datepicker-nav {
+    display: inline-grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-secondary);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.fund-datepicker-nav:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.15);
+}
+
+.fund-datepicker-selects {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    min-width: 0;
+}
+
+.fund-datepicker-selects select {
+    height: 26px;
+    padding: 0 0.35rem;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 4px;
+    background: #0a0c0f;
+    color: #f4f4f5;
+    font: inherit;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color-scheme: dark;
+    cursor: pointer;
+    outline: none;
+}
+
+.fund-datepicker-selects select:focus {
+    border-color: color-mix(in srgb, var(--accent-color) 65%, transparent);
+}
+
+.fund-datepicker-weekdays {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 2px;
+    margin-bottom: 0.25rem;
+}
+
+.fund-datepicker-weekdays span {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 0.2rem 0;
+}
+
+.fund-datepicker-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 2px;
+}
+
+.fund-datepicker-day {
+    display: inline-grid;
+    place-items: center;
+    height: 30px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: #e4e4e7;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.fund-datepicker-day.is-outside {
+    color: #52525b;
+}
+
+.fund-datepicker-day:not(:disabled):hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #ffffff;
+}
+
+.fund-datepicker-day.is-in-range:not(.is-selected) {
+    background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+    color: #f4f4f5;
+}
+
+.fund-datepicker-day.is-today:not(.is-selected) {
+    border-color: color-mix(in srgb, var(--accent-color) 48%, transparent);
+}
+
+.fund-datepicker-day.is-selected {
+    background: var(--accent-color);
+    border-color: var(--accent-color);
+    color: #ffffff;
+    font-weight: 700;
+}
+
+.fund-datepicker-day:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+.fund-datepicker-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 0.55rem;
+    padding-top: 0.45rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.fund-datepicker-foot-btn {
+    height: 24px;
+    padding: 0 0.5rem;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.7rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.fund-datepicker-foot-btn:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+@media (max-width: 640px) {
+    .fund-datepicker {
+        width: 100%;
+    }
+
+    .fund-datepicker-trigger {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .fund-datepicker-popover,
+    .fund-datepicker-popover.is-align-right {
+        left: 0;
+        right: auto;
+        width: min(280px, calc(100vw - 2.5rem));
+    }
+}

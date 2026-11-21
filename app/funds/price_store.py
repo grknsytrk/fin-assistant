@@ -1396,6 +1396,108 @@ def read_fund_price_points_range(
         return []
 
 
+def read_fund_price_date_bounds(
+    processed_dir: Path,
+    fund_code: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Return (min_date, max_date) ISO strings for a fund's daily prices without loading rows."""
+    fs = _fund_service()
+    normalized = fs.normalize_fund_code(fund_code)
+    daily_sources = tuple(fs._DAILY_PRICE_SOURCES)
+    if not normalized or not daily_sources:
+        return (None, None)
+    if not fs.database_enabled() and not fs._fund_prices_db_path(processed_dir).exists():
+        return (None, None)
+
+    source_placeholders = ", ".join("?" for _ in daily_sources)
+    query = (
+        "SELECT MIN(date) AS min_date, MAX(date) AS max_date "
+        "FROM fund_prices "
+        f"WHERE fund_code = ? AND price IS NOT NULL AND price > 0 AND source IN ({source_placeholders})"
+    )
+    params: List[Any] = [normalized, *daily_sources]
+    try:
+        with fs._connect_fund_prices_db(processed_dir) as conn:
+            row = conn.execute(query, params).fetchone()
+    except Exception:
+        return (None, None)
+    if not row:
+        return (None, None)
+    min_raw = row["min_date"]
+    max_raw = row["max_date"]
+    min_date = str(min_raw)[:10] if min_raw else None
+    max_date = str(max_raw)[:10] if max_raw else None
+    return (min_date, max_date)
+
+
+def read_fund_price_on_or_before(
+    processed_dir: Path,
+    fund_code: str,
+    target_date: date,
+) -> Optional[Dict[str, Any]]:
+    """Return the latest valid price point on or before target_date (1-row lookup)."""
+    fs = _fund_service()
+    normalized = fs.normalize_fund_code(fund_code)
+    daily_sources = tuple(fs._DAILY_PRICE_SOURCES)
+    if not normalized or not daily_sources:
+        return None
+    if not fs.database_enabled() and not fs._fund_prices_db_path(processed_dir).exists():
+        return None
+
+    source_placeholders = ", ".join("?" for _ in daily_sources)
+    base_where = (
+        "WHERE fund_code = ? AND date <= ? "
+        "AND price IS NOT NULL AND price > 0 "
+        f"AND source IN ({source_placeholders})"
+    )
+    base_params: List[Any] = [normalized, target_date.isoformat(), *daily_sources]
+    if fs.database_enabled():
+        source_priority_sql, priority_params = _price_source_priority_sql("source")
+        query = (
+            "SELECT date, price FROM fund_prices "
+            f"{base_where} "
+            f"ORDER BY date DESC, {source_priority_sql} DESC, updated_at DESC LIMIT 1"
+        )
+        params = [*base_params, *priority_params]
+        try:
+            with fs._connect_fund_prices_db(processed_dir) as conn:
+                row = conn.execute(query, params).fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        price = fs._coerce_float(row["price"])
+        if price is None or price <= 0:
+            return None
+        return {"date": str(row["date"])[:10], "price": float(price)}
+
+    query = (
+        "SELECT date, source, price, updated_at FROM fund_prices "
+        f"{base_where} "
+        "ORDER BY date DESC, updated_at DESC LIMIT 6"
+    )
+    try:
+        with fs._connect_fund_prices_db(processed_dir) as conn:
+            rows = conn.execute(query, base_params).fetchall()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    latest_day = max(str(r["date"])[:10] for r in rows if r["date"])
+    day_rows = [r for r in rows if str(r["date"])[:10] == latest_day]
+    best = max(
+        day_rows,
+        key=lambda r: (
+            fs._FUND_PRICE_SOURCE_PRIORITY.get(str(r["source"] or ""), 0),
+            str(r["updated_at"] or ""),
+        ),
+    )
+    price = fs._coerce_float(best["price"])
+    if price is None or price <= 0:
+        return None
+    return {"date": latest_day, "price": float(price)}
+
+
 def _daily_return_reconciliation_candidates(
     rows: Iterable[Dict[str, Any]],
     *,
@@ -2167,6 +2269,8 @@ __all__ = [
     "read_fund_price_points",
     "read_latest_fund_price_points",
     "read_fund_price_points_range",
+    "read_fund_price_date_bounds",
+    "read_fund_price_on_or_before",
     "_daily_return_reconciliation_candidates",
     "_daily_return_overrides_from_price_history",
     "_carry_forward_resolved_daily_returns",
