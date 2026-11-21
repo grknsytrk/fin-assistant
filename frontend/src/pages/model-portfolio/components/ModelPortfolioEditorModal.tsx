@@ -172,8 +172,11 @@ export function ModelPortfolioEditorModal({
 
     const [prefillLoading, setPrefillLoading] = useState(false);
     const [saving, setSaving] = useState(false);
-    const [improvingField, setImprovingField] = useState<'thesis' | 'risk_note' | null>(null);
-    const [improveError, setImproveError] = useState<{ field: 'thesis' | 'risk_note'; message: string } | null>(null);
+    const [improvingField, setImprovingField] = useState<'thesis' | 'risk_note' | 'revision_note' | null>(null);
+    const [improveError, setImproveError] = useState<{
+        field: 'thesis' | 'risk_note' | 'revision_note';
+        message: string;
+    } | null>(null);
     const [formError, setFormError] = useState<string | null>(null);
     const [dropdownOpen, setDropdownOpen] = useState(false);
     const prefillAbortRef = useRef<AbortController | null>(null);
@@ -181,24 +184,26 @@ export function ModelPortfolioEditorModal({
     const sectorEditVersionRef = useRef(0);
     const dialogRef = useAccessibleDialog<HTMLDivElement>(true, onClose);
 
-    const improveText = useCallback(async (field: 'thesis' | 'risk_note') => {
-        const text = field === 'thesis' ? thesis : riskNote;
+    const improveText = useCallback(async (field: 'thesis' | 'risk_note' | 'revision_note') => {
+        const text = field === 'thesis' ? thesis : field === 'risk_note' ? riskNote : revisionNote;
         if (!text.trim() || improvingField) return;
         setImprovingField(field);
         setImproveError(null);
+        const activePos = !isEdit ? activePositionsBySymbol.get(symbol.trim().toUpperCase()) : undefined;
         try {
             const result = await apiClient.modelPortfolioImproveText(
                 {
                     field,
                     text,
-                    symbol,
-                    company_name: companyName,
-                    sector,
+                    symbol: activePos?.symbol || symbol,
+                    company_name: activePos?.company_name || companyName,
+                    sector: activePos?.sector || sector,
                 },
                 adminToken,
             );
             if (field === 'thesis') setThesis(result.text);
-            else setRiskNote(result.text);
+            else if (field === 'risk_note') setRiskNote(result.text);
+            else setRevisionNote(result.text);
         } catch (error) {
             setImproveError({
                 field,
@@ -207,7 +212,19 @@ export function ModelPortfolioEditorModal({
         } finally {
             setImprovingField(null);
         }
-    }, [adminToken, companyName, improvingField, riskNote, sector, symbol, thesis]);
+    }, [activePositionsBySymbol, adminToken, companyName, improvingField, isEdit, revisionNote, riskNote, sector, symbol, thesis]);
+
+    const renderImproveButton = (field: 'thesis' | 'risk_note' | 'revision_note', textVal: string) => (
+        <button
+            type="button"
+            className="mp-btn mp-btn-subtle mp-ai-refine-button"
+            onClick={() => void improveText(field)}
+            disabled={!textVal.trim() || improvingField !== null || saving}
+        >
+            <Pencil size={13} />
+            {improvingField === field ? 'Düzenleniyor...' : 'AI ile iyileştir'}
+        </button>
+    );
 
     const matchingUniverse = useMemo(() => {
         const q = symbolQuery.trim().toUpperCase();
@@ -874,15 +891,23 @@ export function ModelPortfolioEditorModal({
                                 </div>
 
                                 <div className="mp-editor-section">
-                                    <label className="mp-field">
-                                        <span className="mp-field-label">Ekleme Notu (İsteğe bağlı)</span>
+                                    <div className="mp-field">
+                                        <div className="mp-field-label-row">
+                                            <span className="mp-field-label">Ekleme Notu (İsteğe bağlı)</span>
+                                            {renderImproveButton('revision_note', revisionNote)}
+                                        </div>
                                         <input
                                             type="text"
+                                            aria-label="Ekleme notu"
                                             value={revisionNote}
                                             onChange={(e) => setRevisionNote(e.target.value)}
                                             placeholder="Örn: Geri çekilmede kademeli alım / ağırlık artışı"
+                                            disabled={improvingField === 'revision_note'}
                                         />
-                                    </label>
+                                        {improveError?.field === 'revision_note' && (
+                                            <span className="mp-ai-refine-error" role="alert">{improveError.message}</span>
+                                        )}
+                                    </div>
                                 </div>
                             </>
                         ) : (
@@ -1063,15 +1088,7 @@ export function ModelPortfolioEditorModal({
                             <div className="mp-field">
                                 <div className="mp-field-label-row">
                                     <span className="mp-field-label">Yatırım Tezi</span>
-                                    <button
-                                        type="button"
-                                        className="mp-btn mp-btn-subtle mp-ai-refine-button"
-                                        onClick={() => void improveText('thesis')}
-                                        disabled={!thesis.trim() || improvingField !== null || saving}
-                                    >
-                                        <Pencil size={13} />
-                                        {improvingField === 'thesis' ? 'Düzenleniyor...' : 'AI ile iyileştir'}
-                                    </button>
+                                    {renderImproveButton('thesis', thesis)}
                                 </div>
                                 <textarea
                                     rows={3}
@@ -1089,15 +1106,7 @@ export function ModelPortfolioEditorModal({
                             <div className="mp-field">
                                 <div className="mp-field-label-row">
                                     <span className="mp-field-label">Temel Riskler</span>
-                                    <button
-                                        type="button"
-                                        className="mp-btn mp-btn-subtle mp-ai-refine-button"
-                                        onClick={() => void improveText('risk_note')}
-                                        disabled={!riskNote.trim() || improvingField !== null || saving}
-                                    >
-                                        <Pencil size={13} />
-                                        {improvingField === 'risk_note' ? 'Düzenleniyor...' : 'AI ile iyileştir'}
-                                    </button>
+                                    {renderImproveButton('risk_note', riskNote)}
                                 </div>
                                 <textarea
                                     rows={2}
@@ -1113,15 +1122,23 @@ export function ModelPortfolioEditorModal({
                             </div>
 
                             {isEdit && (
-                                <label className="mp-field">
-                                    <span className="mp-field-label">Revizyon Notu</span>
+                                <div className="mp-field">
+                                    <div className="mp-field-label-row">
+                                        <span className="mp-field-label">Revizyon Notu</span>
+                                        {renderImproveButton('revision_note', revisionNote)}
+                                    </div>
                                     <input
                                         type="text"
+                                        aria-label="Revizyon notu"
                                         value={revisionNote}
                                         onChange={(e) => setRevisionNote(e.target.value)}
                                         placeholder="Örn: 3Ç bilançosu sonrası hedef revizesi"
+                                        disabled={improvingField === 'revision_note'}
                                     />
-                                </label>
+                                    {improveError?.field === 'revision_note' && (
+                                        <span className="mp-ai-refine-error" role="alert">{improveError.message}</span>
+                                    )}
+                                </div>
                             )}
                         </div>
                         </>

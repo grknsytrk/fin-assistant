@@ -1104,7 +1104,7 @@ export const apiClient = {
     },
     modelPortfolioImproveText: (
         payload: {
-            field: 'thesis' | 'risk_note';
+            field: 'thesis' | 'risk_note' | 'revision_note';
             text: string;
             symbol?: string;
             company_name?: string;

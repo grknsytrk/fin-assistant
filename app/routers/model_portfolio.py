@@ -216,7 +216,7 @@ async def improve_model_portfolio_text_endpoint(request: Request) -> Dict[str, A
         raise HTTPException(status_code=400, detail="Geçersiz istek formatı.")
 
     field = str(body.get("field") or "").strip()
-    max_text_length = 4000 if field == "thesis" else 1500 if field == "risk_note" else 0
+    max_text_length = {"thesis": 4000, "risk_note": 1500, "revision_note": 500}.get(field, 0)
     if max_text_length == 0:
         raise HTTPException(status_code=422, detail="Düzenlenecek alan geçersiz.")
     text = body.get("text")

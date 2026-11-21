@@ -99,6 +99,15 @@ def test_improve_text_payload_validation() -> None:
     assert res_too_long_thesis.status_code == 422
     assert "en fazla 4000 karakter" in res_too_long_thesis.json()["detail"]
 
+    # Text length limits: revision_note max 500
+    res_too_long_revision = client.post(
+        "/model-portfolio/improve-text",
+        headers=auth_headers,
+        json={"field": "revision_note", "text": "C" * 501},
+    )
+    assert res_too_long_revision.status_code == 422
+    assert "en fazla 500 karakter" in res_too_long_revision.json()["detail"]
+
     # Oversized raw body (> 24 KB)
     res_huge = client.post(
         "/model-portfolio/improve-text",
@@ -246,3 +255,47 @@ async def test_improve_model_portfolio_text_unit_error_handling(monkeypatch: pyt
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=error_resp):
         with pytest.raises(NvidiaCommentaryError):
             await improve_model_portfolio_text("metin", "thesis")
+
+
+@pytest.mark.anyio
+async def test_improve_text_revision_note_endpoint_and_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IFM_API_KEY", "test-ifm-key")
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+
+    client = TestClient(api_mod.app)
+    auth_headers = _get_auth_headers(client)
+
+    with patch(
+        "src.nvidia_commentary.improve_model_portfolio_text",
+        new_callable=AsyncMock,
+        return_value="Geri çekilme sonrası kademeli ağırlık artışı yapıldı.",
+    ) as mock_improve:
+        res = client.post(
+            "/model-portfolio/improve-text",
+            headers=auth_headers,
+            json={
+                "field": "revision_note",
+                "text": "dustu biraz ekledik",
+                "symbol": "BIMAS",
+                "company_name": "BİM Birleşik Mağazalar",
+                "sector": "Perakende - Ticaret",
+            },
+        )
+        assert res.status_code == 200
+        assert res.json() == {"text": "Geri çekilme sonrası kademeli ağırlık artışı yapıldı."}
+        mock_improve.assert_called_once_with(
+            "dustu biraz ekledik",
+            "revision_note",
+            symbol="BIMAS",
+            company_name="BİM Birleşik Mağazalar",
+            sector="Perakende - Ticaret",
+        )
+
+    long_resp = httpx.Response(
+        status_code=200,
+        json={"choices": [{"message": {"content": "X" * 650}}]},
+        request=httpx.Request("POST", "https://api.ifm.example/chat/completions"),
+    )
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=long_resp):
+        capped = await improve_model_portfolio_text("kisa not", "revision_note", symbol="BIMAS")
+        assert len(capped) == 500

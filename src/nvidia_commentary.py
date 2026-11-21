@@ -975,10 +975,11 @@ async def improve_model_portfolio_text(
     field_labels = {
         "thesis": "yatırım gerekçesi",
         "risk_note": "takip edilecek temel riskler",
+        "revision_note": "pozisyon ekleme veya revizyon notu (kısa ve öz)",
     }
     label = field_labels.get(field)
     if not label:
-        raise PayloadValidationError("field thesis veya risk_note olmali")
+        raise PayloadValidationError("field thesis, risk_note veya revision_note olmali")
 
     context = []
     if symbol.strip():
@@ -1046,7 +1047,8 @@ async def improve_model_portfolio_text(
     result = result.strip().strip('"“”').strip()
     if not result:
         raise NvidiaCommentaryError("AI bos metin dondu")
-    return result[:4000 if field == "thesis" else 1500]
+    max_len = 4000 if field == "thesis" else 500 if field == "revision_note" else 1500
+    return result[:max_len]
 
 
 def _text_list(value: Any) -> List[str]:
