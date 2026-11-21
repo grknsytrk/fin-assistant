@@ -448,24 +448,18 @@ export default function ModelPortfolioPage() {
             isCash: false,
         }));
         if (liveSummary.cash_weight_pct > 0.05) {
-            const realizedCashAttr = Number(
-                ((portfolioData?.closed_positions || []).reduce(
-                    (acc, r) => acc + (r.return_pct != null ? (r.weight_pct || 0) * r.return_pct : 0),
-                    0,
-                ) / 100).toFixed(2),
-            );
             items.push({
                 symbol: 'NAKİT',
                 label: 'Nakit / Boşta Pay',
                 weight: liveSummary.cash_weight_pct,
                 returnPct: 0,
-                attributionPct: realizedCashAttr,
+                attributionPct: 0,
                 color: '#334155',
                 isCash: true,
             });
         }
         return items;
-    }, [liveActivePositions, liveSummary.cash_weight_pct, portfolioData?.closed_positions]);
+    }, [liveActivePositions, liveSummary.cash_weight_pct]);
 
     const hasPortfolioSetup = Boolean(
         portfolioData?.active_positions.length || portfolioData?.closed_positions.length,
@@ -656,7 +650,7 @@ export default function ModelPortfolioPage() {
                                                         <span className="mp-attr-weight">%{item.weight.toFixed(1)}</span>
                                                     </div>
                                                     <div className="mp-attribution-right">
-                                                        {item.isCash && item.attributionPct === 0 ? (
+                                                        {item.isCash ? (
                                                             <span className="mp-tone-flat">0,00 puan</span>
                                                         ) : (
                                                             <span className={toneClass(item.attributionPct)}>
