@@ -379,7 +379,9 @@ def test_preferred_and_uncached_postgres_queries_behavior_and_6h_ttl(tmp_path, m
     assert preferred[0]["investor_count"] == 77
     assert "tefas_open" not in preferred[0]
     pref_sql, pref_params = queries[0]
-    assert "SELECT DISTINCT ON (date, CASE WHEN source IN" in pref_sql
+    assert "SELECT DISTINCT ON (date, is_fintables)" in pref_sql
+    assert "AS is_fintables" in pref_sql
+    assert "ORDER BY date ASC, is_fintables DESC" in pref_sql
     assert "metadata_json" not in pref_sql
     assert len(pref_params) == pref_sql.count("?")
 

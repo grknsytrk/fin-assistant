@@ -1832,17 +1832,20 @@ def _read_preferred_fund_price_points(
             if fintables_sources:
                 fintables_list = sorted(fintables_sources)
                 fintables_placeholders = ", ".join("?" for _ in fintables_list)
-                bucket_expr = f"CASE WHEN source IN ({fintables_placeholders}) THEN 1 ELSE 0 END"
                 query = (
-                    f"SELECT DISTINCT ON (date, {bucket_expr}) "
+                    "SELECT DISTINCT ON (date, is_fintables) "
                     "fund_code, date, source, price, daily_return, aum, investor_count, "
-                    f"share_count, fetched_at, updated_at FROM fund_prices WHERE {where_clause} "
-                    f"ORDER BY date ASC, {bucket_expr} DESC, {source_priority_sql} DESC, updated_at DESC"
+                    "share_count, fetched_at, updated_at FROM ("
+                    "SELECT fund_code, date, source, price, daily_return, aum, investor_count, "
+                    "share_count, fetched_at, updated_at, "
+                    f"CASE WHEN source IN ({fintables_placeholders}) THEN 1 ELSE 0 END AS is_fintables "
+                    f"FROM fund_prices WHERE {where_clause}"
+                    ") AS fp "
+                    f"ORDER BY date ASC, is_fintables DESC, {source_priority_sql} DESC, updated_at DESC"
                 )
                 query_params: List[Any] = [
                     *fintables_list,
                     *params,
-                    *fintables_list,
                     *priority_params,
                 ]
             else:
