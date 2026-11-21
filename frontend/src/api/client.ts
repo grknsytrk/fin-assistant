@@ -15,6 +15,7 @@ import type {
     MarketFlowResponse,
     MarketFlowHeadResponse,
     ModelPortfolioPerformanceResponse,
+    ModelPortfolioPositionAddPayload,
     ModelPortfolioPositionClosePayload,
     ModelPortfolioPositionCreatePayload,
     ModelPortfolioPositionUpdatePayload,
@@ -1134,6 +1135,20 @@ export const apiClient = {
     modelPortfolioUpdatePosition: (positionId: string, payload: ModelPortfolioPositionUpdatePayload, token: string) =>
         fetchApi<ModelPortfolioResponse>(`/model-portfolio/positions/${encodeURIComponent(positionId)}`, {
             method: 'PUT',
+            headers: { Authorization: `Bearer ${token.trim()}` },
+            body: JSON.stringify(payload),
+            exposeErrorDetail: true,
+        }).then((res) => {
+            modelPortfolioMemoryCache = { payload: res, fetchedAt: Date.now() };
+            modelPortfolioPerformanceMemoryCache = null;
+            const syms = (res.active_positions || []).map((p) => p.symbol);
+            modelPortfolioSymbolsMemoryCache = { symbols: syms, version: res.version, fetchedAt: Date.now() };
+            for (const listener of modelPortfolioSymbolsListeners) listener(syms);
+            return res;
+        }),
+    modelPortfolioAddToPosition: (positionId: string, payload: ModelPortfolioPositionAddPayload, token: string) =>
+        fetchApi<ModelPortfolioResponse>(`/model-portfolio/positions/${encodeURIComponent(positionId)}/add`, {
+            method: 'POST',
             headers: { Authorization: `Bearer ${token.trim()}` },
             body: JSON.stringify(payload),
             exposeErrorDetail: true,

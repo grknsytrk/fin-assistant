@@ -24,7 +24,7 @@ import {
     SECTOR_OPTIONS,
 } from '../constants';
 import { useAccessibleDialog } from '../hooks/useAccessibleDialog';
-import { formatPct, todayIsoDate, toneClass } from '../utils';
+import { formatPct, formatPrice, todayIsoDate, toneClass } from '../utils';
 import { MpExplainedDropdown } from './MpExplainedDropdown';
 import './ModelPortfolioModals.css';
 
@@ -114,6 +114,7 @@ export function MpSectorDropdown({
 export function ModelPortfolioEditorModal({
     adminToken,
     editingPosition,
+    activePositions = [],
     availableWeightPct,
     universeRows,
     onClose,
@@ -121,12 +122,17 @@ export function ModelPortfolioEditorModal({
 }: {
     adminToken: string;
     editingPosition: ModelPortfolioPosition | null;
+    activePositions?: ModelPortfolioPosition[];
     availableWeightPct: number;
     universeRows: MarketUniverseRow[];
     onClose: () => void;
     onSaved: (nextData: ModelPortfolioResponse) => void;
 }) {
     const isEdit = Boolean(editingPosition);
+    const activePositionsBySymbol = useMemo(
+        () => new Map(activePositions.map((pos) => [pos.symbol.trim().toUpperCase(), pos])),
+        [activePositions],
+    );
     const [symbol, setSymbol] = useState(editingPosition?.symbol || '');
     const [symbolQuery, setSymbolQuery] = useState(editingPosition?.symbol || '');
     const [companyName, setCompanyName] = useState(editingPosition?.company_name || '');
@@ -240,6 +246,31 @@ export function ModelPortfolioEditorModal({
             .finally(() => setPrefillLoading(false));
     }, []);
 
+    const existingActivePosition = useMemo(
+        () => (!isEdit ? activePositionsBySymbol.get(symbol.trim().toUpperCase()) || null : null),
+        [activePositionsBySymbol, isEdit, symbol],
+    );
+    const isAddToExisting = Boolean(existingActivePosition);
+
+    useEffect(() => {
+        setFormError(null);
+        if (!existingActivePosition) return;
+        setEntryPrice((prev) => {
+            if (prev.trim() && Number(prev) > 0) return prev;
+            const fallback = existingActivePosition.current_price ?? existingActivePosition.entry_price;
+            return fallback != null ? String(fallback) : prev;
+        });
+        if (availableWeightPct > 0) {
+            setWeightPct((prev) => {
+                const num = Number(prev);
+                if (!prev.trim() || !Number.isFinite(num) || num <= 0 || num > availableWeightPct) {
+                    return String(Number(Math.min(5, availableWeightPct).toFixed(2)));
+                }
+                return prev;
+            });
+        }
+    }, [availableWeightPct, existingActivePosition]);
+
     const autoSelectSector = useCallback(async (targetSym: string) => {
         const normalizedSymbol = targetSym.trim().toUpperCase();
         if (!normalizedSymbol) return;
@@ -275,10 +306,42 @@ export function ModelPortfolioEditorModal({
         setSymbolQuery(normalizedSymbol);
         setCompanyName(targetName || normalizedSymbol);
         setSector('');
+        setFormError(null);
         setDropdownOpen(false);
-        void autoSelectSector(normalizedSymbol);
+        const matchedExisting = !isEdit ? activePositionsBySymbol.get(normalizedSymbol) : undefined;
+        if (matchedExisting) {
+            const fallbackPrice = matchedExisting.current_price ?? matchedExisting.entry_price;
+            if (fallbackPrice != null) {
+                setEntryPrice(String(fallbackPrice));
+            }
+        } else {
+            void autoSelectSector(normalizedSymbol);
+        }
         triggerPrefill(normalizedSymbol, entryDate);
-    }, [autoSelectSector, entryDate, triggerPrefill]);
+    }, [activePositionsBySymbol, autoSelectSector, entryDate, isEdit, triggerPrefill]);
+
+    const addPreview = useMemo(() => {
+        if (!isAddToExisting || !existingActivePosition) return null;
+        const oldWeight = Number(existingActivePosition.weight_pct) || 0;
+        const parsedAddWeight = Number(weightPct);
+        const addWeight = Number.isFinite(parsedAddWeight) && parsedAddWeight > 0 ? parsedAddWeight : 0;
+        const newWeight = Number((oldWeight + addWeight).toFixed(2));
+        const oldEntryPrice = Number(existingActivePosition.entry_price) || 0;
+        const parsedAddPrice = Number(entryPrice);
+        const addPrice = Number.isFinite(parsedAddPrice) && parsedAddPrice > 0 ? parsedAddPrice : null;
+        const newAvgPrice =
+            addPrice != null && addWeight > 0 && newWeight > 0
+                ? Number((((oldWeight * oldEntryPrice) + (addWeight * addPrice)) / newWeight).toFixed(2))
+                : oldEntryPrice;
+        return {
+            oldWeight,
+            addWeight,
+            newWeight,
+            oldEntryPrice,
+            addPrice,
+            newAvgPrice,
+        };
+    }, [entryPrice, existingActivePosition, isAddToExisting, weightPct]);
 
     const impliedUpsidePct = useMemo(() => {
         const ep = Number(entryPrice);
@@ -324,6 +387,42 @@ export function ModelPortfolioEditorModal({
         const wp = Number(weightPct);
         if (!symbol.trim()) {
             setFormError('Lütfen bir hisse kodu seçin.');
+            return;
+        }
+        if (isAddToExisting && existingActivePosition) {
+            if (!Number.isFinite(ep) || ep <= 0) {
+                setFormError('Geçerli bir ekleme fiyatı girin.');
+                return;
+            }
+            if (availableWeightPct <= 0) {
+                setFormError('Portföy ağırlıkları zaten %100. Ekleme yapmak için önce mevcut ağırlıkları azaltın.');
+                return;
+            }
+            if (!Number.isFinite(wp) || wp <= 0 || wp > availableWeightPct + 1e-6) {
+                setFormError(
+                    `Kullanılabilir portföy payı %${availableWeightPct.toFixed(1)}. En fazla bu kadar ekleme yapabilirsiniz.`,
+                );
+                return;
+            }
+            setSaving(true);
+            try {
+                const added = await apiClient.modelPortfolioAddToPosition(
+                    existingActivePosition.id,
+                    {
+                        add_weight_pct: wp,
+                        add_price: ep,
+                        add_date: entryDate,
+                        add_xu100: entryXu100.trim() ? Number(entryXu100) : null,
+                        note: revisionNote.trim() || undefined,
+                    },
+                    adminToken,
+                );
+                onSaved(added);
+            } catch (err: unknown) {
+                setFormError(err instanceof Error ? err.message : 'Ekleme sırasında hata oluştu.');
+            } finally {
+                setSaving(false);
+            }
             return;
         }
         if (!Number.isFinite(ep) || ep <= 0) {
@@ -425,7 +524,11 @@ export function ModelPortfolioEditorModal({
                             <BriefcaseBusiness size={15} />
                         </div>
                         <h3 id="mp-editor-dialog-title">
-                            {isEdit ? `${editingPosition?.symbol} Pozisyonunu Düzenle` : 'Hisse Ekle'}
+                            {isEdit
+                                ? `${editingPosition?.symbol} Pozisyonunu Düzenle`
+                                : isAddToExisting && existingActivePosition
+                                    ? `${existingActivePosition.symbol} Pozisyonuna Ekleme Yap`
+                                    : 'Hisse Ekle'}
                         </h3>
                     </div>
                     <button type="button" className="mp-icon-btn" aria-label="Pozisyon formunu kapat" onClick={onClose}>
@@ -437,7 +540,7 @@ export function ModelPortfolioEditorModal({
                     <div className="mp-modal-body mp-editor-form">
                         {/* SECTION 1: Stock Selection, Date & Sector */}
                         <div className="mp-editor-section">
-                            <div className="mp-form-grid-3">
+                            <div className={isAddToExisting ? 'mp-form-grid-2' : 'mp-form-grid-3'}>
                                 <div className="mp-field mp-symbol-picker">
                                     <div className="mp-field-label-row">
                                         <span className="mp-field-label">Hisse Kodu *</span>
@@ -462,6 +565,8 @@ export function ModelPortfolioEditorModal({
                                                     selectedSymbolRef.current = normalizedSymbol;
                                                     sectorEditVersionRef.current += 1;
                                                     setSector('');
+                                                    setFormError(null);
+                                                    if (!isEdit) setEntryPrice('');
                                                 }
                                                 setSymbolQuery(val);
                                                 setSymbol(val);
@@ -471,7 +576,9 @@ export function ModelPortfolioEditorModal({
                                                 window.setTimeout(() => setDropdownOpen(false), 180);
                                                 const normalizedSymbol = selectedSymbolRef.current;
                                                 if (!isEdit && normalizedSymbol) {
-                                                    void autoSelectSector(normalizedSymbol);
+                                                    if (!activePositionsBySymbol.has(normalizedSymbol)) {
+                                                        void autoSelectSector(normalizedSymbol);
+                                                    }
                                                     triggerPrefill(normalizedSymbol, entryDate);
                                                 }
                                             }}
@@ -482,6 +589,7 @@ export function ModelPortfolioEditorModal({
                                         <div className="mp-symbol-dropdown" id="mp-symbol-options" role="listbox" aria-label="Hisse seçenekleri">
                                             {matchingUniverse.map((row) => {
                                                 const sym = String(row.symbol || row.company).toUpperCase();
+                                                const existingPos = activePositionsBySymbol.get(sym);
                                                 return (
                                                     <button
                                                         key={sym}
@@ -502,6 +610,11 @@ export function ModelPortfolioEditorModal({
                                                                 size="xs"
                                                             />
                                                             <strong>{sym}</strong>
+                                                            {existingPos && (
+                                                                <span className="mp-symbol-active-pill mp-mono">
+                                                                    Portföyde · %{existingPos.weight_pct.toFixed(1).replace(/\.0$/, '')}
+                                                                </span>
+                                                            )}
                                                         </div>
                                                         <span title={row.name || undefined}>{row.name}</span>
                                                     </button>
@@ -513,7 +626,9 @@ export function ModelPortfolioEditorModal({
 
                                 <div className="mp-field">
                                     <div className="mp-field-label-row">
-                                        <span className="mp-field-label">Giriş Tarihi *</span>
+                                        <span className="mp-field-label">
+                                            {isAddToExisting ? 'Ekleme Tarihi *' : 'Giriş Tarihi *'}
+                                        </span>
                                         <button
                                             type="button"
                                             className="mp-mini-preset-btn"
@@ -528,7 +643,7 @@ export function ModelPortfolioEditorModal({
                                     </div>
                                     <input
                                         type="date"
-                                        aria-label="Giriş tarihi"
+                                        aria-label={isAddToExisting ? 'Ekleme tarihi' : 'Giriş tarihi'}
                                         value={entryDate}
                                         onChange={(e) => {
                                             const nextDate = e.target.value;
@@ -538,58 +653,93 @@ export function ModelPortfolioEditorModal({
                                     />
                                 </div>
 
-                                <MpSectorDropdown
-                                    value={sector}
-                                    onChange={(nextSector) => {
-                                        sectorEditVersionRef.current += 1;
-                                        setSector(nextSector);
-                                    }}
-                                />
+                                {!isAddToExisting && (
+                                    <MpSectorDropdown
+                                        value={sector}
+                                        onChange={(nextSector) => {
+                                            sectorEditVersionRef.current += 1;
+                                            setSector(nextSector);
+                                        }}
+                                    />
+                                )}
                             </div>
 
-                            {/* Selected Stock & Auto-Prefilled Reference Strip */}
-                            {symbol.trim() && (
-                                <div className="mp-selected-stock-banner">
+                            {/* Existing Position Info Banner vs New Stock Reference Strip */}
+                            {isAddToExisting && existingActivePosition ? (
+                                <div className="mp-selected-stock-banner mp-add-existing-banner">
                                     <div className="mp-selected-stock-left">
                                         <SymbolLogo
-                                            symbol={symbol.trim().toUpperCase()}
-                                            name={companyName || symbol}
+                                            symbol={existingActivePosition.symbol}
+                                            name={existingActivePosition.company_name}
                                             kind="stock"
                                             size="sm"
                                         />
                                         <div>
                                             <div className="mp-selected-stock-title">
-                                                <strong className="mp-mono">{symbol.trim().toUpperCase()}</strong>
-                                                <span>{companyName || 'Şirket seçildi'}</span>
+                                                <strong className="mp-mono">{existingActivePosition.symbol}</strong>
+                                                <span>{existingActivePosition.company_name}</span>
+                                                <span className="mp-add-existing-badge">
+                                                    Portföyde · Mevcut analiz ve hedef fiyat korunur
+                                                </span>
                                             </div>
                                             <div className="mp-selected-stock-multiples mp-mono">
                                                 <span>
-                                                    XU100: <b>{entryXu100 ? Number(entryXu100).toLocaleString('tr-TR') : '—'}</b>
+                                                    Mevcut Ağırlık: <b>%{existingActivePosition.weight_pct.toFixed(1)}</b>
                                                 </span>
                                                 <span>
-                                                    F/K: <b>{fk ? `${Number(fk).toFixed(2)}x` : '—'}</b>
+                                                    Mevcut Maliyet: <b>{formatPrice(existingActivePosition.entry_price)}</b>
                                                 </span>
                                                 <span>
-                                                    FD/FAVÖK: <b>{fdFavok ? `${Number(fdFavok).toFixed(2)}x` : '—'}</b>
-                                                </span>
-                                                <span>
-                                                    PD/DD: <b>{pdDd ? `${Number(pdDd).toFixed(2)}x` : '—'}</b>
+                                                    Hedef Fiyat: <b>{formatPrice(existingActivePosition.target_price)}</b>
                                                 </span>
                                             </div>
                                         </div>
                                     </div>
-                                    <button
-                                        type="button"
-                                        className="mp-btn mp-btn-subtle mp-btn-sm"
-                                        onClick={() => setShowMultiplesOverride((p) => !p)}
-                                    >
-                                        <SlidersHorizontal size={12} />
-                                        <span>{showMultiplesOverride ? 'Çarpanları Gizle' : 'Çarpanları Düzenle'}</span>
-                                    </button>
                                 </div>
+                            ) : (
+                                symbol.trim() && (
+                                    <div className="mp-selected-stock-banner">
+                                        <div className="mp-selected-stock-left">
+                                            <SymbolLogo
+                                                symbol={symbol.trim().toUpperCase()}
+                                                name={companyName || symbol}
+                                                kind="stock"
+                                                size="sm"
+                                            />
+                                            <div>
+                                                <div className="mp-selected-stock-title">
+                                                    <strong className="mp-mono">{symbol.trim().toUpperCase()}</strong>
+                                                    <span>{companyName || 'Şirket seçildi'}</span>
+                                                </div>
+                                                <div className="mp-selected-stock-multiples mp-mono">
+                                                    <span>
+                                                        XU100: <b>{entryXu100 ? Number(entryXu100).toLocaleString('tr-TR') : '—'}</b>
+                                                    </span>
+                                                    <span>
+                                                        F/K: <b>{fk ? `${Number(fk).toFixed(2)}x` : '—'}</b>
+                                                    </span>
+                                                    <span>
+                                                        FD/FAVÖK: <b>{fdFavok ? `${Number(fdFavok).toFixed(2)}x` : '—'}</b>
+                                                    </span>
+                                                    <span>
+                                                        PD/DD: <b>{pdDd ? `${Number(pdDd).toFixed(2)}x` : '—'}</b>
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            className="mp-btn mp-btn-subtle mp-btn-sm"
+                                            onClick={() => setShowMultiplesOverride((p) => !p)}
+                                        >
+                                            <SlidersHorizontal size={12} />
+                                            <span>{showMultiplesOverride ? 'Çarpanları Gizle' : 'Çarpanları Düzenle'}</span>
+                                        </button>
+                                    </div>
+                                )
                             )}
 
-                            {showMultiplesOverride && (
+                            {!isAddToExisting && showMultiplesOverride && (
                                 <div className="mp-form-grid-4 mp-override-grid">
                                     <label className="mp-field">
                                         <span className="mp-field-label">Giriş Günü XU100</span>
@@ -636,6 +786,107 @@ export function ModelPortfolioEditorModal({
                         </div>
 
                         {/* SECTION 2: Price, Target Price & Weight */}
+                        {isAddToExisting && existingActivePosition ? (
+                            <>
+                                <div className="mp-editor-section">
+                                    <div className="mp-form-grid-2">
+                                        <div className="mp-field">
+                                            <div className="mp-field-label-row">
+                                                <span className="mp-field-label">Ekleme Fiyatı (₺) *</span>
+                                                {prefillLoading && <em className="mp-prefill-tag">Çekiliyor...</em>}
+                                            </div>
+                                            <input
+                                                type="number"
+                                                aria-label="Ekleme fiyatı"
+                                                step="0.01"
+                                                value={entryPrice}
+                                                onChange={(e) => setEntryPrice(e.target.value)}
+                                                placeholder="0.00"
+                                            />
+                                        </div>
+
+                                        <div className="mp-field">
+                                            <div className="mp-field-label-row">
+                                                <span className="mp-field-label">Eklenecek Ağırlık (%) *</span>
+                                                <span className="mp-field-micro-hint mp-mono">
+                                                    Kalan: %{remainingCashAfterWeight.toFixed(1)}
+                                                </span>
+                                            </div>
+                                            <input
+                                                type="number"
+                                                aria-label="Eklenecek ağırlık yüzde"
+                                                step="0.5"
+                                                min="0.5"
+                                                max="100"
+                                                value={weightPct}
+                                                onChange={(e) => setWeightPct(e.target.value)}
+                                            />
+                                            <div className="mp-quick-pills-row">
+                                                {[2.5, 5, 10].map((w) => (
+                                                    <button
+                                                        key={w}
+                                                        type="button"
+                                                        className={`mp-quick-pill${Number(weightPct) === w ? ' active' : ''}`}
+                                                        onClick={() => setWeightPct(String(Math.min(w, availableWeightPct)))}
+                                                    >
+                                                        +%{w}
+                                                    </button>
+                                                ))}
+                                                <button
+                                                    type="button"
+                                                    className="mp-quick-pill"
+                                                    title={`Kullanılabilir maksimum: %${availableWeightPct.toFixed(1)}`}
+                                                    onClick={() => setWeightPct(String(availableWeightPct))}
+                                                >
+                                                    Maks
+                                                </button>
+                                            </div>
+                                            {availableWeightPct <= 0 && (
+                                                <span className="mp-field-micro-hint mp-field-warning-text">
+                                                    Portföy %100 dolu; ekleme yapmak için önce diğer pozisyonların ağırlığını azaltın.
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {addPreview && (
+                                        <div className="mp-add-preview-grid">
+                                            <div className="mp-add-preview-item">
+                                                <span>Yeni Toplam Ağırlık</span>
+                                                <strong className="mp-mono">
+                                                    %{addPreview.oldWeight.toFixed(1)} → %{addPreview.newWeight.toFixed(1)}
+                                                </strong>
+                                            </div>
+                                            <div className="mp-add-preview-item">
+                                                <span>Yeni Ortalama Maliyet</span>
+                                                <strong className="mp-mono">
+                                                    {formatPrice(addPreview.oldEntryPrice)} → {formatPrice(addPreview.newAvgPrice)}
+                                                </strong>
+                                            </div>
+                                            <div className="mp-add-preview-item">
+                                                <span>Hedef Fiyat (Korunur)</span>
+                                                <strong className="mp-mono">
+                                                    {formatPrice(existingActivePosition.target_price)}
+                                                </strong>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="mp-editor-section">
+                                    <label className="mp-field">
+                                        <span className="mp-field-label">Ekleme Notu (İsteğe bağlı)</span>
+                                        <input
+                                            type="text"
+                                            value={revisionNote}
+                                            onChange={(e) => setRevisionNote(e.target.value)}
+                                            placeholder="Örn: Geri çekilmede kademeli alım / ağırlık artışı"
+                                        />
+                                    </label>
+                                </div>
+                            </>
+                        ) : (
+                        <>
                         <div className="mp-editor-section">
                             <div className="mp-form-grid-3">
                                 <div className="mp-field">
@@ -873,6 +1124,8 @@ export function ModelPortfolioEditorModal({
                                 </label>
                             )}
                         </div>
+                        </>
+                        )}
 
                         {formError && <div className="mp-form-error">{formError}</div>}
                     </div>
@@ -880,7 +1133,13 @@ export function ModelPortfolioEditorModal({
                     {/* Sticky Footer */}
                     <div className="mp-modal-footer mp-modal-footer-sticky">
                         <div className="mp-footer-summary">
-                            {symbol.trim() ? (
+                            {isAddToExisting && existingActivePosition && addPreview ? (
+                                <span>
+                                    <b>{existingActivePosition.symbol}</b> · +%{addPreview.addWeight.toFixed(1)} →{' '}
+                                    <b>%{addPreview.newWeight.toFixed(1)}</b> · Ort. Maliyet:{' '}
+                                    <b>{formatPrice(addPreview.newAvgPrice)}</b>
+                                </span>
+                            ) : symbol.trim() ? (
                                 <span>
                                     <b>{symbol.trim().toUpperCase()}</b> · Ağırlık: <b>%{weightPct || 0}</b>
                                     {impliedUpsidePct != null && (
@@ -899,7 +1158,13 @@ export function ModelPortfolioEditorModal({
                                 İptal
                             </button>
                             <button type="submit" className="mp-btn mp-btn-primary" disabled={saving || improvingField !== null}>
-                                {saving ? 'Kaydediliyor...' : isEdit ? 'Kaydet' : 'Portföye Ekle'}
+                                {saving
+                                    ? (isAddToExisting ? 'Ekleniyor...' : 'Kaydediliyor...')
+                                    : isEdit
+                                        ? 'Kaydet'
+                                        : isAddToExisting
+                                            ? 'Ağırlık Artır'
+                                            : 'Portföye Ekle'}
                             </button>
                         </div>
                     </div>

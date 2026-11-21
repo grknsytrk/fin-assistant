@@ -1383,6 +1383,7 @@ export default function ModelPortfolioPage() {
                     <ModelPortfolioEditorModal
                         adminToken={adminToken}
                         editingPosition={editingPosition}
+                        activePositions={liveActivePositions}
                         availableWeightPct={
                             editingPosition
                                 ? Math.max(0, 100 - liveSummary.total_weight_pct + editingPosition.weight_pct)

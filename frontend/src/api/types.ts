@@ -1156,6 +1156,10 @@ export interface ModelPortfolioRevision {
   new_target_price: number;
   prev_weight_pct: number;
   new_weight_pct: number;
+  add_weight_pct?: number;
+  add_price?: number;
+  prev_entry_price?: number;
+  new_entry_price?: number;
   note: string | null;
 }
 
@@ -1311,6 +1315,14 @@ export interface ModelPortfolioPositionUpdatePayload {
   risk_note?: string;
   revision_note?: string;
   entry_multiples?: Partial<ModelPortfolioMultiples>;
+}
+
+export interface ModelPortfolioPositionAddPayload {
+  add_weight_pct: number;
+  add_price: number;
+  add_date?: string;
+  add_xu100?: number | null;
+  note?: string;
 }
 
 export interface ModelPortfolioPositionClosePayload {

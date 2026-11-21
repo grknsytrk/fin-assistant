@@ -804,6 +804,138 @@ def close_position(
         return position
 
 
+def add_to_position(
+    processed_dir: Path,
+    position_id: str,
+    payload: Dict[str, Any],
+    *,
+    current_price_fallback: Optional[float] = None,
+    current_xu100_fallback: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Increase weight of an active position and average its entry cost."""
+    with _STATE_LOCK:
+        state = load_model_portfolio_state(processed_dir)
+        target_idx = next(
+            (i for i, p in enumerate(state["positions"]) if str(p.get("id")) == str(position_id)),
+            None,
+        )
+        if target_idx is None:
+            raise KeyError("Model portföy pozisyonu bulunamadı.")
+
+        position = dict(state["positions"][target_idx])
+        if position.get("status") != "active":
+            raise ValueError("Sadece aktif pozisyonlara ekleme yapılabilir.")
+
+        add_weight_pct = _positive_float(payload.get("add_weight_pct"))
+        if add_weight_pct is None or add_weight_pct <= 0 or add_weight_pct > 100.0:
+            raise ValueError("Eklenecek ağırlık 0 ile 100 arasında olmalıdır.")
+
+        add_price = _positive_float(payload.get("add_price")) or _positive_float(current_price_fallback)
+        if add_price is None:
+            raise ValueError("Ekleme fiyatı (add_price) 0'dan büyük olmalıdır.")
+
+        add_date_raw = str(payload.get("add_date") or _today_iso()).strip()[:10]
+        try:
+            date.fromisoformat(add_date_raw)
+        except ValueError as exc:
+            raise ValueError("Ekleme tarihi YYYY-AA-GG formatında olmalıdır.") from exc
+
+        current_total_weight = sum(
+            float(p.get("weight_pct") or 0.0)
+            for p in state["positions"]
+            if p.get("status") == "active"
+        )
+        if round(current_total_weight + add_weight_pct, 4) > 100.0:
+            remaining = max(0.0, round(100.0 - current_total_weight, 2))
+            raise ValueError(
+                f"Toplam portföy ağırlığı %100'ü aşamaz. Kalan kullanılabilir ağırlık: %{remaining}"
+            )
+
+        prev_weight = float(position.get("weight_pct") or 0.0)
+        prev_entry_price = float(position.get("entry_price") or 0.0)
+        combined_weight = prev_weight + add_weight_pct
+        new_weight = round(combined_weight, 2)
+        new_entry_price = round(
+            ((prev_weight * prev_entry_price) + (add_weight_pct * add_price)) / combined_weight,
+            4,
+        )
+
+        prev_entry_xu100 = _positive_float(position.get("entry_xu100"))
+        resolved_add_xu100 = _positive_float(payload.get("add_xu100")) or _positive_float(current_xu100_fallback)
+        if prev_entry_xu100 is not None and resolved_add_xu100 is not None:
+            new_entry_xu100: Optional[float] = round(
+                ((prev_weight * prev_entry_xu100) + (add_weight_pct * resolved_add_xu100)) / combined_weight,
+                2,
+            )
+        elif prev_entry_xu100 is None and resolved_add_xu100 is not None:
+            new_entry_xu100 = round(resolved_add_xu100, 2)
+        else:
+            new_entry_xu100 = prev_entry_xu100
+
+        now = _now_iso()
+        note = str(payload.get("note") or payload.get("revision_note") or "").strip()[:500]
+        target_price_val = round(float(position.get("target_price") or 0.0), 4)
+
+        position["weight_pct"] = new_weight
+        position["entry_price"] = new_entry_price
+        position["entry_xu100"] = new_entry_xu100
+        position["updated_at"] = now
+
+        revisions = list(position.get("revisions") or [])
+        revisions.insert(
+            0,
+            {
+                "id": uuid.uuid4().hex[:10],
+                "date": add_date_raw,
+                "created_at": now,
+                "prev_target_price": target_price_val,
+                "new_target_price": target_price_val,
+                "prev_weight_pct": round(prev_weight, 2),
+                "new_weight_pct": new_weight,
+                "add_weight_pct": round(add_weight_pct, 2),
+                "add_price": round(add_price, 4),
+                "prev_entry_price": round(prev_entry_price, 4),
+                "new_entry_price": new_entry_price,
+                "note": note or None,
+            },
+        )
+        position["revisions"] = revisions[:50]
+
+        symbol = position["symbol"]
+        summary = (
+            f"{symbol} pozisyonuna {add_price:.2f} ₺ fiyattan +%{add_weight_pct:.1f} ekleme yapıldı "
+            f"(Ağırlık %{prev_weight:.1f} → %{new_weight:.1f}, Ort. maliyet {prev_entry_price:.2f} ₺ → {new_entry_price:.2f} ₺)."
+        )
+        if note:
+            summary = f"{summary} ({note})"
+
+        state["changelog"].insert(
+            0,
+            {
+                "id": uuid.uuid4().hex[:12],
+                "date": add_date_raw,
+                "created_at": now,
+                "action": "weight_revised",
+                "symbol": symbol,
+                "company_name": position.get("company_name") or symbol,
+                "summary": summary,
+                "details": {
+                    "prev_weight_pct": round(prev_weight, 2),
+                    "new_weight_pct": new_weight,
+                    "add_weight_pct": round(add_weight_pct, 2),
+                    "add_price": round(add_price, 4),
+                    "prev_entry_price": round(prev_entry_price, 4),
+                    "new_entry_price": new_entry_price,
+                    "note": note or None,
+                },
+            },
+        )
+        state["changelog"] = state["changelog"][:200]
+        state["positions"][target_idx] = position
+        _save_model_portfolio_state(processed_dir, state)
+        return position
+
+
 def delete_position(processed_dir: Path, position_id: str) -> Dict[str, Any]:
     with _STATE_LOCK:
         state = load_model_portfolio_state(processed_dir)
@@ -861,6 +993,10 @@ _PUBLIC_REVISION_FIELDS = (
     "new_target_price",
     "prev_weight_pct",
     "new_weight_pct",
+    "add_weight_pct",
+    "add_price",
+    "prev_entry_price",
+    "new_entry_price",
     "note",
 )
 _PUBLIC_CHANGELOG_FIELDS = (
@@ -883,6 +1019,10 @@ _PUBLIC_CHANGELOG_DETAIL_FIELDS = (
     "new_target_price",
     "prev_weight_pct",
     "new_weight_pct",
+    "add_weight_pct",
+    "add_price",
+    "prev_entry_price",
+    "new_entry_price",
     "note",
 )
 
@@ -1125,6 +1265,34 @@ def build_model_portfolio_payload(
     }
 
 
+def _effective_weight_on_date(pos: Dict[str, Any], d_str: str) -> float:
+    """Return the portfolio weight active for a position on trading day `d_str`."""
+    raw_revs = pos.get("revisions")
+    if not isinstance(raw_revs, list) or not raw_revs:
+        return float(pos.get("weight_pct") or 0.0)
+    weight_revs: List[Tuple[str, str, float, float]] = []
+    for rev in raw_revs:
+        if not isinstance(rev, dict):
+            continue
+        rev_date_raw = str(rev.get("date") or "").strip()[:10]
+        if len(rev_date_raw) < 10:
+            continue
+        prev_w = _positive_float(rev.get("prev_weight_pct"))
+        new_w = _positive_float(rev.get("new_weight_pct"))
+        if prev_w is None or new_w is None or abs(new_w - prev_w) < 0.01:
+            continue
+        created_at = str(rev.get("created_at") or "")
+        weight_revs.append((rev_date_raw, created_at, prev_w, new_w))
+    if not weight_revs:
+        return float(pos.get("weight_pct") or 0.0)
+    weight_revs.sort(key=lambda item: (item[0], item[1]))
+    effective = weight_revs[0][2]
+    for rev_date, _, _, new_w in weight_revs:
+        if rev_date < d_str:
+            effective = new_w
+    return effective
+
+
 def build_model_portfolio_performance_payload(
     processed_dir: Path,
     *,
@@ -1183,8 +1351,8 @@ def build_model_portfolio_performance_payload(
             continue
     canonical_start = min(entry_dates) if entry_dates else today
 
-    # The series cache includes cash weight (0% daily return) in the 100 TL base.
-    cache_key = f"api:model-portfolio:performance:v5:ver={version}:day={today_iso}"
+    # The series cache includes cash weight (0% daily return) and revision-aware historical weights.
+    cache_key = f"api:model-portfolio:performance:v6:ver={version}:day={today_iso}"
     now_ts = time.time()
 
     with _STATE_LOCK:
@@ -1344,7 +1512,7 @@ def build_model_portfolio_performance_payload(
         included_weight_sum = 0.0
         for pos_idx, pos in enumerate(series_positions):
             sym = str(pos.get("symbol") or "").strip().upper()
-            weight = float(pos.get("weight_pct") or 0.0)
+            weight = _effective_weight_on_date(pos, d_str)
             entry_d = str(pos.get("entry_date") or "")[:10]
             closed_d = str(pos.get("closed_date") or "")[:10] if str(pos.get("status") or "active") == "closed" else ""
             pos_key = position_keys[pos_idx]

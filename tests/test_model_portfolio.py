@@ -544,3 +544,167 @@ def test_load_model_portfolio_state_uses_conditional_cache_and_honors_read_monke
     reset_model_portfolio_cache_for_tests()
 
 
+def test_add_to_existing_position_averages_cost_preserves_analysis_and_tracks_historical_weight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import model_portfolio_service as mps
+
+    reset_model_portfolio_cache_for_tests()
+    reset_admin_rate_limit_for_tests()
+    monkeypatch.delenv("RAGFIN_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(mps, "read_json_cache", lambda path: None)
+    monkeypatch.setattr(
+        api_mod,
+        "CONFIG",
+        replace(api_mod.CONFIG, paths=replace(api_mod.CONFIG.paths, processed_dir=tmp_path)),
+    )
+    monkeypatch.setenv("RAGFIN_ADMIN_TOKEN", "test-founder-secret")
+
+    monkeypatch.setattr(api_mod, "_fetch_market_price_map", lambda symbols, **kwargs: {})
+    api_mod._STOCKS_CACHE["payload:XUTUM"] = {
+        "_ts": 9999999999.0,
+        "entry": {
+            "fresh_until": 9999999999.0,
+            "stale_until": 9999999999.0,
+            "payload": {
+                "as_of": "2026-10-23T12:00:00Z",
+                "rows": [
+                    {
+                        "symbol": "BIMAS",
+                        "company": "BIMAS",
+                        "price": 374.25,
+                        "change": -5.0,
+                        "change_pct": -1.32,
+                        "market_cap": 225000000000.0,
+                    }
+                ],
+            },
+        },
+    }
+    monkeypatch.setattr(api_mod, "_model_portfolio_cached_xu100", lambda: 11131.32)
+    monkeypatch.setattr(
+        api_mod,
+        "_resolve_market_card_valuation",
+        lambda sym, market_cap=None: {
+            "fk": 14.2,
+            "fd_favok": 9.1,
+            "pd_dd": 4.3,
+            "net_borc_favok": 0.5,
+            "valuation_financial_period": "2026/06",
+        },
+    )
+
+    client = TestClient(api_mod.app)
+    verify_res = client.post(
+        "/model-portfolio/admin/verify",
+        headers={"X-Admin-Token": "test-founder-secret"},
+    )
+    assert verify_res.status_code == 200
+    auth_headers = {"Authorization": f"Bearer {verify_res.json()['session_token']}"}
+
+    create_res = client.post(
+        "/model-portfolio/positions",
+        headers=auth_headers,
+        json={
+            "symbol": "BIMAS",
+            "entry_date": "2026-10-21",
+            "entry_price": 385.75,
+            "entry_xu100": 11654.28,
+            "target_price": 570.0,
+            "weight_pct": 20.0,
+            "thesis": "Original thesis",
+            "risk_note": "Original risk",
+            "catalysts": ["Marj Genişlemesi"],
+        },
+    )
+    assert create_res.status_code == 200
+    pos_id = create_res.json()["active_positions"][0]["id"]
+
+    add_res = client.post(
+        f"/model-portfolio/positions/{pos_id}/add",
+        headers=auth_headers,
+        json={
+            "add_weight_pct": 5.0,
+            "add_price": 374.25,
+            "add_date": "2026-10-23",
+            "add_xu100": 11131.32,
+            "note": "Kademeli ekleme",
+        },
+    )
+    assert add_res.status_code == 200
+    payload = add_res.json()
+    pos = payload["active_positions"][0]
+    assert pos["weight_pct"] == 25.0
+    assert pos["entry_price"] == 383.45
+    assert pos["entry_xu100"] == 11549.69
+    assert pos["target_price"] == 570.0
+    assert pos["thesis"] == "Original thesis"
+    assert pos["risk_note"] == "Original risk"
+    assert pos["catalysts"] == ["Marj Genişlemesi"]
+    assert payload["summary"]["total_weight_pct"] == 25.0
+
+    assert len(pos["revisions"]) == 1
+    rev = pos["revisions"][0]
+    assert rev["date"] == "2026-10-23"
+    assert rev["prev_weight_pct"] == 20.0
+    assert rev["new_weight_pct"] == 25.0
+    assert rev["add_weight_pct"] == 5.0
+    assert rev["add_price"] == 374.25
+    assert rev["prev_entry_price"] == 385.75
+    assert rev["new_entry_price"] == 383.45
+    assert rev["note"] == "Kademeli ekleme"
+
+    log_entry = payload["changelog"][0]
+    assert log_entry["action"] == "weight_revised"
+    assert log_entry["symbol"] == "BIMAS"
+    assert log_entry["details"]["new_weight_pct"] == 25.0
+    assert log_entry["details"]["new_entry_price"] == 383.45
+
+    exceed_res = client.post(
+        f"/model-portfolio/positions/{pos_id}/add",
+        headers=auth_headers,
+        json={
+            "add_weight_pct": 80.0,
+            "add_price": 374.25,
+            "add_date": "2026-10-23",
+        },
+    )
+    assert exceed_res.status_code == 400
+
+    fake_series, _ = _performance_test_series(
+        {
+            "XU100": {
+                "2026-10-21": 100.0,
+                "2026-10-22": 100.0,
+                "2026-10-23": 100.0,
+                "2026-10-24": 100.0,
+            },
+            "XU030": {
+                "2026-10-21": 100.0,
+                "2026-10-22": 100.0,
+                "2026-10-23": 100.0,
+                "2026-10-24": 100.0,
+            },
+            "BIMAS": {
+                "2026-10-21": 100.0,
+                "2026-10-22": 110.0,
+                "2026-10-23": 110.0,
+                "2026-10-24": 132.0,
+            },
+        }
+    )
+    perf_payload = mps.build_model_portfolio_performance_payload(
+        tmp_path,
+        fetch_series_fn=fake_series,
+        quote_map={},
+        current_xu100=None,
+    )
+    by_date = {p["date"]: p for p in perf_payload["points"]}
+    assert by_date["2026-10-22"]["portfolio_return_pct"] == 2.0
+    assert by_date["2026-10-23"]["portfolio_return_pct"] == 2.0
+    assert by_date["2026-10-24"]["portfolio_return_pct"] == 7.1
+    reset_model_portfolio_cache_for_tests()
+
+
+

@@ -330,6 +330,41 @@ async def update_model_portfolio_position_endpoint(position_id: str, request: Re
 
     return _build_current_model_portfolio_response()
 
+
+@router.post("/model-portfolio/positions/{position_id}/add")
+async def add_to_model_portfolio_position_endpoint(position_id: str, request: Request) -> Dict[str, Any]:
+    from app.model_portfolio_service import add_to_position, load_model_portfolio_state
+
+    _require_model_portfolio_admin(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Geçersiz JSON gövdesi.") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Geçersiz istek formatı.")
+
+    state = load_model_portfolio_state(CONFIG.paths.processed_dir)
+    pos = next((p for p in state.get("positions", []) if str(p.get("id")) == str(position_id)), None)
+    sym = str((pos or {}).get("symbol") or "").strip().upper()
+    quote = (_model_portfolio_cached_quote_map([sym]).get(sym) or {}) if sym else {}
+    current_xu100 = _model_portfolio_cached_xu100()
+
+    try:
+        add_to_position(
+            CONFIG.paths.processed_dir,
+            position_id,
+            body,
+            current_price_fallback=_positive_float(quote.get("price")),
+            current_xu100_fallback=current_xu100,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _build_current_model_portfolio_response()
+
+
 @router.post("/model-portfolio/positions/{position_id}/close")
 async def close_model_portfolio_position_endpoint(position_id: str, request: Request) -> Dict[str, Any]:
     from app.model_portfolio_service import close_position, load_model_portfolio_state
