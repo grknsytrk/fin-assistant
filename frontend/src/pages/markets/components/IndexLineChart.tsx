@@ -197,21 +197,23 @@ export function IndexLineChart({
         : null;
     const measureTooltipWidth = 190;
     const measureTooltipHeight = 70;
+    const plotRight = width - padding.right;
+    const plotMidX = padding.left + (plotRight - padding.left) / 2;
     const measureTooltipGap = 14;
     const measureTooltipAnchorX = hoverX ?? measureEndX;
     const measureTooltipAnchorY = hoverY ?? measureEndY;
     const measureTooltipShouldFlip = measureTooltipAnchorX != null
-        && measureTooltipAnchorX + measureTooltipGap + measureTooltipWidth > width - 8;
+        && (measureTooltipAnchorX >= plotMidX || measureTooltipAnchorX + measureTooltipGap + measureTooltipWidth > plotRight);
     const measureTooltipX = measureTooltipAnchorX == null
         ? 0
         : measureTooltipShouldFlip
-            ? Math.max(8, measureTooltipAnchorX - measureTooltipGap - measureTooltipWidth)
-            : Math.min(measureTooltipAnchorX + measureTooltipGap, width - measureTooltipWidth - 8);
+            ? Math.max(padding.left, measureTooltipAnchorX - measureTooltipGap - measureTooltipWidth)
+            : Math.min(measureTooltipAnchorX + measureTooltipGap, plotRight - measureTooltipWidth);
     const measureTooltipY = measureTooltipAnchorY == null
         ? 0
         : measureTooltipAnchorY - measureTooltipGap - measureTooltipHeight >= padding.top
             ? measureTooltipAnchorY - measureTooltipGap - measureTooltipHeight
-            : Math.min(measureTooltipAnchorY + measureTooltipGap, height - measureTooltipHeight - 8);
+            : Math.min(measureTooltipAnchorY + measureTooltipGap, height - measureTooltipHeight - padding.bottom);
     const measureDeltaText = measureDelta == null
         ? '-'
         : `${measureDelta > 0 ? '+' : measureDelta < 0 ? '-' : ''}${formatIndexPrice(Math.abs(measureDelta))} puan`;
@@ -220,7 +222,12 @@ export function IndexLineChart({
     const measureRightX = measureAnchorX != null && measureEndX != null ? Math.max(measureAnchorX, measureEndX) : null;
     const tooltipWidth = 145;
     const tooltipHeight = 60;
-    const tooltipX = hoverX == null ? 0 : clamp(hoverX + 16, padding.left, width - tooltipWidth - padding.right);
+    const tooltipGap = 16;
+    const tooltipX = hoverX == null
+        ? 0
+        : hoverX < plotMidX && hoverX + tooltipGap + tooltipWidth <= plotRight
+            ? clamp(hoverX + tooltipGap, padding.left, plotRight - tooltipWidth)
+            : Math.max(padding.left, hoverX - tooltipWidth - tooltipGap);
     const tooltipY = hoverY == null ? 0 : clamp(hoverY - tooltipHeight / 2, padding.top, height - tooltipHeight - padding.bottom);
 
     return (

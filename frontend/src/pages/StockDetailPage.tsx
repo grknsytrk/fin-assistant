@@ -477,23 +477,25 @@ function StockDetailPriceChart({
     const measureLineY = measureAnchorY != null && measureEndY != null
         ? Math.max(padding.top + (isMobileChart ? 28 : 12), Math.min(measureAnchorY, measureEndY) - (isMobileChart ? 34 : 18))
         : null;
+    const plotRight = width - padding.right;
+    const plotMidX = padding.left + (plotRight - padding.left) / 2;
     const measureTooltipWidth = isMobileChart ? 320 : 190;
     const measureTooltipHeight = isMobileChart ? 112 : 70;
     const measureTooltipGap = isMobileChart ? 22 : 14;
     const measureTooltipAnchorX = measureEndX;
     const measureTooltipAnchorY = measureEndY;
     const measureTooltipShouldFlip = measureTooltipAnchorX != null
-        && measureTooltipAnchorX + measureTooltipGap + measureTooltipWidth > width - 8;
+        && (measureTooltipAnchorX >= plotMidX || measureTooltipAnchorX + measureTooltipGap + measureTooltipWidth > plotRight);
     const measureTooltipX = measureTooltipAnchorX == null
         ? 0
         : measureTooltipShouldFlip
-            ? Math.max(8, measureTooltipAnchorX - measureTooltipGap - measureTooltipWidth)
-            : Math.min(measureTooltipAnchorX + measureTooltipGap, width - measureTooltipWidth - 8);
+            ? Math.max(padding.left, measureTooltipAnchorX - measureTooltipGap - measureTooltipWidth)
+            : Math.min(measureTooltipAnchorX + measureTooltipGap, plotRight - measureTooltipWidth);
     const measureTooltipY = measureTooltipAnchorY == null
         ? 0
         : measureTooltipAnchorY - measureTooltipGap - measureTooltipHeight >= padding.top
             ? measureTooltipAnchorY - measureTooltipGap - measureTooltipHeight
-            : Math.min(measureTooltipAnchorY + measureTooltipGap, height - measureTooltipHeight - 8);
+            : Math.min(measureTooltipAnchorY + measureTooltipGap, height - measureTooltipHeight - padding.bottom);
     const measureDeltaText = measureDelta == null
         ? '-'
         : `${measureDelta > 0 ? '+' : measureDelta < 0 ? '-' : ''}${formatQuotePrice(Math.abs(measureDelta), currency)}`;
@@ -506,7 +508,12 @@ function StockDetailPriceChart({
     const selectionClipId = `sd-price-chart-selection-${ticker}-${selectedRange}`;
     const tooltipWidth = isMobileChart ? 270 : 166;
     const tooltipHeight = isMobileChart ? 90 : 60;
-    const tooltipX = hoverX == null ? 0 : Math.min(Math.max(hoverX + 16, padding.left), width - tooltipWidth - 8);
+    const tooltipGap = 16;
+    const tooltipX = hoverX == null
+        ? 0
+        : hoverX < plotMidX && hoverX + tooltipGap + tooltipWidth <= plotRight
+            ? Math.min(plotRight - tooltipWidth, Math.max(padding.left, hoverX + tooltipGap))
+            : Math.max(padding.left, hoverX - tooltipWidth - tooltipGap);
     const tooltipY = hoverY == null
         ? 0
         : hoverY - tooltipHeight / 2 < padding.top
