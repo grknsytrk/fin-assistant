@@ -2056,3 +2056,202 @@ def test_history_job_should_schedule_allows_widening_running_job_for_3y_5y() -> 
 
     assert fund_api_service._history_job_should_schedule(payload, last_job=running_1y_job, target=target_1y) is False
     assert fund_api_service._history_job_should_schedule(payload, last_job=running_1y_job, target=target_5y) is True
+
+
+def test_tefas_bulk_returns_cache_enriches_detail_and_yield_summary_zero_http(monkeypatch, tmp_path) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    monkeypatch.delenv("RAGFIN_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    target_day = date(2026, 11, 20)
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> "FixedDate":
+            return cls(2026, 11, 20)
+
+    monkeypatch.setattr(fund_service, "date", FixedDate)
+    monkeypatch.setattr(fund_service, "_turkey_market_today", lambda: target_day)
+
+    assert fund_service.commit_funds_snapshot(
+        tmp_path,
+        {
+            "status": "ok",
+            "as_of": target_day.isoformat(),
+            "rows": [
+                {
+                    "fund_code": "TMG",
+                    "name": "IS PORTFOY YABANCI",
+                    "as_of": target_day.isoformat(),
+                    "price": 1.44,
+                    "tefas_open": True,
+                    "period_returns": {},
+                },
+                {
+                    "fund_code": "BUY",
+                    "name": "BUYUYEN HISSE FONU",
+                    "as_of": target_day.isoformat(),
+                    "price": 2.50,
+                    "tefas_open": True,
+                    "period_returns": {},
+                },
+                {
+                    "fund_code": "TLY",
+                    "name": "TERA BIRINCI",
+                    "as_of": target_day.isoformat(),
+                    "price": 3.20,
+                    "tefas_open": True,
+                    "period_returns": {},
+                },
+            ],
+            "source_metadata": {"source": "tefasfon_funds"},
+        },
+        job_id="bulk-returns-test",
+        owner_token="bulk-returns-test",
+        generation=1,
+    )
+
+    class StubReturnsClient:
+        def fetch_returns(self):
+            return [
+                {
+                    "fonKodu": "TMG",
+                    "getiri1a": -3.55,
+                    "getiri3a": -0.41,
+                    "getiri6a": 7.89,
+                    "getiri1y": 30.33,
+                    "getiri3y": 192.09,
+                    "getiri5y": 617.20,
+                },
+                {
+                    "fonKodu": "BUY",
+                    "getiri1a": 3.01,
+                    "getiri3a": -19.01,
+                    "getiri6a": -18.44,
+                    "getiri1y": 6.77,
+                    "getiri3y": 8.70,
+                    "getiri5y": None,
+                },
+                {
+                    "fonKodu": "TLY",
+                    "getiri1a": None,
+                    "getiri3a": 0.0,
+                    "getiri6a": 0.0,
+                    "getiri1y": 0.0,
+                    "getiri3y": 0.0,
+                    "getiri5y": 0.0,
+                },
+            ]
+
+    monkeypatch.setattr(fund_service, "TefasFonClient", lambda: StubReturnsClient())
+    by_code = fund_service.refresh_tefas_bulk_returns(tmp_path)
+    assert "TMG" in by_code
+    assert "BUY" in by_code
+    assert "TLY" not in by_code
+
+    # Drop in-memory cache (keep disk file) and forbid any further HTTP calls.
+    fund_service.reset_tefas_bulk_returns_cache()
+    monkeypatch.setattr(
+        fund_service,
+        "fetch_fintables_yield_summary",
+        lambda *_a, **_k: pytest.fail("Fintables HTTP must not be called"),
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "TefasFonClient",
+        lambda: pytest.fail("TEFAS HTTP must not be called"),
+    )
+
+    tmg_detail = fund_service.get_fund_detail_payload(tmp_path, "TMG")
+    assert tmg_detail["period_returns"]["3y"] == pytest.approx(192.09)
+    assert tmg_detail["period_returns"]["5y"] == pytest.approx(617.20)
+
+    tmg_ys = fund_service.get_fund_yield_summary_payload("TMG", processed_dir=tmp_path)
+    assert tmg_ys["source"] == "local_fund_snapshot"
+    assert tmg_ys["periods"]["3y"]["return_pct"] == pytest.approx(192.09)
+    assert tmg_ys["periods"]["5y"]["return_pct"] == pytest.approx(617.20)
+
+    buy_detail = fund_service.get_fund_detail_payload(tmp_path, "BUY")
+    assert buy_detail["period_returns"]["3y"] == pytest.approx(8.70)
+    assert buy_detail["period_returns"].get("5y") is None
+
+    tly_detail = fund_service.get_fund_detail_payload(tmp_path, "TLY")
+    assert tly_detail["period_returns"].get("3y") is None
+    assert tly_detail["period_returns"].get("5y") is None
+
+
+def test_zero_price_snapshot_falls_back_to_latest_db_price_for_detail_and_yield_summary(
+    monkeypatch, tmp_path
+) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    monkeypatch.delenv("RAGFIN_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    target_day = date(2026, 11, 20)
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> "FixedDate":
+            return cls(2026, 11, 20)
+
+    monkeypatch.setattr(fund_service, "date", FixedDate)
+    monkeypatch.setattr(fund_service, "_turkey_market_today", lambda: target_day)
+
+    assert fund_service.commit_funds_snapshot(
+        tmp_path,
+        {
+            "status": "ok",
+            "as_of": target_day.isoformat(),
+            "rows": [
+                {
+                    "fund_code": "TLY",
+                    "name": "TERA BIRINCI SERBEST",
+                    "as_of": target_day.isoformat(),
+                    "price": 0.0,
+                    "tefas_open": True,
+                    "period_returns": {},
+                }
+            ],
+            "source_metadata": {"source": "tefasfon_funds"},
+        },
+        job_id="zero-price-db-fallback-test",
+        owner_token="zero-price-db-fallback-test",
+        generation=1,
+    )
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {"fund_code": "TLY", "date": "2021-11-19", "price": 10.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2023-11-20", "price": 20.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2025-11-19", "price": 50.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2025-12-31", "price": 60.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2026-05-20", "price": 70.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2026-08-20", "price": 80.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2026-10-20", "price": 90.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2026-11-13", "price": 95.0, "source": "fintables_udf_history"},
+            {"fund_code": "TLY", "date": "2026-11-20", "price": 100.0, "source": "fintables_udf_history"},
+        ],
+        source="fintables_udf_history",
+    )
+
+    monkeypatch.setattr(
+        fund_service,
+        "fetch_fintables_yield_summary",
+        lambda *_a, **_k: pytest.fail("Fintables HTTP must not be called"),
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "TefasFonClient",
+        lambda: pytest.fail("TEFAS HTTP must not be called"),
+    )
+
+    detail = fund_service.get_fund_detail_payload(tmp_path, "TLY")
+    assert detail["history_start_date"] == "2021-11-19"
+    assert detail["period_returns"]["3y"] == pytest.approx(400.0)
+    assert detail["period_returns"]["5y"] == pytest.approx(900.0)
+
+    yield_payload = fund_service.get_fund_yield_summary_payload("TLY", processed_dir=tmp_path)
+    assert yield_payload["status"] == "ok"
+    assert yield_payload["source"] == "local_fund_snapshot"
+    assert yield_payload["periods"]["1m"]["latest_date"] == "2026-11-20"
+    assert yield_payload["periods"]["3y"]["return_pct"] == pytest.approx(400.0)
+    assert yield_payload["periods"]["5y"]["return_pct"] == pytest.approx(900.0)
+    assert yield_payload["periods"]["oldest"]["prev_close_date"] == "2021-11-19"

@@ -779,6 +779,7 @@ class FundSnapshotFetchResult:
 
 def reset_fund_caches_for_tests() -> None:
     _clear_all_fund_memory_caches()
+    reset_tefas_bulk_returns_cache()
     with _AUTO_FETCH_LOCK:
         _AUTO_FETCH_IN_FLIGHT.clear()
         _AUTO_FETCH_NEGATIVE_CACHE.clear()
@@ -1740,6 +1741,12 @@ from app.funds.performance_and_allocations import (
     _find_fund_row,
     _fund_return_rank_value,
     _fund_category_rankings,
+    reset_tefas_bulk_returns_cache,
+    tefas_bulk_returns_generation,
+    load_cached_tefas_bulk_returns,
+    tefas_bulk_returns_is_stale,
+    refresh_tefas_bulk_returns,
+    _is_tefas_zero_extended_sentinel,
     get_fund_detail_payload,
     _local_yield_summary_periods,
     get_fund_yield_summary_payload,

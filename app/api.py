@@ -52,7 +52,7 @@ from app.fund_api_service import (
     _stop_fund_price_collector,
     shutdown_fund_executors,
 )
-from app.fund_service import close_shared_http_clients
+from app.fund_service import close_shared_http_clients, load_cached_tefas_bulk_returns
 from app.kap_api_service import shutdown_background_refresh_executor
 from app.kap_statement_refresh import shutdown_kap_statement_executor
 from app.market_broadcaster import get_market_broadcaster
@@ -99,6 +99,11 @@ def bootstrap_application_storage() -> None:
     _market_service._hydrate_stock_return_bases_from_disk()
     _market_service._hydrate_stock_hist_multiples_from_disk()
     _market_service._schedule_xutum_return_bases_warmup_if_needed()
+    try:
+        load_cached_tefas_bulk_returns(CONFIG.paths.processed_dir)
+        _fund_api_service._schedule_tefas_bulk_returns_warmup_if_needed()
+    except Exception as exc:
+        LOGGER.warning("TEFAS bulk returns warmup schedule failed: %s", exc)
 
 
 @asynccontextmanager

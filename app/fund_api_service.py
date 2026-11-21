@@ -469,13 +469,21 @@ _FUND_SNAPSHOT_ROW_MAP_CACHE: Dict[str, Any] = {}
 
 
 def _fund_detail_payload(*, normalized: str) -> Dict[str, Any]:
-    from app.fund_service import fund_listing_revision, get_fund_detail_payload
+    from app.fund_service import (
+        fund_listing_revision,
+        get_fund_detail_payload,
+        tefas_bulk_returns_generation,
+    )
 
     try:
         revision = fund_listing_revision(CONFIG.paths.processed_dir)
     except Exception:
         revision = {}
-    detail_rev = f"{int(revision.get('catalog_generation') or 0)}:{int(revision.get('price_generation') or 0)}"
+    detail_rev = (
+        f"{int(revision.get('catalog_generation') or 0)}:"
+        f"{int(revision.get('price_generation') or 0)}:"
+        f"{int(tefas_bulk_returns_generation())}"
+    )
     backend = _get_cache()
     l1_key = (id(backend), id(get_fund_detail_payload), str(CONFIG.paths.processed_dir), detail_rev, normalized)
     l1_hit = _FUND_DETAIL_L1_CACHE.get(l1_key)
@@ -662,7 +670,7 @@ from app.funds_api.jobs_and_collector import (
     _history_job_set, _history_job_should_schedule, _history_last_key, _history_merge_target,
     _history_request_range, _history_start_or_extend_job, _maybe_schedule_fund_snapshot_refresh,
     _public_fund_refresh_job, _run_allocation_history_refresh_job, _run_fund_history_job,
-    _run_fund_refresh_job, _set_fund_refresh_job, _start_allocation_history_refresh_job,
+    _run_fund_refresh_job, _schedule_tefas_bulk_returns_warmup_if_needed, _set_fund_refresh_job, _start_allocation_history_refresh_job,
     _start_fund_price_collector, _start_fund_refresh_job, _stop_fund_price_collector,
     _update_fund_refresh_job,
 )

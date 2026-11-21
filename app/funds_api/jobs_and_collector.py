@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import threading
 from datetime import date
 from typing import Any, Dict, Optional
 
@@ -637,6 +639,56 @@ async def _stop_fund_price_collector() -> None:
         await task
     except fas.asyncio.CancelledError:
         pass
+
+
+_TEFAS_BULK_RETURNS_WARMUP_LOCK = threading.Lock()
+_TEFAS_BULK_RETURNS_WARMUP_RUNNING = False
+
+
+def _schedule_tefas_bulk_returns_warmup_if_needed() -> bool:
+    """Kick off a non-blocking single-flight warmup when TEFAS bulk returns are cold/stale."""
+    global _TEFAS_BULK_RETURNS_WARMUP_RUNNING
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+
+    fas = _fas()
+    from app import fund_service as _fund_service
+
+    processed_dir = fas.CONFIG.paths.processed_dir
+    if not _fund_service.tefas_bulk_returns_is_stale(processed_dir):
+        return False
+
+    with _TEFAS_BULK_RETURNS_WARMUP_LOCK:
+        if _TEFAS_BULK_RETURNS_WARMUP_RUNNING:
+            return False
+        _TEFAS_BULK_RETURNS_WARMUP_RUNNING = True
+
+    def _run_warmup() -> None:
+        global _TEFAS_BULK_RETURNS_WARMUP_RUNNING
+        try:
+            by_code = _fund_service.refresh_tefas_bulk_returns(processed_dir)
+            if by_code:
+                fas._FUND_DETAIL_L1_CACHE.clear()
+                backend = fas._get_cache()
+                for prefix in ("api:fund-detail:", "api:fund-yield-summary:"):
+                    try:
+                        backend.delete_prefix_with_status(prefix)
+                    except Exception:
+                        pass
+                fas.LOGGER.info("TEFAS bulk returns warmup completed: %d funds", len(by_code))
+        except Exception as exc:
+            fas.LOGGER.warning("TEFAS bulk returns warmup failed: %s", exc)
+        finally:
+            with _TEFAS_BULK_RETURNS_WARMUP_LOCK:
+                _TEFAS_BULK_RETURNS_WARMUP_RUNNING = False
+
+    try:
+        fas._FUND_REFRESH_EXECUTOR.submit(_run_warmup)
+        return True
+    except Exception:
+        with _TEFAS_BULK_RETURNS_WARMUP_LOCK:
+            _TEFAS_BULK_RETURNS_WARMUP_RUNNING = False
+        return False
 
 
 def _history_job_key(fund_code: str, job_id: str) -> str:

@@ -907,12 +907,162 @@ def _fund_category_rankings(
     }
 
 
+_TEFAS_BULK_RETURNS_LOCK = threading.Lock()
+_TEFAS_BULK_RETURNS_CACHE: Dict[str, Any] = {
+    "fetched_at": 0.0,
+    "generation": 0,
+    "by_code": {},
+    "path": None,
+}
+_TEFAS_BULK_RETURNS_TTL_SECONDS = 6 * 3600
+_TEFAS_BULK_RETURNS_FILENAME = "tefas_bulk_returns_cache.json"
+
+
+def reset_tefas_bulk_returns_cache() -> None:
+    """Clear in-memory cached bulk TEFAS return percentages (used in tests)."""
+    with _TEFAS_BULK_RETURNS_LOCK:
+        _TEFAS_BULK_RETURNS_CACHE["fetched_at"] = 0.0
+        _TEFAS_BULK_RETURNS_CACHE["generation"] = 0
+        _TEFAS_BULK_RETURNS_CACHE["by_code"] = {}
+        _TEFAS_BULK_RETURNS_CACHE["path"] = None
+
+
+def tefas_bulk_returns_generation() -> int:
+    """Return the monotonic generation of the cached bulk TEFAS returns map."""
+    with _TEFAS_BULK_RETURNS_LOCK:
+        return int(_TEFAS_BULK_RETURNS_CACHE.get("generation") or 0)
+
+
+def load_cached_tefas_bulk_returns(processed_dir: Path) -> Dict[str, Dict[str, Optional[float]]]:
+    """Read bulk TEFAS period returns from memory or disk without making HTTP requests."""
+    resolved_path = str(processed_dir)
+    with _TEFAS_BULK_RETURNS_LOCK:
+        if (
+            _TEFAS_BULK_RETURNS_CACHE.get("path") == resolved_path
+            and isinstance(_TEFAS_BULK_RETURNS_CACHE.get("by_code"), dict)
+            and _TEFAS_BULK_RETURNS_CACHE["by_code"]
+        ):
+            return _TEFAS_BULK_RETURNS_CACHE["by_code"]
+
+    cache_path = processed_dir / _TEFAS_BULK_RETURNS_FILENAME
+    try:
+        if not cache_path.exists():
+            return {}
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    by_code = payload.get("by_code")
+    if not isinstance(by_code, dict) or not by_code:
+        return {}
+    fetched_at = float(payload.get("fetched_at") or 0.0)
+    with _TEFAS_BULK_RETURNS_LOCK:
+        _TEFAS_BULK_RETURNS_CACHE["fetched_at"] = fetched_at
+        _TEFAS_BULK_RETURNS_CACHE["by_code"] = by_code
+        _TEFAS_BULK_RETURNS_CACHE["path"] = resolved_path
+        if int(_TEFAS_BULK_RETURNS_CACHE.get("generation") or 0) == 0:
+            _TEFAS_BULK_RETURNS_CACHE["generation"] = 1
+        return by_code
+
+
+def tefas_bulk_returns_is_stale(processed_dir: Path) -> bool:
+    """Return True when bulk TEFAS returns are missing or older than TTL."""
+    by_code = load_cached_tefas_bulk_returns(processed_dir)
+    if not by_code:
+        return True
+    with _TEFAS_BULK_RETURNS_LOCK:
+        fetched_at = float(_TEFAS_BULK_RETURNS_CACHE.get("fetched_at") or 0.0)
+    return (time.time() - fetched_at) > _TEFAS_BULK_RETURNS_TTL_SECONDS
+
+
+def refresh_tefas_bulk_returns(processed_dir: Path) -> Dict[str, Dict[str, Optional[float]]]:
+    """Fetch bulk TEFAS period returns in a single call and cache to memory + disk."""
+    fs = _fund_service()
+    raw_rows = fs.TefasFonClient().fetch_returns()
+    by_code: Dict[str, Dict[str, Optional[float]]] = {}
+    for row in raw_rows or ():
+        if not isinstance(row, dict):
+            continue
+        code = fs.normalize_fund_code(str(row.get("fonKodu") or row.get("fund_code") or ""))
+        if not code:
+            continue
+        parsed = _seam("_period_returns_from_raw")(row)
+        cleaned = {key: value for key, value in parsed.items() if value is not None}
+        # Skip rows where TEFAS returned only 0.0 placeholders across all windows (e.g. private Serbest funds).
+        if not cleaned or all(value == 0.0 for value in cleaned.values()):
+            continue
+        by_code[code] = cleaned
+    if by_code:
+        now = time.time()
+        cache_path = processed_dir / _TEFAS_BULK_RETURNS_FILENAME
+        tmp_path = processed_dir / f".{_TEFAS_BULK_RETURNS_FILENAME}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            processed_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path.write_text(
+                json.dumps({"fetched_at": now, "by_code": by_code}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp_path, cache_path)
+        except Exception:
+            fs.LOGGER.warning("Failed to persist TEFAS bulk returns cache to %s", cache_path, exc_info=True)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        with _TEFAS_BULK_RETURNS_LOCK:
+            _TEFAS_BULK_RETURNS_CACHE["fetched_at"] = now
+            _TEFAS_BULK_RETURNS_CACHE["generation"] = int(_TEFAS_BULK_RETURNS_CACHE.get("generation") or 0) + 1
+            _TEFAS_BULK_RETURNS_CACHE["by_code"] = by_code
+            _TEFAS_BULK_RETURNS_CACHE["path"] = str(processed_dir)
+    return by_code
+
+
 def _is_tefas_zero_extended_sentinel(period_returns: Dict[str, Any]) -> bool:
     fs = _fund_service()
     v1y = fs._coerce_float(period_returns.get("1y"))
     v3y = fs._coerce_float(period_returns.get("3y"))
     v5y = fs._coerce_float(period_returns.get("5y"))
     return v1y == 0.0 and v3y == 0.0 and v5y == 0.0
+
+
+def _overlay_cached_tefas_bulk_returns(
+    raw_returns: Any,
+    processed_dir: Path,
+    normalized_code: str,
+) -> Dict[str, Any]:
+    fs = _fund_service()
+    merged: Dict[str, Any] = dict(raw_returns) if isinstance(raw_returns, dict) else {}
+    if _is_tefas_zero_extended_sentinel(merged):
+        merged["3y"] = None
+        merged["5y"] = None
+    bulk_row = load_cached_tefas_bulk_returns(processed_dir).get(normalized_code)
+    if isinstance(bulk_row, dict):
+        for bulk_key, bulk_val in bulk_row.items():
+            if bulk_val is not None and fs._coerce_float(merged.get(bulk_key)) is None:
+                merged[bulk_key] = bulk_val
+    return merged
+
+
+def _resolve_latest_db_price(
+    processed_dir: Path,
+    normalized_code: str,
+    max_date_str: Optional[str],
+) -> Optional[Tuple[float, str, date]]:
+    if not max_date_str:
+        return None
+    try:
+        max_dt = date.fromisoformat(max_date_str)
+    except ValueError:
+        return None
+    latest_db = _fund_service().read_fund_price_on_or_before(processed_dir, normalized_code, max_dt)
+    if not latest_db or latest_db.get("price") is None or latest_db["price"] <= 0:
+        return None
+    try:
+        db_dt = date.fromisoformat(latest_db["date"])
+    except ValueError:
+        return None
+    return (float(latest_db["price"]), latest_db["date"], db_dt)
 
 
 def _resolve_extended_db_anchor(
@@ -967,16 +1117,17 @@ def get_fund_detail_payload(processed_dir: Path, fund_code: str) -> Dict[str, An
     else:
         management_fee = applied if applied is not None else prospectus
     tax_info = row.get("tax_info") or _fund_service()._fund_tax_info(row.get("fund_type"))
-    period_returns = dict(row.get("period_returns") or {})
-    if _is_tefas_zero_extended_sentinel(period_returns):
-        period_returns["3y"] = None
-        period_returns["5y"] = None
+    period_returns = _overlay_cached_tefas_bulk_returns(row.get("period_returns"), processed_dir, normalized)
     history_start_date: Optional[str] = None
-    min_date_str, _max_date_str = _fund_service().read_fund_price_date_bounds(processed_dir, normalized)
+    min_date_str, max_date_str = _fund_service().read_fund_price_date_bounds(processed_dir, normalized)
     if min_date_str:
         history_start_date = min_date_str
         latest_price = _fund_service()._coerce_float(row.get("price"))
         latest_date_str = _fund_service()._fund_date(row.get("as_of"))
+        if latest_price is None or latest_price <= 0 or not latest_date_str:
+            resolved_db = _resolve_latest_db_price(processed_dir, normalized, max_date_str)
+            if resolved_db is not None:
+                latest_price, latest_date_str, _ = resolved_db
         if latest_price is not None and latest_price > 0 and latest_date_str:
             try:
                 latest_dt = date.fromisoformat(latest_date_str)
@@ -1024,25 +1175,39 @@ def _local_yield_summary_periods(
 ) -> Dict[str, Dict[str, Any]]:
     """Build yield-summary period anchors from cached catalog + local prices without HTTP."""
     fs = _fund_service()
-    latest_price = fs._coerce_float(latest_row.get("price"))
-    latest_date = fs._fund_date(latest_row.get("as_of"))
-    if latest_price is None or latest_price <= 0 or not latest_date:
+    snapshot_date = fs._fund_date(latest_row.get("as_of"))
+    if not snapshot_date:
         return {}
     try:
-        latest_dt = date.fromisoformat(latest_date)
+        snapshot_dt = date.fromisoformat(snapshot_date)
     except ValueError:
         return {}
-    if latest_dt < fs._latest_fund_snapshot_target_date() - timedelta(days=5):
+    if snapshot_dt < fs._latest_fund_snapshot_target_date() - timedelta(days=5):
         return {}
 
-    period_returns = latest_row.get("period_returns")
+    latest_price = fs._coerce_float(latest_row.get("price"))
+    latest_date = snapshot_date
+    latest_dt = snapshot_dt
+    db_exists = fs.database_enabled() or fs._fund_prices_db_path(processed_dir).exists()
+    min_date_str: Optional[str] = None
+    max_date_str: Optional[str] = None
+    if db_exists:
+        min_date_str, max_date_str = fs.read_fund_price_date_bounds(processed_dir, normalized_code)
+        if latest_price is None or latest_price <= 0:
+            resolved_db = _resolve_latest_db_price(processed_dir, normalized_code, max_date_str)
+            if resolved_db is not None:
+                latest_price, latest_date, latest_dt = resolved_db
+    if latest_price is None or latest_price <= 0:
+        return {}
+
+    effective_returns = _overlay_cached_tefas_bulk_returns(
+        latest_row.get("period_returns"), processed_dir, normalized_code
+    )
+
     periods: Dict[str, Dict[str, Any]] = {}
-    if isinstance(period_returns, dict):
-        skip_zero_extended = _is_tefas_zero_extended_sentinel(period_returns)
+    if effective_returns:
         for key in ("1w", "1m", "3m", "6m", "ytd", "1y", "3y", "5y"):
-            if skip_zero_extended and key in {"3y", "5y"}:
-                continue
-            return_pct = fs._coerce_float(period_returns.get(key))
+            return_pct = fs._coerce_float(effective_returns.get(key))
             if return_pct is None:
                 continue
             denominator = 1.0 + (return_pct / 100.0)
@@ -1057,7 +1222,7 @@ def _local_yield_summary_periods(
                 "return_pct": return_pct,
             }
 
-    if fs.database_enabled() or fs._fund_prices_db_path(processed_dir).exists():
+    if db_exists:
         try:
             local_points = fs.read_fund_price_points_range(
                 processed_dir,
@@ -1086,7 +1251,6 @@ def _local_yield_summary_periods(
             ext_key not in periods or periods[ext_key].get("prev_close") is None
             for ext_key in ("3y", "5y")
         )
-        min_date_str, _max_date_str = fs.read_fund_price_date_bounds(processed_dir, normalized_code)
         if min_date_str:
             try:
                 min_dt = date.fromisoformat(min_date_str)
@@ -3570,6 +3734,12 @@ __all__ = [
     "_find_fund_row",
     "_fund_return_rank_value",
     "_fund_category_rankings",
+    "reset_tefas_bulk_returns_cache",
+    "tefas_bulk_returns_generation",
+    "load_cached_tefas_bulk_returns",
+    "tefas_bulk_returns_is_stale",
+    "refresh_tefas_bulk_returns",
+    "_is_tefas_zero_extended_sentinel",
     "get_fund_detail_payload",
     "_local_yield_summary_periods",
     "get_fund_yield_summary_payload",
