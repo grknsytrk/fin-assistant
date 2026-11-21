@@ -2411,6 +2411,14 @@ def _auto_refresh_fund_performance(
             error = "fund history returned no valid points"
             _seam("_remember_auto_fetch_failure")(key, error)
             return [f"fund history auto fetch failed: {error}"]
+        if (
+            (end_date - start_date).days > 120
+            and str((payload.get("source_metadata") or {}).get("coverage_state") or "") == "range_incomplete"
+        ):
+            _seam("_remember_auto_fetch_failure")(
+                key,
+                "fund history range incomplete after upstream refresh",
+            )
         return []
     except _fund_service().FundUpstreamError as exc:
         error = str(exc)
@@ -2774,7 +2782,7 @@ def _fetch_fast_long_fund_history(
         except _fund_service().TefasUpstreamError as exc:
             direct_rows = []
             warnings.append(f"tefas_fund_list daily history bootstrap failed: {exc}")
-        combined_direct = list(direct_rows) + list(existing_tail) if direct_rows else []
+        combined_direct = list(direct_rows) + list(existing_tail) if (direct_rows or existing_tail) else []
         valid_direct_rows = _seam("_valid_performance_points")(combined_direct, normalized)
         if _seam("_history_is_usable_daily_range")(
             valid_direct_rows,

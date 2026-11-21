@@ -2806,11 +2806,40 @@ class TefasClient:
                     max_workers=worker_count,
                     thread_name_prefix="tefas-history",
                 ) as executor:
-                    futures = [
-                        executor.submit(_fetch_chunk, chunk_start, chunk_end)
-                        for chunk_start, chunk_end in chunks
-                    ]
-                    outcomes = [future.result() for future in futures]
+                    if len(chunks) > 8:
+                        # Walk backwards from newest to oldest month so funds
+                        # launched after start_date stop as soon as two
+                        # consecutive months before inception return empty.
+                        outcomes = []
+                        consecutive_empty = 0
+                        reversed_chunks = list(reversed(chunks))
+                        for batch_idx in range(0, len(reversed_chunks), worker_count):
+                            batch = reversed_chunks[batch_idx : batch_idx + worker_count]
+                            batch_futures = [
+                                executor.submit(_fetch_chunk, c_start, c_end)
+                                for c_start, c_end in batch
+                            ]
+                            batch_outcomes = [future.result() for future in batch_futures]
+                            outcomes.extend(batch_outcomes)
+                            if stop_event.is_set():
+                                break
+                            stop_early = False
+                            for st, pl in batch_outcomes:
+                                if st == "ok" and not pl:
+                                    consecutive_empty += 1
+                                    if consecutive_empty >= 2:
+                                        stop_early = True
+                                        break
+                                elif st == "ok" and pl:
+                                    consecutive_empty = 0
+                            if stop_early:
+                                break
+                    else:
+                        futures = [
+                            executor.submit(_fetch_chunk, chunk_start, chunk_end)
+                            for chunk_start, chunk_end in chunks
+                        ]
+                        outcomes = [future.result() for future in futures]
 
                 for status, payload in outcomes:
                     if status == "rate_limit":
