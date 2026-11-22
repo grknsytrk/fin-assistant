@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import threading
 from datetime import date
@@ -1012,7 +1013,23 @@ def _history_start_or_extend_job(
                 submit = True
     if submit and job:
         try:
-            fas._FUND_HISTORY_EXECUTOR.submit(fas._run_fund_history_job, normalized, str(job["job_id"]))
+            future = fas._FUND_HISTORY_EXECUTOR.submit(fas._run_fund_history_job, normalized, str(job["job_id"]))
+            if isinstance(future, concurrent.futures.Future):
+                with fas._FUND_HISTORY_FUTURES_LOCK:
+                    if len(fas._FUND_HISTORY_FUTURES) >= 128:
+                        done_keys = [
+                            k
+                            for k, v in list(fas._FUND_HISTORY_FUTURES.items())
+                            if not isinstance(v, concurrent.futures.Future) or v.done()
+                        ]
+                        for k in done_keys:
+                            fas._FUND_HISTORY_FUTURES.pop(k, None)
+                        while len(fas._FUND_HISTORY_FUTURES) >= 128:
+                            oldest_key = next(iter(fas._FUND_HISTORY_FUTURES), None)
+                            if oldest_key is None:
+                                break
+                            fas._FUND_HISTORY_FUTURES.pop(oldest_key, None)
+                    fas._FUND_HISTORY_FUTURES[str(job["job_id"])] = future
         except Exception as exc:
             job["status"] = "failed"
             job["finished_at"] = fas._fund_refresh_now_iso()
@@ -1113,6 +1130,36 @@ def _run_fund_history_job(fund_code: str, job_id: str) -> None:
                 auto_refresh=False,
             )
             metadata = result.get("source_metadata") if isinstance(result.get("source_metadata"), dict) else {}
+            if (phase_end - phase_start).days > 400:
+                five_year_start = phase_end - fas.timedelta(days=5 * 366)
+                if five_year_start < phase_start:
+                    try:
+                        wider_probe = get_fund_performance_payload(
+                            fas.CONFIG.paths.processed_dir,
+                            normalized,
+                            start_date=five_year_start,
+                            end_date=phase_end,
+                            auto_refresh=False,
+                        )
+                    except Exception:
+                        wider_probe = None
+                    if isinstance(wider_probe, dict):
+                        wider_meta = wider_probe.get("source_metadata")
+                        if isinstance(wider_meta, dict):
+                            wider_cov = str(wider_meta.get("coverage_state") or "")
+                            wider_start = fas._history_job_date(
+                                wider_meta.get("available_start_date") or wider_meta.get("date_min")
+                            )
+                            if wider_cov == "complete":
+                                widened_iso = (
+                                    min(five_year_start, wider_start).isoformat()
+                                    if wider_start
+                                    else five_year_start.isoformat()
+                                )
+                                latest["effective_start"] = widened_iso
+                                latest["requested_start"] = widened_iso
+                            elif wider_start and wider_start < phase_start:
+                                latest["effective_start"] = wider_start.isoformat()
             latest.update(
                 {
                     "status": "succeeded",
@@ -1155,6 +1202,8 @@ def _run_fund_history_job(fund_code: str, job_id: str) -> None:
     finally:
         heartbeat_stop.set()
         heartbeat_thread.join(timeout=max(1.0, fas._FUND_HISTORY_HEARTBEAT_INTERVAL_SECONDS))
+        with fas._FUND_HISTORY_FUTURES_LOCK:
+            fas._FUND_HISTORY_FUTURES.pop(job_id, None)
         try:
             backend.release_if_owner(lease_key, owner_token)
         except Exception:

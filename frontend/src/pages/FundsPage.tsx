@@ -483,14 +483,19 @@ export default function FundsPage({
 
     const historyJob = performance?.source_metadata?.history_job || null;
     const historyJobId = historyJob?.job_id || null;
+    const historyJobStatus = historyJob?.status || null;
+    const historyJobRequestedStart = historyJob?.requested_start || null;
+    const historyJobRequestedEnd = historyJob?.requested_end || null;
+    const historyJobEffectiveStart = historyJob?.effective_start || null;
+    const historyJobEffectiveEnd = historyJob?.effective_end || null;
 
     useEffect(() => {
-        if (!fundCode || !historyJob || !historyJobId || !['queued', 'running'].includes(historyJob.status)) {
+        if (!fundCode || !historyJobId || !historyJobStatus || !['queued', 'running'].includes(historyJobStatus)) {
             return;
         }
         const normalizedCode = fundCode.trim().toUpperCase();
-        const requestedStart = historyJob.requested_start || performance?.source_metadata?.requested_start_date || undefined;
-        const requestedEnd = historyJob.requested_end || performance?.source_metadata?.requested_end_date || undefined;
+        const requestedStart = historyJobRequestedStart || performance?.source_metadata?.requested_start_date || undefined;
+        const requestedEnd = historyJobRequestedEnd || performance?.source_metadata?.requested_end_date || undefined;
         // Backend history jobs are retained for 30 minutes. Keep polling for
         // that same contract instead of declaring a cold TEFAS backfill dead
         // after two minutes.
@@ -499,13 +504,18 @@ export default function FundsPage({
         let timer: number | null = null;
         let inFlight = false;
         let continuePolling = true;
+        let pollAttempt = 0;
 
         const schedule = () => {
             if (timer !== null) {
                 window.clearTimeout(timer);
                 timer = null;
             }
-            if (alive && continuePolling) timer = window.setTimeout(poll, 5000);
+            if (alive && continuePolling) {
+                const delay = pollAttempt < 5 ? 800 : pollAttempt < 12 ? 2000 : 5000;
+                pollAttempt += 1;
+                timer = window.setTimeout(poll, delay);
+            }
         };
         const poll = async () => {
             if (!alive || inFlight) return;
@@ -538,10 +548,10 @@ export default function FundsPage({
                         // merge it so a narrower late response cannot erase
                         // an already complete series in the UI.
                         const refreshStart = statusJob.effective_start
-                            || historyJob.effective_start
+                            || historyJobEffectiveStart
                             || requestedStart;
                         const refreshEnd = statusJob.effective_end
-                            || historyJob.effective_end
+                            || historyJobEffectiveEnd
                             || requestedEnd;
                         const refreshed = await apiClient.fundPerformance(normalizedCode, {
                             startDate: refreshStart,
@@ -575,7 +585,17 @@ export default function FundsPage({
             if (timer !== null) window.clearTimeout(timer);
             document.removeEventListener('visibilitychange', onVisibilityChange);
         };
-    }, [fundCode, historyJob, historyJobId, performance?.source_metadata?.requested_end_date, performance?.source_metadata?.requested_start_date]);
+    }, [
+        fundCode,
+        historyJobEffectiveEnd,
+        historyJobEffectiveStart,
+        historyJobId,
+        historyJobRequestedEnd,
+        historyJobRequestedStart,
+        historyJobStatus,
+        performance?.source_metadata?.requested_end_date,
+        performance?.source_metadata?.requested_start_date,
+    ]);
 
     useEffect(() => {
         if (!fundCode) {
@@ -945,11 +965,21 @@ export default function FundsPage({
         return base;
     }, [detailPeriodReturns, earliestKnownFundDate, latestAvailableDate]);
     const activeRangeCovered = useMemo(() => {
-        if (chartRange !== '3y' && chartRange !== '5y') return true;
+        if (chartRange === 'all') {
+            return hasFullHistoryPerformance(performance) && performancePoints.length >= 2;
+        }
+        if (chartRange !== '3y' && chartRange !== '5y' && chartRange !== 'custom') return true;
         if (chartPoints.length < 2) return false;
-        const targetCutoff = shiftIsoDateDays(rangeStartDate(chartRange, chartEndDate, ''), 14);
+        const startIso = rangeStartDate(chartRange, chartEndDate, customStartDate);
+        const targetCutoff = shiftIsoDateDays(startIso, 14);
         return chartPoints[0].date <= targetCutoff;
-    }, [chartEndDate, chartPoints, chartRange]);
+    }, [chartEndDate, chartPoints, chartRange, customStartDate, performance, performancePoints.length]);
+    const activeRangeJobPending = Boolean(
+        (chartRange === '3y' || chartRange === '5y' || chartRange === 'custom' || chartRange === 'all')
+        && !activeRangeCovered
+        && historyJobStatus
+        && ['queued', 'running'].includes(historyJobStatus),
+    );
     const fundsDocumentTitle = useMemo(() => {
         if (fundCode || selectedFund) {
             const normalizedCode = selectedFund?.fund_code || fundCode?.trim().toUpperCase();
@@ -1014,7 +1044,7 @@ export default function FundsPage({
             setComparisonHistoryLoading(false);
             return;
         }
-        if (pendingChartRange) {
+        if (pendingChartRange || activeRangeJobPending) {
             setComparisonHistory(null);
             setComparisonHistoryError(null);
             setComparisonHistoryLoading(true);
@@ -1071,6 +1101,7 @@ export default function FundsPage({
             }
         };
     }, [
+        activeRangeJobPending,
         comparisonAssetRequestKey,
         comparisonChartEndDate,
         comparisonHistoryFetchStartDate,
@@ -1819,7 +1850,7 @@ export default function FundsPage({
                                                     comparisonError={comparisonHistoryError}
                                                     comparison={comparisonState}
                                                     selectedRange={chartRange}
-                                                    pendingRange={pendingChartRange}
+                                                    pendingRange={pendingChartRange || (activeRangeJobPending ? chartRange : null)}
                                                     historyPending={fintablesHistoryPending}
                                                     rangeError={chartRangeError}
                                                     customStartDate={customStartDate}

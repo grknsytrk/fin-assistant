@@ -188,7 +188,16 @@ def fund_performance(
         fallback=fallback,
         refresh=refresh,
     )
-    if bool(payload.get("stale")) or str(payload.get("status") or "") == "pending":
+    metadata = payload.get("source_metadata") if isinstance(payload.get("source_metadata"), dict) else {}
+    coverage_state = str(metadata.get("coverage_state") or "")
+    history_job_meta = metadata.get("history_job") if isinstance(metadata.get("history_job"), dict) else {}
+    job_status = str(history_job_meta.get("status") or "")
+    if (
+        bool(payload.get("stale"))
+        or str(payload.get("status") or "") == "pending"
+        or coverage_state in {"range_incomplete", "upgrading", "unavailable"}
+        or job_status in {"queued", "running"}
+    ):
         return ORJSONResponse(content=payload, headers={"Cache-Control": "private, no-cache"})
     try:
         latest_price_gen = int(fund_listing_revision(CONFIG.paths.processed_dir).get("price_generation") or 0)

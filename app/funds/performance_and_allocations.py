@@ -2746,8 +2746,9 @@ def _fetch_fast_long_fund_history(
         points.extend(fintables_rows_with_tail)
     else:
         existing_tail: List[Dict[str, Any]] = []
+        existing_dates: set[str] = set()
         direct_fetch_end = end_date
-        if (end_date - start_date).days > 400:
+        if processed_dir is not None:
             try:
                 cached_pts = _fund_service()._read_preferred_fund_price_points(
                     processed_dir,
@@ -2756,7 +2757,13 @@ def _fetch_fast_long_fund_history(
                     end_date=end_date,
                 )
                 valid_cached = _seam("_valid_performance_points")(cached_pts, normalized)
-                if valid_cached:
+                existing_tail = valid_cached
+                existing_dates = {
+                    str(point.get("date") or "")
+                    for point in existing_tail
+                    if isinstance(point, dict) and point.get("date")
+                }
+                if (end_date - start_date).days > 400 and valid_cached:
                     first_cached_dt = date.fromisoformat(valid_cached[0]["date"])
                     last_cached_dt = date.fromisoformat(valid_cached[-1]["date"])
                     if (
@@ -2764,49 +2771,101 @@ def _fetch_fast_long_fund_history(
                         and last_cached_dt >= end_date - timedelta(days=7)
                         and not _seam("_history_internal_gap_warnings")(valid_cached, resolution="daily")
                     ):
-                        existing_tail = valid_cached
                         direct_fetch_end = first_cached_dt - timedelta(days=1)
             except Exception:
                 existing_tail = []
+                existing_dates = set()
                 direct_fetch_end = end_date
-        try:
-            direct_rows = (
-                _fund_service().TefasClient().fetch_fund_history(
-                    fund_codes=[normalized],
+
+        tefas_client = _fund_service().TefasClient()
+        fast_price_history_used = False
+        if hasattr(tefas_client, "fetch_fund_price_history"):
+            price_history_rows: List[Dict[str, Any]] = []
+            try:
+                price_history_rows = tefas_client.fetch_fund_price_history(
+                    fund_code=normalized,
                     start_date=start_date,
-                    end_date=direct_fetch_end,
+                    end_date=end_date,
+                    clip_to_range=(processed_dir is None or (end_date - start_date).days <= 400),
                 )
-                if start_date <= direct_fetch_end
+            except _fund_service().TefasUpstreamError as exc:
+                warnings.append(f"tefas_price_history daily history bootstrap failed: {exc}")
+            if price_history_rows:
+                missing_price_rows = [
+                    row
+                    for row in price_history_rows
+                    if str(row.get("date") or "") not in existing_dates
+                ]
+                combined_for_check = _seam("_valid_performance_points")(
+                    list(missing_price_rows) + list(existing_tail),
+                    normalized,
+                )
+                within_tefas_window = start_date >= (end_date - timedelta(days=(5 * 366) + 14))
+                if within_tefas_window or _seam("_history_is_usable_daily_range")(
+                    combined_for_check,
+                    start_date=start_date,
+                    end_date=end_date,
+                ):
+                    fast_price_history_used = True
+                    fallback_used = True
+                    fallback_reason = (
+                        "fintables_udf_history_partial_tefas_fallback"
+                        if valid_fintables_rows
+                        else "fintables_udf_history_unavailable_tefas_fallback"
+                    )
+                    result_points = (
+                        _seam("_valid_performance_points")(missing_price_rows, normalized)
+                        if (processed_dir is not None and missing_price_rows)
+                        else combined_for_check
+                    )
+                    if (end_date - start_date).days > 400 or not include_overview_metrics:
+                        return result_points, warnings, fallback_used, fallback_reason
+                    points.extend(result_points)
+
+        if not fast_price_history_used:
+            direct_tail = (
+                existing_tail
+                if ((end_date - start_date).days > 400 and direct_fetch_end < end_date)
                 else []
             )
-        except _fund_service().TefasUpstreamError as exc:
-            direct_rows = []
-            warnings.append(f"tefas_fund_list daily history bootstrap failed: {exc}")
-        combined_direct = list(direct_rows) + list(existing_tail) if (direct_rows or existing_tail) else []
-        valid_direct_rows = _seam("_valid_performance_points")(combined_direct, normalized)
-        if _seam("_history_is_usable_daily_range")(
-            valid_direct_rows,
-            start_date=start_date,
-            end_date=end_date,
-        ):
-            fallback_used = True
-            fallback_reason = (
-                "fintables_udf_history_partial_tefas_fallback"
-                if valid_fintables_rows
-                else "fintables_udf_history_unavailable_tefas_fallback"
-            )
-            return valid_direct_rows, warnings, fallback_used, fallback_reason
-        if valid_direct_rows:
-            fallback_used = True
-            fallback_reason = (
-                "fintables_udf_history_partial_tefas_fallback"
-                if valid_fintables_rows
-                else "fintables_udf_history_unavailable_tefas_fallback"
-            )
-            if (end_date - start_date).days > 400 and not valid_fintables_rows:
+            try:
+                direct_rows = (
+                    tefas_client.fetch_fund_history(
+                        fund_codes=[normalized],
+                        start_date=start_date,
+                        end_date=direct_fetch_end,
+                    )
+                    if start_date <= direct_fetch_end
+                    else []
+                )
+            except _fund_service().TefasUpstreamError as exc:
+                direct_rows = []
+                warnings.append(f"tefas_fund_list daily history bootstrap failed: {exc}")
+            combined_direct = list(direct_rows) + list(direct_tail) if (direct_rows or direct_tail) else []
+            valid_direct_rows = _seam("_valid_performance_points")(combined_direct, normalized)
+            if _seam("_history_is_usable_daily_range")(
+                valid_direct_rows,
+                start_date=start_date,
+                end_date=end_date,
+            ):
+                fallback_used = True
+                fallback_reason = (
+                    "fintables_udf_history_partial_tefas_fallback"
+                    if valid_fintables_rows
+                    else "fintables_udf_history_unavailable_tefas_fallback"
+                )
                 return valid_direct_rows, warnings, fallback_used, fallback_reason
-        points.extend(fintables_rows_with_tail)
-        points.extend(valid_direct_rows)
+            if valid_direct_rows:
+                fallback_used = True
+                fallback_reason = (
+                    "fintables_udf_history_partial_tefas_fallback"
+                    if valid_fintables_rows
+                    else "fintables_udf_history_unavailable_tefas_fallback"
+                )
+                if (end_date - start_date).days > 400 and not valid_fintables_rows:
+                    return valid_direct_rows, warnings, fallback_used, fallback_reason
+            points.extend(fintables_rows_with_tail)
+            points.extend(valid_direct_rows)
 
     if not include_overview_metrics:
         if not points:

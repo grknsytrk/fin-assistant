@@ -2255,3 +2255,147 @@ def test_zero_price_snapshot_falls_back_to_latest_db_price_for_detail_and_yield_
     assert yield_payload["periods"]["3y"]["return_pct"] == pytest.approx(400.0)
     assert yield_payload["periods"]["5y"]["return_pct"] == pytest.approx(900.0)
     assert yield_payload["periods"]["oldest"]["prev_close_date"] == "2021-11-19"
+
+
+def test_tefas_fetch_fund_price_history_and_fast_long_bootstrap_preserve_existing_rows(
+    monkeypatch, tmp_path
+) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    monkeypatch.delenv("RAGFIN_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> "FixedDate":
+            return cls(2026, 11, 22)
+
+    monkeypatch.setattr(fund_service, "date", FixedDate)
+
+    # Seed existing tail rows with AUM / investor_count from tefasfon_funds
+    fund_service.upsert_fund_price_points(
+        tmp_path,
+        [
+            {
+                "fund_code": "YAY",
+                "date": "2026-11-19",
+                "price": 1589.70,
+                "aum": 10_626_470_125.0,
+                "investor_count": 39_306,
+                "share_count": 6_684_000.0,
+                "source": "tefasfon_funds",
+            },
+            {
+                "fund_code": "YAY",
+                "date": "2026-11-20",
+                "price": 1634.29,
+                "aum": 10_926_620_391.0,
+                "investor_count": 39_211,
+                "share_count": 6_685_870.0,
+                "source": "tefasfon_funds",
+            },
+        ],
+        source="tefasfon_funds",
+    )
+
+    posted_bodies: list[dict[str, object]] = []
+
+    def fake_post_json(self, client, *, endpoint, body, context, referer=None):
+        posted_bodies.append({"endpoint": endpoint, "body": dict(body), "referer": referer})
+        return {
+            "resultList": [
+                {"fonKodu": "YAY", "fonUnvan": "YAY FON", "tarih": "2021-11-19", "fiyat": 0},
+                {"fonKodu": "YAY", "fonUnvan": "YAY FON", "tarih": "2021-11-22", "fiyat": 249.17},
+                {"fonKodu": "YAY", "fonUnvan": "YAY FON", "tarih": "2023-11-22", "fiyat": 551.13},
+                {"fonKodu": "YAY", "fonUnvan": "YAY FON", "tarih": "2026-11-19", "fiyat": 1589.70},
+                {"fonKodu": "YAY", "fonUnvan": "YAY FON", "tarih": "2026-11-20", "fiyat": 1634.29},
+            ]
+        }
+
+    monkeypatch.setattr(fund_service.TefasClient, "_post_json", fake_post_json)
+    monkeypatch.setattr(
+        fund_service.TefasClient,
+        "fetch_fund_history",
+        lambda *_a, **_k: pytest.fail("60-chunk fetch_fund_history must not run when fonFiyatBilgiGetir succeeds"),
+    )
+    monkeypatch.setattr(
+        fund_service,
+        "fetch_fintables_udf_history",
+        lambda *_a, **_k: (_ for _ in ()).throw(fund_service.FintablesUpstreamError("WAF")),
+    )
+
+    payload = fund_service.refresh_fund_performance(
+        tmp_path,
+        "YAY",
+        start_date=date(2023, 11, 22),
+        end_date=date(2026, 11, 20),
+        prefer_fast_long_range=True,
+    )
+
+    assert len(posted_bodies) == 1
+    assert posted_bodies[0]["body"] == {"fonKodu": "YAY", "dil": "TR", "periyod": 60}
+    by_date = {pt["date"]: pt for pt in payload["points"]}
+    assert "2021-11-19" not in by_date  # zero-price row excluded
+    assert by_date["2023-11-22"]["price"] == pytest.approx(551.13)
+    assert by_date["2023-11-22"]["source"] == "tefas_direct_funds"
+    assert by_date["2026-11-20"]["source"] == "tefasfon_funds"
+    assert by_date["2026-11-20"]["aum"] == pytest.approx(10_926_620_391.0)
+    assert by_date["2026-11-20"]["investor_count"] == 39_211
+
+    # Also verify 5Y rows were cached into DB on that single call without issuing a second HTTP call
+    five_year_points = fund_service.read_fund_price_points(
+        tmp_path,
+        "YAY",
+        start_date=date(2021, 11, 22),
+        end_date=date(2026, 11, 20),
+    )
+    assert five_year_points[0]["date"] == "2021-11-22"
+    assert five_year_points[0]["price"] == pytest.approx(249.17)
+
+
+def test_fintables_blocked_cooldown_short_circuits_repeat_waf_calls(monkeypatch) -> None:
+    fund_service.reset_fund_caches_for_tests()
+    monkeypatch.setattr(fund_service, "FINTABLES_BLOCKED_COOLDOWN_SECONDS", 300.0)
+    monkeypatch.setattr(fund_service, "FINTABLES_PROXY_BASE_URL", "")
+    monkeypatch.setattr(fund_service, "FINTABLES_PROXY_TOKEN", "")
+    direct_calls = 0
+    fallback_calls = 0
+
+    class FakeResponse:
+        status_code = 403
+        headers = {"content-type": "text/html"}
+        content = b"<html><title>Just a moment...</title>cloudflare</html>"
+
+    class FakeHttpxClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def get(self, *args, **kwargs):
+            nonlocal direct_calls
+            direct_calls += 1
+            return FakeResponse()
+
+    def waf_fallback(*_args, **_kwargs):
+        nonlocal fallback_calls
+        fallback_calls += 1
+        raise fund_service.FintablesUpstreamError(f"Fintables UDF history: {fund_service.FINTABLES_GATE_BLOCKED_MESSAGE}")
+
+    monkeypatch.setattr(fund_service.httpx, "Client", FakeHttpxClient)
+    monkeypatch.setattr(fund_service, "_fintables_curl_payload", waf_fallback)
+    monkeypatch.setattr(fund_service, "_fintables_curl_cffi_payload", waf_fallback)
+
+    with pytest.raises(fund_service.FintablesUpstreamError, match="WAF/Cloudflare"):
+        fund_service.fetch_fintables_udf_history("YAY", date(2025, 1, 1), date(2026, 1, 1))
+    assert direct_calls == 1
+    assert fallback_calls == 2
+
+    with pytest.raises(fund_service.FintablesUpstreamError, match="cooldown"):
+        fund_service.fetch_fintables_udf_history("TMG", date(2025, 1, 1), date(2026, 1, 1))
+    assert direct_calls == 1
+    assert fallback_calls == 2
+

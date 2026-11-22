@@ -46,7 +46,8 @@ _FUND_REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="fund-snapshot-refresh"
 )
 _FUND_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=2, thread_name_prefix="fund-history-backfill"
+    max_workers=max(2, int(os.getenv("RAGFIN_FUND_HISTORY_WORKERS", "4"))),
+    thread_name_prefix="fund-history-backfill",
 )
 _FUND_ALLOCATION_HISTORY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=max(1, int(os.getenv("RAGFIN_FUND_ALLOCATION_HISTORY_WORKERS", "3"))),
@@ -65,6 +66,9 @@ def shutdown_fund_executors() -> None:
 
 _FUND_REFRESH_STATE_LOCK = threading.Lock()
 _FUND_HISTORY_STATE_LOCK = threading.Lock()
+_FUND_HISTORY_FUTURES_LOCK = threading.Lock()
+_FUND_HISTORY_FUTURES: Dict[str, Any] = {}
+_FUND_HISTORY_INLINE_WAIT_SECONDS = max(0.0, float(os.getenv("RAGFIN_FUND_HISTORY_INLINE_WAIT_SECONDS", "3.0")))
 _FUND_HISTORY_JOB_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_HISTORY_JOB_TTL_SECONDS", str(30 * 60)))
 _FUND_ALLOCATION_HISTORY_JOB_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_ALLOCATION_HISTORY_JOB_TTL_SECONDS", str(30 * 60)))
 _FUND_ALLOCATION_HISTORY_LEASE_TTL_SECONDS = int(os.getenv("RAGFIN_FUND_ALLOCATION_HISTORY_LEASE_TTL_SECONDS", "120"))
@@ -396,6 +400,32 @@ def _fund_performance_payload(
             normalized, start_date=start, end_date=end,
             force_new=_history_job_needs_fintables_probe(existing_job, target),
         )
+    if (
+        start is not None
+        and end is not None
+        and (end - start).days > 400
+        and isinstance(existing_job, dict)
+        and str(existing_job.get("status") or "") in {"queued", "running"}
+        and _FUND_HISTORY_INLINE_WAIT_SECONDS > 0
+    ):
+        job_id = str(existing_job.get("job_id") or "")
+        with _FUND_HISTORY_FUTURES_LOCK:
+            future = _FUND_HISTORY_FUTURES.get(job_id)
+        if isinstance(future, concurrent.futures.Future):
+            try:
+                future.result(timeout=_FUND_HISTORY_INLINE_WAIT_SECONDS)
+            except Exception:
+                pass
+            existing_job = _history_job_get(normalized, job_id) or existing_job
+            if str(existing_job.get("status") or "") == "succeeded":
+                payload = get_fund_performance_payload(
+                    CONFIG.paths.processed_dir,
+                    normalized,
+                    start_date=start,
+                    end_date=end,
+                    allow_upstream_fallback=fallback,
+                    auto_refresh=False,
+                )
     return _history_attach_job(payload, existing_job)
 
 

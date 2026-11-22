@@ -108,10 +108,18 @@ FINTABLES_STICKY_TRANSPORT_TTL_SECONDS = max(
     0.0,
     float(os.getenv("RAGFIN_FINTABLES_STICKY_TRANSPORT_TTL_SECONDS", "900")),
 )
+FINTABLES_BLOCKED_COOLDOWN_SECONDS = max(
+    0.0,
+    float(os.getenv("RAGFIN_FINTABLES_BLOCKED_COOLDOWN_SECONDS", "300")),
+)
 TEFAS_BASE_URL = os.getenv("RAGFIN_TEFAS_BASE_URL", "https://www.tefas.gov.tr").rstrip("/")
 TEFAS_FUNDS_LIST_ENDPOINT = os.getenv(
     "RAGFIN_TEFAS_FUNDS_LIST_ENDPOINT",
     f"{TEFAS_BASE_URL}/api/funds/fonGnlBlgSiraliGetir",
+)
+TEFAS_PRICE_HISTORY_ENDPOINT = os.getenv(
+    "RAGFIN_TEFAS_PRICE_HISTORY_ENDPOINT",
+    f"{TEFAS_BASE_URL}/api/funds/fonFiyatBilgiGetir",
 )
 TEFAS_PORTFOLIO_ENDPOINT = os.getenv(
     "RAGFIN_TEFAS_PORTFOLIO_ENDPOINT",
@@ -535,27 +543,43 @@ def _fintables_sticky_scope_matches(saved_scope: Dict[str, Any]) -> bool:
 
 
 def _get_fintables_sticky_transport() -> Optional[str]:
-    if FINTABLES_STICKY_TRANSPORT_TTL_SECONDS <= 0:
+    if FINTABLES_STICKY_TRANSPORT_TTL_SECONDS <= 0 and FINTABLES_BLOCKED_COOLDOWN_SECONDS <= 0:
         return None
     global _FINTABLES_STICKY_TRANSPORT
     with _FINTABLES_STICKY_TRANSPORT_LOCK:
         entry = _FINTABLES_STICKY_TRANSPORT
         if not entry:
             return None
+        transport = str(entry["transport"])
+        if transport == "blocked" and FINTABLES_BLOCKED_COOLDOWN_SECONDS <= 0:
+            _FINTABLES_STICKY_TRANSPORT = None
+            return None
+        if transport != "blocked" and FINTABLES_STICKY_TRANSPORT_TTL_SECONDS <= 0:
+            _FINTABLES_STICKY_TRANSPORT = None
+            return None
         if not _fintables_sticky_scope_matches(entry["scope"]) or time.monotonic() >= float(entry["expires_at"]):
             _FINTABLES_STICKY_TRANSPORT = None
             return None
-        return str(entry["transport"])
+        return transport
 
 
-def _set_fintables_sticky_transport(transport: str) -> None:
-    if FINTABLES_STICKY_TRANSPORT_TTL_SECONDS <= 0:
+def _set_fintables_sticky_transport(
+    transport: str,
+    *,
+    ttl_seconds: Optional[float] = None,
+) -> None:
+    effective_ttl = (
+        max(0.0, float(ttl_seconds))
+        if ttl_seconds is not None
+        else FINTABLES_STICKY_TRANSPORT_TTL_SECONDS
+    )
+    if effective_ttl <= 0:
         return
     global _FINTABLES_STICKY_TRANSPORT
     with _FINTABLES_STICKY_TRANSPORT_LOCK:
         _FINTABLES_STICKY_TRANSPORT = {
             "transport": str(transport),
-            "expires_at": time.monotonic() + FINTABLES_STICKY_TRANSPORT_TTL_SECONDS,
+            "expires_at": time.monotonic() + effective_ttl,
             "scope": _fintables_sticky_scope_key(),
         }
 

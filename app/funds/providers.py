@@ -6,6 +6,7 @@ import atexit
 import concurrent.futures
 import contextlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -522,6 +523,10 @@ class FintablesClient:
 
         if fs.FINTABLES_CURL_FALLBACK_ENABLED:
             sticky = fs._get_fintables_sticky_transport()
+            if sticky == "blocked":
+                raise fs.FintablesUpstreamError(
+                    f"{context}: {fs.FINTABLES_GATE_BLOCKED_MESSAGE} (cooldown)"
+                )
             if sticky == "proxy" and proxy_configured:
                 try:
                     return _run_proxy()
@@ -568,6 +573,15 @@ class FintablesClient:
                     continue
                 fs._set_fintables_sticky_transport(transport_name)
                 return payload
+            if (
+                fs.FINTABLES_BLOCKED_COOLDOWN_SECONDS > 0
+                and errors
+                and all(fs.FINTABLES_GATE_BLOCKED_MESSAGE in str(err) for err in errors)
+            ):
+                fs._set_fintables_sticky_transport(
+                    "blocked",
+                    ttl_seconds=fs.FINTABLES_BLOCKED_COOLDOWN_SECONDS,
+                )
             raise fs.FintablesUpstreamError("; ".join(str(err) for err in errors)) from errors[-1]
 
     def fetch_udf_history(self, fund_code: str, start_date: date, end_date: date) -> List[Dict[str, Any]]:
@@ -1587,7 +1601,31 @@ class TefasFonClient:
                     else:
                         rows_by_date[point_date] = dict(row)
 
-        # 1. Primary: single-layer direct TEFAS query (calendar-month chunked inside TefasClient)
+        # 1. Fast per-fund TEFAS price history endpoint for >120 day ranges
+        if (end_date - start_date).days > 120 and hasattr(direct_client, "fetch_fund_price_history"):
+            try:
+                price_rows = direct_client.fetch_fund_price_history(
+                    fund_code=normalized,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                matched_price_rows = matching_rows(price_rows)
+                if matched_price_rows:
+                    add_rows(matched_price_rows)
+                    return [rows_by_date[point_date] for point_date in sorted(rows_by_date)]
+            except fs.TefasRateLimitError:
+                raise
+            except fs.TefasUpstreamError as exc:
+                direct_error = exc
+                fs.LOGGER.warning(
+                    "TEFAS price history failed for %s [%s to %s]: %s",
+                    normalized,
+                    start_date.isoformat(),
+                    end_date.isoformat(),
+                    exc,
+                )
+
+        # 2. Primary: single-layer direct TEFAS query (calendar-month chunked inside TefasClient)
         try:
             direct_rows = direct_client.fetch_fund_history(
                 fund_codes=[normalized],
@@ -2722,6 +2760,87 @@ class TefasClient:
                 normalized["source"] = fs.TEFASFON_FUNDS_SOURCE
                 result.append(normalized)
         return result
+
+    @staticmethod
+    def _price_history_period_months(start_date: date, end_date: date) -> int:
+        fs = _fund_service()
+        today = fs.date.today()
+        anchor_end = max(today, end_date)
+        delta_days = max(0, (anchor_end - start_date).days)
+        months_needed = math.ceil(delta_days / 30) + 1
+        if months_needed > 12:
+            return 60
+        for period in (1, 3, 6, 12):
+            if period >= months_needed:
+                return period
+        return 12
+
+    def fetch_fund_price_history(
+        self,
+        *,
+        fund_code: str,
+        start_date: date,
+        end_date: date,
+        clip_to_range: bool = True,
+    ) -> List[Dict[str, Any]]:
+        fs = _fund_service()
+        normalize = fs.normalize_fund_code
+        normalized_code = normalize(fund_code)
+        if not normalized_code or start_date > end_date:
+            return []
+        period_months = self._price_history_period_months(start_date, end_date)
+        client = fs._get_tefas_client(self.timeout_seconds)
+        try:
+            payload = self._post_json(
+                client,
+                endpoint=fs.TEFAS_PRICE_HISTORY_ENDPOINT,
+                body={
+                    "fonKodu": normalized_code,
+                    "dil": "TR",
+                    "periyod": period_months,
+                },
+                context=f"TEFAS price history {normalized_code}",
+                referer=f"{fs.TEFAS_BASE_URL}/tr/fon-analiz",
+            )
+        finally:
+            if client is not fs._TEFAS_CLIENT:
+                _close_ephemeral_client(client)
+
+        error_message = str(payload.get("errorMessage") or "").strip()
+        raw_rows = payload.get("resultList") or payload.get("data") or payload.get("Data") or []
+        if error_message and not raw_rows:
+            raise fs.TefasUpstreamError(f"TEFAS price history error: {error_message}")
+        if not isinstance(raw_rows, list):
+            return []
+
+        by_date: Dict[str, Dict[str, Any]] = {}
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            row_code = normalize(str(row.get("fonKodu") or row.get("fund_code") or normalized_code))
+            if row_code != normalized_code:
+                continue
+            point_date = fs._fund_date(row.get("tarih") or row.get("TARIH") or row.get("date"))
+            price = fs._coerce_float(row.get("fiyat") or row.get("FIYAT") or row.get("price"))
+            if not point_date or price is None or price <= 0:
+                continue
+            try:
+                dt = date.fromisoformat(point_date)
+            except ValueError:
+                continue
+            if dt > end_date:
+                continue
+            if clip_to_range and dt < start_date:
+                continue
+            by_date[point_date] = {
+                "fund_code": normalized_code,
+                "date": point_date,
+                "price": price,
+                "name": fs._first_text(row, "fonUnvan", "name"),
+                "source": fs.TEFAS_DIRECT_FUNDS_SOURCE,
+                "source_url": fs.TEFAS_PRICE_HISTORY_ENDPOINT,
+            }
+        return [by_date[key] for key in sorted(by_date)]
 
     def fetch_fund_history(
         self,

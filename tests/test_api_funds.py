@@ -1263,3 +1263,121 @@ def test_fund_detail_categories_search_payload_caches_and_invalidates(
     assert detail_calls == 2
     assert categories_calls == 2
     assert search_calls == 2
+
+
+def test_fund_performance_omits_etag_for_incomplete_or_running_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_performance(processed_dir: Any, fund_code: str, **kwargs: Any) -> Dict[str, Any]:
+        return {
+            "fund_code": fund_code,
+            "status": "ok",
+            "points": [{"date": "2025-09-10", "price": 100.0}],
+            "period_stats": {},
+            "stale": False,
+            "source_metadata": {
+                "resolution": "daily",
+                "coverage_state": "range_incomplete",
+                "available_start_date": "2025-09-10",
+                "available_end_date": "2026-11-20",
+                "internal_gap_count": 0,
+            },
+        }
+
+    class FakeExecutor:
+        def submit(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    monkeypatch.setattr(fund_service_module, "get_fund_performance_payload", fake_performance)
+    monkeypatch.setattr(api_module, "_FUND_HISTORY_EXECUTOR", FakeExecutor())
+
+    response = TestClient(app).get(
+        "/funds/YAY/performance",
+        params={"start_date": "2023-11-22", "end_date": "2026-11-22"},
+    )
+
+    assert response.status_code == 200
+    assert "etag" not in {k.lower(): v for k, v in response.headers.items()}
+    assert response.json()["source_metadata"]["coverage_state"] == "range_incomplete"
+    assert response.json()["source_metadata"]["history_job"]["status"] == "queued"
+
+
+def test_fund_performance_long_range_waits_inline_and_returns_completed_series(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import concurrent.futures
+    import threading
+    import time
+
+    ready = threading.Event()
+    calls: List[str] = []
+
+    def fake_get_performance(processed_dir: Any, fund_code: str, **kwargs: Any) -> Dict[str, Any]:
+        start_d = kwargs.get("start_date")
+        calls.append(start_d.isoformat() if start_d else "full")
+        if ready.is_set():
+            return {
+                "fund_code": fund_code,
+                "status": "ok",
+                "points": [
+                    {"date": "2021-11-22", "price": 249.17}
+                    if (start_d and start_d <= date(2021, 11, 22))
+                    else {"date": "2023-11-22", "price": 551.13},
+                    {"date": "2026-11-20", "price": 1634.29},
+                ],
+                "period_stats": {},
+                "stale": False,
+                "source_metadata": {
+                    "resolution": "daily",
+                    "coverage_state": "complete",
+                    "available_start_date": "2021-11-22",
+                    "available_end_date": "2026-11-20",
+                    "internal_gap_count": 0,
+                    "chart_granularity": "weekly",
+                },
+            }
+        return {
+            "fund_code": fund_code,
+            "status": "ok",
+            "points": [{"date": "2025-09-10", "price": 1076.64}, {"date": "2026-11-20", "price": 1634.29}],
+            "period_stats": {},
+            "stale": False,
+            "source_metadata": {
+                "resolution": "daily",
+                "coverage_state": "range_incomplete",
+                "available_start_date": "2025-09-10",
+                "available_end_date": "2026-11-20",
+                "internal_gap_count": 0,
+                "chart_granularity": "weekly",
+            },
+        }
+
+    def fake_refresh(processed_dir: Any, fund_code: str, **kwargs: Any) -> Dict[str, Any]:
+        time.sleep(0.05)
+        ready.set()
+        return {"fund_code": fund_code, "status": "ok", "points": [{"date": "2023-11-22", "price": 551.13}]}
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        monkeypatch.setattr(fund_service_module, "get_fund_performance_payload", fake_get_performance)
+        monkeypatch.setattr(fund_service_module, "refresh_fund_performance", fake_refresh)
+        monkeypatch.setattr(api_module, "_FUND_HISTORY_EXECUTOR", executor)
+        monkeypatch.setattr(api_module, "_FUND_HISTORY_INLINE_WAIT_SECONDS", 2.0)
+
+        client = TestClient(app)
+        response = client.get(
+            "/funds/YAYINLINE/performance",
+            params={"start_date": "2023-11-22", "end_date": "2026-11-22"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["source_metadata"]["coverage_state"] == "complete"
+        assert payload["source_metadata"]["history_job"]["status"] == "succeeded"
+        # Widened 5Y effective_start lets a subsequent 5Y request skip re-queuing
+        assert payload["source_metadata"]["history_job"]["effective_start"] <= "2021-11-22"
+        assert payload["points"][0]["date"] == "2023-11-22"
+        assert "etag" in {k.lower() for k in response.headers}
+    finally:
+        executor.shutdown(wait=True)
+

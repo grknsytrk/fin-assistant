@@ -76,6 +76,7 @@ const fundDetailInFlight = new Map<string, Promise<FundDetail>>();
 const fundYieldSummaryMemoryCache = new BoundedMemoryCache<string, { payload: FundYieldSummaryResponse; fetchedAt: number }>(64);
 const fundYieldSummaryInFlight = new Map<string, Promise<FundYieldSummaryResponse>>();
 const fundPerformanceMemoryCache = new BoundedMemoryCache<string, { payload: FundPerformanceResponse; fetchedAt: number }>(64);
+const fundPerformanceCacheKeysByCode = new Map<string, Set<string>>();
 const fundPerformanceInFlight = new Map<string, Promise<FundPerformanceResponse>>();
 let kapCompaniesInFlight: Promise<KapCompaniesResponse> | null = null;
 const fundAllocationsMemoryCache = new BoundedMemoryCache<string, { payload: FundAllocationsResponse; fetchedAt: number }>(64);
@@ -1269,7 +1270,33 @@ export const apiClient = {
             { signal: options?.signal },
         )
             .then((payload) => {
-                if (!payload.stale && payload.status !== 'pending' && payload.status !== 'unavailable') {
+                const coverageState = payload.source_metadata?.coverage_state;
+                const jobStatus = payload.source_metadata?.history_job?.status;
+                const isCompleteEnoughToCache =
+                    !payload.stale
+                    && payload.status !== 'pending'
+                    && payload.status !== 'unavailable'
+                    && coverageState !== 'range_incomplete'
+                    && coverageState !== 'upgrading'
+                    && coverageState !== 'unavailable'
+                    && jobStatus !== 'queued'
+                    && jobStatus !== 'running';
+                if (isCompleteEnoughToCache) {
+                    if (options?.refresh) {
+                        const existingKeys = fundPerformanceCacheKeysByCode.get(normalizedCode);
+                        if (existingKeys) {
+                            for (const existingKey of existingKeys) {
+                                fundPerformanceMemoryCache.delete(existingKey);
+                            }
+                            existingKeys.clear();
+                        }
+                    }
+                    let keysForFund = fundPerformanceCacheKeysByCode.get(normalizedCode);
+                    if (!keysForFund) {
+                        keysForFund = new Set();
+                        fundPerformanceCacheKeysByCode.set(normalizedCode, keysForFund);
+                    }
+                    keysForFund.add(cacheKey);
                     fundPerformanceMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
                 }
                 return payload;
