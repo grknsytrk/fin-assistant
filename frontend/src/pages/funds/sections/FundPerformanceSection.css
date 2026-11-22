@@ -481,6 +481,10 @@
         font-size: 30px;
     }
 
+    .fund-chart-measure-row-value {
+        font-size: 22px;
+    }
+
     .fund-chart-loading-label {
         font-size: 24px;
     }
@@ -578,6 +582,21 @@
     fill: var(--danger-color);
 }
 
+.fund-chart-measure-row-value {
+    fill: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.fund-chart-measure-row-value.is-positive {
+    fill: var(--success-color);
+}
+
+.fund-chart-measure-row-value.is-negative {
+    fill: var(--danger-color);
+}
+
 .fund-chart-loading-label {
     fill: var(--text-secondary);
     font-size: 13px;
@@ -587,12 +606,13 @@
 .fund-chart-legend {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.45rem 0.8rem;
+    align-items: center;
+    gap: 0.45rem 0.85rem;
     margin-top: 0;
     padding: 0.55rem 1rem 0.55rem;
 }
 
-.fund-chart-legend span {
+.fund-chart-legend-item {
     display: inline-flex;
     align-items: center;
     gap: 0.38rem;
@@ -601,12 +621,41 @@
     font-family: var(--font-mono);
     font-size: 0.74rem;
     font-weight: 600;
+    line-height: 1.2;
+}
+
+button.fund-chart-legend-item.is-removable {
+    padding: 0.18rem 0.4rem;
+    margin: -0.18rem -0.2rem;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+    transition: background-color 0.14s ease, color 0.14s ease;
+}
+
+button.fund-chart-legend-item.is-removable:hover,
+button.fund-chart-legend-item.is-removable:focus-visible {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+}
+
+.fund-chart-legend-remove {
+    opacity: 0.55;
+    flex-shrink: 0;
+    transition: opacity 0.14s ease;
+}
+
+button.fund-chart-legend-item.is-removable:hover .fund-chart-legend-remove,
+button.fund-chart-legend-item.is-removable:focus-visible .fund-chart-legend-remove {
+    opacity: 1;
 }
 
 .fund-chart-legend i {
     width: 0.58rem;
     height: 0.58rem;
     border-radius: 999px;
+    flex-shrink: 0;
 }
 
 .fund-chart-empty {

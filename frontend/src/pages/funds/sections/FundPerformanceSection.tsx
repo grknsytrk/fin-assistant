@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
-import { Calendar, Trophy } from 'lucide-react';
+import { Calendar, Trophy, X } from 'lucide-react';
 import type {
     FundDetail,
     FundPerformanceResponse,
@@ -336,6 +336,64 @@ export function FundPerformanceChart({
             (comparisonPointsById.get(id) || []).length >= 2
         ));
     const comparisonMode = comparisonHistoryMatches && hasUsableComparisonSeries;
+    const comparisonSeriesDisplayLabel = (
+        series: Pick<FundChartComparisonSeries, 'asset' | 'fxConverted' | 'nativeCurrency'>,
+    ) => {
+        const baseLabel = series.asset.displaySymbol || series.asset.symbol;
+        if (series.fxConverted) return `${baseLabel} (TL)`;
+        if (series.nativeCurrency && series.nativeCurrency !== 'TRY') return `${baseLabel} (${series.nativeCurrency})`;
+        return baseLabel;
+    };
+    const defaultComparisonLegendItems = [
+        {
+            id: comparisonAssetId('fund', fundCode),
+            color: FUND_CHART_COMPARISON_COLORS[0],
+            label: fundCode,
+            removable: false,
+        },
+        ...comparisonAssets.map((asset, index) => {
+            const history = comparisonHistoryById.get(asset.id);
+            const nativeCurrency = history?.native_currency || asset.nativeCurrency || 'TRY';
+            const isForeign = Boolean(nativeCurrency && nativeCurrency !== 'TRY');
+            return {
+                id: asset.id,
+                color: FUND_CHART_COMPARISON_COLORS[(index + 1) % FUND_CHART_COMPARISON_COLORS.length],
+                label: comparisonSeriesDisplayLabel({
+                    asset,
+                    fxConverted: Boolean(history?.fx_converted ?? (isForeign && comparison.fxAdjusted)),
+                    nativeCurrency,
+                }),
+                removable: true,
+            };
+        }),
+    ];
+    const renderComparisonLegend = (
+        items: Array<{ id: string; color: string; label: string; removable: boolean }>,
+    ) => (
+        <div className="fund-chart-legend" aria-label="Grafik karşılaştırmaları">
+            {items.map((item) => (
+                item.removable ? (
+                    <button
+                        key={item.id}
+                        type="button"
+                        className="fund-chart-legend-item is-removable"
+                        onClick={() => comparison.removeAsset(item.id)}
+                        title={`${item.label} karşılaştırmadan çıkar`}
+                        aria-label={`${item.label} karşılaştırmadan çıkar`}
+                    >
+                        <i style={{ background: item.color }} />
+                        <span>{item.label}</span>
+                        <X size={11} aria-hidden="true" className="fund-chart-legend-remove" />
+                    </button>
+                ) : (
+                    <span key={item.id} className="fund-chart-legend-item">
+                        <i style={{ background: item.color }} />
+                        <span>{item.label}</span>
+                    </span>
+                )
+            ))}
+        </div>
+    );
     const waitingForComparison = comparisonAssets.length > 0
         && !comparisonMode
         && (comparisonLoading || !comparisonHistoryMatches)
@@ -372,7 +430,8 @@ export function FundPerformanceChart({
                         Karşılaştırma grafiği hazırlanıyor...
                     </text>
                 </svg>
-                <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" />
+                {renderComparisonLegend(defaultComparisonLegendItems)}
+                <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" hideChips />
                 {rangeError && <div className="fund-chart-error">{rangeError}</div>}
             </section>
         );
@@ -410,12 +469,6 @@ export function FundPerformanceChart({
                 fxPair: history?.fx_pair || null,
             };
         });
-        const comparisonSeriesDisplayLabel = (series: Pick<FundChartComparisonSeries, 'asset' | 'fxConverted' | 'nativeCurrency'>) => {
-            const baseLabel = series.asset.displaySymbol || series.asset.symbol;
-            if (series.fxConverted) return `${baseLabel} (TL)`;
-            if (series.nativeCurrency && series.nativeCurrency !== 'TRY') return `${baseLabel} (${series.nativeCurrency})`;
-            return baseLabel;
-        };
         const rawSeries = [baseSeries, ...externalSeries];
         const normalizedSeries = rawSeries
             .map((series, index) => {
@@ -424,6 +477,7 @@ export function FundPerformanceChart({
                 return {
                     ...series,
                     color: FUND_CHART_COMPARISON_COLORS[index % FUND_CHART_COMPARISON_COLORS.length],
+                    rawPoints: ordered,
                     points: baseValue
                         ? ordered.map((point) => ({
                             date: point.date,
@@ -524,13 +578,58 @@ export function FundPerformanceChart({
             ? { start: Math.min(measureAnchorIndex, hoverIndex), end: Math.max(measureAnchorIndex, hoverIndex) }
             : null;
         const visibleMeasureRange = dragSelection || selectedMeasureRange;
-        const measureStartX = visibleMeasureRange ? xForDate(validPoints[visibleMeasureRange.start].date) : null;
-        const measureEndX = visibleMeasureRange ? xForDate(validPoints[visibleMeasureRange.end].date) : null;
+        const measureStartPoint = visibleMeasureRange ? validPoints[visibleMeasureRange.start] : null;
+        const measureEndPoint = visibleMeasureRange ? validPoints[visibleMeasureRange.end] : null;
+        const measureStartX = measureStartPoint ? xForDate(measureStartPoint.date) : null;
+        const measureEndX = measureEndPoint ? xForDate(measureEndPoint.date) : null;
         const measureLeftX = measureStartX != null && measureEndX != null ? Math.min(measureStartX, measureEndX) : null;
         const measureRightX = measureStartX != null && measureEndX != null ? Math.max(measureStartX, measureEndX) : null;
         const hasVisibleSelection = Boolean(
             visibleMeasureRange && measureLeftX != null && measureRightX != null && measureRightX > measureLeftX,
         );
+        const measureRows = hasVisibleSelection && measureStartPoint && measureEndPoint
+            ? normalizedSeries
+                .map((series) => {
+                    const startRaw = nearestChartPoint(series.rawPoints, measureStartPoint.date);
+                    const endRaw = nearestChartPoint(series.rawPoints, measureEndPoint.date);
+                    const startNorm = nearestChartPoint(series.points, measureStartPoint.date);
+                    const endNorm = nearestChartPoint(series.points, measureEndPoint.date);
+                    if (!startRaw || !endRaw || !startNorm || !endNorm) return null;
+                    const periodReturn = returnBetween(endRaw.value, startRaw.value);
+                    if (periodReturn == null) return null;
+                    return {
+                        series,
+                        startNorm,
+                        endNorm,
+                        periodReturn,
+                    };
+                })
+                .filter((item): item is {
+                    series: typeof normalizedSeries[number];
+                    startNorm: { date: string; value: number };
+                    endNorm: { date: string; value: number };
+                    periodReturn: number;
+                } => Boolean(item))
+                .slice(0, 6)
+            : [];
+        const measureTooltipWidth = isMobileChart ? 350 : 224;
+        const measureTooltipHeight = isMobileChart
+            ? Math.max(92, 48 + measureRows.length * 32)
+            : Math.max(54, 30 + measureRows.length * 18);
+        const measureTooltipGap = isMobileChart ? 20 : 14;
+        const measureTooltipX = measureLeftX == null || measureRightX == null
+            ? 0
+            : measureRightX + measureTooltipGap + measureTooltipWidth <= width - 8
+                ? measureRightX + measureTooltipGap
+                : measureLeftX - measureTooltipGap - measureTooltipWidth >= padding.left + 8
+                    ? measureLeftX - measureTooltipGap - measureTooltipWidth
+                    : Math.min(Math.max(padding.left + 8, measureRightX - measureTooltipWidth - 8), width - measureTooltipWidth - 8);
+        const measureAnchorYCenter = measureRows.length > 0
+            ? measureRows.reduce((sum, row) => sum + yFor(row.endNorm.value), 0) / measureRows.length
+            : padding.top + plotHeight * 0.25;
+        const rawMeasureTooltipY = (hoverPointer?.y ?? measureAnchorYCenter) - measureTooltipHeight * 0.5;
+        const maxMeasureTooltipY = Math.max(padding.top + 8, height - padding.bottom - measureTooltipHeight - 36);
+        const measureTooltipY = Math.min(Math.max(padding.top + 8, rawMeasureTooltipY), maxMeasureTooltipY);
         const selectionClipId = `${gradientId}-compare-selection`;
         const hoverX = hoverPoint ? xForDate(hoverPoint.date) : null;
         const tooltipRows = hoverPoint
@@ -687,7 +786,51 @@ export function FundPerformanceChart({
                             ))}
                         </g>
                     )}
-                    {hoverPoint && hoverX != null && tooltipRows.length > 0 && (
+                    {hasVisibleSelection && measureStartPoint && measureEndPoint && measureRows.length > 0 && (
+                        <g className="fund-chart-measure">
+                            {measureRows.map(({ series, startNorm, endNorm }) => (
+                                <g key={`${series.asset.id}-measure-dots`}>
+                                    <circle
+                                        cx={xForDate(startNorm.date)}
+                                        cy={yFor(startNorm.value)}
+                                        r={3.8}
+                                        className="fund-chart-measure-point"
+                                        fill={series.color}
+                                    />
+                                    <circle
+                                        cx={xForDate(endNorm.date)}
+                                        cy={yFor(endNorm.value)}
+                                        r={3.8}
+                                        className="fund-chart-measure-point"
+                                        fill={series.color}
+                                    />
+                                </g>
+                            ))}
+                            <g className="fund-chart-measure-tooltip" style={{ transform: `translate(${measureTooltipX}px, ${measureTooltipY}px)` }}>
+                                <rect width={measureTooltipWidth} height={measureTooltipHeight} rx="7" className="fund-chart-measure-tooltip-bg" />
+                                <text x="10" y={isMobileChart ? 28 : 18} className="fund-chart-measure-muted">
+                                    {formatChartDate(measureStartPoint.date, selectedRange)} - {formatChartDate(measureEndPoint.date, selectedRange)}
+                                </text>
+                                {measureRows.map(({ series, periodReturn }, index) => (
+                                    <g key={`${series.asset.id}-measure-row`} transform={`translate(10, ${isMobileChart ? 60 + index * 32 : 38 + index * 18})`}>
+                                        <circle cx="3.5" cy="-4" r="2.8" fill={series.color} />
+                                        <text x="13" y="0" className="fund-chart-measure-muted">
+                                            {comparisonSeriesDisplayLabel(series).slice(0, 14)}
+                                        </text>
+                                        <text
+                                            x={measureTooltipWidth - 20}
+                                            y="0"
+                                            textAnchor="end"
+                                            className={`fund-chart-measure-row-value ${periodReturn >= 0 ? 'is-positive' : 'is-negative'}`}
+                                        >
+                                            {formatPct(periodReturn)}
+                                        </text>
+                                    </g>
+                                ))}
+                            </g>
+                        </g>
+                    )}
+                    {measureAnchorIndex == null && selectedMeasureRange == null && hoverPoint && hoverX != null && tooltipRows.length > 0 && (
                         <g>
                             <line x1={hoverX} x2={hoverX} y1={padding.top} y2={height - padding.bottom} className="fund-chart-hoverline" />
                             {tooltipRows.map(({ series, point }) => (
@@ -720,15 +863,15 @@ export function FundPerformanceChart({
                         </g>
                     )}
                 </svg>
-                <div className="fund-chart-legend" aria-label="Grafik karşılaştırmaları">
-                    {normalizedSeries.map((series) => (
-                        <span key={series.asset.id}>
-                            <i style={{ background: series.color }} />
-                            {comparisonSeriesDisplayLabel(series)}
-                        </span>
-                    ))}
-                </div>
-                <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" />
+                {renderComparisonLegend(
+                    normalizedSeries.map((series) => ({
+                        id: series.asset.id,
+                        color: series.color,
+                        label: comparisonSeriesDisplayLabel(series),
+                        removable: series.asset.id !== baseAsset.id,
+                    })),
+                )}
+                <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" hideChips />
                 {normalizedSeries.some((series) => series.fxConverted) && (
                     <div className="fund-chart-note">
                         Yabancı endeksler günlük kapanış kurlarıyla (USD/TRY, EUR/TRY vb.) TL bazlı getiriye endekslenmiştir.
@@ -1053,7 +1196,8 @@ export function FundPerformanceChart({
                     </g>
                 )}
             </svg>
-            <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" />
+            {comparisonAssets.length > 0 && renderComparisonLegend(defaultComparisonLegendItems)}
+            <FundComparisonControls comparison={comparison} surface="chart" className="fund-chart-compare-controls" hideChips />
             {(comparisonPendingSymbols.length > 0 || (comparisonLoading && comparisonAssets.length > 0)) && (
                 <div className="fund-chart-note">
                     {comparisonPendingSymbols.length > 0

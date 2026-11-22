@@ -334,10 +334,12 @@ export function FundComparisonControls({
     comparison,
     surface,
     className,
+    hideChips = false,
 }: {
     comparison: FundComparisonState;
     surface: FundComparisonControlSurface;
     className?: string;
+    hideChips?: boolean;
 }) {
     const {
         selectedAssets,
@@ -430,26 +432,28 @@ export function FundComparisonControls({
                 )}
             </div>
 
-            <div className="fund-comparison-chips" aria-label="Seçili karşılaştırmalar">
-                {selectedAssets.map((asset) => {
-                    const baseSymbol = asset.displaySymbol || asset.symbol;
-                    const isForeign = Boolean(asset.nativeCurrency && asset.nativeCurrency !== 'TRY');
-                    const chipLabel = isForeign
-                        ? `${baseSymbol} · ${fxAdjusted ? 'TL' : asset.nativeCurrency}`
-                        : baseSymbol;
-                    return (
-                        <button
-                            key={asset.id}
-                            type="button"
-                            onClick={() => removeAsset(asset.id)}
-                            title={`${chipLabel} karşılaştırmadan çıkar`}
-                        >
-                            <i />
-                            {chipLabel}
-                        </button>
-                    );
-                })}
-            </div>
+            {!hideChips && (
+                <div className="fund-comparison-chips" aria-label="Seçili karşılaştırmalar">
+                    {selectedAssets.map((asset) => {
+                        const baseSymbol = asset.displaySymbol || asset.symbol;
+                        const isForeign = Boolean(asset.nativeCurrency && asset.nativeCurrency !== 'TRY');
+                        const chipLabel = isForeign
+                            ? `${baseSymbol} · ${fxAdjusted ? 'TL' : asset.nativeCurrency}`
+                            : baseSymbol;
+                        return (
+                            <button
+                                key={asset.id}
+                                type="button"
+                                onClick={() => removeAsset(asset.id)}
+                                title={`${chipLabel} karşılaştırmadan çıkar`}
+                            >
+                                <i />
+                                {chipLabel}
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
 
             {hasForeignAssets && (
                 <div className="fund-comparison-fx-toggle" role="group" aria-label="Kur düzeltme modu">
