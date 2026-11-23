@@ -95,6 +95,10 @@ const fundAllocationsHistoryMemoryCache = new BoundedMemoryCache<string, { paylo
 const fundAllocationsHistoryInFlight = new Map<string, Promise<FundAllocationsHistoryResponse>>();
 const marketIndicesMemoryCache = new BoundedMemoryCache<string, { payload: MarketIndicesResponse; fetchedAt: number }>(4);
 const marketIndicesInFlight = new Map<string, Promise<MarketIndicesResponse>>();
+const marketIndexDetailMemoryCache = new BoundedMemoryCache<string, { payload: MarketIndexDetailResponse; fetchedAt: number }>(16);
+const marketIndexDetailInFlight = new Map<string, Promise<MarketIndexDetailResponse>>();
+const marketStockCardChartMemoryCache = new BoundedMemoryCache<string, { payload: MarketStockCardChartResponse; fetchedAt: number }>(64);
+const marketStockCardChartInFlight = new Map<string, Promise<MarketStockCardChartResponse>>();
 const marketFxMemoryCache = new BoundedMemoryCache<string, { payload: MarketFxResponse; fetchedAt: number }>(4);
 const marketFxInFlight = new Map<string, Promise<MarketFxResponse>>();
 const MARKET_WATCH_LIVE_TTL_MS = 25_000;
@@ -162,7 +166,10 @@ interface MarketStocksStreamHandle {
     source: EventSource | null;
     connected: boolean;
     cleanupListeners: (() => void) | null;
+    releaseTimer: number | null;
 }
+
+const MARKET_STREAM_RELEASE_GRACE_MS = 2_500;
 
 const marketStocksStreams = new Map<MarketStockIndex, MarketStocksStreamHandle>();
 
@@ -275,14 +282,22 @@ function applyMarketStocksDeltaInternal(
     return primaryResult || marketStocksMemoryCache.get(index)?.payload || null;
 }
 
-function retainMarketStocksStreamInternal(index: MarketStockIndex = 'XUTUM'): () => void {
+function retainMarketStocksStreamInternal(requestedIndex: MarketStockIndex = 'XUTUM'): () => void {
     if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
         return () => {};
     }
+    // XUTUM deltas fan out to XU100 and XU030 in applyMarketStocksDeltaInternal,
+    // so sharing one XUTUM stream avoids duplicate EventSource connections.
+    const index: MarketStockIndex =
+        requestedIndex === 'XU100' || requestedIndex === 'XU030' ? 'XUTUM' : requestedIndex;
     let handle = marketStocksStreams.get(index);
     if (!handle) {
-        handle = { refCount: 0, source: null, connected: false, cleanupListeners: null };
+        handle = { refCount: 0, source: null, connected: false, cleanupListeners: null, releaseTimer: null };
         marketStocksStreams.set(index, handle);
+    }
+    if (handle.releaseTimer !== null) {
+        window.clearTimeout(handle.releaseTimer);
+        handle.releaseTimer = null;
     }
     handle.refCount += 1;
 
@@ -310,7 +325,13 @@ function retainMarketStocksStreamInternal(index: MarketStockIndex = 'XUTUM'): ()
             closeSource();
             return;
         }
-        if (handle.source) return;
+        if (handle.source) {
+            if (handle.source.readyState === EventSource.CLOSED) {
+                closeSource();
+            } else {
+                return;
+            }
+        }
         try {
             const url = `${API_BASE}/market/stream?index=${encodeURIComponent(index)}`;
             const es = new EventSource(url);
@@ -319,7 +340,11 @@ function retainMarketStocksStreamInternal(index: MarketStockIndex = 'XUTUM'): ()
                 if (handle) handle.connected = true;
             };
             es.onerror = () => {
-                if (handle) handle.connected = false;
+                if (!handle) return;
+                handle.connected = false;
+                if (es.readyState === EventSource.CLOSED) {
+                    closeSource();
+                }
             };
             es.addEventListener('stocks_delta', (event: MessageEvent) => {
                 try {
@@ -353,21 +378,26 @@ function retainMarketStocksStreamInternal(index: MarketStockIndex = 'XUTUM'): ()
         const current = marketStocksStreams.get(index);
         if (!current) return;
         current.refCount = Math.max(0, current.refCount - 1);
-        if (current.refCount === 0) {
-            if (current.cleanupListeners) {
-                current.cleanupListeners();
-                current.cleanupListeners = null;
-            }
-            if (current.source) {
-                try {
-                    current.source.close();
-                } catch {
-                    // ignore
+        if (current.refCount === 0 && current.releaseTimer === null) {
+            current.releaseTimer = window.setTimeout(() => {
+                const latest = marketStocksStreams.get(index);
+                if (!latest || latest.refCount > 0) return;
+                latest.releaseTimer = null;
+                if (latest.cleanupListeners) {
+                    latest.cleanupListeners();
+                    latest.cleanupListeners = null;
                 }
-                current.source = null;
-            }
-            current.connected = false;
-            marketStocksStreams.delete(index);
+                if (latest.source) {
+                    try {
+                        latest.source.close();
+                    } catch {
+                        // ignore
+                    }
+                    latest.source = null;
+                }
+                latest.connected = false;
+                marketStocksStreams.delete(index);
+            }, MARKET_STREAM_RELEASE_GRACE_MS);
         }
     };
 }
@@ -721,7 +751,7 @@ export const apiClient = {
     retainMarketStocksStream: (index: MarketStockIndex = 'XUTUM') =>
         retainMarketStocksStreamInternal(index),
     isMarketStocksStreamActive: (index: MarketStockIndex = 'XUTUM') =>
-        Boolean(marketStocksStreams.get(index)?.connected),
+        Boolean(marketStocksStreams.get(index)?.connected || marketStocksStreams.get('XUTUM')?.connected),
     marketStockSearch: (options: {
         q: string;
         index?: MarketStockIndex;
@@ -754,11 +784,37 @@ export const apiClient = {
         range: MarketStockCardChartRange,
         options?: { refresh?: boolean; signal?: AbortSignal },
     ) => {
-        const params = new URLSearchParams({ symbol, range });
+        const normalizedSymbol = symbol.trim().toUpperCase();
+        const cacheKey = `${normalizedSymbol}:${range}`;
+        const ttlMs = isBistTradingHours() ? MARKET_REFERENCE_LIVE_TTL_MS : MARKET_REFERENCE_OFFHOURS_TTL_MS;
+        if (!options?.refresh && !options?.signal?.aborted) {
+            const cached = marketStockCardChartMemoryCache.get(cacheKey);
+            if (cached && Date.now() - cached.fetchedAt < ttlMs) {
+                return Promise.resolve(cached.payload);
+            }
+        }
+        if (!options?.refresh && !options?.signal) {
+            const existing = marketStockCardChartInFlight.get(cacheKey);
+            if (existing) return existing;
+        }
+        const params = new URLSearchParams({ symbol: normalizedSymbol, range });
         if (options?.refresh) params.append('refresh', 'true');
-        return fetchApi<MarketStockCardChartResponse>(`/market/stocks/cards/chart?${params.toString()}`, {
+        const request = fetchApi<MarketStockCardChartResponse>(`/market/stocks/cards/chart?${params.toString()}`, {
             signal: options?.signal,
+        }).then((payload) => {
+            if (payload?.line_points?.length) {
+                marketStockCardChartMemoryCache.set(cacheKey, { payload, fetchedAt: Date.now() });
+            }
+            return payload;
+        }).finally(() => {
+            if (!options?.signal && marketStockCardChartInFlight.get(cacheKey) === request) {
+                marketStockCardChartInFlight.delete(cacheKey);
+            }
         });
+        if (!options?.refresh && !options?.signal) {
+            marketStockCardChartInFlight.set(cacheKey, request);
+        }
+        return request;
     },
     marketComparisonHistory: (
         request: {
@@ -794,8 +850,16 @@ export const apiClient = {
         const params = new URLSearchParams();
         if (options?.refresh) params.append('refresh', 'true');
         const query = params.toString();
-        return fetchApi<MarketIndexDetailResponse>(
-            query ? `/market/indices/${index}?${query}` : `/market/indices/${index}`,
+        const ttlMs = isBistTradingHours() ? MARKET_WATCH_LIVE_TTL_MS : MARKET_REFERENCE_OFFHOURS_TTL_MS;
+        return cachedFetch(
+            marketIndexDetailMemoryCache,
+            marketIndexDetailInFlight,
+            index,
+            ttlMs,
+            () => fetchApi<MarketIndexDetailResponse>(
+                query ? `/market/indices/${index}?${query}` : `/market/indices/${index}`,
+            ),
+            { bypassCache: Boolean(options?.refresh) },
         );
     },
     marketFlow: (
@@ -1241,7 +1305,7 @@ export const apiClient = {
             exposeErrorDetail: true,
         })
             .then((payload) => {
-                if (payload.status !== 'pending' && payload.status !== 'unavailable') {
+                if (payload.status !== 'pending' && payload.status !== 'unavailable' && !payload.refresh_pending) {
                     fundYieldSummaryMemoryCache.set(normalizedCode, { payload, fetchedAt: Date.now() });
                 }
                 return payload;

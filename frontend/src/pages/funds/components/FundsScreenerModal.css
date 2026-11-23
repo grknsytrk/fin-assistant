@@ -412,8 +412,38 @@
 
 
 @media (max-width: 760px) {
+    .funds-screener-backdrop {
+        padding: 0.5rem;
+    }
+
+    .funds-screener-modal {
+        max-height: 94vh;
+        max-height: 94dvh;
+    }
+
     .funds-screener-grid,
     .funds-screener-returns-cols {
         grid-template-columns: 1fr;
+    }
+
+    .funds-screener-select,
+    .funds-screener-num-field input {
+        font-size: 16px;
+    }
+
+    .funds-screener-footer {
+        flex-wrap: wrap;
+        gap: 0.65rem;
+        padding: 0.75rem 0.9rem calc(0.75rem + env(safe-area-inset-bottom));
+    }
+
+    .funds-screener-footer-right {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .funds-screener-apply-btn,
+    .funds-screener-clear-btn {
+        min-height: 40px;
     }
 }

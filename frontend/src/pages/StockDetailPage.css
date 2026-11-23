@@ -695,6 +695,10 @@
 }
 
 @media (max-width: 760px) {
+    .sd-price-chart-svg {
+        touch-action: pan-y;
+    }
+
     .sd-price-chart-svg,
     .sd-price-chart-state {
         min-height: 240px;

@@ -1119,8 +1119,13 @@
         width: var(--mwr-panel-width);
         flex-basis: auto;
         height: 100vh;
+        height: 100dvh;
         border-left: 1px solid color-mix(in srgb, var(--surface-border) 86%, transparent);
     }
+}
+
+.mwr-mobile-tool-bar {
+    display: none;
 }
 
 @media (max-width: 760px) {
@@ -1132,11 +1137,61 @@
     }
 
     .mwr-panel {
+        z-index: 170;
         width: var(--mwr-panel-width);
-        left: auto;
+        left: 0;
         right: 0;
         bottom: calc(66px + env(safe-area-inset-bottom));
         height: auto;
+        border-left: 0;
+    }
+
+    .mwr-mobile-tool-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.55rem 0.75rem;
+        border-bottom: 1px solid var(--surface-border);
+        background: var(--bg-color);
+        flex-shrink: 0;
+    }
+
+    .mwr-mobile-tool-btn {
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 38px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.35rem;
+        padding: 0.35rem 0.5rem;
+        border: 1px solid var(--surface-border);
+        border-radius: 6px;
+        background: var(--surface-color);
+        color: var(--text-secondary);
+        font-size: 0.76rem;
+        font-weight: 600;
+        white-space: nowrap;
+        cursor: pointer;
+    }
+
+    .mwr-mobile-tool-btn.is-active {
+        border-color: color-mix(in srgb, var(--accent-color) 55%, transparent);
+        background: var(--accent-glow);
+        color: #ffffff;
+    }
+
+    .mwr-mobile-close-btn {
+        display: inline-grid;
+        place-items: center;
+        width: 38px;
+        height: 38px;
+        flex-shrink: 0;
+        border: 1px solid var(--surface-border);
+        border-radius: 6px;
+        background: var(--surface-color);
+        color: var(--text-secondary);
+        cursor: pointer;
     }
 
     .mwr-tabs {
@@ -1168,10 +1223,6 @@
     .mwr-row {
         grid-template-columns: minmax(0, 1fr) 76px 68px;
         gap: 0.45rem;
-    }
-
-    .mwr-table-head,
-    .mwr-row {
         padding-left: 0.75rem;
         padding-right: 0.75rem;
     }
@@ -1180,19 +1231,9 @@
         display: none;
     }
 
-    .mwr-dock {
-        top: 5.1rem;
-        right: 4px;
-        width: 40px;
-        padding: 0.34rem 0.28rem;
-    }
-
-    .mwr-dock-button {
-        width: 31px;
-        min-width: 31px;
-        height: 31px;
-        min-height: 31px;
-        flex-basis: 31px;
+    .mwr-watchlist-search input,
+    .mwr-flow-select {
+        font-size: 16px;
     }
 
     .mwr-mobile-toggle {

@@ -121,42 +121,39 @@ export function useWatchlist() {
     }, []);
 
     const addItem = useCallback((item: WatchlistItem) => {
-        setItemsState((current) => {
-            const normalizedItem = normalizeItem(item);
-            if (!normalizedItem) return current;
-            if (current.some((existing) => watchlistItemKey(existing) === watchlistItemKey(normalizedItem))) {
-                return current;
-            }
-            const next = normalizeWatchlistItems([...current, normalizedItem]);
-            writeWatchlistItems(next);
-            dispatchWatchlistEvent(next);
-            return next;
-        });
+        const normalizedItem = normalizeItem(item);
+        if (!normalizedItem) return;
+        const current = readWatchlistItems();
+        if (current.some((existing) => watchlistItemKey(existing) === watchlistItemKey(normalizedItem))) {
+            return;
+        }
+        const next = normalizeWatchlistItems([...current, normalizedItem]);
+        writeWatchlistItems(next);
+        setItemsState(next);
+        dispatchWatchlistEvent(next);
     }, []);
 
     const removeItem = useCallback((kind: WatchlistItemKind, symbol: string) => {
         const key = `${kind}:${normalizeWatchlistSymbol(symbol)}`;
-        setItemsState((current) => {
-            const next = current.filter((item) => watchlistItemKey(item) !== key);
-            writeWatchlistItems(next);
-            dispatchWatchlistEvent(next);
-            return next;
-        });
+        const current = readWatchlistItems();
+        const next = current.filter((item) => watchlistItemKey(item) !== key);
+        writeWatchlistItems(next);
+        setItemsState(next);
+        dispatchWatchlistEvent(next);
     }, []);
 
     const toggleItem = useCallback((item: WatchlistItem) => {
         const normalizedItem = normalizeItem(item);
         if (!normalizedItem) return;
         const key = watchlistItemKey(normalizedItem);
-        setItemsState((current) => {
-            const exists = current.some((existing) => watchlistItemKey(existing) === key);
-            const next = exists
-                ? current.filter((existing) => watchlistItemKey(existing) !== key)
-                : normalizeWatchlistItems([...current, normalizedItem]);
-            writeWatchlistItems(next);
-            dispatchWatchlistEvent(next);
-            return next;
-        });
+        const current = readWatchlistItems();
+        const exists = current.some((existing) => watchlistItemKey(existing) === key);
+        const next = exists
+            ? current.filter((existing) => watchlistItemKey(existing) !== key)
+            : normalizeWatchlistItems([...current, normalizedItem]);
+        writeWatchlistItems(next);
+        setItemsState(next);
+        dispatchWatchlistEvent(next);
     }, []);
 
     const hasItem = useCallback((kind: WatchlistItemKind, symbol: string) => {

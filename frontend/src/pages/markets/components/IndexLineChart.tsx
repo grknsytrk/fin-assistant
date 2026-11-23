@@ -154,10 +154,15 @@ export function IndexLineChart({
 
     const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
         if (event.pointerType === 'mouse' && event.button !== 0) return;
-        event.preventDefault();
         const x = chartXFromEvent(event);
         if (x == null) return;
         const closestIndex = closestIndexForX(x);
+        if (event.pointerType === 'touch') {
+            setMeasureAnchorIndex(null);
+            setHoverIndex(closestIndex);
+            return;
+        }
+        event.preventDefault();
         setHoverIndex(closestIndex);
         setMeasureAnchorIndex(closestIndex);
         event.currentTarget.setPointerCapture?.(event.pointerId);

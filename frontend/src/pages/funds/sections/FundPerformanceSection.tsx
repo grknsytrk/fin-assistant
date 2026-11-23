@@ -523,10 +523,17 @@ export function FundPerformanceChart({
         };
         const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
             if (event.pointerType === 'mouse' && event.button !== 0) return;
-            event.preventDefault();
             const pointer = chartPointerFromEvent(event);
             if (!pointer) return;
             const closestIndex = closestIndexForX(pointer.x);
+            if (event.pointerType === 'touch') {
+                setSelectedMeasureRange(null);
+                setMeasureAnchorIndex(null);
+                setHoverPointer(pointer);
+                setHoverIndex(closestIndex);
+                return;
+            }
+            event.preventDefault();
             const rect = event.currentTarget.getBoundingClientRect();
             const handleHitRadius = rect.width > 0 ? (20 * width) / rect.width : 32;
             let anchorIndex = closestIndex;
@@ -924,10 +931,17 @@ export function FundPerformanceChart({
         };
         const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
             if (event.pointerType === 'mouse' && event.button !== 0) return;
+            const pointer = chartPointerFromEvent(event);
+            if (!pointer) return;
+            const closestIndex = closestPriceIndexForX(pointer.x);
+            if (event.pointerType === 'touch') {
+                setSelectedMeasureRange(null);
+                setMeasureAnchorIndex(null);
+                setHoverPointer(pointer);
+                setHoverIndex(closestIndex);
+                return;
+            }
             event.preventDefault();
-        const pointer = chartPointerFromEvent(event);
-        if (!pointer) return;
-        const closestIndex = closestPriceIndexForX(pointer.x);
         const rect = event.currentTarget.getBoundingClientRect();
         const handleHitRadius = rect.width > 0 ? (20 * width) / rect.width : 32;
         let anchorIndex = closestIndex;
@@ -1014,7 +1028,7 @@ export function FundPerformanceChart({
             : Math.min(measureAnchorYForTooltip + measureTooltipGap, height - measureTooltipHeight - 8);
     const measureDeltaText = measureDelta == null
         ? '-'
-        : `${measureDelta > 0 ? '+' : measureDelta < 0 ? '-' : ''}${formatCurrency(Math.abs(measureDelta), 'TRY')}`;
+        : `${measureDelta > 0 ? '+' : measureDelta < 0 ? '-' : ''}${formatCurrency(Math.abs(measureDelta), currency || 'TRY')}`;
     const measureClass = measureReturn == null ? '' : measureReturn >= 0 ? 'is-positive' : 'is-negative';
     const measureLeftX = measureAnchorX != null && measureEndX != null ? Math.min(measureAnchorX, measureEndX) : null;
     const measureRightX = measureAnchorX != null && measureEndX != null ? Math.max(measureAnchorX, measureEndX) : null;
@@ -1370,7 +1384,7 @@ export function FundMonthlyHeatmap({ monthlyReturns }: { monthlyReturns: Monthly
     );
 }
 
-export function FundHistoryTable({ points }: { points: FundPricePoint[] }) {
+export function FundHistoryTable({ points, currency }: { points: FundPricePoint[]; currency?: string | null }) {
     const orderedPoints = [...points].sort((a, b) => a.date.localeCompare(b.date));
     const latestPoint = orderedPoints[orderedPoints.length - 1] || null;
     const latestDate = latestPoint ? new Date(`${latestPoint.date}T00:00:00`) : null;
@@ -1424,7 +1438,7 @@ export function FundHistoryTable({ points }: { points: FundPricePoint[] }) {
                         return (
                             <tr key={point.date}>
                                 <td>{formatDate(point.date)}</td>
-                                <td>{formatCurrency(point.price, 'TRY')}</td>
+                                <td>{formatCurrency(point.price, currency || 'TRY')}</td>
                                 <td className={pctClass(point.daily_return)}>{formatPct(point.daily_return)}</td>
                                 <td>{formatCompactCurrency(point.aum)}</td>
                                 <td className={pctClass(cashFlowDelta)}>{formatSignedCompactCurrency(cashFlowDelta)}</td>

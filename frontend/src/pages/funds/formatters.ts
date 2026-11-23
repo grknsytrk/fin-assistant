@@ -14,6 +14,7 @@ import type {
 } from '../../api/types';
 import type { SymbolLogoKind } from '../../components/SymbolLogo';
 import { STOCK_LOGO_DOMAIN_MAP } from '../../components/symbolLogoMaps';
+import { isBistTradingHours } from '../../utils/marketHours';
 import { formatFundQuotePrice, formatFundReportDate } from '../../utils/fundPresentation';
 import {
     DETAIL_RETURN_PERIODS,
@@ -100,16 +101,7 @@ export function formatQuotePrice(value: number | null | undefined, currency = 'T
 }
 
 export function isBistMarketOpen(now = new Date()): boolean {
-    const parts = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Europe/Istanbul',
-        weekday: 'short',
-        hour: '2-digit',
-        hourCycle: 'h23',
-    }).formatToParts(now);
-    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-    const weekday = values.weekday;
-    const hour = Number(values.hour);
-    return !['Sat', 'Sun'].includes(weekday) && Number.isFinite(hour) && hour >= 10 && hour < 18;
+    return isBistTradingHours(now);
 }
 
 export function formatHoldingPrice(value: number | null | undefined, currency: string | null | undefined): string {

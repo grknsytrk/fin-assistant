@@ -223,20 +223,35 @@
     background: rgba(255, 255, 255, 0.06);
 }
 
-@media (max-width: 640px) {
+@media (max-width: 760px) {
     .fund-datepicker {
         width: 100%;
     }
 
     .fund-datepicker-trigger {
         width: 100%;
+        min-height: 40px;
         justify-content: space-between;
+    }
+
+    .fund-datepicker-selects select {
+        height: 34px;
+        font-size: 16px;
+    }
+
+    .fund-datepicker-nav {
+        width: 34px;
+        height: 34px;
+    }
+
+    .fund-datepicker-day {
+        height: 36px;
     }
 
     .fund-datepicker-popover,
     .fund-datepicker-popover.is-align-right {
         left: 0;
         right: auto;
-        width: min(280px, calc(100vw - 2.5rem));
+        width: min(296px, calc(100vw - 2rem));
     }
 }

@@ -756,20 +756,6 @@
     }
 }
 
-@media (max-width: 760px) {
-    .fund-chart-axis {
-        font-size: 15px;
-    }
-
-    .fund-chart-tooltip-muted {
-        font-size: 15px;
-    }
-
-    .fund-chart-tooltip-value {
-        font-size: 17px;
-    }
-}
-
 .fund-chart-gridline {
     stroke: color-mix(in srgb, var(--surface-border) 58%, transparent);
     stroke-dasharray: 4 6;
@@ -811,6 +797,20 @@
     font-family: var(--font-mono);
     font-size: 13px;
     font-weight: 800;
+}
+
+@media (max-width: 760px) {
+    .fund-chart-axis {
+        font-size: 15px;
+    }
+
+    .fund-chart-tooltip-muted {
+        font-size: 15px;
+    }
+
+    .fund-chart-tooltip-value {
+        font-size: 17px;
+    }
 }
 
 @media (max-width: 1080px) {

@@ -419,6 +419,7 @@ export default function MarketWatchRail({
     }, [watchlistItems]);
 
     useEffect(() => {
+        if (panelCollapsed) return undefined;
         const cachedCatalog = apiClient.getCachedFundsCatalog();
         const freshCatalogRows = (
             cachedCatalog
@@ -449,7 +450,7 @@ export default function MarketWatchRail({
                 }
                 continue;
             }
-            if (!(code in watchlistFundRows)) {
+            if (!watchlistFundRows[code]) {
                 stillMissingCodes.push(code);
             }
         }
@@ -458,7 +459,7 @@ export default function MarketWatchRail({
             setWatchlistFundRows((current) => ({ ...current, ...cachedUpdates }));
         }
 
-        if (!stillMissingCodes.length) return;
+        if (!stillMissingCodes.length) return undefined;
 
         let cancelled = false;
         Promise.all(
@@ -469,9 +470,11 @@ export default function MarketWatchRail({
             ),
         ).then((entries) => {
             if (cancelled) return;
+            const resolvedEntries = entries.filter((entry): entry is readonly [string, FundSummary] => entry[1] != null);
+            if (resolvedEntries.length === 0) return;
             setWatchlistFundRows((current) => {
                 const next = { ...current };
-                for (const [code, detail] of entries) {
+                for (const [code, detail] of resolvedEntries) {
                     next[code] = detail;
                 }
                 return next;
@@ -481,7 +484,7 @@ export default function MarketWatchRail({
         return () => {
             cancelled = true;
         };
-    }, [watchlistFundCodes, watchlistFundRows]);
+    }, [panelCollapsed, watchlistFundCodes, watchlistFundRows]);
 
     useEffect(() => {
         const query = watchlistSearch.trim();
@@ -959,6 +962,47 @@ export default function MarketWatchRail({
                 aria-label="İzleme listesi"
                 aria-hidden={panelCollapsed}
             >
+                <div className="mwr-mobile-tool-bar" role="tablist" aria-label="Mobil panel araçları">
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={activeTool === 'markets'}
+                        className={`mwr-mobile-tool-btn${activeTool === 'markets' ? ' is-active' : ''}`}
+                        onClick={() => setActiveTool('markets')}
+                    >
+                        <BarChart3 size={15} aria-hidden="true" />
+                        <span>Piyasalar</span>
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={activeTool === 'watchlist'}
+                        className={`mwr-mobile-tool-btn${activeTool === 'watchlist' ? ' is-active' : ''}`}
+                        onClick={() => setActiveTool('watchlist')}
+                    >
+                        <Star size={15} aria-hidden="true" />
+                        <span>İzleme</span>
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={activeTool === 'news'}
+                        className={`mwr-mobile-tool-btn${activeTool === 'news' ? ' is-active' : ''}`}
+                        onClick={() => setActiveTool('news')}
+                    >
+                        <Activity size={15} aria-hidden="true" />
+                        <span>KAP Akışı</span>
+                    </button>
+                    <button
+                        type="button"
+                        className="mwr-mobile-close-btn"
+                        onClick={() => updateCollapsed(true)}
+                        aria-label="Paneli kapat"
+                        title="Kapat"
+                    >
+                        <X size={18} aria-hidden="true" />
+                    </button>
+                </div>
                 {activeTool !== 'news' && (
                     <div className="mwr-head">
                         <div className="mwr-head-row">
@@ -1010,7 +1054,7 @@ export default function MarketWatchRail({
                 )}
 
                 {activeTool === 'news' ? (
-                    <MarketFlowPanel onSelectTicker={onSelectTicker} />
+                    !panelCollapsed ? <MarketFlowPanel onSelectTicker={onSelectTicker} /> : null
                 ) : activeTool === 'watchlist' ? (
                     <div className="mwr-watchlist">
                         <div className="mwr-watchlist-search">

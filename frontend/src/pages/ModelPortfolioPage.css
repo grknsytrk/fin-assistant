@@ -283,7 +283,7 @@
 }
 
 .mp-tone-down {
-    color: var(--error-color) !important;
+    color: var(--danger-color) !important;
 }
 
 .mp-tone-flat {
@@ -933,7 +933,7 @@
 }
 
 .mp-progress-fill.is-negative {
-    background: var(--error-color);
+    background: var(--danger-color);
 }
 
 .mp-row-actions {
@@ -1614,6 +1614,32 @@
 
     .mp-closed-scorecard {
         grid-template-columns: 1fr;
+    }
+
+    .mp-closed-scorecard .mp-score-item {
+        border-left: 0;
+        padding: 0.55rem 0;
+        border-top: 1px solid var(--surface-border);
+    }
+
+    .mp-closed-scorecard .mp-score-item:first-child {
+        border-top: 0;
+        padding-top: 0;
+    }
+
+    .mp-changelog-item {
+        flex-direction: column;
+        gap: 0.4rem;
+    }
+
+    .mp-changelog-meta {
+        flex: 0 0 auto;
+    }
+
+    .mp-field input,
+    .mp-field select,
+    .mp-field textarea {
+        font-size: 16px;
     }
 
     .mp-modal-backdrop {

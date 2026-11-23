@@ -466,30 +466,6 @@
     cursor: default;
 }
 
-@media (max-width: 760px) {
-    .fund-detail-chart.is-mobile-chart {
-        height: auto;
-        min-height: 0;
-        aspect-ratio: 860 / 560;
-    }
-
-    .fund-chart-measure-muted {
-        font-size: 15px;
-    }
-
-    .fund-chart-measure-value {
-        font-size: 21px;
-    }
-
-    .fund-chart-measure-row-value {
-        font-size: 16px;
-    }
-
-    .fund-chart-loading-label {
-        font-size: 17px;
-    }
-}
-
 @media (max-width: 640px) {
     .fund-chart-range {
         min-height: 2.55rem;
@@ -603,6 +579,34 @@
     fill: var(--text-secondary);
     font-size: 13px;
     font-weight: 500;
+}
+
+@media (max-width: 760px) {
+    .fund-detail-chart {
+        touch-action: pan-y;
+    }
+
+    .fund-detail-chart.is-mobile-chart {
+        height: auto;
+        min-height: 0;
+        aspect-ratio: 860 / 560;
+    }
+
+    .fund-chart-measure-muted {
+        font-size: 15px;
+    }
+
+    .fund-chart-measure-value {
+        font-size: 21px;
+    }
+
+    .fund-chart-measure-row-value {
+        font-size: 16px;
+    }
+
+    .fund-chart-loading-label {
+        font-size: 17px;
+    }
 }
 
 .fund-chart-legend {

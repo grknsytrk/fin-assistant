@@ -25,6 +25,7 @@ import {
     retainMarketStockCardsForSymbols,
 } from '../utils/stockCardData';
 import { isBistTradingHours } from '../utils/marketHours';
+import { cacheWatchlistFund, getCachedWatchlistFund } from '../utils/watchlistData';
 import { BoundedMemoryCache } from '../utils/lruCache';
 import '../styles/market-shared.css';
 import './MarketsView.css';
@@ -235,9 +236,12 @@ export default function MarketsView({
         key: 'impact_abs',
         direction: 'desc',
     });
-    const stocksInFlightRef = useRef(false);
+    const stocksRequestIdRef = useRef(0);
+    const stocksInFlightIndexRef = useRef<MarketStockIndex | null>(null);
     const indicesInFlightRef = useRef(false);
-    const indexDetailInFlightRef = useRef(false);
+    const indexDetailRequestIdRef = useRef(0);
+    const indexDetailInFlightCodeRef = useRef<MarketIndexCode | null>(null);
+    const mobileWatchlistFundFailedRef = useRef<Record<string, number>>({});
     const stockCardQuickInFlightRef = useRef<Promise<void> | null>(null);
     const stockCardFullInFlightRef = useRef<Promise<void> | null>(null);
     const stockCardsRef = useRef<MarketStockCardsResponse | null>(stockCards);
@@ -281,24 +285,29 @@ export default function MarketsView({
     useEffect(() => {
         if (activeSection !== 'markets' || !isMobileViewport) return;
         let alive = true;
+        let hasLoaded = false;
         const loadMobileIndex = () => {
             apiClient
                 .marketIndexDetail('XU100')
                 .then((payload) => {
-                    if (alive) setMobileIndexDetail(payload);
+                    if (!alive) return;
+                    hasLoaded = true;
+                    setMobileIndexDetail(payload);
                 })
                 .catch(() => {
-                    if (alive) setMobileIndexDetail(null);
+                    // Keep previously loaded XU100 data instead of wiping it to null on transient errors.
                 });
         };
         loadMobileIndex();
         const intervalId = window.setInterval(() => {
-            if (document.visibilityState === 'visible' && isBistTradingHours()) {
+            if (document.visibilityState === 'visible' && (!hasLoaded || isBistTradingHours())) {
                 loadMobileIndex();
             }
         }, marketDetailRefreshMs);
         const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible' && isBistTradingHours()) loadMobileIndex();
+            if (document.visibilityState === 'visible' && (!hasLoaded || isBistTradingHours())) {
+                loadMobileIndex();
+            }
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
@@ -310,22 +319,69 @@ export default function MarketsView({
 
     useEffect(() => {
         if (activeSection !== 'markets' || !isMobileViewport) return;
-        const missingCodes = mobileWatchlistFundCodes.filter(
-            (code) => !(code in mobileWatchlistFundRows),
-        );
+        const cachedCatalog = apiClient.getCachedFundsCatalog();
+        const freshCatalogRows = (
+            cachedCatalog
+            && Date.now() - cachedCatalog.fetchedAt < 5 * 60_000
+            && Array.isArray(cachedCatalog.payload?.rows)
+        )
+            ? cachedCatalog.payload.rows
+            : null;
+        const catalogByCode = freshCatalogRows
+            ? new Map(freshCatalogRows.map((row) => [normalizeWatchlistSymbol(row.fund_code), row]))
+            : null;
+
+        const cachedUpdates: Record<string, FundSummary> = {};
+        const missingCodes: string[] = [];
+        for (const code of mobileWatchlistFundCodes) {
+            const localCached = getCachedWatchlistFund(code);
+            if (localCached) {
+                if (mobileWatchlistFundRows[code] !== localCached) {
+                    cachedUpdates[code] = localCached;
+                }
+                continue;
+            }
+            const catalogMatch = catalogByCode?.get(code);
+            if (catalogMatch) {
+                cacheWatchlistFund(catalogMatch);
+                if (mobileWatchlistFundRows[code] !== catalogMatch) {
+                    cachedUpdates[code] = catalogMatch;
+                }
+                continue;
+            }
+            if (!mobileWatchlistFundRows[code]) {
+                const failedAt = mobileWatchlistFundFailedRef.current[code];
+                if (!failedAt || Date.now() - failedAt > 60_000) {
+                    missingCodes.push(code);
+                }
+            }
+        }
+
+        if (Object.keys(cachedUpdates).length > 0) {
+            setMobileWatchlistFundRows((current) => ({ ...current, ...cachedUpdates }));
+        }
         if (missingCodes.length === 0) return;
 
         let cancelled = false;
         Promise.all(
             missingCodes.map((code) => apiClient
                 .fundDetail(code)
-                .then((detail) => [code, detail] as const)
-                .catch(() => [code, null] as const)),
+                .then((detail) => {
+                    delete mobileWatchlistFundFailedRef.current[code];
+                    cacheWatchlistFund(detail);
+                    return [code, detail] as const;
+                })
+                .catch(() => {
+                    mobileWatchlistFundFailedRef.current[code] = Date.now();
+                    return [code, null] as const;
+                })),
         ).then((entries) => {
             if (cancelled) return;
+            const resolved = entries.filter((entry): entry is readonly [string, NonNullable<typeof entry[1]>] => entry[1] != null);
+            if (resolved.length === 0) return;
             setMobileWatchlistFundRows((current) => {
                 const next = { ...current };
-                for (const [code, detail] of entries) next[code] = detail;
+                for (const [code, detail] of resolved) next[code] = detail;
                 return next;
             });
         });
@@ -368,7 +424,7 @@ export default function MarketsView({
     useLayoutEffect(() => {
         if (activeSection !== 'markets' || loading || error || !market) return;
         if (!pendingMarketScrollResetRef.current) return;
-        if (stockCardSymbols.length > 0 && !stockCards && !stockCardsError) return;
+        if (!isMobileViewport && stockCardSymbols.length > 0 && !stockCards && !stockCardsError) return;
 
         const resetScroll = () => {
             marketPageRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
@@ -646,8 +702,10 @@ export default function MarketsView({
     }
 
     async function loadStocks(silent = false, refresh = false, requestedIndex: MarketStockIndex = stockIndex) {
-        if (stocksInFlightRef.current) return;
-        stocksInFlightRef.current = true;
+        if (silent && stocksInFlightIndexRef.current === requestedIndex) return;
+        const requestId = stocksRequestIdRef.current + 1;
+        stocksRequestIdRef.current = requestId;
+        stocksInFlightIndexRef.current = requestedIndex;
         const cachedStocks = apiClient.getCachedMarketStocks(requestedIndex);
         if (cachedStocks) {
             setStocks(cachedStocks);
@@ -655,6 +713,7 @@ export default function MarketsView({
             void apiClient
                 .marketUniverse({ index: requestedIndex })
                 .then((universePayload) => {
+                    if (requestId !== stocksRequestIdRef.current) return;
                     if (latestActiveSectionRef.current === 'stocks' && latestStockIndexRef.current !== requestedIndex) return;
                     if (latestActiveSectionRef.current === 'markets' && requestedIndex !== 'XUTUM') return;
                     setStocks((current) => (
@@ -671,17 +730,21 @@ export default function MarketsView({
         if (!silent) setStocksError(null);
         try {
             const stocksPayload = await apiClient.marketStocks({ index: requestedIndex, refresh });
+            if (requestId !== stocksRequestIdRef.current) return;
             if (latestActiveSectionRef.current === 'stocks' && latestStockIndexRef.current !== requestedIndex) return;
             if (latestActiveSectionRef.current === 'markets' && requestedIndex !== 'XUTUM') return;
             setStocks(stocksPayload);
             setStocksError(null);
         } catch (err: any) {
+            if (requestId !== stocksRequestIdRef.current) return;
             if (!silent || !stocks) {
                 setStocksError(err.message || 'Hisse verileri yüklenemedi.');
             }
         } finally {
-            stocksInFlightRef.current = false;
-            if (!silent) setStocksLoading(false);
+            if (requestId === stocksRequestIdRef.current) {
+                stocksInFlightIndexRef.current = null;
+                if (!silent) setStocksLoading(false);
+            }
         }
     }
 
@@ -764,22 +827,28 @@ export default function MarketsView({
         refresh = false,
         requestedIndex: MarketIndexCode = selectedIndex || 'XUTUM',
     ) {
-        if (indexDetailInFlightRef.current) return;
-        indexDetailInFlightRef.current = true;
+        if (silent && indexDetailInFlightCodeRef.current === requestedIndex) return;
+        const requestId = indexDetailRequestIdRef.current + 1;
+        indexDetailRequestIdRef.current = requestId;
+        indexDetailInFlightCodeRef.current = requestedIndex;
         if (!silent) setIndexDetailLoading(true);
         if (!silent) setIndexDetailError(null);
         try {
             const payload = await apiClient.marketIndexDetail(requestedIndex, { refresh });
+            if (requestId !== indexDetailRequestIdRef.current) return;
             if (latestSelectedIndexRef.current !== requestedIndex) return;
             setIndexDetail(payload);
             setIndexDetailError(null);
         } catch (err: any) {
+            if (requestId !== indexDetailRequestIdRef.current) return;
             if (!silent || !indexDetail) {
                 setIndexDetailError(err.message || 'Endeks detayı yüklenemedi.');
             }
         } finally {
-            indexDetailInFlightRef.current = false;
-            if (!silent) setIndexDetailLoading(false);
+            if (requestId === indexDetailRequestIdRef.current) {
+                indexDetailInFlightCodeRef.current = null;
+                if (!silent) setIndexDetailLoading(false);
+            }
         }
     }
 
@@ -1365,8 +1434,9 @@ export default function MarketsView({
                             onOpenFund={onOpenFund}
                             onAddWatchlistStock={(symbol) => watchlist.addItem({ kind: 'stock', symbol })}
                             onAddWatchlistFund={(fund) => {
-                                setMobileWatchlistFundRows((current) => ({ ...current, [fund.fund_code]: fund }));
-                                watchlist.addItem({ kind: 'fund', symbol: fund.fund_code, label: fund.name });
+                                const normalizedCode = normalizeWatchlistSymbol(fund.fund_code);
+                                setMobileWatchlistFundRows((current) => ({ ...current, [normalizedCode]: fund }));
+                                watchlist.addItem({ kind: 'fund', symbol: normalizedCode, label: fund.name });
                             }}
                             onRemoveWatchlistItem={(item) => watchlist.removeItem(item.kind, item.symbol)}
                             onMobileWatchlistSearchOpenChange={setMobileWatchlistSearchOpen}

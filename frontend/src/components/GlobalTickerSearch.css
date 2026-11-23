@@ -183,21 +183,22 @@
   }
 
   .global-search-modal-backdrop {
-    padding: 0.75rem;
+    padding: 0.75rem 0.75rem calc(0.75rem + env(safe-area-inset-bottom));
   }
 
   .global-search-modal {
     width: 100%;
     max-height: calc(100vh - 1.5rem);
+    max-height: calc(100dvh - 1.5rem - env(safe-area-inset-bottom));
   }
 
   .global-search-modal-head {
-    min-height: 68px;
+    min-height: 60px;
     padding: 0 0.9rem;
   }
 
   .global-search-modal-head input {
-    font-size: 1.1rem;
+    font-size: 16px;
   }
 
 }

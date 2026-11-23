@@ -2007,7 +2007,7 @@ export default function FundsPage({
                                                 ) : visiblePerformancePoints.length ? (
                                                     <>
                                                         <FundPeriodStatsStrip stats={performance?.period_stats} />
-                                                        <FundHistoryTable points={visiblePerformancePoints} />
+                                                        <FundHistoryTable points={visiblePerformancePoints} currency={selectedFund.currency} />
                                                     </>
                                                 ) : (
                                                     <div className="funds-state">Geçmiş fiyat verisi henüz hazır değil.</div>

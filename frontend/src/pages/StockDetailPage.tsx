@@ -407,10 +407,16 @@ function StockDetailPriceChart({
     };
     const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
         if (event.pointerType === 'mouse' && event.button !== 0) return;
-        event.preventDefault();
         const x = chartXFromEvent(event);
         if (x == null) return;
         const closestIndex = closestIndexForX(x);
+        if (event.pointerType === 'touch') {
+            setSelectedMeasureRange(null);
+            setMeasureAnchorIndex(null);
+            setHoverIndex(closestIndex);
+            return;
+        }
+        event.preventDefault();
         const rect = event.currentTarget.getBoundingClientRect();
         const handleHitRadius = rect.width > 0 ? (20 * width) / rect.width : 32;
         let anchorIndex = closestIndex;
@@ -893,8 +899,8 @@ export default function StockDetailPage({
     const displayAsOf = marketCard?.as_of || valuation?.price_as_of;
     const displayChangePct = marketCard?.change_pct ?? null;
     const displayMarketCap = marketCard?.market_cap ?? valuation?.market_cap;
-    const displayFk = marketCard ? marketCard.fk : valuation?.fk;
-    const displayPdDd = marketCard ? marketCard.pd_dd : valuation?.pd_dd;
+    const displayFk = marketCard?.fk ?? valuation?.fk;
+    const displayPdDd = marketCard?.pd_dd ?? valuation?.pd_dd;
     const selectedTabLabel = STOCK_DETAIL_TABS.find((tab) => tab.key === selectedTab)?.label;
     const quoteTitle = [
         formatTitleCurrency(displayPrice, displayCurrency),

@@ -14,6 +14,7 @@ import type {
 import SymbolLogo from '../../../components/SymbolLogo';
 import { MAX_WATCHLIST_ITEMS, normalizeWatchlistSymbol, type WatchlistItem } from '../../../hooks/useWatchlist';
 import { searchWatchlistFunds } from '../../../utils/watchlistData';
+import { formatCurrency as formatFundCurrency, formatDate as formatFundDate } from '../../funds/formatters';
 import {
     formatIndexPrice,
     formatTablePct,
@@ -22,6 +23,15 @@ import {
     mobileSparklinePath,
 } from '../stockScreenerConfig';
 import './MobileMarketOverview.css';
+
+function formatWatchlistAsOf(value: string | null | undefined): string {
+    if (!value) return '--:--';
+    const trimmed = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+        return formatFundDate(trimmed);
+    }
+    return formatUpdateTime(trimmed);
+}
 
 export interface MobileMarketOverviewProps {
     index: MarketIndexDetailResponse | null;
@@ -81,11 +91,14 @@ export function MobileMarketOverview({
             .filter(Boolean),
         [watchlistItems],
     );
+    const failedChartFetchAtRef = useRef<Record<string, number>>({});
     const watchlistChartSymbolsToLoad = useMemo(
-        () => visibleWatchlistChartSymbols.filter((symbol) => (
-            !mobileSparklinePath(cardBySymbol.get(symbol)?.line_points ?? [])
-            && !(symbol in watchlistChartPoints)
-        )),
+        () => visibleWatchlistChartSymbols.filter((symbol) => {
+            if (mobileSparklinePath(cardBySymbol.get(symbol)?.line_points ?? [])) return false;
+            if (symbol in watchlistChartPoints) return false;
+            const failedAt = failedChartFetchAtRef.current[symbol];
+            return !failedAt || Date.now() - failedAt > 60_000;
+        }),
         [cardBySymbol, visibleWatchlistChartSymbols, watchlistChartPoints],
     );
 
@@ -96,15 +109,21 @@ export function MobileMarketOverview({
         void Promise.all(watchlistChartSymbolsToLoad.map(async (symbol) => {
             try {
                 const payload = await apiClient.marketStockCardChart(symbol, '1d', { signal: controller.signal });
+                delete failedChartFetchAtRef.current[symbol];
                 return [symbol, payload.line_points ?? []] as const;
             } catch {
+                if (!controller.signal.aborted) {
+                    failedChartFetchAtRef.current[symbol] = Date.now();
+                }
                 return [symbol, null] as const;
             }
         })).then((entries) => {
             if (!active || controller.signal.aborted) return;
+            const resolved = entries.filter((entry): entry is readonly [string, MarketIndexLinePoint[]] => entry[1] != null);
+            if (resolved.length === 0) return;
             setWatchlistChartPoints((current) => ({
                 ...current,
-                ...Object.fromEntries(entries),
+                ...Object.fromEntries(resolved),
             }));
         });
         return () => {
@@ -329,11 +348,13 @@ export function MobileMarketOverview({
                                         />
                                         <span className="mobile-market-watchlist-symbol">
                                             <strong>{symbol}</strong>
-                                            <small>{formatUpdateTime(asOf)}</small>
+                                            <small>{formatWatchlistAsOf(asOf)}</small>
                                         </span>
                                         <span className="mobile-market-watchlist-price">
                                             <small title="Günlük">Günlük</small>
-                                            {formatIndexPrice(price)}
+                                            {item.kind === 'fund'
+                                                ? formatFundCurrency(price, fundRow?.currency)
+                                                : formatIndexPrice(price)}
                                         </span>
                                         <span className={`mobile-market-watchlist-chart ${getTableChangeClass(changePct)}`} aria-hidden="true">
                                             {chartPath ? (

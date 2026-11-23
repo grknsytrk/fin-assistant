@@ -132,7 +132,7 @@ export function getAdaptiveRefreshMs(
 
     const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
     if (isHidden) {
-        return options?.hiddenMs ?? 30_000;
+        return options?.hiddenMs ?? null;
     }
 
     return options?.activeMs ?? (kind === 'bist' ? 3_000 : 5_000);

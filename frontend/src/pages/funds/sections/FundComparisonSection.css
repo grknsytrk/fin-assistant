@@ -454,6 +454,25 @@
     .fund-compare-line-chart {
         min-width: 560px;
     }
+
+    .fund-compare-table {
+        min-width: 600px;
+    }
+
+    .fund-compare-table th:first-child,
+    .fund-compare-table td:first-child {
+        position: sticky;
+        left: 0;
+        z-index: 2;
+        width: 132px;
+        min-width: 132px;
+        background: var(--surface-color);
+        border-right: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .fund-compare-table th:first-child {
+        z-index: 3;
+    }
 }
 
 @media (max-width: 640px) {

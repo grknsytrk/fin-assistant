@@ -107,6 +107,7 @@
 
     .indices-line-chart {
         min-height: 0;
+        touch-action: pan-y;
     }
 
     .indices-chart-empty {

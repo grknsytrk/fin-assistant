@@ -480,6 +480,7 @@ export default function GlobalTickerSearch({
   const useFundSearchFallback = fundCatalogStatus !== 'ready';
 
   useEffect(() => {
+    if (!isOpen) return undefined;
     let active = true;
 
     setStockQuoteRows(cachedMarketStockRows());
@@ -503,7 +504,7 @@ export default function GlobalTickerSearch({
       unsubscribeStocks?.();
       unsubscribeFunds?.();
     };
-  }, []);
+  }, [isOpen]);
 
   const cancelSearch = useCallback(() => {
     submitGenerationRef.current += 1;
@@ -663,7 +664,7 @@ export default function GlobalTickerSearch({
   );
 
   useEffect(() => {
-    if (recentSearches.length === 0) return;
+    if (!isOpen || recentSearches.length === 0) return;
     const currentResults = new Map(allSearchCandidates.map((result) => [result.id, result]));
     const quoteResultsById = new Map(
       stockQuoteRows.map((row) => {
@@ -696,7 +697,7 @@ export default function GlobalTickerSearch({
       if (changed) writeRecentSearches(next);
       return changed ? next : current;
     });
-  }, [allSearchCandidates, recentSearches.length, stockQuoteRows]);
+  }, [allSearchCandidates, isOpen, recentSearches.length, stockQuoteRows]);
 
   const visibleResults = useMemo(() => {
     if (!normalizedQuery) return recentSearches;
