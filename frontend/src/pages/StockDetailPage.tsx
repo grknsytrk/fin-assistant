@@ -179,6 +179,7 @@ function StockDetailPriceChart({
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
     const [selectedMeasureRange, setSelectedMeasureRange] = useState<{ start: number; end: number } | null>(null);
+    const touchPointersRef = useRef<Map<number, number>>(new Map());
     const isMobileChart = useMobileChartLayout();
 
     useEffect(() => {
@@ -403,7 +404,21 @@ function StockDetailPriceChart({
     const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
         const x = chartXFromEvent(event);
         if (x == null) return;
-        setHoverIndex(closestIndexForX(x));
+        const closestIndex = closestIndexForX(x);
+        if (event.pointerType === 'touch') {
+            if (touchPointersRef.current.has(event.pointerId)) {
+                touchPointersRef.current.set(event.pointerId, closestIndex);
+            }
+            if (touchPointersRef.current.size >= 2) {
+                event.preventDefault();
+                const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
+                setSelectedMeasureRange(null);
+                setMeasureAnchorIndex(firstIdx);
+                setHoverIndex(secondIdx);
+                return;
+            }
+        }
+        setHoverIndex(closestIndex);
     };
     const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
         if (event.pointerType === 'mouse' && event.button !== 0) return;
@@ -411,6 +426,15 @@ function StockDetailPriceChart({
         if (x == null) return;
         const closestIndex = closestIndexForX(x);
         if (event.pointerType === 'touch') {
+            touchPointersRef.current.set(event.pointerId, closestIndex);
+            if (touchPointersRef.current.size >= 2) {
+                event.preventDefault();
+                const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
+                setSelectedMeasureRange(null);
+                setMeasureAnchorIndex(firstIdx);
+                setHoverIndex(secondIdx);
+                return;
+            }
             setSelectedMeasureRange(null);
             setMeasureAnchorIndex(null);
             setHoverIndex(closestIndex);
@@ -441,6 +465,25 @@ function StockDetailPriceChart({
         event.currentTarget.setPointerCapture?.(event.pointerId);
     };
     const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+        if (event.pointerType === 'touch') {
+            const wasTwoFinger = touchPointersRef.current.size >= 2;
+            const prevIndices = wasTwoFinger ? Array.from(touchPointersRef.current.values()) : [];
+            touchPointersRef.current.delete(event.pointerId);
+            if (touchPointersRef.current.size >= 2) {
+                const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
+                setMeasureAnchorIndex(firstIdx);
+                setHoverIndex(secondIdx);
+                return;
+            }
+            if (wasTwoFinger && prevIndices.length >= 2 && prevIndices[0] !== prevIndices[1]) {
+                setSelectedMeasureRange({
+                    start: Math.min(prevIndices[0], prevIndices[1]),
+                    end: Math.max(prevIndices[0], prevIndices[1]),
+                });
+            }
+            setMeasureAnchorIndex(null);
+            return;
+        }
         const x = chartXFromEvent(event);
         if (x != null && measureAnchorIndex != null) {
             const endIndex = closestIndexForX(x);
@@ -547,6 +590,7 @@ function StockDetailPriceChart({
                 onPointerUp={handlePointerUp}
                 onPointerCancel={handlePointerUp}
                 onPointerLeave={() => {
+                    touchPointersRef.current.clear();
                     setHoverIndex(null);
                     setMeasureAnchorIndex(null);
                 }}

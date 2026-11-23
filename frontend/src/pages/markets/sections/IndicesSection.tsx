@@ -1,5 +1,5 @@
-import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
-import { AlertCircle, Clock3, RefreshCw, Search, X } from 'lucide-react';
+import { useEffect, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
+import { AlertCircle, ArrowUpRight, Clock3, RefreshCw, Search, X } from 'lucide-react';
 import type {
     MarketIndexCode,
     MarketIndexConstituent,
@@ -64,6 +64,7 @@ export interface IndicesSectionProps {
     sortedIndexConstituents: MarketIndexConstituent[];
     visibleIndexConstituents: MarketIndexConstituent[];
     indexConstituentSort: { key: IndexConstituentSortKey; direction: SortDirection };
+    indexConstituentFilter?: 'all' | 'positive' | 'neutral' | 'negative';
     indexConstituentStartIndex: number;
     indexConstituentTopSpacerHeight: number;
     indexConstituentBottomSpacerHeight: number;
@@ -79,6 +80,7 @@ export interface IndicesSectionProps {
     onSelectIndex: (index: MarketIndexCode | null) => void;
     onRetryIndexDetail: (index: MarketIndexCode) => void;
     onIndexConstituentSort: (key: IndexConstituentSortKey) => void;
+    onIndexConstituentPreset?: (preset: 'all' | 'weight' | 'positive' | 'negative' | 'neutral') => void;
     onCompanyClick: (ticker: string) => void;
     getTreemapTileScale: (row: MarketIndexConstituent) => number;
     getHeatmapTileFontSize: (tile: HeatmapTile) => string;
@@ -105,6 +107,7 @@ export function IndicesSection({
     sortedIndexConstituents,
     visibleIndexConstituents,
     indexConstituentSort,
+    indexConstituentFilter = 'all',
     indexConstituentStartIndex,
     indexConstituentTopSpacerHeight,
     indexConstituentBottomSpacerHeight,
@@ -120,10 +123,21 @@ export function IndicesSection({
     onSelectIndex,
     onRetryIndexDetail,
     onIndexConstituentSort,
+    onIndexConstituentPreset,
     onCompanyClick,
     getTreemapTileScale,
     getHeatmapTileFontSize,
 }: IndicesSectionProps) {
+    const [selectedHeatmapSymbol, setSelectedHeatmapSymbol] = useState<string | null>(null);
+
+    useEffect(() => {
+        setSelectedHeatmapSymbol(null);
+    }, [selectedIndex]);
+
+    const selectedHeatmapTile = selectedHeatmapSymbol
+        ? heatmapTiles.find((tile) => tile.row.symbol === selectedHeatmapSymbol) || null
+        : null;
+
     if (!selectedIndex) {
         return (
             <div className="indices-view">
@@ -507,10 +521,13 @@ export function IndicesSection({
                                             : showSymbol
                                                 ? 'is-label-only'
                                                 : 'is-tiny';
+                                        const isSelectedTile = selectedHeatmapSymbol === row.symbol;
                                         return (
                                             <div
                                                 key={row.symbol}
-                                                className={`indices-tree-tile ${tileDensityClass} ${getTableChangeClass(tile.changePct)}`}
+                                                role="button"
+                                                tabIndex={0}
+                                                className={`indices-tree-tile ${tileDensityClass} ${getTableChangeClass(tile.changePct)}${isSelectedTile ? ' is-selected' : ''}`}
                                                 style={{
                                                     left: `${tile.left}%`,
                                                     top: `${tile.top}%`,
@@ -521,6 +538,16 @@ export function IndicesSection({
                                                 }}
                                                 title={tileDetail}
                                                 aria-label={tileDetail}
+                                                aria-pressed={isSelectedTile}
+                                                onClick={() => {
+                                                    setSelectedHeatmapSymbol((current) => (current === row.symbol ? null : row.symbol));
+                                                }}
+                                                onKeyDown={(event) => {
+                                                    if (event.key === 'Enter' || event.key === ' ') {
+                                                        event.preventDefault();
+                                                        setSelectedHeatmapSymbol((current) => (current === row.symbol ? null : row.symbol));
+                                                    }
+                                                }}
                                             >
                                                 {showSymbol && <strong>{row.symbol}</strong>}
                                                 {showChange && (
@@ -530,23 +557,73 @@ export function IndicesSection({
                                         );
                                     })}
                                 </div>
+                                {selectedHeatmapTile && (
+                                    <div className="indices-heatmap-inspector" role="region" aria-label={`${selectedHeatmapTile.row.symbol} özet bilgisi`}>
+                                        <div className="indices-heatmap-inspector-main">
+                                            <div className="indices-heatmap-inspector-head">
+                                                <strong>{selectedHeatmapTile.row.symbol}</strong>
+                                                <span className={getTableChangeClass(selectedHeatmapTile.changePct)}>
+                                                    {formatHeatmapChangePct(selectedHeatmapTile.changePct)}
+                                                </span>
+                                            </div>
+                                            <div className="indices-heatmap-inspector-meta">
+                                                <span>Ağırlık: <b>{formatWeight(selectedHeatmapTile.row.weight_pct)}</b></span>
+                                                <span>Etki: <b className={getTableChangeClass(selectedHeatmapTile.impactPct)}>{formatImpactPct(selectedHeatmapTile.impactPct)}</b></span>
+                                                <span>Puan: <b className={getTableChangeClass(selectedHeatmapTile.pointEffect)}>{formatPointEffectShort(selectedHeatmapTile.pointEffect)}</b></span>
+                                            </div>
+                                        </div>
+                                        <div className="indices-heatmap-inspector-actions">
+                                            <button
+                                                type="button"
+                                                className="indices-heatmap-inspector-go"
+                                                onClick={() => onCompanyClick(selectedHeatmapTile.row.symbol)}
+                                            >
+                                                <span>Detay</span>
+                                                <ArrowUpRight size={13} aria-hidden="true" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="indices-heatmap-inspector-close"
+                                                onClick={() => setSelectedHeatmapSymbol(null)}
+                                                aria-label="Seçimi kapat"
+                                            >
+                                                <X size={14} aria-hidden="true" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
                             </>
                         )}
 
                         <div className="indices-impact-summary">
                             <div className="indices-impact-counts">
-                                <span className="indices-impact-count stocks-up">
+                                <button
+                                    type="button"
+                                    className={`indices-impact-count stocks-up${indexConstituentFilter === 'positive' ? ' is-active' : ''}`}
+                                    aria-pressed={indexConstituentFilter === 'positive'}
+                                    onClick={() => onIndexConstituentPreset?.('positive')}
+                                >
                                     <span className="indices-impact-dot" />
                                     {positiveConstituents} pozitif
-                                </span>
-                                <span className="indices-impact-count stocks-flat">
+                                </button>
+                                <button
+                                    type="button"
+                                    className={`indices-impact-count stocks-flat${indexConstituentFilter === 'neutral' ? ' is-active' : ''}`}
+                                    aria-pressed={indexConstituentFilter === 'neutral'}
+                                    onClick={() => onIndexConstituentPreset?.('neutral')}
+                                >
                                     <span className="indices-impact-dot" />
                                     {neutralConstituents} nötr
-                                </span>
-                                <span className="indices-impact-count stocks-down">
+                                </button>
+                                <button
+                                    type="button"
+                                    className={`indices-impact-count stocks-down${indexConstituentFilter === 'negative' ? ' is-active' : ''}`}
+                                    aria-pressed={indexConstituentFilter === 'negative'}
+                                    onClick={() => onIndexConstituentPreset?.('negative')}
+                                >
                                     <span className="indices-impact-dot" />
                                     {negativeConstituents} negatif
-                                </span>
+                                </button>
                             </div>
                             <div className="indices-net-impact">
                                 <span>{indexDetail.symbol} tahmini katkı:</span>
@@ -558,6 +635,38 @@ export function IndicesSection({
                                     {formatImpactPct(netImpactPct)}
                                 </strong>
                             </div>
+                            {onIndexConstituentPreset && (
+                                <div className="indices-constituent-presets" role="group" aria-label="Bileşen sıralama ve filtre">
+                                    <button
+                                        type="button"
+                                        className={`indices-preset-btn${indexConstituentFilter === 'all' && indexConstituentSort.key === 'impact_abs' ? ' is-active' : ''}`}
+                                        onClick={() => onIndexConstituentPreset('all')}
+                                    >
+                                        En Çok Etkileyen
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`indices-preset-btn${indexConstituentFilter === 'all' && indexConstituentSort.key === 'weight_pct' ? ' is-active' : ''}`}
+                                        onClick={() => onIndexConstituentPreset('weight')}
+                                    >
+                                        En Ağırlar
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`indices-preset-btn is-up${indexConstituentFilter === 'positive' ? ' is-active' : ''}`}
+                                        onClick={() => onIndexConstituentPreset('positive')}
+                                    >
+                                        Pozitif Etki
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`indices-preset-btn is-down${indexConstituentFilter === 'negative' ? ' is-active' : ''}`}
+                                        onClick={() => onIndexConstituentPreset('negative')}
+                                    >
+                                        Negatif Etki
+                                    </button>
+                                </div>
+                            )}
                         </div>
 
                         <div className="stocks-table-wrap indices-constituent-wrap" ref={indexConstituentTableWrapCallbackRef}>

@@ -107,7 +107,6 @@ import {
     updateFundsCatalogSnapshot,
 } from './funds/formatters';
 import { FundsSearchInput, FundsTable } from './funds/components/FundsTable';
-import { FundsScreenerModal } from './funds/components/FundsScreenerModal';
 import { FundReturnComparison, useFundComparisonState } from './funds/components/FundReturnComparison';
 import {
     FundCategoryRankingsPanel,
@@ -127,6 +126,9 @@ import {
 export type { FundsPageProps };
 
 const FundComparisonSection = lazy(() => import('./funds/sections/FundComparisonSection'));
+const FundsScreenerModal = lazy(() =>
+    import('./funds/components/FundsScreenerModal').then((module) => ({ default: module.FundsScreenerModal })),
+);
 
 export default function FundsPage({
     view = 'list',
@@ -318,7 +320,12 @@ export default function FundsPage({
                 setCategories(categoryPayload);
             } catch (err) {
                 if (!alive) return;
-                setError(err instanceof Error ? err.message : 'Fon listesi alınamadı.');
+                const message = err instanceof Error ? err.message : 'Fon listesi alınamadı.';
+                if (hasUsableCachedCatalog) {
+                    setRefreshError(message);
+                } else {
+                    setError(message);
+                }
             } finally {
                 if (alive && !hasUsableCachedCatalog) setLoading(false);
             }
@@ -772,12 +779,16 @@ export default function FundsPage({
         };
     }, [fundCode, activeTab, loadHoldingsLive]);
 
-    const fundSearchIndex = useMemo(() => (funds?.rows || []).map((row) => ({
-        row,
-        haystack: normalizeCompareSearch(
-            `${row.fund_code} ${row.name} ${row.fund_type || ''} ${row.founder_company || ''} ${row.manager_company || ''}`,
-        ),
-    })), [funds]);
+    const hasDeferredSearch = deferredSearchTerm.trim().length > 0;
+    const fundSearchIndex = useMemo(() => {
+        if (!hasDeferredSearch) return null;
+        return (funds?.rows || []).map((row) => ({
+            row,
+            haystack: normalizeCompareSearch(
+                `${row.fund_code} ${row.name} ${row.fund_type || ''} ${row.founder_company || ''} ${row.manager_company || ''}`,
+            ),
+        }));
+    }, [funds, hasDeferredSearch]);
 
     const parsedFundScreenerBounds = useMemo(() => ({
         minDaily: parseFundScreenerNumber(fundScreenerFilters.min_daily),
@@ -803,36 +814,63 @@ export default function FundsPage({
     }), [fundScreenerFilters]);
 
     const filteredFunds = useMemo(() => {
-        const needle = normalizeCompareSearch(deferredSearchTerm);
+        const rows = funds?.rows || [];
+        if (rows.length === 0) return [];
+        const needle = hasDeferredSearch ? normalizeCompareSearch(deferredSearchTerm) : '';
+        const b = parsedFundScreenerBounds;
+        const hasRangeFilter = (
+            b.minDaily !== undefined || b.maxDaily !== undefined
+            || b.min1w !== undefined || b.max1w !== undefined
+            || b.min1m !== undefined || b.max1m !== undefined
+            || b.min3m !== undefined || b.max3m !== undefined
+            || b.min6m !== undefined || b.max6m !== undefined
+            || b.minYtd !== undefined || b.maxYtd !== undefined
+            || b.min1y !== undefined || b.max1y !== undefined
+            || b.minRisk !== undefined || b.maxRisk !== undefined
+            || b.minAumM !== undefined || b.maxAumM !== undefined
+            || b.minInvestors !== undefined || b.maxInvestors !== undefined
+        );
+        const hasAnyFilter = Boolean(needle || fundTypeFilter || riskFilter || fundScreenerFilters.founder || hasRangeFilter);
+
+        if (!hasAnyFilter) {
+            if (sortKey === 'fund_code' && sortOrder === 'asc') {
+                return rows;
+            }
+            return [...rows].sort((a, bRow) => compareFundRows(a, bRow, sortKey, sortOrder));
+        }
+
         const matchesRange = (val: number | null | undefined, min?: number, max?: number) => {
             if (min !== undefined && (val == null || !Number.isFinite(val) || val < min)) return false;
             if (max !== undefined && (val == null || !Number.isFinite(val) || val > max)) return false;
             return true;
         };
-        const b = parsedFundScreenerBounds;
-        const filtered = fundSearchIndex
-            .filter(({ row, haystack }) => {
-                if (needle && !haystack.includes(needle)) return false;
-                if (fundTypeFilter && row.fund_type !== fundTypeFilter) return false;
-                if (riskFilter && String(row.risk_value ?? '') !== riskFilter) return false;
-                if (fundScreenerFilters.founder) {
-                    const founder = row.founder_company || row.manager_company || '';
-                    if (founder !== fundScreenerFilters.founder) return false;
-                }
-                if (!matchesRange(row.daily_return, b.minDaily, b.maxDaily)) return false;
-                if (!matchesRange(row.period_returns?.['1w'], b.min1w, b.max1w)) return false;
-                if (!matchesRange(row.period_returns?.['1m'], b.min1m, b.max1m)) return false;
-                if (!matchesRange(row.period_returns?.['3m'], b.min3m, b.max3m)) return false;
-                if (!matchesRange(row.period_returns?.['6m'], b.min6m, b.max6m)) return false;
-                if (!matchesRange(row.period_returns?.ytd, b.minYtd, b.maxYtd)) return false;
-                if (!matchesRange(row.period_returns?.['1y'], b.min1y, b.max1y)) return false;
-                if (!matchesRange(row.risk_value, b.minRisk, b.maxRisk)) return false;
-                const aumMillions = row.aum != null && Number.isFinite(row.aum) ? row.aum / 1_000_000 : null;
-                if (!matchesRange(aumMillions, b.minAumM, b.maxAumM)) return false;
-                if (!matchesRange(row.investor_count, b.minInvestors, b.maxInvestors)) return false;
-                return true;
-            })
-            .map(({ row }) => row);
+        const matchesNonSearchFilters = (row: FundSummary) => {
+            if (fundTypeFilter && row.fund_type !== fundTypeFilter) return false;
+            if (riskFilter && String(row.risk_value ?? '') !== riskFilter) return false;
+            if (fundScreenerFilters.founder) {
+                const founder = row.founder_company || row.manager_company || '';
+                if (founder !== fundScreenerFilters.founder) return false;
+            }
+            if (!hasRangeFilter) return true;
+            if (!matchesRange(row.daily_return, b.minDaily, b.maxDaily)) return false;
+            if (!matchesRange(row.period_returns?.['1w'], b.min1w, b.max1w)) return false;
+            if (!matchesRange(row.period_returns?.['1m'], b.min1m, b.max1m)) return false;
+            if (!matchesRange(row.period_returns?.['3m'], b.min3m, b.max3m)) return false;
+            if (!matchesRange(row.period_returns?.['6m'], b.min6m, b.max6m)) return false;
+            if (!matchesRange(row.period_returns?.ytd, b.minYtd, b.maxYtd)) return false;
+            if (!matchesRange(row.period_returns?.['1y'], b.min1y, b.max1y)) return false;
+            if (!matchesRange(row.risk_value, b.minRisk, b.maxRisk)) return false;
+            const aumMillions = row.aum != null && Number.isFinite(row.aum) ? row.aum / 1_000_000 : null;
+            if (!matchesRange(aumMillions, b.minAumM, b.maxAumM)) return false;
+            if (!matchesRange(row.investor_count, b.minInvestors, b.maxInvestors)) return false;
+            return true;
+        };
+
+        const filtered = needle && fundSearchIndex
+            ? fundSearchIndex
+                .filter(({ row, haystack }) => haystack.includes(needle) && matchesNonSearchFilters(row))
+                .map(({ row }) => row)
+            : rows.filter(matchesNonSearchFilters);
         filtered.sort((a, bRow) => compareFundRows(a, bRow, sortKey, sortOrder));
         return filtered;
     }, [
@@ -840,6 +878,8 @@ export default function FundsPage({
         fundScreenerFilters.founder,
         fundSearchIndex,
         fundTypeFilter,
+        funds,
+        hasDeferredSearch,
         parsedFundScreenerBounds,
         riskFilter,
         sortKey,
@@ -1141,12 +1181,31 @@ export default function FundsPage({
             yieldSummary,
         ],
     );
-    const visibleFundTypes = categories?.fund_types.length ? categories.fund_types : Array.from(new Set((funds?.rows || []).map((row) => row.fund_type).filter(Boolean))) as string[];
-    const visibleRiskValues = categories?.risk_values.length ? categories.risk_values : Array.from(new Set((funds?.rows || []).map((row) => row.risk_value).filter((value): value is number => typeof value === 'number'))).sort((a, b) => a - b);
-    const visibleFounders = useMemo(
-        () => Array.from(new Set((funds?.rows || []).map((row) => row.founder_company || row.manager_company).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b, 'tr')),
-        [funds],
+    const visibleFundTypes = useMemo(
+        () => (
+            categories?.fund_types.length
+                ? categories.fund_types
+                : Array.from(new Set((funds?.rows || []).map((row) => row.fund_type).filter(Boolean))) as string[]
+        ),
+        [categories, funds],
     );
+    const visibleRiskValues = useMemo(
+        () => (
+            categories?.risk_values.length
+                ? categories.risk_values
+                : Array.from(
+                    new Set((funds?.rows || []).map((row) => row.risk_value).filter((value): value is number => typeof value === 'number')),
+                ).sort((a, b) => a - b)
+        ),
+        [categories, funds],
+    );
+    const visibleFounders = useMemo(() => {
+        if (!fundScreenerOpen && !fundScreenerFilters.founder) return [];
+        if (categories?.founder_companies.length) return categories.founder_companies;
+        return Array.from(
+            new Set((funds?.rows || []).map((row) => row.founder_company || row.manager_company).filter(Boolean) as string[]),
+        ).sort((a, b) => a.localeCompare(b, 'tr'));
+    }, [categories, fundScreenerFilters.founder, fundScreenerOpen, funds]);
     const activeFundFilterCount = useMemo(() => {
         let count = 0;
         if (fundTypeFilter) count += 1;
@@ -1671,32 +1730,36 @@ export default function FundsPage({
                                 </div>
                             )}
 
-                            <FundsScreenerModal
-                                open={fundScreenerOpen}
-                                onClose={() => setFundScreenerOpen(false)}
-                                totalFundsCount={funds?.total_count ?? funds?.count ?? 0}
-                                filteredFundsCount={filteredFunds.length}
-                                activePreset={activeFundScreenerPreset}
-                                onApplyPreset={applyFundScreenerPreset}
-                                activeChips={activeFundChips}
-                                fundTypeFilter={fundTypeFilter}
-                                onFundTypeFilterChange={(value) => {
-                                    setActiveFundScreenerPreset(null);
-                                    setFundTypeFilter(value);
-                                }}
-                                riskFilter={riskFilter}
-                                onRiskFilterChange={(value) => {
-                                    setActiveFundScreenerPreset(null);
-                                    setRiskFilter(value);
-                                }}
-                                visibleFundTypes={visibleFundTypes}
-                                visibleRiskValues={visibleRiskValues}
-                                visibleFounders={visibleFounders}
-                                filters={fundScreenerFilters}
-                                onFilterChange={handleFundScreenerFilterChange}
-                                isScreenerActive={isFundScreenerActive}
-                                onClearFilters={clearFundScreenerFilters}
-                            />
+                            {fundScreenerOpen && (
+                                <Suspense fallback={null}>
+                                    <FundsScreenerModal
+                                        open={fundScreenerOpen}
+                                        onClose={() => setFundScreenerOpen(false)}
+                                        totalFundsCount={funds?.total_count ?? funds?.count ?? 0}
+                                        filteredFundsCount={filteredFunds.length}
+                                        activePreset={activeFundScreenerPreset}
+                                        onApplyPreset={applyFundScreenerPreset}
+                                        activeChips={activeFundChips}
+                                        fundTypeFilter={fundTypeFilter}
+                                        onFundTypeFilterChange={(value) => {
+                                            setActiveFundScreenerPreset(null);
+                                            setFundTypeFilter(value);
+                                        }}
+                                        riskFilter={riskFilter}
+                                        onRiskFilterChange={(value) => {
+                                            setActiveFundScreenerPreset(null);
+                                            setRiskFilter(value);
+                                        }}
+                                        visibleFundTypes={visibleFundTypes}
+                                        visibleRiskValues={visibleRiskValues}
+                                        visibleFounders={visibleFounders}
+                                        filters={fundScreenerFilters}
+                                        onFilterChange={handleFundScreenerFilterChange}
+                                        isScreenerActive={isFundScreenerActive}
+                                        onClearFilters={clearFundScreenerFilters}
+                                    />
+                                </Suspense>
+                            )}
                             {loading ? (
                                 <FundsListLoader />
                             ) : error ? (

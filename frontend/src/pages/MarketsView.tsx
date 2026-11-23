@@ -236,6 +236,7 @@ export default function MarketsView({
         key: 'impact_abs',
         direction: 'desc',
     });
+    const [indexConstituentFilter, setIndexConstituentFilter] = useState<'all' | 'positive' | 'neutral' | 'negative'>('all');
     const stocksRequestIdRef = useRef(0);
     const stocksInFlightIndexRef = useRef<MarketStockIndex | null>(null);
     const indicesInFlightRef = useRef(false);
@@ -1020,7 +1021,13 @@ export default function MarketsView({
     const negativeConstituents = indexConstituents.filter((row) => (row.point_effect || 0) < 0).length;
     const neutralConstituents = indexConstituents.length - positiveConstituents - negativeConstituents;
     const sortedIndexConstituents = useMemo(() => {
-        const arr = [...indexConstituents];
+        const arr = indexConstituents.filter((row) => {
+            const effect = row.point_effect ?? 0;
+            if (indexConstituentFilter === 'positive') return effect > 0;
+            if (indexConstituentFilter === 'negative') return effect < 0;
+            if (indexConstituentFilter === 'neutral') return effect === 0;
+            return true;
+        });
         arr.sort((a, b) => {
             const av = constituentSortValue(a, indexConstituentSort.key, indexImpactLevel);
             const bv = constituentSortValue(b, indexConstituentSort.key, indexImpactLevel);
@@ -1040,7 +1047,55 @@ export default function MarketsView({
             return indexConstituentSort.direction === 'asc' ? result : -result;
         });
         return arr;
-    }, [indexConstituents, indexConstituentSort, indexImpactLevel]);
+    }, [indexConstituents, indexConstituentFilter, indexConstituentSort, indexImpactLevel]);
+
+    const handleIndexConstituentPreset = useCallback((preset: 'all' | 'weight' | 'positive' | 'negative' | 'neutral') => {
+        if (preset === 'all') {
+            setIndexConstituentFilter('all');
+            setIndexConstituentSort({ key: 'impact_abs', direction: 'desc' });
+            return;
+        }
+        if (preset === 'weight') {
+            setIndexConstituentFilter('all');
+            setIndexConstituentSort({ key: 'weight_pct', direction: 'desc' });
+            return;
+        }
+        if (preset === 'positive') {
+            setIndexConstituentFilter((current) => {
+                if (current === 'positive') {
+                    setIndexConstituentSort({ key: 'impact_abs', direction: 'desc' });
+                    return 'all';
+                }
+                setIndexConstituentSort({ key: 'point_effect', direction: 'desc' });
+                return 'positive';
+            });
+            return;
+        }
+        if (preset === 'negative') {
+            setIndexConstituentFilter((current) => {
+                if (current === 'negative') {
+                    setIndexConstituentSort({ key: 'impact_abs', direction: 'desc' });
+                    return 'all';
+                }
+                setIndexConstituentSort({ key: 'point_effect', direction: 'asc' });
+                return 'negative';
+            });
+            return;
+        }
+        setIndexConstituentFilter((current) => {
+            if (current === 'neutral') {
+                setIndexConstituentSort({ key: 'impact_abs', direction: 'desc' });
+                return 'all';
+            }
+            setIndexConstituentSort({ key: 'weight_pct', direction: 'desc' });
+            return 'neutral';
+        });
+    }, []);
+
+    useEffect(() => {
+        setIndexConstituentFilter('all');
+        setIndexConstituentSort({ key: 'impact_abs', direction: 'desc' });
+    }, [selectedIndex]);
 
     const indexConstituentWrapRef = useRef<HTMLDivElement>(null);
     const {
@@ -1057,6 +1112,7 @@ export default function MarketsView({
         resetDeps: [
             activeSection,
             selectedIndex,
+            indexConstituentFilter,
             indexConstituentSort.key,
             indexConstituentSort.direction,
             isMobileViewport,
@@ -1372,6 +1428,14 @@ export default function MarketsView({
     };
 
     const getHeatmapTileFontSize = (tile: HeatmapTile): string => {
+        if (isMobileViewport) {
+            const minDim = Math.min(tile.width, tile.height);
+            if (tile.areaPct >= 14 && minDim >= 18) return '0.92rem';
+            if (tile.areaPct >= 7 && minDim >= 12) return '0.74rem';
+            if (tile.areaPct >= 3 && minDim >= 8.5) return '0.62rem';
+            if (tile.areaPct >= 1.2 && minDim >= 5.5) return '0.52rem';
+            return '0.44rem';
+        }
         if (tile.areaPct >= 16 && tile.width >= 22 && tile.height >= 22) return '2rem';
         if (tile.areaPct >= 8) return '1.45rem';
         if (tile.areaPct >= 3.5) return '1rem';
@@ -1545,6 +1609,7 @@ export default function MarketsView({
                             sortedIndexConstituents={sortedIndexConstituents}
                             visibleIndexConstituents={visibleIndexConstituents}
                             indexConstituentSort={indexConstituentSort}
+                            indexConstituentFilter={indexConstituentFilter}
                             indexConstituentStartIndex={indexConstituentStartIndex}
                             indexConstituentTopSpacerHeight={indexConstituentTopSpacerHeight}
                             indexConstituentBottomSpacerHeight={indexConstituentBottomSpacerHeight}
@@ -1560,6 +1625,7 @@ export default function MarketsView({
                             onSelectIndex={handleSelectIndex}
                             onRetryIndexDetail={(index) => loadIndexDetail(false, false, index)}
                             onIndexConstituentSort={handleIndexConstituentSort}
+                            onIndexConstituentPreset={handleIndexConstituentPreset}
                             onCompanyClick={onCompanyClick}
                             getTreemapTileScale={getTreemapTileScale}
                             getHeatmapTileFontSize={getHeatmapTileFontSize}

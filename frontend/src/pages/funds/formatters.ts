@@ -1,5 +1,6 @@
 import { apiClient } from '../../api/client';
 import type {
+    FundCategoriesResponse,
     FundHoldingsLiveResponse,
     FundHoldingsResponse,
     FundPerformanceResponse,
@@ -313,8 +314,76 @@ export function shouldRefreshSnapshot(payload: FundsResponse | null): boolean {
 }
 
 export const FUNDS_CATALOG_MEMORY_TTL_MS = 5 * 60 * 1000;
+const FUNDS_CATALOG_SESSION_KEY = 'ragfin:funds:catalog:v1';
+const FUNDS_CATALOG_SESSION_MAX_AGE_MS = 30 * 60 * 1000;
+const TR_NUMERIC_COLLATOR = new Intl.Collator('tr', { numeric: true });
 let fundsCatalogMemoryCache: FundsCatalogMemoryCache | null = null;
 let fundsCatalogInFlight: Promise<FundsCatalogPayload> | null = null;
+
+function deriveCategoriesFromFunds(fundPayload: FundsResponse): FundCategoriesResponse {
+    const fundTypes = new Set<string>();
+    const founders = new Set<string>();
+    const managers = new Set<string>();
+    const riskValues = new Set<number>();
+    for (const row of fundPayload.rows || []) {
+        if (row.fund_type) fundTypes.add(row.fund_type);
+        if (row.founder_company) founders.add(row.founder_company);
+        if (row.manager_company) managers.add(row.manager_company);
+        if (typeof row.risk_value === 'number' && Number.isFinite(row.risk_value)) {
+            riskValues.add(row.risk_value);
+        }
+    }
+    return {
+        status: fundPayload.status || 'ok',
+        fund_types: Array.from(fundTypes).sort((a, b) => TR_NUMERIC_COLLATOR.compare(a, b)),
+        founder_companies: Array.from(founders).sort((a, b) => TR_NUMERIC_COLLATOR.compare(a, b)),
+        manager_companies: Array.from(managers).sort((a, b) => TR_NUMERIC_COLLATOR.compare(a, b)),
+        risk_values: Array.from(riskValues).sort((a, b) => a - b),
+        source_metadata: fundPayload.source_metadata || {},
+    };
+}
+
+function readFundsCatalogSessionCache(): FundsCatalogMemoryCache | null {
+    if (typeof window === 'undefined' || !window.sessionStorage) return null;
+    try {
+        const raw = window.sessionStorage.getItem(FUNDS_CATALOG_SESSION_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as { fetchedAt?: number; funds?: FundsResponse } | null;
+        if (
+            !parsed
+            || typeof parsed.fetchedAt !== 'number'
+            || !parsed.funds
+            || !Array.isArray(parsed.funds.rows)
+            || parsed.funds.rows.length === 0
+        ) {
+            return null;
+        }
+        if (Date.now() - parsed.fetchedAt > FUNDS_CATALOG_SESSION_MAX_AGE_MS) {
+            window.sessionStorage.removeItem(FUNDS_CATALOG_SESSION_KEY);
+            return null;
+        }
+        return {
+            funds: parsed.funds,
+            categories: deriveCategoriesFromFunds(parsed.funds),
+            fetchedAt: parsed.fetchedAt,
+        };
+    } catch {
+        return null;
+    }
+}
+
+function writeFundsCatalogSessionCache(funds: FundsResponse, fetchedAt: number): void {
+    if (typeof window === 'undefined' || !window.sessionStorage) return;
+    if (!funds?.rows?.length || shouldRefreshSnapshot(funds)) return;
+    try {
+        window.sessionStorage.setItem(
+            FUNDS_CATALOG_SESSION_KEY,
+            JSON.stringify({ fetchedAt, funds }),
+        );
+    } catch {
+        // Ignore quota / privacy-mode errors; RAM cache remains active.
+    }
+}
 
 export async function fetchFundsCatalog(options: { bypassMemoryCache?: boolean } = {}): Promise<FundsCatalogPayload> {
     const bypassMemoryCache = Boolean(options.bypassMemoryCache);
@@ -330,9 +399,14 @@ export async function fetchFundsCatalog(options: { bypassMemoryCache?: boolean }
     const task = (async () => {
         // Refresh is an admin/workflow operation. Public clients only reread
         // the current canonical snapshot and never carry an admin token.
-        const [fundPayload, categoryPayload] = await Promise.all([apiClient.funds(), apiClient.fundCategories()]);
+        // Categories are derived directly from the catalog rows so initial load
+        // does not block on a second HTTP round-trip.
+        const fundPayload = await apiClient.funds();
+        const categoryPayload = deriveCategoriesFromFunds(fundPayload);
         const result = { funds: fundPayload, categories: categoryPayload };
-        fundsCatalogMemoryCache = { ...result, fetchedAt: Date.now() };
+        const fetchedAt = Date.now();
+        fundsCatalogMemoryCache = { ...result, fetchedAt };
+        writeFundsCatalogSessionCache(fundPayload, fetchedAt);
         return result;
     })();
 
@@ -397,17 +471,21 @@ export function compareFundRows(a: FundSummary, b: FundSummary, key: FundSortKey
     if (bv == null) return -1;
     const direction = order === 'desc' ? -1 : 1;
     if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * direction;
-    return String(av).localeCompare(String(bv), 'tr', { numeric: true }) * direction;
+    return TR_NUMERIC_COLLATOR.compare(String(av), String(bv)) * direction;
 }
 
 export function getFundsCatalogMemoryCache(): FundsCatalogMemoryCache | null {
+    if (!fundsCatalogMemoryCache) {
+        fundsCatalogMemoryCache = readFundsCatalogSessionCache();
+    }
     return fundsCatalogMemoryCache;
 }
 
 export function updateFundsCatalogSnapshot(funds: FundsResponse): void {
-    if (fundsCatalogMemoryCache) {
-        fundsCatalogMemoryCache = { ...fundsCatalogMemoryCache, funds, fetchedAt: Date.now() };
-    }
+    const fetchedAt = Date.now();
+    const categories = deriveCategoriesFromFunds(funds);
+    fundsCatalogMemoryCache = { funds, categories, fetchedAt };
+    writeFundsCatalogSessionCache(funds, fetchedAt);
 }
 
 export function returnBetween(latestPrice: number | null | undefined, basePrice: number | null | undefined): number | null {

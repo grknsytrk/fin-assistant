@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { MarketIndexDetailResponse } from '../../../api/types';
 import AnimatedChartSkeleton from '../../../components/charts/AnimatedChartSkeleton';
@@ -23,6 +23,7 @@ export function IndexLineChart({
 }: IndexLineChartProps) {
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
+    const touchPointersRef = useRef<Map<number, number>>(new Map());
     const isMobileChart = useMobileChartLayout();
     const width = 1120;
     const height = isMobileChart ? 540 : 400;
@@ -149,7 +150,20 @@ export function IndexLineChart({
     const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
         const x = chartXFromEvent(event);
         if (x == null) return;
-        setHoverIndex(closestIndexForX(x));
+        const closestIndex = closestIndexForX(x);
+        if (event.pointerType === 'touch') {
+            if (touchPointersRef.current.has(event.pointerId)) {
+                touchPointersRef.current.set(event.pointerId, closestIndex);
+            }
+            if (touchPointersRef.current.size >= 2) {
+                event.preventDefault();
+                const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
+                setMeasureAnchorIndex(firstIdx);
+                setHoverIndex(secondIdx);
+                return;
+            }
+        }
+        setHoverIndex(closestIndex);
     };
 
     const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
@@ -158,6 +172,14 @@ export function IndexLineChart({
         if (x == null) return;
         const closestIndex = closestIndexForX(x);
         if (event.pointerType === 'touch') {
+            touchPointersRef.current.set(event.pointerId, closestIndex);
+            if (touchPointersRef.current.size >= 2) {
+                event.preventDefault();
+                const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
+                setMeasureAnchorIndex(firstIdx);
+                setHoverIndex(secondIdx);
+                return;
+            }
             setMeasureAnchorIndex(null);
             setHoverIndex(closestIndex);
             return;
@@ -169,6 +191,17 @@ export function IndexLineChart({
     };
 
     const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+        if (event.pointerType === 'touch') {
+            touchPointersRef.current.delete(event.pointerId);
+            if (touchPointersRef.current.size >= 2) {
+                const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
+                setMeasureAnchorIndex(firstIdx);
+                setHoverIndex(secondIdx);
+                return;
+            }
+            setMeasureAnchorIndex(null);
+            return;
+        }
         setMeasureAnchorIndex(null);
         try {
             if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
@@ -253,6 +286,7 @@ export function IndexLineChart({
                 onPointerUp={handlePointerUp}
                 onPointerCancel={handlePointerUp}
                 onPointerLeave={() => {
+                    touchPointersRef.current.clear();
                     setHoverIndex(null);
                     setMeasureAnchorIndex(null);
                 }}

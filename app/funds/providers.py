@@ -313,10 +313,25 @@ def _is_tefas_rate_limit(exc: BaseException) -> bool:
     return isinstance(exc, _fund_service().TefasRateLimitError) or "http 429" in str(exc).lower()
 
 
+def _is_tefas_empty_result_error(error_message: Any) -> bool:
+    text = str(error_message or "").strip().lower()
+    if not text:
+        return False
+    return (
+        "index 0 out of bounds for length 0" in text
+        or "index: 0, size: 0" in text
+        or "no data found" in text
+        or "kayıt bulunamadı" in text
+        or "kayit bulunamadi" in text
+    )
+
+
 def _normalize_tefas_fund_list_payload(payload: Dict[str, Any], *, source_url: str) -> List[Dict[str, Any]]:
     fs = _fund_service()
     error_message = str(payload.get("errorMessage") or "").strip()
     if error_message and not payload.get("resultList"):
+        if _is_tefas_empty_result_error(error_message):
+            return []
         raise fs.TefasUpstreamError(f"TEFAS fund list error: {error_message}")
     raw_rows = payload.get("data") or payload.get("Data") or payload.get("resultList") or []
     if raw_rows is None:
@@ -1408,6 +1423,8 @@ class TefasFonClient:
                         )
                     error_message = body.get("errorMessage") or body.get("errorCode")
                     if error_message:
+                        if _is_tefas_empty_result_error(error_message) and page_index == 0:
+                            break
                         raise fs.TefasUpstreamError(
                             f"tefasfon snapshot page {page_index + 1} for {fund_type_code} {as_of.isoformat()} failed: {error_message}"
                         )

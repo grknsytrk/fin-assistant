@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
 import { Calendar, Trophy, X } from 'lucide-react';
 import type {
     FundDetail,
@@ -145,6 +145,7 @@ export function FundPerformanceChart({
     const [hoverPointer, setHoverPointer] = useState<{ x: number; y: number } | null>(null);
     const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
     const [selectedMeasureRange, setSelectedMeasureRange] = useState<{ start: number; end: number } | null>(null);
+    const touchPointersRef = useRef<Map<number, number>>(new Map());
     const isMobileChart = useMobileChartLayout();
     const width = 860;
     const height = isMobileChart ? 560 : 430;
@@ -926,22 +927,47 @@ export function FundPerformanceChart({
     const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
         const pointer = chartPointerFromEvent(event);
         if (!pointer) return;
-        setHoverPointer(pointer);
-        setHoverIndex(closestPriceIndexForX(pointer.x));
-        };
-        const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
-            if (event.pointerType === 'mouse' && event.button !== 0) return;
-            const pointer = chartPointerFromEvent(event);
-            if (!pointer) return;
-            const closestIndex = closestPriceIndexForX(pointer.x);
-            if (event.pointerType === 'touch') {
+        const closestIndex = closestPriceIndexForX(pointer.x);
+        if (event.pointerType === 'touch') {
+            if (touchPointersRef.current.has(event.pointerId)) {
+                touchPointersRef.current.set(event.pointerId, closestIndex);
+            }
+            if (touchPointersRef.current.size >= 2) {
+                event.preventDefault();
+                const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
                 setSelectedMeasureRange(null);
-                setMeasureAnchorIndex(null);
+                setMeasureAnchorIndex(firstIdx);
                 setHoverPointer(pointer);
-                setHoverIndex(closestIndex);
+                setHoverIndex(secondIdx);
                 return;
             }
-            event.preventDefault();
+        }
+        setHoverPointer(pointer);
+        setHoverIndex(closestIndex);
+    };
+    const handlePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        const pointer = chartPointerFromEvent(event);
+        if (!pointer) return;
+        const closestIndex = closestPriceIndexForX(pointer.x);
+        if (event.pointerType === 'touch') {
+            touchPointersRef.current.set(event.pointerId, closestIndex);
+            if (touchPointersRef.current.size >= 2) {
+                event.preventDefault();
+                const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
+                setSelectedMeasureRange(null);
+                setMeasureAnchorIndex(firstIdx);
+                setHoverPointer(pointer);
+                setHoverIndex(secondIdx);
+                return;
+            }
+            setSelectedMeasureRange(null);
+            setMeasureAnchorIndex(null);
+            setHoverPointer(pointer);
+            setHoverIndex(closestIndex);
+            return;
+        }
+        event.preventDefault();
         const rect = event.currentTarget.getBoundingClientRect();
         const handleHitRadius = rect.width > 0 ? (20 * width) / rect.width : 32;
         let anchorIndex = closestIndex;
@@ -967,6 +993,25 @@ export function FundPerformanceChart({
         event.currentTarget.setPointerCapture?.(event.pointerId);
     };
     const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
+        if (event.pointerType === 'touch') {
+            const wasTwoFinger = touchPointersRef.current.size >= 2;
+            const prevIndices = wasTwoFinger ? Array.from(touchPointersRef.current.values()) : [];
+            touchPointersRef.current.delete(event.pointerId);
+            if (touchPointersRef.current.size >= 2) {
+                const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
+                setMeasureAnchorIndex(firstIdx);
+                setHoverIndex(secondIdx);
+                return;
+            }
+            if (wasTwoFinger && prevIndices.length >= 2 && prevIndices[0] !== prevIndices[1]) {
+                setSelectedMeasureRange({
+                    start: Math.min(prevIndices[0], prevIndices[1]),
+                    end: Math.max(prevIndices[0], prevIndices[1]),
+                });
+            }
+            setMeasureAnchorIndex(null);
+            return;
+        }
         const pointer = chartPointerFromEvent(event);
         if (pointer && measureAnchorIndex != null) {
             const endIndex = closestPriceIndexForX(pointer.x);
@@ -1069,6 +1114,7 @@ export function FundPerformanceChart({
                 onPointerUp={handlePointerUp}
                 onPointerCancel={handlePointerUp}
                 onPointerLeave={() => {
+                    touchPointersRef.current.clear();
                     setHoverIndex(null);
                     setHoverPointer(null);
                     setMeasureAnchorIndex(null);
