@@ -23,6 +23,7 @@ export function IndexLineChart({
 }: IndexLineChartProps) {
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
+    const [selectedMeasureRange, setSelectedMeasureRange] = useState<{ start: number; end: number } | null>(null);
     const touchPointersRef = useRef<Map<number, number>>(new Map());
     const isMobileChart = useMobileChartLayout();
     const width = 1120;
@@ -36,6 +37,8 @@ export function IndexLineChart({
     useEffect(() => {
         setHoverIndex(null);
         setMeasureAnchorIndex(null);
+        setSelectedMeasureRange(null);
+        touchPointersRef.current.clear();
     }, [pointWindowKey]);
 
     if (validPoints.length < 2) {
@@ -158,6 +161,7 @@ export function IndexLineChart({
             if (touchPointersRef.current.size >= 2) {
                 event.preventDefault();
                 const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
+                setSelectedMeasureRange(null);
                 setMeasureAnchorIndex(firstIdx);
                 setHoverIndex(secondIdx);
                 return;
@@ -176,15 +180,18 @@ export function IndexLineChart({
             if (touchPointersRef.current.size >= 2) {
                 event.preventDefault();
                 const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
+                setSelectedMeasureRange(null);
                 setMeasureAnchorIndex(firstIdx);
                 setHoverIndex(secondIdx);
                 return;
             }
+            setSelectedMeasureRange(null);
             setMeasureAnchorIndex(null);
             setHoverIndex(closestIndex);
             return;
         }
         event.preventDefault();
+        setSelectedMeasureRange(null);
         setHoverIndex(closestIndex);
         setMeasureAnchorIndex(closestIndex);
         event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -192,6 +199,8 @@ export function IndexLineChart({
 
     const handlePointerUp = (event: ReactPointerEvent<SVGSVGElement>) => {
         if (event.pointerType === 'touch') {
+            const wasTwoFinger = touchPointersRef.current.size >= 2;
+            const prevIndices = wasTwoFinger ? Array.from(touchPointersRef.current.values()) : [];
             touchPointersRef.current.delete(event.pointerId);
             if (touchPointersRef.current.size >= 2) {
                 const [firstIdx, secondIdx] = Array.from(touchPointersRef.current.values());
@@ -199,8 +208,25 @@ export function IndexLineChart({
                 setHoverIndex(secondIdx);
                 return;
             }
+            if (wasTwoFinger && prevIndices.length >= 2 && prevIndices[0] !== prevIndices[1]) {
+                setSelectedMeasureRange({
+                    start: Math.min(prevIndices[0], prevIndices[1]),
+                    end: Math.max(prevIndices[0], prevIndices[1]),
+                });
+            }
             setMeasureAnchorIndex(null);
             return;
+        }
+        const x = chartXFromEvent(event);
+        if (x != null && measureAnchorIndex != null) {
+            const endIndex = closestIndexForX(x);
+            setHoverIndex(endIndex);
+            if (measureAnchorIndex !== endIndex) {
+                setSelectedMeasureRange({
+                    start: Math.min(measureAnchorIndex, endIndex),
+                    end: Math.max(measureAnchorIndex, endIndex),
+                });
+            }
         }
         setMeasureAnchorIndex(null);
         try {
@@ -217,15 +243,22 @@ export function IndexLineChart({
     const hoverPoint = activeHoverIndex == null ? null : validPoints[activeHoverIndex];
     const hoverX = activeHoverIndex == null ? null : xFor(activeHoverIndex);
     const hoverY = hoverPoint ? yFor(hoverPoint.close) : null;
-    const measureAnchorPoint = measureAnchorIndex == null
-        ? null
-        : validPoints[clamp(measureAnchorIndex, 0, validPoints.length - 1)];
-    const measureEndPoint = measureAnchorPoint && hoverPoint && activeHoverIndex != null && activeHoverIndex !== measureAnchorIndex
-        ? hoverPoint
-        : null;
-    const measureAnchorX = measureAnchorIndex == null ? null : xFor(clamp(measureAnchorIndex, 0, validPoints.length - 1));
+    const activeSelection = measureAnchorIndex != null && activeHoverIndex != null && activeHoverIndex !== measureAnchorIndex
+        ? {
+            start: Math.min(clamp(measureAnchorIndex, 0, validPoints.length - 1), activeHoverIndex),
+            end: Math.max(clamp(measureAnchorIndex, 0, validPoints.length - 1), activeHoverIndex),
+        }
+        : selectedMeasureRange && selectedMeasureRange.start !== selectedMeasureRange.end
+            ? {
+                start: clamp(selectedMeasureRange.start, 0, validPoints.length - 1),
+                end: clamp(selectedMeasureRange.end, 0, validPoints.length - 1),
+            }
+            : null;
+    const measureAnchorPoint = activeSelection ? validPoints[activeSelection.start] : null;
+    const measureEndPoint = activeSelection ? validPoints[activeSelection.end] : null;
+    const measureAnchorX = activeSelection ? xFor(activeSelection.start) : null;
     const measureAnchorY = measureAnchorPoint ? yFor(measureAnchorPoint.close) : null;
-    const measureEndX = measureEndPoint && activeHoverIndex != null ? xFor(activeHoverIndex) : null;
+    const measureEndX = activeSelection ? xFor(activeSelection.end) : null;
     const measureEndY = measureEndPoint ? yFor(measureEndPoint.close) : null;
     const measureStartValue = measureAnchorPoint?.close ?? null;
     const measureEndValue = measureEndPoint?.close ?? null;
@@ -235,23 +268,29 @@ export function IndexLineChart({
     const measureReturn = measureStartValue != null && measureEndValue != null && measureStartValue !== 0
         ? ((measureEndValue - measureStartValue) / measureStartValue) * 100
         : null;
+    const selectionColor = measureReturn == null ? chartColor : measureReturn >= 0 ? '#00c805' : '#ef4444';
+    const selectedSegmentPath = activeSelection
+        ? validPoints
+            .slice(activeSelection.start, activeSelection.end + 1)
+            .map((point, offset) => `${offset === 0 ? 'M' : 'L'} ${xFor(activeSelection.start + offset)} ${yFor(point.close)}`)
+            .join(' ')
+        : '';
+    const selectedSegmentArea = activeSelection && selectedSegmentPath
+        ? `${selectedSegmentPath} L ${xFor(activeSelection.end)} ${height - padding.bottom} L ${xFor(activeSelection.start)} ${height - padding.bottom} Z`
+        : '';
     const measureLineY = measureAnchorY != null && measureEndY != null
         ? Math.max(padding.top + 12, Math.min(measureAnchorY, measureEndY) - 18)
         : null;
-    const measureTooltipWidth = 190;
-    const measureTooltipHeight = 70;
+    const measureTooltipWidth = isMobileChart ? 260 : 196;
+    const measureTooltipHeight = isMobileChart ? 92 : 70;
     const plotRight = width - padding.right;
     const plotMidX = padding.left + (plotRight - padding.left) / 2;
     const measureTooltipGap = 14;
-    const measureTooltipAnchorX = hoverX ?? measureEndX;
-    const measureTooltipAnchorY = hoverY ?? measureEndY;
-    const measureTooltipShouldFlip = measureTooltipAnchorX != null
-        && (measureTooltipAnchorX >= plotMidX || measureTooltipAnchorX + measureTooltipGap + measureTooltipWidth > plotRight);
+    const measureTooltipAnchorX = activeSelection ? (xFor(activeSelection.start) + xFor(activeSelection.end)) / 2 : (hoverX ?? measureEndX);
+    const measureTooltipAnchorY = measureLineY ?? (hoverY ?? measureEndY);
     const measureTooltipX = measureTooltipAnchorX == null
         ? 0
-        : measureTooltipShouldFlip
-            ? Math.max(padding.left, measureTooltipAnchorX - measureTooltipGap - measureTooltipWidth)
-            : Math.min(measureTooltipAnchorX + measureTooltipGap, plotRight - measureTooltipWidth);
+        : clamp(measureTooltipAnchorX - measureTooltipWidth / 2, padding.left + 4, plotRight - measureTooltipWidth - 4);
     const measureTooltipY = measureTooltipAnchorY == null
         ? 0
         : measureTooltipAnchorY - measureTooltipGap - measureTooltipHeight >= padding.top
@@ -293,8 +332,12 @@ export function IndexLineChart({
             >
                 <defs>
                     <linearGradient id="areaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-                        <stop offset="0%" stopColor={chartColor} stopOpacity="0.24" />
-                        <stop offset="100%" stopColor={chartColor} stopOpacity="0" />
+                        <stop offset="0%" stopColor={activeSelection ? '#9aa3ad' : chartColor} stopOpacity={activeSelection ? '0.12' : '0.24'} />
+                        <stop offset="100%" stopColor={activeSelection ? '#9aa3ad' : chartColor} stopOpacity="0" />
+                    </linearGradient>
+                    <linearGradient id="indexSelectedAreaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" stopColor={selectionColor} stopOpacity="0.28" />
+                        <stop offset="100%" stopColor={selectionColor} stopOpacity="0.02" />
                     </linearGradient>
                 </defs>
                 {/* Koyu Arkaplan (Uygulamanın karanlık temasına uygun) */}
@@ -349,7 +392,27 @@ export function IndexLineChart({
 
                 {/* Alan ve Çizgi (Ağ/Line) (Açılış, yüksek, düşük kullanılmıyor, SADECE CLOSE) */}
                 <path d={areaData} fill="url(#areaGrad)" />
-                <path d={pathData} fill="none" stroke={chartColor} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+                <path
+                    d={pathData}
+                    fill="none"
+                    stroke={activeSelection ? 'rgba(154, 163, 173, 0.48)' : chartColor}
+                    strokeWidth="2.5"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                />
+                {activeSelection && selectedSegmentArea && (
+                    <>
+                        <path d={selectedSegmentArea} fill="url(#indexSelectedAreaGrad)" />
+                        <path
+                            d={selectedSegmentPath}
+                            fill="none"
+                            stroke={selectionColor}
+                            strokeWidth="2.8"
+                            strokeLinejoin="round"
+                            strokeLinecap="round"
+                        />
+                    </>
+                )}
 
                 {/* Uç Noktası (Kapanış) Dot ve Pulse */}
                 <circle cx={xFor(validPoints.length - 1)} cy={yFor(last)} r="4" fill={chartColor} opacity="0.6">
@@ -408,22 +471,22 @@ export function IndexLineChart({
                             y2={measureLineY + 5}
                             className="indices-chart-measure-line"
                         />
-                        <circle cx={measureAnchorX} cy={measureAnchorY} r="4.2" className="indices-chart-measure-point" fill={chartColor} />
-                        <circle cx={measureEndX} cy={measureEndY} r="4.2" className="indices-chart-measure-point" fill={chartColor} />
+                        <circle cx={measureAnchorX} cy={measureAnchorY} r={isMobileChart ? '5.2' : '4.2'} className="indices-chart-measure-point" fill={selectionColor} />
+                        <circle cx={measureEndX} cy={measureEndY} r={isMobileChart ? '5.2' : '4.2'} className="indices-chart-measure-point" fill={selectionColor} />
                         <g
                             className="indices-chart-measure-tooltip"
                             style={{ transform: `translate(${measureTooltipX}px, ${measureTooltipY}px)` }}
                         >
                             <rect width={measureTooltipWidth} height={measureTooltipHeight} rx="7" className="indices-chart-measure-tooltip-bg" />
-                            <text x="10" y="18" className="indices-chart-measure-muted">
+                            <text x="12" y={isMobileChart ? '24' : '18'} className="indices-chart-measure-muted">
                                 {new Intl.DateTimeFormat('tr-TR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(measureAnchorPoint.time))}
                                 {' - '}
                                 {new Intl.DateTimeFormat('tr-TR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(measureEndPoint.time))}
                             </text>
-                            <text x="10" y="42" className={`indices-chart-measure-value ${measureClass}`}>
+                            <text x="12" y={isMobileChart ? '56' : '42'} className={`indices-chart-measure-value ${measureClass}`}>
                                 {formatTablePct(measureReturn)}
                             </text>
-                            <text x="10" y="60" className="indices-chart-measure-muted">
+                            <text x="12" y={isMobileChart ? '80' : '60'} className="indices-chart-measure-muted">
                                 {measureDeltaText}
                             </text>
                         </g>
@@ -431,7 +494,7 @@ export function IndexLineChart({
                 )}
 
                 {/* Hover Tooltip */}
-                {measureAnchorIndex == null && hoverPoint && hoverX != null && hoverY != null && (
+                {measureAnchorIndex == null && !activeSelection && hoverPoint && hoverX != null && hoverY != null && (
                     <g className="indices-chart-hover">
                         <line
                             x1={hoverX}

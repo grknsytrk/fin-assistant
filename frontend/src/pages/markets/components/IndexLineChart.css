@@ -113,4 +113,12 @@
     .indices-chart-empty {
         min-height: 200px;
     }
+
+    .indices-chart-measure-muted {
+        font-size: 15px;
+    }
+
+    .indices-chart-measure-value {
+        font-size: 22px;
+    }
 }
