@@ -23,9 +23,19 @@ export function formatFundReportDate(value: string | null | undefined): string {
     return date.toLocaleDateString('tr-TR', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
+export function formatCurrencyPrefix(currency: string | null | undefined): string {
+    const code = String(currency || '').trim().toUpperCase();
+    if (!code) return '';
+    if (code === 'TRY' || code === 'TL') return '₺';
+    if (code === 'USD') return '$';
+    if (code === 'EUR') return '€';
+    if (code === 'GBP') return '£';
+    return `${code} `;
+}
+
 export function formatFundQuotePrice(value: number | null | undefined, currency = 'TRY'): string {
     if (value == null || !Number.isFinite(value)) return '-';
-    const prefix = currency === 'TRY' ? '₺' : `${currency} `;
+    const prefix = formatCurrencyPrefix(currency);
     return `${prefix}${value.toLocaleString('tr-TR', {
         minimumFractionDigits: 4,
         maximumFractionDigits: 6,

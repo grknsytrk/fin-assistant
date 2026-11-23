@@ -16,7 +16,7 @@ import type {
 import type { SymbolLogoKind } from '../../components/SymbolLogo';
 import { STOCK_LOGO_DOMAIN_MAP } from '../../components/symbolLogoMaps';
 import { isBistTradingHours } from '../../utils/marketHours';
-import { formatFundQuotePrice, formatFundReportDate } from '../../utils/fundPresentation';
+import { formatCurrencyPrefix, formatFundQuotePrice, formatFundReportDate } from '../../utils/fundPresentation';
 import {
     DETAIL_RETURN_PERIODS,
     EXTENDED_DETAIL_RETURN_PERIODS,
@@ -65,7 +65,7 @@ export function isoDateMonthsAgo(months: number): string {
 
 export function formatCurrency(value: number | null | undefined, currency = 'TRY'): string {
     if (value == null || !Number.isFinite(value)) return '-';
-    const prefix = currency === 'TRY' ? '₺' : `${currency} `;
+    const prefix = formatCurrencyPrefix(currency);
     return `${prefix}${value.toLocaleString('tr-TR', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 4,
@@ -108,7 +108,7 @@ export function isBistMarketOpen(now = new Date()): boolean {
 export function formatHoldingPrice(value: number | null | undefined, currency: string | null | undefined): string {
     if (value == null || !Number.isFinite(value)) return '-';
     const abs = Math.abs(value);
-    const prefix = currency === 'TRY' ? '₺' : currency ? `${currency} ` : '';
+    const prefix = formatCurrencyPrefix(currency);
     if (abs >= 100) {
         return `${prefix}${value.toLocaleString('tr-TR', {
             minimumFractionDigits: 2,

@@ -55,7 +55,7 @@ describe('fund presentation helpers', () => {
     it('uses the canonical snapshot price and its currency', () => {
         expect(canonicalFundPrice(12.345678)).toBe(12.345678);
         expect(canonicalFundPrice(0)).toBeNull();
-        expect(formatFundQuotePrice(12.345678, 'USD')).toMatch(/^USD /);
+        expect(formatFundQuotePrice(12.345678, 'USD')).toMatch(/^\$/);
     });
 
     it('renders date-only values as reporting dates without UTC rollover', () => {
