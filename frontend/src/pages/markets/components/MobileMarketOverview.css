@@ -158,6 +158,65 @@
         padding: 1rem 0.85rem 0.85rem;
     }
 
+    .mobile-market-sk-card {
+        cursor: default;
+        pointer-events: none;
+    }
+
+    .mobile-sk-circle,
+    .mobile-sk-bar {
+        display: block;
+        border-radius: 6px;
+        background: linear-gradient(90deg, #1c1c1b 25%, #2a2a29 50%, #1c1c1b 75%);
+        background-size: 200% 100%;
+        animation: mobile-market-shimmer 1.6s infinite linear;
+    }
+
+    .mobile-sk-circle {
+        width: 40px;
+        height: 40px;
+        border-radius: 10px;
+        flex-shrink: 0;
+    }
+
+    .mobile-sk-circle.is-sm {
+        width: 30px;
+        height: 30px;
+        border-radius: 8px;
+    }
+
+    .mobile-sk-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 0.32rem;
+        min-width: 0;
+    }
+
+    .mobile-sk-bar.is-lg { width: 78px; height: 16px; }
+    .mobile-sk-bar.is-md { width: 112px; height: 11px; opacity: 0.72; }
+    .mobile-sk-bar.is-sm { width: 54px; height: 10px; opacity: 0.6; }
+    .mobile-sk-bar.is-price { width: 92px; height: 20px; }
+    .mobile-sk-bar.is-title { width: 118px; height: 16px; }
+    .mobile-sk-bar.is-subtitle { width: 175px; height: 11px; opacity: 0.65; }
+    .mobile-sk-bar.is-sym { width: 56px; height: 13px; }
+    .mobile-sk-bar.is-time { width: 42px; height: 9px; opacity: 0.55; }
+    .mobile-sk-bar.is-row-price { width: 58px; height: 14px; justify-self: end; }
+    .mobile-sk-bar.is-spark { width: 100%; height: 22px; opacity: 0.55; }
+    .mobile-sk-bar.is-pill { width: 56px; height: 24px; border-radius: 8px; justify-self: end; }
+
+    .mobile-market-watchlist-row-skeleton {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto minmax(38px, 0.62fr) auto;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.65rem 0.1rem;
+        border-bottom: 1px solid color-mix(in srgb, var(--surface-border) 55%, transparent);
+    }
+
+    .mobile-market-watchlist-row-skeleton:last-child {
+        border-bottom: 0;
+    }
+
     .mobile-market-watchlist-head {
         padding: 0 0.15rem 0.7rem;
         justify-content: flex-start;

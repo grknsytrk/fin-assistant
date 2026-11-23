@@ -124,37 +124,83 @@ export function MarketOverviewSection({
             {loading && (
                 <div className="market-content market-content-terminal" role="status" aria-live="polite" aria-label="Piyasa verileri yükleniyor">
                     <div className="market-main-column">
-                        <div className="stock-card-skeleton-grid" aria-hidden="true">
-                            {[0, 1, 2].map((cardIdx) => (
-                                <div key={cardIdx} className="stock-card-skeleton">
-                                    <div className="stock-card-skeleton-head">
-                                        <div className="stock-card-skeleton-logo stock-card-skeleton-pulse" />
-                                        <div className="stock-card-skeleton-id">
-                                            <div className="stock-card-skeleton-symbol stock-card-skeleton-pulse" />
-                                            <div className="stock-card-skeleton-company stock-card-skeleton-pulse" />
+                        {isMobileViewport ? (
+                            <div className="mobile-market-overview mobile-market-overview-skeleton" aria-hidden="true">
+                                <div className="mobile-market-index-card mobile-market-sk-card">
+                                    <div className="mobile-market-index-head">
+                                        <div className="mobile-market-index-identity">
+                                            <span className="mobile-sk-circle" />
+                                            <div className="mobile-sk-stack">
+                                                <span className="mobile-sk-bar is-lg" />
+                                                <span className="mobile-sk-bar is-md" />
+                                                <span className="mobile-sk-bar is-sm" />
+                                            </div>
+                                        </div>
+                                        <div className="mobile-market-index-quote">
+                                            <span className="mobile-sk-bar is-sm" />
+                                            <span className="mobile-sk-bar is-price" />
+                                            <span className="mobile-sk-bar is-sm" />
                                         </div>
                                     </div>
-                                    <div className="stock-card-skeleton-price-row">
-                                        <div className="stock-card-skeleton-price stock-card-skeleton-pulse" />
-                                        <div className="stock-card-skeleton-change stock-card-skeleton-pulse" />
+                                    <div className="mobile-market-index-chart is-loading" />
+                                </div>
+
+                                <div className="mobile-market-watchlist mobile-market-sk-watchlist">
+                                    <div className="mobile-market-watchlist-head">
+                                        <div className="mobile-sk-stack">
+                                            <span className="mobile-sk-bar is-title" />
+                                            <span className="mobile-sk-bar is-subtitle" />
+                                        </div>
                                     </div>
-                                    <div className="stock-card-skeleton-metrics">
-                                        <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
-                                        <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
-                                        <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
-                                    </div>
-                                    <div className="stock-card-skeleton-chart">
-                                        <AnimatedChartSkeleton
-                                            seed={`overview-loading-${cardIdx}`}
-                                            width={340}
-                                            height={100}
-                                            padding={{ top: 10, right: 6, bottom: 12, left: 6 }}
-                                            preserveAspectRatio="none"
-                                        />
+                                    <div className="mobile-market-watchlist-list">
+                                        {[0, 1, 2, 3].map((rowIdx) => (
+                                            <div key={rowIdx} className="mobile-market-watchlist-row-skeleton">
+                                                <span className="mobile-sk-circle is-sm" />
+                                                <div className="mobile-sk-stack">
+                                                    <span className="mobile-sk-bar is-sym" />
+                                                    <span className="mobile-sk-bar is-time" />
+                                                </div>
+                                                <span className="mobile-sk-bar is-row-price" />
+                                                <span className="mobile-sk-bar is-spark" />
+                                                <span className="mobile-sk-bar is-pill" />
+                                            </div>
+                                        ))}
                                     </div>
                                 </div>
-                            ))}
-                        </div>
+                            </div>
+                        ) : (
+                            <div className="stock-card-skeleton-grid" aria-hidden="true">
+                                {[0, 1, 2].map((cardIdx) => (
+                                    <div key={cardIdx} className="stock-card-skeleton">
+                                        <div className="stock-card-skeleton-head">
+                                            <div className="stock-card-skeleton-logo stock-card-skeleton-pulse" />
+                                            <div className="stock-card-skeleton-id">
+                                                <div className="stock-card-skeleton-symbol stock-card-skeleton-pulse" />
+                                                <div className="stock-card-skeleton-company stock-card-skeleton-pulse" />
+                                            </div>
+                                        </div>
+                                        <div className="stock-card-skeleton-price-row">
+                                            <div className="stock-card-skeleton-price stock-card-skeleton-pulse" />
+                                            <div className="stock-card-skeleton-change stock-card-skeleton-pulse" />
+                                        </div>
+                                        <div className="stock-card-skeleton-metrics">
+                                            <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
+                                            <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
+                                            <div className="stock-card-skeleton-metric stock-card-skeleton-pulse" />
+                                        </div>
+                                        <div className="stock-card-skeleton-chart">
+                                            <AnimatedChartSkeleton
+                                                seed={`overview-loading-${cardIdx}`}
+                                                width={340}
+                                                height={100}
+                                                padding={{ top: 10, right: 6, bottom: 12, left: 6 }}
+                                                preserveAspectRatio="none"
+                                            />
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                     </div>
                 </div>
             )}

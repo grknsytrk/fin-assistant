@@ -1140,10 +1140,125 @@
     }
 
     .mp-editor-modal .mp-modal-body {
-        padding: 0.85rem 1rem 1rem;
+        padding: 0.85rem 0.9rem 1rem;
+        gap: 0.85rem;
     }
 
     .mp-editor-cards-grid {
         grid-template-columns: 1fr;
+    }
+
+    .mp-editor-modal .mp-field-label-row {
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: 0.35rem 0.5rem;
+        white-space: normal;
+    }
+
+    .mp-editor-modal .mp-selected-stock-left {
+        width: 100%;
+        min-width: 0;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+    }
+
+    .mp-editor-modal .mp-selected-stock-title {
+        min-width: 0;
+        flex: 1 1 160px;
+    }
+
+    .mp-editor-modal .mp-selected-stock-title strong,
+    .mp-editor-modal .mp-selected-stock-title span {
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    .mp-editor-modal .mp-add-existing-badge {
+        white-space: normal;
+        line-height: 1.25;
+        text-align: left;
+    }
+
+    .mp-editor-modal .mp-add-preview-grid {
+        grid-template-columns: 1fr;
+        gap: 0.5rem;
+    }
+
+    .mp-editor-modal .mp-add-preview-item strong {
+        overflow-wrap: anywhere;
+    }
+
+    .mp-editor-modal .mp-quick-pills-row {
+        flex-wrap: wrap;
+        gap: 0.35rem;
+    }
+
+    .mp-editor-modal .mp-quick-pill,
+    .mp-editor-modal .mp-mini-preset-btn,
+    .mp-editor-modal .mp-catalyst-choice {
+        min-height: 30px;
+        height: auto;
+        padding: 0.25rem 0.6rem;
+        white-space: normal;
+        text-align: left;
+    }
+
+    .mp-editor-modal .mp-custom-catalyst-row {
+        flex-wrap: wrap;
+    }
+
+    .mp-editor-modal .mp-custom-catalyst-row input {
+        min-width: 0;
+        flex: 1 1 180px;
+        height: 40px;
+    }
+
+    .mp-editor-modal .mp-custom-catalyst-row button {
+        height: 40px;
+    }
+
+    .mp-editor-modal .mp-explained-menu:not(.mp-sector-menu) {
+        left: 0;
+        right: 0;
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .mp-editor-modal .mp-modal-body input,
+    .mp-editor-modal .mp-modal-body select,
+    .mp-editor-modal .mp-modal-body textarea {
+        font-size: 16px;
+    }
+
+    .mp-editor-modal .mp-price-input-group input,
+    .mp-editor-modal .mp-fetch-price-btn {
+        height: 40px;
+    }
+
+    .mp-editor-modal .mp-modal-footer-sticky {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.55rem;
+        padding: 0.75rem 0.9rem calc(0.75rem + env(safe-area-inset-bottom));
+    }
+
+    .mp-editor-modal .mp-footer-summary {
+        line-height: 1.4;
+        overflow-wrap: anywhere;
+    }
+
+    .mp-editor-modal .mp-footer-btns {
+        display: grid;
+        grid-template-columns: 1fr 1.6fr;
+        gap: 0.5rem;
+        width: 100%;
+    }
+
+    .mp-editor-modal .mp-btn-primary,
+    .mp-editor-modal .mp-btn-ghost {
+        height: auto;
+        min-height: 40px;
+        font-size: 0.8rem;
     }
 }
