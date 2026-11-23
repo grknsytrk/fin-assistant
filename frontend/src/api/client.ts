@@ -50,7 +50,17 @@ import type {
 import { BoundedMemoryCache } from '../utils/lruCache';
 
 const rawApiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
-const DEFAULT_API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:8000';
+const resolveDefaultApiBase = (): string => {
+    if (import.meta.env.PROD) return '/api';
+    if (typeof window !== 'undefined' && window.location) {
+        const { hostname, protocol } = window.location;
+        if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+            return `${protocol || 'http:'}//${hostname}:8000`;
+        }
+    }
+    return 'http://localhost:8000';
+};
+const DEFAULT_API_BASE = resolveDefaultApiBase();
 const API_BASE = (rawApiBase && rawApiBase !== '/' ? rawApiBase : DEFAULT_API_BASE).replace(/\/+$/, '');
 
 const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);

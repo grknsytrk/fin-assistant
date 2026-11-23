@@ -122,7 +122,11 @@ export default function MarketsNavigation({
                         aria-expanded={stocksExpanded}
                         onClick={() => {
                             if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 760px)').matches) {
-                                onSectionChange('stocks');
+                                if (activeSection === 'stocks' && activeStockSection === 'compare' && onStockSectionChange) {
+                                    onStockSectionChange('list');
+                                } else {
+                                    onSectionChange('stocks');
+                                }
                                 return;
                             }
                             if (collapsed) {
@@ -175,6 +179,14 @@ export default function MarketsNavigation({
                         title="Fonlar"
                         aria-expanded={fundsExpanded}
                         onClick={() => {
+                            if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 760px)').matches) {
+                                if (activeSection === 'funds' && activeFundSection === 'compare' && onFundSectionChange) {
+                                    onFundSectionChange('investment');
+                                } else {
+                                    onSectionChange('funds');
+                                }
+                                return;
+                            }
                             if (collapsed) {
                                 onCollapsedChange(false);
                                 setFundsExpanded(true);

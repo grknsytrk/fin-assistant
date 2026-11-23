@@ -244,6 +244,7 @@ export default function MarketsView({
     const marketPageRef = useRef<HTMLDivElement | null>(null);
     const pendingMarketScrollResetRef = useRef(true);
     const marketScrollResetFrameRef = useRef<number | null>(null);
+    const latestActiveSectionRef = useRef<MarketSection>(activeSection);
     const latestStockIndexRef = useRef<MarketStockIndex>(stockIndex);
     const latestSelectedIndexRef = useRef<MarketIndexCode | null>(selectedIndex);
     const latestStockCardSymbolsRef = useRef(stockCardSymbols.join(','));
@@ -392,6 +393,10 @@ export default function MarketsView({
     }, [activeSection, loading, error, market, stockCardSymbols.length, stockCards, stockCardsError]);
 
     useEffect(() => {
+        latestActiveSectionRef.current = activeSection;
+    }, [activeSection]);
+
+    useEffect(() => {
         latestStockIndexRef.current = stockIndex;
     }, [stockIndex]);
 
@@ -449,27 +454,37 @@ export default function MarketsView({
 
     useEffect(() => {
         return apiClient.subscribeMarketStocks((index, payload) => {
-            if (activeSection === 'stocks' && index === latestStockIndexRef.current) {
+            if (
+                (activeSection === 'stocks' && index === latestStockIndexRef.current)
+                || (activeSection === 'markets' && isMobileViewport && index === 'XUTUM')
+            ) {
                 setStocks(payload);
                 setStocksError(null);
             }
         });
-    }, [activeSection]);
+    }, [activeSection, isMobileViewport]);
 
     useEffect(() => {
-        if (activeSection !== 'stocks') return;
-        setStocks(null);
+        const needsMobileOverviewQuotes = activeSection === 'markets' && isMobileViewport;
+        if (activeSection !== 'stocks' && !needsMobileOverviewQuotes) return;
+        const targetIndex: MarketStockIndex = needsMobileOverviewQuotes ? 'XUTUM' : stockIndex;
+        const cached = apiClient.getCachedMarketStocks(targetIndex);
+        if (cached) {
+            setStocks(cached);
+        } else if (activeSection === 'stocks') {
+            setStocks(null);
+        }
         setStocksError(null);
-        loadStocks(false, false, stockIndex);
-        const releaseStream = apiClient.retainMarketStocksStream(stockIndex);
+        loadStocks(Boolean(cached), false, targetIndex);
+        const releaseStream = apiClient.retainMarketStocksStream(targetIndex);
         const intervalId = window.setInterval(() => {
             if (document.visibilityState !== 'visible' || !isBistTradingHours()) return;
-            if (apiClient.isMarketStocksStreamActive(stockIndex)) return;
-            loadStocks(true, false, stockIndex);
+            if (apiClient.isMarketStocksStreamActive(targetIndex)) return;
+            loadStocks(true, false, targetIndex);
         }, marketListRefreshMs);
         const onVisibilityChange = () => {
             if (document.visibilityState === 'visible' && isBistTradingHours()) {
-                loadStocks(true, false, stockIndex);
+                loadStocks(true, false, targetIndex);
             }
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
@@ -478,7 +493,7 @@ export default function MarketsView({
             window.clearInterval(intervalId);
             document.removeEventListener('visibilitychange', onVisibilityChange);
         };
-    }, [activeSection, marketListRefreshMs, stockIndex]);
+    }, [activeSection, isMobileViewport, marketListRefreshMs, stockIndex]);
 
     useEffect(() => {
         if (activeSection !== 'markets' || isMobileViewport) return;
@@ -640,7 +655,8 @@ export default function MarketsView({
             void apiClient
                 .marketUniverse({ index: requestedIndex })
                 .then((universePayload) => {
-                    if (latestStockIndexRef.current !== requestedIndex) return;
+                    if (latestActiveSectionRef.current === 'stocks' && latestStockIndexRef.current !== requestedIndex) return;
+                    if (latestActiveSectionRef.current === 'markets' && requestedIndex !== 'XUTUM') return;
                     setStocks((current) => (
                         current?.index === requestedIndex && !current.partial
                             ? current
@@ -655,7 +671,8 @@ export default function MarketsView({
         if (!silent) setStocksError(null);
         try {
             const stocksPayload = await apiClient.marketStocks({ index: requestedIndex, refresh });
-            if (latestStockIndexRef.current !== requestedIndex) return;
+            if (latestActiveSectionRef.current === 'stocks' && latestStockIndexRef.current !== requestedIndex) return;
+            if (latestActiveSectionRef.current === 'markets' && requestedIndex !== 'XUTUM') return;
             setStocks(stocksPayload);
             setStocksError(null);
         } catch (err: any) {
@@ -1368,7 +1385,28 @@ export default function MarketsView({
                     )}
 
                     {activeSection === 'stocks' && (
-                        <StocksSection
+                        <>
+                            {onNavigateStockSection && (
+                                <div className="mobile-subsection-switcher" role="navigation" aria-label="Hisse görünümleri">
+                                    <button
+                                        type="button"
+                                        className="mobile-subsection-btn active"
+                                        aria-pressed={true}
+                                        onClick={() => onNavigateStockSection('list')}
+                                    >
+                                        Hisse Listesi
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="mobile-subsection-btn"
+                                        aria-pressed={false}
+                                        onClick={() => onNavigateStockSection('compare')}
+                                    >
+                                        Hisse Karşılaştırma
+                                    </button>
+                                </div>
+                            )}
+                            <StocksSection
                             stocks={stocks}
                             stocksLoading={stocksLoading}
                             stocksError={stocksError}
@@ -1412,6 +1450,7 @@ export default function MarketsView({
                             onApplyScreenerPreset={applyScreenerPreset}
                             onClearScreenerFilters={clearScreenerFilters}
                         />
+                        </>
                     )}
 
                     {activeSection === 'indices' && (

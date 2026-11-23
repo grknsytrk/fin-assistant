@@ -382,7 +382,7 @@ export function StocksSection({
                                     aria-rowcount={sortedStocks.length + 1}
                                 >
                                     <colgroup>
-                                        <col style={{ width: '48px', minWidth: '48px' }} />
+                                        <col className="stocks-rank-col" />
                                         {activeStockColumns.map((column) => (
                                             <col
                                                 key={column.key}

@@ -794,4 +794,38 @@
     .indices-detail-view > .error-message button {
         margin-left: 0 !important;
     }
+
+    .indices-table {
+        min-width: 640px;
+    }
+
+    .indices-table th,
+    .indices-table td {
+        padding: 0.38rem 0.55rem;
+    }
+
+    .indices-table th.stocks-rank,
+    .indices-table td.stocks-rank {
+        display: none;
+    }
+
+    .indices-table th:nth-child(2),
+    .indices-table td.stocks-symbol-cell {
+        position: sticky;
+        left: 0;
+        z-index: 3;
+        min-width: 128px;
+        max-width: 152px;
+        background: var(--surface-color);
+        border-right: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .indices-table th:nth-child(2) {
+        z-index: 4;
+        background: #0d0f12;
+    }
+
+    .indices-symbol-main {
+        max-width: 120px;
+    }
 }

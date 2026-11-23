@@ -18,8 +18,51 @@
 @media (max-width: 760px) {
     .mn-layout {
         --mn-sidebar-width: 0px;
+        height: 100vh;
+        height: 100dvh;
         padding-left: 0;
         padding-bottom: calc(66px + env(safe-area-inset-bottom));
+    }
+}
+
+.mobile-subsection-switcher {
+    display: none;
+}
+
+@media (max-width: 760px) {
+    .mobile-subsection-switcher {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.35rem;
+        padding: 0.25rem;
+        margin-bottom: 0.65rem;
+        background: var(--surface-color);
+        border: 1px solid var(--surface-border);
+        border-radius: 6px;
+        flex-shrink: 0;
+    }
+
+    .mobile-subsection-btn {
+        min-height: 36px;
+        padding: 0.4rem 0.6rem;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 0.78rem;
+        font-weight: 600;
+        cursor: pointer;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        transition: background-color 0.14s ease, color 0.14s ease;
+    }
+
+    .mobile-subsection-btn.active {
+        background: var(--accent-glow);
+        color: #ffffff;
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-color) 45%, transparent);
     }
 }
 

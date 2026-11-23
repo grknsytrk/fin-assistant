@@ -52,6 +52,7 @@ import {
     mergeFundPerformancePayloads,
 } from '../utils/fundPresentation';
 import './FundsPage.css';
+import '../styles/market-shared.css';
 import {
     DETAIL_RETURN_PERIODS,
     EMPTY_FUND_SCREENER_FILTERS,
@@ -1451,6 +1452,32 @@ export default function FundsPage({
             />
             <div className="funds-workspace">
                 <div className="funds-page" ref={fundsPageRef}>
+                    {!fundCode && (
+                        <div className="mobile-subsection-switcher" role="navigation" aria-label="Fon görünümleri">
+                            <button
+                                type="button"
+                                className={`mobile-subsection-btn${view !== 'compare' ? ' active' : ''}`}
+                                aria-pressed={view !== 'compare'}
+                                onClick={() => {
+                                    if (onNavigateFundSection) {
+                                        onNavigateFundSection('investment');
+                                    } else {
+                                        onBack();
+                                    }
+                                }}
+                            >
+                                Yatırım Fonları
+                            </button>
+                            <button
+                                type="button"
+                                className={`mobile-subsection-btn${view === 'compare' ? ' active' : ''}`}
+                                aria-pressed={view === 'compare'}
+                                onClick={() => onNavigateFundSection?.('compare')}
+                            >
+                                Fon Karşılaştırma
+                            </button>
+                        </div>
+                    )}
                     {view === 'compare' ? (
                         <Suspense fallback={<FinLoader message="Fon karşılaştırma yükleniyor" />}>
                             <FundComparisonSection

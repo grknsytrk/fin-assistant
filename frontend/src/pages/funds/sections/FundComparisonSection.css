@@ -450,6 +450,12 @@
     }
 }
 
+@media (max-width: 760px) {
+    .fund-compare-line-chart {
+        min-width: 560px;
+    }
+}
+
 @media (max-width: 640px) {
     .fund-compare-chart-panel {
         padding: 0.85rem;

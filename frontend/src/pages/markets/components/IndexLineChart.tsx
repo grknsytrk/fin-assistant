@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { MarketIndexDetailResponse } from '../../../api/types';
 import AnimatedChartSkeleton from '../../../components/charts/AnimatedChartSkeleton';
+import { useMobileChartLayout } from '../../../hooks/useMobileChartLayout';
 import { formatIndexPrice, formatTablePct, isBistSymbol } from '../stockScreenerConfig';
 import './IndexLineChart.css';
 
@@ -22,9 +23,12 @@ export function IndexLineChart({
 }: IndexLineChartProps) {
     const [hoverIndex, setHoverIndex] = useState<number | null>(null);
     const [measureAnchorIndex, setMeasureAnchorIndex] = useState<number | null>(null);
+    const isMobileChart = useMobileChartLayout();
     const width = 1120;
-    const height = 400;
-    const padding = { top: 30, right: 65, bottom: 40, left: 16 };
+    const height = isMobileChart ? 540 : 400;
+    const padding = isMobileChart
+        ? { top: 30, right: 92, bottom: 52, left: 16 }
+        : { top: 30, right: 65, bottom: 40, left: 16 };
     const validPoints = points.filter((point) => Number.isFinite(point.close));
     const pointWindowKey = `${symbol || ''}:${validPoints.length}:${validPoints[0]?.time || ''}:${validPoints[validPoints.length - 1]?.time || ''}`;
 
@@ -95,7 +99,8 @@ export function IndexLineChart({
     // X ekseni (saat başları için tahmini çizim veya eşit dağılımlı)
     const timeTickLabels: Array<{ x: number; label: string; key: string }> = [];
     if (useTimeScale) {
-        for (let h = 10; h <= 18; h += 1) {
+        const hourStep = isMobileChart ? 2 : 1;
+        for (let h = 10; h <= 18; h += hourStep) {
             const d = new Date(validPoints[0].time);
             d.setHours(h, 0, 0, 0);
             timeTickLabels.push({
@@ -105,7 +110,7 @@ export function IndexLineChart({
             });
         }
     } else {
-        const timeTickCount = 8;
+        const timeTickCount = isMobileChart ? 5 : 8;
         const timeTicks = Array.from({ length: timeTickCount }).map((_, i) => Math.floor((validPoints.length - 1) * (i / (timeTickCount - 1))));
         timeTicks.forEach((index) => {
             const dt = new Date(validPoints[index].time);
@@ -267,7 +272,7 @@ export function IndexLineChart({
                             stroke="rgba(255,255,255,0.05)"
                             strokeWidth="1"
                         />
-                        <text x={width - padding.right + 10} y={yFor(value) + 4} fill="rgba(255,255,255,0.4)" fontSize="11" fontFamily="monospace">
+                        <text x={width - padding.right + 10} y={yFor(value) + 4} fill="rgba(255,255,255,0.4)" fontSize={isMobileChart ? '15' : '11'} fontFamily="monospace">
                             {formatIndexPrice(value)}
                         </text>
                     </g>
@@ -297,7 +302,7 @@ export function IndexLineChart({
                             stroke="rgba(255,255,255,0.03)"
                             strokeWidth="1"
                         />
-                        <text x={x} y={height - 15} fill="rgba(255,255,255,0.5)" fontSize="11" fontFamily="monospace" textAnchor="middle">
+                        <text x={x} y={height - 15} fill="rgba(255,255,255,0.5)" fontSize={isMobileChart ? '15' : '11'} fontFamily="monospace" textAnchor="middle">
                             {label}
                         </text>
                     </g>
@@ -316,9 +321,9 @@ export function IndexLineChart({
 
                 {/* Anlık Fiyat İşareti */}
                 <g transform={`translate(${width - padding.right}, ${yFor(last)})`}>
-                    <rect x="0" y="-10" width="65" height="20" fill={chartColor} rx="2" />
+                    <rect x="0" y={isMobileChart ? '-12' : '-10'} width={isMobileChart ? '86' : '65'} height={isMobileChart ? '24' : '20'} fill={chartColor} rx="2" />
                     <path d="M 0 0 L 6 -6 L 6 6 Z" fill={chartColor} transform="translate(-5, 0)" />
-                    <text x="32" y="3" fill="#ffffff" fontSize="11" fontFamily="monospace" textAnchor="middle" fontWeight="bold">
+                    <text x={isMobileChart ? '43' : '32'} y={isMobileChart ? '5' : '3'} fill="#ffffff" fontSize={isMobileChart ? '15' : '11'} fontFamily="monospace" textAnchor="middle" fontWeight="bold">
                         {formatIndexPrice(last)}
                     </text>
                 </g>

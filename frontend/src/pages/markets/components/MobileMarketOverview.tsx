@@ -302,7 +302,7 @@ export function MobileMarketOverview({
                             const indexRow = item.kind === 'stock' ? indexRowBySymbol.get(symbol) : null;
                             const price = quoteRow?.price ?? cardRow?.price ?? indexRow?.price ?? row?.price ?? fundRow?.price ?? null;
                             const changePct = quoteRow?.change_pct ?? cardRow?.change_pct ?? indexRow?.change_pct ?? row?.change_pct ?? fundRow?.daily_return ?? null;
-                            const asOf = quoteRow?.price_as_of ?? cardRow?.as_of ?? row?.price_as_of ?? fundRow?.as_of ?? null;
+                            const asOf = quoteRow?.price_as_of ?? cardRow?.as_of ?? row?.price_as_of ?? fundRow?.as_of ?? (indexRow ? index?.as_of ?? null : null);
                             const chartPoints = cardRow?.line_points?.length
                                 ? cardRow.line_points
                                 : (watchlistChartPoints[symbol] || []);

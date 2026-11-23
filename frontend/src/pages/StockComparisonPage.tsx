@@ -7,6 +7,7 @@ import MarketsNavigation, {
     type MarketsNavigationStockSection,
 } from '../components/MarketsNavigation';
 import StockComparisonSection from './markets/sections/StockComparisonSection';
+import '../styles/market-shared.css';
 
 export interface StockComparisonPageProps {
     onNavigateSection: (section: MarketsNavigationSection) => void;
@@ -73,6 +74,30 @@ export default function StockComparisonPage({
             />
             <div className="funds-workspace">
                 <div className="funds-page">
+                    <div className="mobile-subsection-switcher" role="navigation" aria-label="Hisse görünümleri">
+                        <button
+                            type="button"
+                            className="mobile-subsection-btn"
+                            aria-pressed={false}
+                            onClick={() => {
+                                if (onNavigateStockSection) {
+                                    onNavigateStockSection('list');
+                                } else {
+                                    onNavigateSection('stocks');
+                                }
+                            }}
+                        >
+                            Hisse Listesi
+                        </button>
+                        <button
+                            type="button"
+                            className="mobile-subsection-btn active"
+                            aria-pressed={true}
+                            onClick={() => onNavigateStockSection?.('compare')}
+                        >
+                            Hisse Karşılaştırma
+                        </button>
+                    </div>
                     <StockComparisonSection stocks={stocks} loading={loading} error={error} />
                 </div>
             </div>

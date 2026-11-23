@@ -281,9 +281,9 @@ function StockDetailPriceChart({
             .filter(point => Number.isFinite(Number(point.close)) && Number.isFinite(Date.parse(point.time)))
             .sort((a, b) => Date.parse(a.time) - Date.parse(b.time))
             .map(point => Number(point.close));
-        const loadingHeight = isMobileChart ? 900 : 400;
-        const loadingTop = isMobileChart ? 52 : 30;
-        const loadingBottomPadding = isMobileChart ? 112 : 44;
+        const loadingHeight = isMobileChart ? 640 : 400;
+        const loadingTop = isMobileChart ? 36 : 30;
+        const loadingBottomPadding = isMobileChart ? 72 : 44;
 
         return (
             <section className="sd-price-chart-panel" aria-label={`${ticker} fiyat grafiği`} aria-busy="true">
@@ -293,7 +293,7 @@ function StockDetailPriceChart({
                     values={previousValues.length >= 2 ? previousValues : undefined}
                     width={1120}
                     height={loadingHeight}
-                    padding={{ top: loadingTop, right: isMobileChart ? 190 : 76, bottom: loadingBottomPadding, left: 16 }}
+                    padding={{ top: loadingTop, right: isMobileChart ? 145 : 76, bottom: loadingBottomPadding, left: 16 }}
                     gridRatios={[0.18, 0.4, 0.62, 0.84]}
                     className="sd-price-chart-loading"
                     ariaLabel="Grafik verisi yükleniyor"
@@ -312,9 +312,9 @@ function StockDetailPriceChart({
     }
 
     const width = 1120;
-    const height = isMobileChart ? 900 : 400;
+    const height = isMobileChart ? 640 : 400;
     const padding = isMobileChart
-        ? { top: 52, right: 190, bottom: 112, left: 16 }
+        ? { top: 36, right: 145, bottom: 72, left: 16 }
         : { top: 30, right: 76, bottom: 44, left: 16 };
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
@@ -479,9 +479,9 @@ function StockDetailPriceChart({
         : null;
     const plotRight = width - padding.right;
     const plotMidX = padding.left + (plotRight - padding.left) / 2;
-    const measureTooltipWidth = isMobileChart ? 320 : 190;
-    const measureTooltipHeight = isMobileChart ? 112 : 70;
-    const measureTooltipGap = isMobileChart ? 22 : 14;
+    const measureTooltipWidth = isMobileChart ? 260 : 190;
+    const measureTooltipHeight = isMobileChart ? 86 : 70;
+    const measureTooltipGap = isMobileChart ? 18 : 14;
     const measureTooltipAnchorX = measureEndX;
     const measureTooltipAnchorY = measureEndY;
     const measureTooltipShouldFlip = measureTooltipAnchorX != null
@@ -506,8 +506,8 @@ function StockDetailPriceChart({
         visibleMeasureRange && measureLeftX != null && measureRightX != null && measureRightX > measureLeftX,
     );
     const selectionClipId = `sd-price-chart-selection-${ticker}-${selectedRange}`;
-    const tooltipWidth = isMobileChart ? 270 : 166;
-    const tooltipHeight = isMobileChart ? 90 : 60;
+    const tooltipWidth = isMobileChart ? 210 : 166;
+    const tooltipHeight = isMobileChart ? 72 : 60;
     const tooltipGap = 16;
     const tooltipX = hoverX == null
         ? 0
@@ -521,8 +521,8 @@ function StockDetailPriceChart({
             : Math.min(hoverY - tooltipHeight / 2, height - tooltipHeight - padding.bottom);
     const markerLabel = formatQuotePrice(markerPrice, currency);
     const markerWidth = Math.max(
-        isMobileChart ? 132 : 70,
-        markerLabel.length * (isMobileChart ? 17 : 8) + (isMobileChart ? 28 : 18),
+        isMobileChart ? 112 : 70,
+        markerLabel.length * (isMobileChart ? 12 : 8) + (isMobileChart ? 22 : 18),
     );
     const markerY = yFor(markerPrice);
     const markerX = width - padding.right + 4;
@@ -586,7 +586,7 @@ function StockDetailPriceChart({
                         />
                         <text
                             x={x}
-                            y={height - (isMobileChart ? 34 : 15)}
+                            y={height - (isMobileChart ? 24 : 15)}
                             className="sd-price-chart-axis"
                             textAnchor={x === padding.left ? 'start' : x === width - padding.right ? 'end' : 'middle'}
                         >
@@ -598,9 +598,9 @@ function StockDetailPriceChart({
                 <path d={pathData} fill="none" stroke={hasVisibleSelection ? '#8f98a3' : chartColor} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
                 <circle cx={xFor(validPoints.length - 1)} cy={yFor(validPoints[validPoints.length - 1].close)} r="4" fill={chartColor} />
                 <g transform={`translate(${markerX}, ${markerY})`}>
-                    <rect width={markerWidth} height={isMobileChart ? 32 : 20} y={isMobileChart ? -16 : -10} rx="2" fill={chartColor} />
+                    <rect width={markerWidth} height={isMobileChart ? 26 : 20} y={isMobileChart ? -13 : -10} rx="2" fill={chartColor} />
                     <path d="M 0 0 L -6 -6 L -6 6 Z" fill={chartColor} />
-                    <text x={markerWidth / 2} y="4" fill="#ffffff" fontSize={isMobileChart ? 26 : 11} fontFamily="monospace" textAnchor="middle" fontWeight="bold">
+                    <text x={markerWidth / 2} y={isMobileChart ? 5 : 4} fill="#ffffff" fontSize={isMobileChart ? 16 : 11} fontFamily="monospace" textAnchor="middle" fontWeight="bold">
                         {markerLabel}
                     </text>
                 </g>
@@ -646,13 +646,13 @@ function StockDetailPriceChart({
                             style={{ transform: `translate(${measureTooltipX}px, ${measureTooltipY}px)` }}
                         >
                             <rect width={measureTooltipWidth} height={measureTooltipHeight} rx="7" className="sd-price-chart-measure-tooltip-bg" />
-                            <text x="10" y={isMobileChart ? 30 : 18} className="sd-price-chart-measure-muted">
+                            <text x="10" y={isMobileChart ? 24 : 18} className="sd-price-chart-measure-muted">
                                 {formatStockDetailChartTime(measureAnchorPoint.time, selectedRange)} - {formatStockDetailChartTime(measureEndPoint.time, selectedRange)}
                             </text>
-                            <text x="10" y={isMobileChart ? 65 : 42} className={`sd-price-chart-measure-value ${measureClass}`}>
+                            <text x="10" y={isMobileChart ? 52 : 42} className={`sd-price-chart-measure-value ${measureClass}`}>
                                 {formatPct(measureReturn)}
                             </text>
-                            <text x="10" y={isMobileChart ? 96 : 60} className="sd-price-chart-measure-muted">
+                            <text x="10" y={isMobileChart ? 74 : 60} className="sd-price-chart-measure-muted">
                                 {measureDeltaText}
                             </text>
                         </g>
@@ -666,10 +666,10 @@ function StockDetailPriceChart({
                         <circle cx={hoverX} cy={hoverY} r="4" fill={chartColor} stroke="#0a0c0f" strokeWidth="2" />
                         <g transform={`translate(${tooltipX}, ${tooltipY})`}>
                             <rect width={tooltipWidth} height={tooltipHeight} rx="4" className="sd-price-chart-tooltip-bg" />
-                            <text x="12" y={isMobileChart ? 31 : 21} className="sd-price-chart-tooltip-muted">
+                            <text x="12" y={isMobileChart ? 25 : 21} className="sd-price-chart-tooltip-muted">
                                 {formatStockDetailChartTime(hoverPoint.time, selectedRange)}
                             </text>
-                            <text x="12" y={isMobileChart ? 66 : 45} className="sd-price-chart-tooltip-value">
+                            <text x="12" y={isMobileChart ? 54 : 45} className="sd-price-chart-tooltip-value">
                                 {formatQuotePrice(hoverPoint.close, currency)}
                             </text>
                         </g>

@@ -156,14 +156,14 @@ export const FundTableRow = memo(function FundTableRow({
                 </>
             ) : (
                 <>
-                    <td className={row.fund_type ? 'funds-text-muted' : 'funds-cell-muted'}>{row.fund_type || '—'}</td>
-                    <td className={row.founder_company || row.manager_company ? 'funds-text-muted' : 'funds-cell-muted'} title={row.founder_company || row.manager_company || undefined}>
-                        {row.founder_company || row.manager_company || '—'}
-                    </td>
                     <td className={`funds-cell-right ${row.price == null ? 'funds-cell-muted' : 'funds-price-cell'}`}>
                         {formatCurrency(row.price, row.currency)}
                     </td>
                     {renderPctCell(row.daily_return)}
+                    <td className={row.fund_type ? 'funds-text-muted' : 'funds-cell-muted'}>{row.fund_type || '—'}</td>
+                    <td className={row.founder_company || row.manager_company ? 'funds-text-muted' : 'funds-cell-muted'} title={row.founder_company || row.manager_company || undefined}>
+                        {row.founder_company || row.manager_company || '—'}
+                    </td>
                     <td className={`funds-cell-right ${row.risk_value == null ? 'funds-cell-muted' : ''}`}>
                         {row.risk_value ?? '—'}
                     </td>
@@ -256,10 +256,10 @@ export const FundsTable = memo(function FundsTable({
                             </>
                         ) : (
                             <>
-                                {renderSortHeader('fund_type', 'Tür')}
-                                {renderSortHeader('founder_company', 'Kurucu')}
                                 {renderSortHeader('price', 'Fiyat', 'right')}
                                 {renderSortHeader('daily_return', 'Gün %', 'right')}
+                                {renderSortHeader('fund_type', 'Tür')}
+                                {renderSortHeader('founder_company', 'Kurucu')}
                                 {renderSortHeader('risk_value', 'Risk', 'right')}
                                 {renderSortHeader('aum', 'Portföy', 'right')}
                                 {renderSortHeader('investor_count', 'Yatırımcı', 'right')}

@@ -466,29 +466,31 @@
     cursor: default;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 760px) {
     .fund-detail-chart.is-mobile-chart {
         height: auto;
         min-height: 0;
-        aspect-ratio: 860 / 760;
+        aspect-ratio: 860 / 560;
     }
 
     .fund-chart-measure-muted {
-        font-size: 22px;
+        font-size: 15px;
     }
 
     .fund-chart-measure-value {
-        font-size: 30px;
+        font-size: 21px;
     }
 
     .fund-chart-measure-row-value {
-        font-size: 22px;
+        font-size: 16px;
     }
 
     .fund-chart-loading-label {
-        font-size: 24px;
+        font-size: 17px;
     }
+}
 
+@media (max-width: 640px) {
     .fund-chart-range {
         min-height: 2.55rem;
     }

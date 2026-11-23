@@ -318,6 +318,19 @@ export default function MarketWatchRail({
     useEffect(() => {
         onCollapseChange?.(panelCollapsed);
     }, [panelCollapsed, onCollapseChange]);
+
+    useEffect(() => {
+        if (typeof window === 'undefined' || !window.matchMedia) return;
+        const mediaQuery = window.matchMedia('(max-width: 760px)');
+        const onChange = () => {
+            if (mediaQuery.matches) {
+                setIsCollapsed(true);
+            }
+        };
+        onChange();
+        mediaQuery.addEventListener('change', onChange);
+        return () => mediaQuery.removeEventListener('change', onChange);
+    }, []);
     const [activeTool, setActiveTool] = useState<'markets' | 'watchlist' | 'news' | 'history' | 'portfolio'>('markets');
     const [activeTab, setActiveTab] = useState<RailTab>(readStoredRailTab);
     const [sort, setSort] = useState<{ key: RailSortKey | null; direction: RailSortDirection | null }>({
@@ -766,7 +779,17 @@ export default function MarketWatchRail({
     }, []);
 
     useEffect(() => {
-        if (panelCollapsed || activeTool !== 'markets') return;
+        if (panelCollapsed) return;
+
+        if (activeTool === 'watchlist') {
+            const hasWatchlistStocks = watchlistItems.some((item) => item.kind === 'stock');
+            if (hasWatchlistStocks && !xutumPayload?.rows?.length && !stockQuoteRows.length) {
+                loadStockTab('xutum', { silent: false, refresh: false });
+            }
+            return;
+        }
+
+        if (activeTool !== 'markets') return;
 
         if (activeTab === 'xutum' || activeTab === 'xu100' || activeTab === 'xu030') {
             const hasCurrentRows = hasStockRowsRef.current[activeTab];
@@ -788,6 +811,9 @@ export default function MarketWatchRail({
         activeTool,
         panelCollapsed,
         loadStockTab,
+        stockQuoteRows.length,
+        watchlistItems,
+        xutumPayload?.rows?.length,
     ]);
 
     // Paylaşımlı bellek önbelleği / SSE delta güncellemelerini dinle

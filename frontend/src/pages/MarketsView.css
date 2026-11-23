@@ -849,6 +849,11 @@
     font-size: 0;
 }
 
+.stocks-rank-col {
+    width: 48px;
+    min-width: 48px;
+}
+
 .stocks-rank {
     width: 48px;
     min-width: 48px;
@@ -1215,6 +1220,40 @@
     .stocks-segment button:focus-visible {
         outline: 2px solid var(--accent-color);
         outline-offset: 2px;
+    }
+
+    .stocks-table-wrap {
+        max-height: min(68dvh, 720px);
+    }
+
+    .stocks-view .stocks-table {
+        width: max-content !important;
+        min-width: 680px !important;
+    }
+
+    .stocks-rank-col,
+    .stocks-view .stocks-table th.stocks-rank,
+    .stocks-view .stocks-table td.stocks-rank {
+        display: none;
+    }
+
+    .stocks-view .stocks-table th,
+    .stocks-view .stocks-table td {
+        padding: 0.44rem 0.55rem;
+    }
+
+    .stocks-view .stocks-table th:nth-child(2),
+    .stocks-view .stocks-table td.stocks-symbol-cell {
+        position: sticky;
+        left: 0;
+        z-index: 3;
+        background: var(--surface-color);
+        border-right: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .stocks-view .stocks-table th:nth-child(2) {
+        z-index: 4;
+        background: #0d0f12;
     }
 
     .stocks-panel-actions .search-box {

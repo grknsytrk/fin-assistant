@@ -1311,6 +1311,22 @@
     .fund-holdings-th-sort {
         min-height: 40px;
     }
+
+    .fund-holdings-rank-head {
+        display: none;
+    }
+
+    .fund-holdings-rank-row {
+        grid-template-columns: 1.6rem 1rem minmax(4.5rem, 6.5rem) minmax(0, 1fr);
+        gap: 0.35rem 0.45rem;
+        padding: 0.35rem 0;
+    }
+
+    .fund-holdings-rank-previous {
+        grid-column: 3 / -1;
+        text-align: right;
+        font-size: 0.7rem;
+    }
 }
 
 @media (max-width: 640px) {
@@ -1325,9 +1341,7 @@
     }
 
     .fund-holdings-effect-summary,
-    .fund-holdings-highlight-grid,
-    .fund-holdings-rank-head,
-    .fund-holdings-rank-row {
+    .fund-holdings-highlight-grid {
         grid-template-columns: 1fr;
     }
 

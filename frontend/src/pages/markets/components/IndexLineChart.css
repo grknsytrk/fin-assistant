@@ -105,7 +105,10 @@
         margin-bottom: 0.75rem;
     }
 
-    .indices-line-chart,
+    .indices-line-chart {
+        min-height: 0;
+    }
+
     .indices-chart-empty {
         min-height: 200px;
     }

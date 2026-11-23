@@ -694,6 +694,30 @@
     }
 }
 
+@media (max-width: 760px) {
+    .sd-price-chart-svg,
+    .sd-price-chart-state {
+        min-height: 240px;
+    }
+
+    .sd-price-chart-axis {
+        font-size: 16px;
+    }
+
+    .sd-price-chart-tooltip-muted,
+    .sd-price-chart-measure-muted {
+        font-size: 16px;
+    }
+
+    .sd-price-chart-tooltip-value {
+        font-size: 20px;
+    }
+
+    .sd-price-chart-measure-value {
+        font-size: 22px;
+    }
+}
+
 @media (max-width: 640px) {
     .sd-price-chart-toolbar {
         align-items: flex-start;
@@ -710,34 +734,12 @@
         font-size: 0.84rem;
     }
 
-    .sd-price-chart-svg,
-    .sd-price-chart-state {
-        min-height: 280px;
-    }
-
     .sd-price-chart-kicker {
         font-size: 0.78rem;
     }
 
     .sd-price-chart-toolbar strong {
         font-size: 1rem;
-    }
-
-    .sd-price-chart-axis {
-        font-size: 30px;
-    }
-
-    .sd-price-chart-tooltip-muted,
-    .sd-price-chart-measure-muted {
-        font-size: 24px;
-    }
-
-    .sd-price-chart-tooltip-value {
-        font-size: 28px;
-    }
-
-    .sd-price-chart-measure-value {
-        font-size: 31px;
     }
 
     .stock-detail-page {

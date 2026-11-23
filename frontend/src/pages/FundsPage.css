@@ -756,17 +756,17 @@
     }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 760px) {
     .fund-chart-axis {
-        font-size: 24px;
+        font-size: 15px;
     }
 
     .fund-chart-tooltip-muted {
-        font-size: 22px;
+        font-size: 15px;
     }
 
     .fund-chart-tooltip-value {
-        font-size: 26px;
+        font-size: 17px;
     }
 }
 
@@ -847,6 +847,8 @@
 @media (max-width: 760px) {
     .mn-layout {
         --mn-sidebar-width: 0px;
+        height: 100vh;
+        height: 100dvh;
         padding-left: 0;
         padding-bottom: calc(66px + env(safe-area-inset-bottom));
     }

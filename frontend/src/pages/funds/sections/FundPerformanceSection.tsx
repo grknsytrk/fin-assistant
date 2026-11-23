@@ -147,9 +147,9 @@ export function FundPerformanceChart({
     const [selectedMeasureRange, setSelectedMeasureRange] = useState<{ start: number; end: number } | null>(null);
     const isMobileChart = useMobileChartLayout();
     const width = 860;
-    const height = isMobileChart ? 760 : 430;
+    const height = isMobileChart ? 560 : 430;
     const padding = isMobileChart
-        ? { top: 44, right: 24, bottom: 90, left: 92 }
+        ? { top: 34, right: 24, bottom: 64, left: 96 }
         : { top: 34, right: 24, bottom: 50, left: 74 };
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
@@ -612,11 +612,11 @@ export function FundPerformanceChart({
                 } => Boolean(item))
                 .slice(0, 6)
             : [];
-        const measureTooltipWidth = isMobileChart ? 350 : 224;
+        const measureTooltipWidth = isMobileChart ? 280 : 224;
         const measureTooltipHeight = isMobileChart
-            ? Math.max(92, 48 + measureRows.length * 32)
+            ? Math.max(72, 38 + measureRows.length * 24)
             : Math.max(54, 30 + measureRows.length * 18);
-        const measureTooltipGap = isMobileChart ? 20 : 14;
+        const measureTooltipGap = isMobileChart ? 18 : 14;
         const measureTooltipX = measureLeftX == null || measureRightX == null
             ? 0
             : measureRightX + measureTooltipGap + measureTooltipWidth <= width - 8
@@ -641,11 +641,11 @@ export function FundPerformanceChart({
                 .filter((item): item is { series: typeof normalizedSeries[number]; point: { date: string; value: number } } => Boolean(item))
                 .slice(0, 4)
             : [];
-        const tooltipWidth = isMobileChart ? 340 : 212;
+        const tooltipWidth = isMobileChart ? 270 : 212;
         const tooltipHeight = isMobileChart
-            ? Math.max(86, 42 + tooltipRows.length * 30)
+            ? Math.max(66, 32 + tooltipRows.length * 22)
             : Math.max(48, 24 + tooltipRows.length * 15);
-        const tooltipGap = isMobileChart ? 18 : 12;
+        const tooltipGap = isMobileChart ? 16 : 12;
         const tooltipAnchorX = hoverPointer?.x ?? hoverX;
         const tooltipAnchorY = hoverPointer?.y ?? padding.top;
         const tooltipShouldFlip = tooltipAnchorX != null && tooltipAnchorX + tooltipGap + tooltipWidth > width - 8;
@@ -705,7 +705,7 @@ export function FundPerformanceChart({
                         <text
                             key={index}
                             x={xForDate(validPoints[index].date)}
-                            y={height - (isMobileChart ? 30 : 10)}
+                            y={height - (isMobileChart ? 22 : 10)}
                             className="fund-chart-axis"
                             textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
                         >
@@ -808,14 +808,14 @@ export function FundPerformanceChart({
                             ))}
                             <g className="fund-chart-measure-tooltip" style={{ transform: `translate(${measureTooltipX}px, ${measureTooltipY}px)` }}>
                                 <rect width={measureTooltipWidth} height={measureTooltipHeight} rx="7" className="fund-chart-measure-tooltip-bg" />
-                                <text x="10" y={isMobileChart ? 28 : 18} className="fund-chart-measure-muted">
+                                <text x="10" y={isMobileChart ? 22 : 18} className="fund-chart-measure-muted">
                                     {formatChartDate(measureStartPoint.date, selectedRange)} - {formatChartDate(measureEndPoint.date, selectedRange)}
                                 </text>
                                 {measureRows.map(({ series, periodReturn }, index) => (
-                                    <g key={`${series.asset.id}-measure-row`} transform={`translate(10, ${isMobileChart ? 60 + index * 32 : 38 + index * 18})`}>
+                                    <g key={`${series.asset.id}-measure-row`} transform={`translate(10, ${isMobileChart ? 46 + index * 24 : 38 + index * 18})`}>
                                         <circle cx="3.5" cy="-4" r="2.8" fill={series.color} />
                                         <text x="13" y="0" className="fund-chart-measure-muted">
-                                            {comparisonSeriesDisplayLabel(series).slice(0, 14)}
+                                            {comparisonSeriesDisplayLabel(series).slice(0, isMobileChart ? 12 : 14)}
                                         </text>
                                         <text
                                             x={measureTooltipWidth - 20}
@@ -847,14 +847,14 @@ export function FundPerformanceChart({
                             ))}
                             <g className="fund-chart-tooltip" style={{ transform: `translate(${tooltipX}px, ${tooltipY}px)` }}>
                                 <rect width={tooltipWidth} height={tooltipHeight} rx="6" className="fund-chart-tooltip-bg" />
-                                <text x="8" y={isMobileChart ? 27 : 17} className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
+                                <text x="8" y={isMobileChart ? 22 : 17} className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
                                 {tooltipRows.map(({ series, point }, index) => (
-                                    <g key={series.asset.id} transform={`translate(8, ${isMobileChart ? 52 + index * 29 : 35 + index * 15})`}>
+                                    <g key={series.asset.id} transform={`translate(8, ${isMobileChart ? 44 + index * 22 : 35 + index * 15})`}>
                                         <circle cx="3.5" cy="-4" r="2.6" fill={series.color} />
                                         <text x="12" y="0" className="fund-chart-tooltip-muted">
-                                            {comparisonSeriesDisplayLabel(series).slice(0, 14)}
+                                            {comparisonSeriesDisplayLabel(series).slice(0, isMobileChart ? 12 : 14)}
                                         </text>
-                                        <text x={tooltipWidth - 10} y="0" className="fund-chart-tooltip-value" textAnchor="end">
+                                        <text x={tooltipWidth - 16} y="0" className="fund-chart-tooltip-value" textAnchor="end">
                                             {formatPct(point.value)}
                                         </text>
                                     </g>
@@ -995,9 +995,9 @@ export function FundPerformanceChart({
     const measureLineY = measureAnchorY != null && measureEndY != null
         ? Math.max(padding.top + (isMobileChart ? 28 : 12), Math.min(measureAnchorY, measureEndY) - (isMobileChart ? 34 : 18))
         : null;
-    const measureTooltipWidth = isMobileChart ? 300 : 180;
-    const measureTooltipHeight = isMobileChart ? 112 : 70;
-    const measureTooltipGap = isMobileChart ? 22 : 14;
+    const measureTooltipWidth = isMobileChart ? 240 : 180;
+    const measureTooltipHeight = isMobileChart ? 86 : 70;
+    const measureTooltipGap = isMobileChart ? 18 : 14;
     const measureAnchorXForTooltip = measureEndX;
     const measureAnchorYForTooltip = measureEndY;
     const measureTooltipShouldFlip = measureAnchorXForTooltip != null
@@ -1022,8 +1022,8 @@ export function FundPerformanceChart({
         visibleMeasureRange && measureLeftX != null && measureRightX != null && measureRightX > measureLeftX,
     );
     const selectionClipId = `${gradientId}-selection`;
-    const tooltipWidth = isMobileChart ? 250 : 152;
-    const tooltipHeight = isMobileChart ? 90 : 58;
+    const tooltipWidth = isMobileChart ? 200 : 152;
+    const tooltipHeight = isMobileChart ? 72 : 58;
     const tooltipGap = 12;
     const tooltipAnchorX = hoverPointer?.x ?? hoverX;
     const tooltipAnchorY = hoverPointer?.y ?? hoverY;
@@ -1093,7 +1093,7 @@ export function FundPerformanceChart({
                     <text
                         key={index}
                         x={xFor(index)}
-                        y={height - (isMobileChart ? 30 : 10)}
+                        y={height - (isMobileChart ? 22 : 10)}
                         className="fund-chart-axis"
                         textAnchor={index === 0 ? 'start' : index === validPoints.length - 1 ? 'end' : 'middle'}
                     >
@@ -1172,13 +1172,13 @@ export function FundPerformanceChart({
                         <circle cx={measureEndX} cy={measureEndY} r="4.2" className="fund-chart-measure-point" fill={color} />
                         <g className="fund-chart-measure-tooltip" style={{ transform: `translate(${measureTooltipX}px, ${measureTooltipY}px)` }}>
                             <rect width={measureTooltipWidth} height={measureTooltipHeight} rx="7" className="fund-chart-measure-tooltip-bg" />
-                            <text x="10" y={isMobileChart ? 30 : 18} className="fund-chart-measure-muted">
+                            <text x="10" y={isMobileChart ? 24 : 18} className="fund-chart-measure-muted">
                                 {formatChartDate(measureAnchorPoint.date, selectedRange)} - {formatChartDate(measureEndPoint.date, selectedRange)}
                             </text>
-                            <text x="10" y={isMobileChart ? 65 : 42} className={`fund-chart-measure-value ${measureClass}`}>
+                            <text x="10" y={isMobileChart ? 52 : 42} className={`fund-chart-measure-value ${measureClass}`}>
                                 {formatPct(measureReturn)}
                             </text>
-                            <text x="10" y={isMobileChart ? 96 : 60} className="fund-chart-measure-muted">
+                            <text x="10" y={isMobileChart ? 74 : 60} className="fund-chart-measure-muted">
                                 {measureDeltaText}
                             </text>
                         </g>
@@ -1190,8 +1190,8 @@ export function FundPerformanceChart({
                         <circle className="fund-chart-hover-point" cx={hoverX} cy={hoverY} r="3.6" fill={color} stroke="#0a0c0f" strokeWidth="1.6" />
                         <g className="fund-chart-tooltip" style={{ transform: `translate(${tooltipX}px, ${tooltipY}px)` }}>
                             <rect width={tooltipWidth} height={tooltipHeight} rx="6" className="fund-chart-tooltip-bg" />
-                            <text x="10" y={isMobileChart ? 31 : 20} className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
-                            <text x="10" y={isMobileChart ? 65 : 43} className="fund-chart-tooltip-value">{formatCurrency(hoverPoint.price, currency || 'TRY')}</text>
+                            <text x="10" y={isMobileChart ? 25 : 20} className="fund-chart-tooltip-muted">{formatDate(hoverPoint.date)}</text>
+                            <text x="10" y={isMobileChart ? 53 : 43} className="fund-chart-tooltip-value">{formatCurrency(hoverPoint.price, currency || 'TRY')}</text>
                         </g>
                     </g>
                 )}

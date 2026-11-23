@@ -745,4 +745,47 @@
     .funds-th-sort {
         min-height: 40px;
     }
+
+    .funds-table-wrap {
+        max-height: min(68dvh, 720px);
+    }
+
+    .funds-table {
+        min-width: 720px;
+    }
+
+    .funds-table.funds-performance-table {
+        min-width: 760px;
+    }
+
+    .funds-table th,
+    .funds-table td {
+        padding: 0.36rem 0.55rem;
+    }
+
+    .funds-table th.funds-rank,
+    .funds-table td.funds-rank {
+        display: none;
+    }
+
+    .funds-table th:nth-child(2),
+    .funds-table td.funds-symbol-cell {
+        position: sticky;
+        left: 0;
+        z-index: 3;
+        width: 148px;
+        min-width: 148px;
+        max-width: 148px;
+        background: var(--surface-color);
+        border-right: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .funds-table th:nth-child(2) {
+        z-index: 4;
+        background: #0d0f12;
+    }
+
+    .funds-symbol small {
+        max-width: 102px;
+    }
 }
