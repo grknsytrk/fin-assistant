@@ -162,7 +162,11 @@
 
 .fund-category-ranking-panel {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     padding: 0;
     border: 1px solid var(--surface-border);
     border-radius: 6px;
@@ -268,6 +272,8 @@
 }
 
 .fund-chart-panel {
+    width: 100%;
+    max-width: 100%;
     min-width: 0;
     padding: 0;
     overflow: visible;
@@ -819,13 +825,20 @@ button.fund-chart-legend-item.is-removable:focus-visible .fund-chart-legend-remo
 
 
 .fund-heatmap-panel {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     padding: 0;
     overflow: hidden;
 }
 
 .fund-heatmap {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     overflow-x: auto;
     padding: 0.9rem 1rem;
+    -webkit-overflow-scrolling: touch;
 }
 
 .fund-heatmap-months,
@@ -946,7 +959,28 @@ button.fund-chart-legend-item.is-removable:focus-visible .fund-chart-legend-remo
     .fund-overview-metrics-row,
     .fund-category-ranking-grid,
     .fund-heatmap-stats {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .fund-period-stats {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .fund-period-stat-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.5rem 0.65rem;
+    }
+
+    .fund-period-stat-metrics span {
+        font-size: 0.7rem;
+    }
+
+    .fund-period-stat-metrics strong {
+        font-size: 0.84rem;
+    }
+
+    .fund-heatmap {
+        padding: 0.7rem 0.75rem;
     }
 
     .fund-overview-metric-card,

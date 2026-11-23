@@ -1,6 +1,8 @@
 .fund-allocation-panel {
     display: flex;
     flex-direction: column;
+    width: 100%;
+    max-width: 100%;
     min-width: 0;
     padding: 0;
     border: 1px solid var(--surface-border);
@@ -22,12 +24,12 @@
 
 .fund-allocation-donut-wrap {
     position: relative;
-    display: grid;
-    width: min(192px, 72%);
-    max-width: 196px;
-    aspect-ratio: 1;
+    display: block;
+    width: 184px;
+    height: 184px;
+    max-width: 100%;
     margin: 1rem auto 0.85rem;
-    place-items: center;
+    flex-shrink: 0;
 }
 
 .fund-allocation-donut {
@@ -50,6 +52,7 @@
 .fund-allocation-segment {
     cursor: pointer;
     outline: none;
+    -webkit-tap-highlight-color: transparent;
     transition:
         opacity 160ms ease,
         stroke 160ms ease;
@@ -72,35 +75,42 @@
 
 .fund-allocation-donut-center {
     position: absolute;
-    inset: 31%;
-    display: grid;
-    align-content: center;
-    justify-items: center;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.14rem;
     min-width: 0;
-    padding: 0.2rem;
+    padding: 26%;
     color: var(--text-primary);
     pointer-events: none;
     text-align: center;
 }
 
 .fund-allocation-donut-center span {
+    display: block;
     max-width: 100%;
     overflow: hidden;
     color: var(--text-secondary);
-    font-size: 0.64rem;
+    font-size: 0.62rem;
     font-weight: 600;
-    letter-spacing: 0.04em;
-    line-height: 1.2;
+    letter-spacing: 0.03em;
+    line-height: 1.15;
     text-overflow: ellipsis;
     text-transform: uppercase;
     white-space: nowrap;
 }
 
 .fund-allocation-donut-center strong {
-    margin-top: 0.2rem;
+    display: block;
+    max-width: 100%;
+    margin-top: 0;
     font-family: var(--font-mono);
-    font-size: 0.86rem;
-    font-weight: 600;
+    font-size: 0.84rem;
+    font-weight: 700;
+    line-height: 1.1;
+    white-space: nowrap;
 }
 
 .fund-allocation-tooltip {
@@ -237,6 +247,9 @@
 .fund-allocation-history-panel {
     display: flex;
     flex-direction: column;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     overflow: hidden;
     padding: 1rem;
     border: 1px solid color-mix(in srgb, var(--surface-border) 76%, transparent);
@@ -395,6 +408,9 @@
 
 .fund-allocation-history-table-wrap {
     flex: 1 1 auto;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     min-height: 0;
     max-height: min(52vh, 520px);
     overflow: auto;
@@ -429,16 +445,29 @@
 
 
 .fund-holdings-table-wrap {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     overflow-x: auto;
     overflow-y: visible;
     border: 1px solid var(--surface-border);
     border-radius: 6px;
     background: var(--surface-color);
+    -webkit-overflow-scrolling: touch;
 }
 
 .fund-holdings-panel {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.65rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+}
+
+.fund-holdings-panel > * {
+    min-width: 0;
+    max-width: 100%;
 }
 
 .fund-holdings-head {
@@ -632,7 +661,11 @@
 
 .fund-holdings-snapshot {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     border: 1px solid var(--surface-border);
     border-radius: 6px;
     background: var(--surface-color);
@@ -779,7 +812,11 @@
 
 .fund-holdings-rank-panel {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.34rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     padding: 0.72rem 0.9rem;
     border: 1px solid var(--surface-border);
     border-radius: 6px;
@@ -1308,34 +1345,43 @@
     }
 
     .fund-allocation-donut-wrap {
-        width: 156px;
-        max-width: 156px;
+        width: 168px;
+        height: 168px;
+        max-width: 168px;
         margin: 0.75rem auto 0.65rem;
     }
 
+    .fund-allocation-donut-center {
+        padding: 25%;
+        gap: 0.1rem;
+    }
+
     .fund-allocation-donut-center span {
-        font-size: 0.68rem;
+        font-size: 0.58rem;
     }
 
     .fund-allocation-donut-center strong {
-        font-size: 0.84rem;
+        font-size: 0.76rem;
     }
 
     .fund-allocation-tooltip {
-        max-width: calc(100vw - 2rem);
+        display: none;
     }
 
     .fund-allocation-list {
         padding: 0 0.85rem 0.65rem;
+        min-width: 0;
     }
 
     .fund-allocation-row {
         font-size: 0.78rem;
-        padding: 0.4rem 0;
+        padding: 0.42rem 0;
+        min-width: 0;
     }
 
     .fund-allocation-list strong {
         font-size: 0.78rem;
+        white-space: nowrap;
     }
 
     .fund-allocation-history-panel {
@@ -1397,31 +1443,23 @@
     .fund-holdings-filters,
     .fund-holdings-change-filters {
         display: flex;
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        gap: 0.35rem;
-        padding-bottom: 2px;
-        scrollbar-width: none;
-    }
-
-    .fund-holdings-filters::-webkit-scrollbar,
-    .fund-holdings-change-filters::-webkit-scrollbar {
-        display: none;
+        flex-wrap: wrap;
+        gap: 0.32rem;
     }
 
     .fund-holdings-filters button,
     .fund-holdings-change-filters button {
         flex: 0 0 auto;
-        min-height: 32px;
-        height: 32px;
-        padding: 0 0.65rem;
-        font-size: 0.74rem;
+        min-height: 30px;
+        height: auto;
+        padding: 0.28rem 0.58rem;
+        font-size: 0.72rem;
         white-space: nowrap;
     }
 
     .fund-holdings-effect-summary,
     .fund-holdings-highlight-grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .fund-holdings-effect-card {

@@ -2,6 +2,9 @@
     display: flex;
     flex-direction: column;
     gap: 0;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     padding: 0;
     border: 1px solid var(--surface-border);
     border-radius: 6px;
@@ -413,7 +416,11 @@
     bottom: auto;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 760px) {
+    .fund-comparison-panel {
+        overflow: hidden;
+    }
+
     .fund-comparison-head,
     .fund-comparison-controls {
         align-items: stretch;
@@ -430,25 +437,30 @@
     .fund-comparison-search-button,
     .fund-comparison-search-active {
         width: 100%;
+        max-width: 100%;
     }
 
     .fund-comparison-chart {
-        width: 560px;
-        min-width: 560px;
-        height: 300px;
+        width: 520px;
+        min-width: 520px;
+        height: 280px;
     }
 
     .fund-comparison-chart-wrap {
-        min-height: 300px;
-        margin: 0 -0.2rem;
-        padding: 0 0.2rem 0.35rem;
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        min-height: 280px;
+        margin: 0;
+        padding: 0.45rem 0.5rem 0.35rem;
         overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
     }
 
     .fund-comparison-period select {
         min-width: 108px;
-        height: 44px;
-        font-size: 1rem;
+        height: 40px;
+        font-size: 16px;
     }
 
     .fund-comparison-results {

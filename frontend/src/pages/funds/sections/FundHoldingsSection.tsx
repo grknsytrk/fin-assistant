@@ -132,7 +132,7 @@ export function FundAllocationSummary({
                 item,
                 index,
                 color: FUND_DONUT_COLORS[index % FUND_DONUT_COLORS.length],
-                path: donutSegmentPath(startAngle, cursor),
+                path: donutSegmentPath(startAngle, cursor, 92, 54),
                 tooltipX: tooltipPoint.x,
                 tooltipY: tooltipPoint.y,
             };
@@ -165,12 +165,13 @@ export function FundAllocationSummary({
                                         tabIndex={0}
                                         aria-label={`${segment.item.label}: ${formatAllocationWeight(segment.item.weight)}`}
                                         onPointerEnter={() => setActiveIndex(segment.index)}
+                                        onClick={() => setActiveIndex((current) => (current === segment.index ? null : segment.index))}
                                         onFocus={() => setActiveIndex(segment.index)}
                                         onBlur={() => setActiveIndex(null)}
                                     />
                                 );
                             })}
-                            <circle cx="100" cy="100" r="44" className="fund-allocation-donut-hole" />
+                            <circle cx="100" cy="100" r="54" className="fund-allocation-donut-hole" />
                         </svg>
                         <div className="fund-allocation-donut-center">
                             <span>{activeSegment ? activeSegment.item.label : 'Toplam'}</span>
@@ -200,6 +201,7 @@ export function FundAllocationSummary({
                                 ].filter(Boolean).join(' ')}
                                 onPointerEnter={() => setActiveIndex(index)}
                                 onPointerLeave={() => setActiveIndex(null)}
+                                onClick={() => setActiveIndex((current) => (current === index ? null : index))}
                             >
                                 <i style={{ background: FUND_DONUT_COLORS[index % FUND_DONUT_COLORS.length] }} />
                                 <span>{item.label}</span>
